@@ -5,9 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>大规模点云可视化与配准系统</title>
     <style>
-        /* ============================
-                   全局重置与 CSS 变量
-                   ============================ */
         * {
             margin: 0;
             padding: 0;
@@ -654,1699 +651,1275 @@
     <!-- ==========================================================
     HTML 结构
     ========================================================== -->
-    <div id="app">
-
-        <!-- 左侧边栏 -->
-        <aside id="sidebar">
-            <div class="sidebar-header">
-                <h1>☁️ 点云可视化</h1>
-                <p>大规模点云</p>
+<div id="app">
+    <aside id="sidebar">
+        <div class="sidebar-header">
+            <h1>☁️ 点云可视化</h1>
+            <p>大规模点云处理与配准</p>
+        </div>
+        <div class="sidebar-content">
+            <!-- 上传 -->
+            <div class="sidebar-section">
+                <div class="section-title">📁 文件上传</div>
+                <div class="upload-zone" id="drop-zone">
+                    <div class="icon">📂</div>
+                    <p>拖拽 PLY 文件到此处</p>
+                    <p class="hint">支持多文件同时上传</p>
+                </div>
+                <input type="file" id="file-input" accept=".ply" multiple />
             </div>
 
-            <div class="sidebar-content">
-
-                <!-- 文件上传 -->
-                <div class="sidebar-section">
-                    <div class="section-title">📁 文件上传</div>
-                    <div class="upload-zone" id="drop-zone">
-                        <div class="icon">📂</div>
-                        <p>拖拽 PLY 文件到此处</p>
-                        <p class="hint">支持多文件同时上传</p>
-                    </div>
-                    <input type="file" id="file-input" accept=".ply" multiple />
+            <!-- 参数 -->
+            <div class="sidebar-section">
+                <div class="section-title">⚙️ 处理参数</div>
+                <div class="param-group">
+                    <label>体素下采样大小</label>
+                    <input type="range" id="voxel-size" min="0" max="1" step="0.01" value="0.05" />
+                    <div class="param-value"><span>精细</span><span class="value" id="voxel-value">0.05</span><span>粗略</span></div>
                 </div>
-
-                <!-- 处理参数 -->
-                <div class="sidebar-section">
-                    <div class="section-title">⚙️ 处理参数</div>
-                    <div class="param-group">
-                        <label>体素下采样大小</label>
-                        <input type="range" id="voxel-size" min="0" max="1" step="0.01" value="0.05" />
-                        <div class="param-value">
-                            <span>精细</span>
-                            <span class="value" id="voxel-value">0.05</span>
-                            <span>粗略</span>
-                        </div>
-                    </div>
-                    <div class="param-group">
-                        <label>点大小缩放</label>
-                        <input type="range" id="point-size" min="0.1" max="10" step="0.1" value="1.0" />
-                        <div class="param-value">
-                            <span>小</span>
-                            <span class="value" id="point-size-value">1.0</span>
-                            <span>大</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 文件列表 -->
-                <div class="sidebar-section">
-                    <div class="section-title">📋 文件列表</div>
-                    <div class="file-list" id="file-list">
-                        <div style="text-align: center; color: var(--text-secondary); font-size: 12px; padding: 20px;">
-                            暂无文件，请上传
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 基本处理操作 -->
-                <div class="sidebar-section">
-                    <div class="section-title">🔧 处理操作</div>
-                    <button class="btn btn-secondary" id="btn-denoise" disabled>
-                        🧹 去噪处理
-                    </button>
-                    <button class="btn btn-secondary" id="btn-normals" disabled>
-                        📐 计算法向量
-                    </button>
-                    <button class="btn btn-secondary" id="btn-bbox" disabled>
-                        📦 显示边界框
-                    </button>
-                    <button class="btn btn-secondary" id="btn-save-reg" disabled>
-                        💾 保存配准结果
-                    </button>
-
-                    <div class="btn-row">
-                        <button class="btn btn-danger" id="btn-clear" disabled>🗑️ 清空</button>
-                        <button class="btn btn-secondary" id="btn-reset-view">🎯 重置视角</button>
-                    </div>
-                </div>
-
-                <!-- 颜色修改 -->
-                <div class="sidebar-section">
-                    <div class="section-title">🎨 颜色设置</div>
-                    <div class="color-editor">
-                        <input type="color" id="color-picker" value="#667eea" />
-                        <div class="color-presets" id="color-presets">
-                            <div class="color-preset" style="background: #667eea;" data-color="#667eea"></div>
-                            <div class="color-preset" style="background: #f56565;" data-color="#f56565"></div>
-                            <div class="color-preset" style="background: #48bb78;" data-color="#48bb78"></div>
-                            <div class="color-preset" style="background: #ed8936;" data-color="#ed8936"></div>
-                            <div class="color-preset" style="background: #38b2ac;" data-color="#38b2ac"></div>
-                            <div class="color-preset" style="background: #9f7aea;" data-color="#9f7aea"></div>
-                        </div>
-                    </div>
-                    <button class="btn btn-secondary" id="btn-apply-color" style="margin-top:8px;" disabled>
-                        ✨ 应用颜色
-                    </button>
-                    <button class="btn btn-secondary" id="btn-reset-color" style="margin-top:4px;" disabled>
-                        ↩️ 恢复原始颜色
-                    </button>
-                    <button class="btn btn-secondary" id="btn-clear-selection" style="margin-top:4px;" disabled>
-                        🔄 清除选中点
-                    </button>
-                </div>
-
-                <!-- 配准控制 -->
-                <div class="sidebar-section">
-                    <div class="section-title">🔗 点云配准</div>
-                    <div class="btn-row">
-                        <button class="btn btn-secondary" id="btn-set-target" disabled>🎯 设为目标</button>
-                        <button class="btn btn-secondary" id="btn-set-source" disabled>📌 设为源</button>
-                    </div>
-                    <div class="btn-row">
-                        <button class="btn btn-secondary" id="btn-reg-mode" disabled>✏️ 进入配准</button>
-                        <button class="btn btn-secondary" id="btn-add-correspondence" disabled>➕ 添加点对</button>
-                    </div>
-                    <div class="btn-row">
-                        <button class="btn btn-primary" id="btn-execute-reg" disabled>⚡ 执行配准</button>
-                        <button class="btn btn-secondary" id="btn-icp-refine" disabled>🔧 ICP精配准</button>
-                    </div>
-                    <div style="margin-top:8px; font-size:12px; color:var(--text-secondary);" id="reg-status">
-                        对应点: 0 对 | 源: 未选 | 目标: 未选
-                    </div>
-                </div>
-
-            </div> <!-- sidebar-content -->
-
-            <!-- 底部状态条 -->
-            <div class="status-bar" id="status-bar">
-                <span>就绪</span>
-            </div>
-        </aside>
-
-        <!-- ==========================================================
-        3D 视图主区域
-        ========================================================== -->
-        <main id="viewport">
-            <div id="canvas-container"></div>
-
-            <!-- 顶部工具栏 -->
-            <div class="toolbar">
-                <button class="toolbar-btn active" id="tb-rotate" title="旋转模式 (R)">🔄</button>
-                <button class="toolbar-btn" id="tb-pan" title="平移模式 (P)">✋</button>
-                <button class="toolbar-btn" id="tb-zoom" title="缩放模式 (Z)">🔍</button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn" id="tb-select" title="点选模式 (S)">👆</button>
-                <button class="toolbar-btn" id="tb-measure" title="测量模式 (M)">📏</button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn active" id="tb-grid" title="切换网格 (G)">⊞</button>
-                <button class="toolbar-btn active" id="tb-axes" title="切换坐标轴 (A)">📐</button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn" id="tb-screenshot" title="截图 (C)">📷</button>
-                <button class="toolbar-btn" id="tb-fullscreen" title="全屏 (F)">⛶</button>
-            </div>
-
-            <!-- 信息面板 -->
-            <div class="info-panel" id="info-panel">
-                <h3>📊 场景信息</h3>
-                <div class="info-row">
-                    <span class="info-label">文件</span>
-                    <span class="info-value" id="info-filename">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">点数</span>
-                    <span class="info-value" id="info-points">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">边界框</span>
-                    <span class="info-value" id="info-bbox">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">中心</span>
-                    <span class="info-value" id="info-center">-</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">场景范围</span>
-                    <span class="info-value" id="info-range">-</span>
-                </div>
-
-                <div class="selected-info" id="selected-info">
-                    <h3>🎯 选中点</h3>
-                    <div class="info-row">
-                        <span class="info-label">索引</span>
-                        <span class="info-value" id="sel-index">-</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">位置</span>
-                        <span class="info-value" id="sel-pos">-</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">法向量</span>
-                        <span class="info-value" id="sel-normal">-</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">颜色</span>
-                        <span class="info-value" id="sel-color">-</span>
-                    </div>
+                <div class="param-group">
+                    <label>点大小缩放</label>
+                    <input type="range" id="point-size" min="0.01" max="5" step="0.01" value="1.0" />
+                    <div class="param-value"><span>小</span><span class="value" id="point-size-value">1.0</span><span>大</span></div>
                 </div>
             </div>
 
-            <!-- 底部状态 -->
-            <div class="bottom-bar">
-                <div class="fps-counter" id="fps-counter">FPS: 60</div>
-                <div class="hint-text" id="hint-text">鼠标左键旋转 | 右键平移 | 滚轮缩放</div>
-            </div>
-
-            <!-- 进度遮罩 -->
-            <div class="progress-overlay" id="progress-overlay">
-                <div class="progress-card">
-                    <h3 id="progress-title">处理中...</h3>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="progress-fill"></div>
-                    </div>
-                    <div class="progress-text" id="progress-text">0%</div>
+            <!-- 文件列表 -->
+            <div class="sidebar-section">
+                <div class="section-title">📋 文件列表</div>
+                <div class="file-list" id="file-list">
+                    <div style="text-align:center; color:var(--text-secondary); font-size:12px; padding:20px;">暂无文件，请上传</div>
                 </div>
             </div>
 
-            <!-- 提示框 -->
-            <div class="tooltip" id="tooltip"></div>
-        </main>
-    </div>
+            <!-- 基本操作 -->
+            <div class="sidebar-section">
+                <div class="section-title">🔧 处理操作</div>
+                <button class="btn btn-secondary" id="btn-denoise" disabled>🧹 去噪处理</button>
+                <button class="btn btn-secondary" id="btn-normals" disabled>📐 计算法向量</button>
+                <button class="btn btn-secondary" id="btn-bbox" disabled>📦 显示边界框</button>
+                <button class="btn btn-secondary" id="btn-save-reg" disabled>💾 保存配准结果</button>
+                <div class="btn-row">
+                    <button class="btn btn-danger" id="btn-clear" disabled>🗑️ 清空</button>
+                    <button class="btn btn-secondary" id="btn-reset-view">🎯 重置视角</button>
+                </div>
+            </div>
 
-    <!-- ==========================================================
-    Three.js 导入映射
-    ========================================================== -->
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-            }
-        }
-    </script>
+            <!-- 颜色 -->
+            <div class="sidebar-section">
+                <div class="section-title">🎨 颜色设置</div>
+                <div class="color-editor">
+                    <input type="color" id="color-picker" value="#667eea" />
+                    <div class="color-presets" id="color-presets">
+                        <div class="color-preset" style="background:#667eea;" data-color="#667eea"></div>
+                        <div class="color-preset" style="background:#f56565;" data-color="#f56565"></div>
+                        <div class="color-preset" style="background:#48bb78;" data-color="#48bb78"></div>
+                        <div class="color-preset" style="background:#ed8936;" data-color="#ed8936"></div>
+                        <div class="color-preset" style="background:#38b2ac;" data-color="#38b2ac"></div>
+                        <div class="color-preset" style="background:#9f7aea;" data-color="#9f7aea"></div>
+                    </div>
+                </div>
+                <button class="btn btn-secondary" id="btn-apply-color" style="margin-top:8px;" disabled>✨ 应用颜色</button>
+                <button class="btn btn-secondary" id="btn-reset-color" style="margin-top:4px;" disabled>↩️ 恢复原始颜色</button>
+            </div>
 
-    <!-- ==========================================================
-    主脚本
-    ========================================================== -->
-    <script type="module">
-        // ============================================================
-        // 引入 Three.js 核心库和扩展
-        // ============================================================
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+            <!-- 配准控制 -->
+            <div class="sidebar-section">
+                <div class="section-title">🔗 点云配准</div>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="btn-set-target" disabled>🎯 设为目标</button>
+                    <button class="btn btn-secondary" id="btn-set-source" disabled>📌 设为源</button>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="btn-reg-mode" disabled>✏️ 进入配准</button>
+                    <button class="btn btn-danger" id="btn-exit-reg" disabled>🚪 退出配准</button>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="btn-add-correspondence" disabled>➕ 添加点对</button>
+                    <button class="btn btn-secondary" id="btn-undo-correspondence" disabled>↩️ 撤销点对</button>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-primary" id="btn-execute-reg" disabled>⚡ 执行配准</button>
+                    <button class="btn btn-secondary" id="btn-icp-refine" disabled>🔧 ICP精配准</button>
+                </div>
+                <div style="margin-top:8px; font-size:12px; color:var(--text-secondary);" id="reg-status">
+                    对应点: 0 对 | 源: 未选 | 目标: 未选
+                </div>
+            </div>
+        </div>
+        <div class="status-bar" id="status-bar"><span>就绪</span></div>
+    </aside>
 
-        // ---------- 后端 API 地址 ----------
-        const API_BASE = 'http://localhost:5000';
+    <main id="viewport">
+        <div id="canvas-container"></div>
+        <div class="toolbar">
+            <button class="toolbar-btn active" id="tb-rotate" title="旋转 (R)">🔄</button>
+            <button class="toolbar-btn" id="tb-pan" title="平移 (P)">✋</button>
+            <button class="toolbar-btn" id="tb-zoom" title="缩放 (Z)">🔍</button>
+            <div class="toolbar-divider"></div>
+            <button class="toolbar-btn active" id="tb-grid" title="切换网格 (G)">⊞</button>
+            <button class="toolbar-btn active" id="tb-axes" title="切换坐标轴 (A)">📍</button>
+            <div class="toolbar-divider"></div>
+            <button class="toolbar-btn" id="tb-screenshot" title="截图 (C)">📷</button>
+            <button class="toolbar-btn" id="tb-fullscreen" title="全屏 (F)">⛶</button>
+        </div>
 
-        // ---------- 全局配置 ----------
-        const CONFIG = {
-            BASE_POINT_SIZE: 0.5,
-            NORMAL_LENGTH: 0.5,
-            NORMAL_COLOR: 0x00ff88,
-            SELECTION_COLOR: 0xff3366,
-            FPS_INTERVAL: 500,
-            REG_MARKER_SIZE: 0.5,
+        <div class="info-panel" id="info-panel">
+            <h3>📊 场景信息</h3>
+            <div class="info-row"><span class="info-label">文件</span><span class="info-value" id="info-filename">-</span></div>
+            <div class="info-row"><span class="info-label">点数</span><span class="info-value" id="info-points">-</span></div>
+            <div class="info-row"><span class="info-label">边界框</span><span class="info-value" id="info-bbox">-</span></div>
+            <div class="info-row"><span class="info-label">中心</span><span class="info-value" id="info-center">-</span></div>
+            <div class="info-row"><span class="info-label">场景范围</span><span class="info-value" id="info-range">-</span></div>
+        </div>
+
+        <div class="bottom-bar">
+            <div class="fps-counter" id="fps-counter">FPS: 60</div>
+            <div class="hint-text" id="hint-text">鼠标左键旋转 | 右键平移 | 滚轮缩放</div>
+        </div>
+
+        <div class="progress-overlay" id="progress-overlay">
+            <div class="progress-card">
+                <h3 id="progress-title">处理中...</h3>
+                <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+                <div class="progress-text" id="progress-text">请稍候...</div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+}
+</script>
+
+<script type="module">
+// ============================================================
+// 导入
+// ============================================================
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- 后端 API ----------
+const API_BASE = 'http://localhost:5000';
+
+// ---------- 配置 ----------
+const CONFIG = {
+    BASE_POINT_SIZE: 0.5,
+    NORMAL_LENGTH: 0.5,
+    NORMAL_COLOR: 0x00ff88,
+    REG_MARKER_SIZE: 0.5,
+    FPS_INTERVAL: 500,
+};
+
+// ============================================================
+// 全局状态（含视角持久化）
+// ============================================================
+const state = {
+    scene: null,
+    camera: null,
+    renderer: null,
+    controls: null,
+    raycaster: new THREE.Raycaster(),
+    mouse: new THREE.Vector2(),
+
+    pointClouds: new Map(),
+    activeCloud: null,
+
+    bboxHelper: null,
+    normalHelpers: null,
+    gridHelper: null,
+    axesHelper: null,
+
+    showBbox: false,
+    showNormals: false,
+    pointSizeScale: 1.0,
+    sceneRange: 100,
+
+    // 视角状态（用于恢复）
+    cameraState: {
+        position: null,
+        target: null,
+    },
+
+    // 配准状态
+    reg: {
+        mode: false,
+        sourceUUID: null,
+        targetUUID: null,
+        correspondences: [], // [{src: Vector3, tgt: Vector3}]
+        nextIsSource: true,
+        tempMarkers: [],
+        lastTransform: null,
+    },
+};
+
+// ============================================================
+// 坐标转换工具
+// ============================================================
+function convertZupToYup(positions) {
+    const count = positions.length / 3;
+    const out = new Float32Array(positions.length);
+    for (let i = 0; i < count; i++) {
+        const x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2];
+        out[i*3] = x;
+        out[i*3+1] = z;
+        out[i*3+2] = -y;
+    }
+    return out;
+}
+function convertZupToYupSingle(pointZ) {
+    return new THREE.Vector3(pointZ[0], pointZ[2], -pointZ[1]);
+}
+function convertZupToYupNormals(normals) {
+    const count = normals.length / 3;
+    const out = new Float32Array(normals.length);
+    for (let i = 0; i < count; i++) {
+        const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
+        out[i*3] = nx;
+        out[i*3+1] = nz;
+        out[i*3+2] = -ny;
+    }
+    return out;
+}
+
+// ============================================================
+// 场景初始化
+// ============================================================
+function initScene() {
+    const container = document.getElementById('canvas-container');
+    state.scene = new THREE.Scene();
+    state.scene.background = new THREE.Color(0x0a0a1a);
+
+    const aspect = container.clientWidth / container.clientHeight;
+    state.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 50000);
+    state.camera.position.set(100, 100, 100);
+
+    state.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    state.renderer.setSize(container.clientWidth, container.clientHeight);
+    state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(state.renderer.domElement);
+
+    state.controls = new OrbitControls(state.camera, state.renderer.domElement);
+    state.controls.enableDamping = true;
+    state.controls.dampingFactor = 0.05;
+    state.controls.screenSpacePanning = true;
+    state.controls.minDistance = 0.1;
+    state.controls.maxDistance = 20000;
+
+    state.scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(50, 50, 50);
+    state.scene.add(dirLight);
+
+    state.gridHelper = new THREE.GridHelper(1000, 100, 0x444466, 0x222244);
+    state.scene.add(state.gridHelper);
+    state.axesHelper = new THREE.AxesHelper(50);
+    state.scene.add(state.axesHelper);
+
+    // 保存初始相机状态
+    saveCameraState();
+
+    bindEvents();
+    animate();
+    updateToolbarState();
+}
+
+// ============================================================
+// 相机状态持久化
+// ============================================================
+function saveCameraState() {
+    if (state.camera && state.controls) {
+        state.cameraState.position = state.camera.position.clone();
+        state.cameraState.target = state.controls.target.clone();
+    }
+}
+function restoreCameraState() {
+    if (state.cameraState.position && state.cameraState.target) {
+        state.camera.position.copy(state.cameraState.position);
+        state.controls.target.copy(state.cameraState.target);
+        state.controls.update();
+    }
+}
+
+// ============================================================
+// 更新场景尺度
+// ============================================================
+function updateSceneScale() {
+    const range = state.sceneRange;
+    if (state.gridHelper) state.scene.remove(state.gridHelper);
+    state.gridHelper = new THREE.GridHelper(range * 2, 50, 0x444466, 0x222244);
+    state.scene.add(state.gridHelper);
+    if (state.axesHelper) state.scene.remove(state.axesHelper);
+    state.axesHelper = new THREE.AxesHelper(range * 0.1);
+    state.scene.add(state.axesHelper);
+}
+
+// ============================================================
+// 加载点云（复用Mesh，保留视角）
+// ============================================================
+async function loadPointCloud(data, filename, uuid, updateOnly = false) {
+    const { positions, colors, normals } = data;
+    const pointCount = positions.length / 3;
+
+    const posY = convertZupToYup(positions);
+    const normY = convertZupToYupNormals(normals);
+    const col = new Float32Array(colors);
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(posY, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normY, 3));
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox.clone();
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const adaptiveSize = computeAdaptivePointSize(size);
+
+    // 如果已经存在该UUID，则更新几何和材质（保留Mesh对象）
+    let cloudEntry = state.pointClouds.get(uuid);
+    if (cloudEntry) {
+        // 复用现有Mesh
+        const mesh = cloudEntry.mesh;
+        mesh.geometry.dispose();
+        mesh.geometry = geometry;
+        mesh.material.size = adaptiveSize * state.pointSizeScale;
+        // 更新数据
+        cloudEntry.geometry = geometry;
+        cloudEntry.data = {
+            positions: Array.from(posY),
+            colors: Array.from(col),
+            normals: Array.from(normY),
         };
+        cloudEntry.pointCount = pointCount;
+        cloudEntry.center = center;
+        cloudEntry.bbox = bbox;
+        cloudEntry.adaptiveSize = adaptiveSize;
+        cloudEntry.originalColors = new Float32Array(col);
+        // 如果是激活的，更新信息
+        if (state.activeCloud && state.activeCloud.uuid === uuid) {
+            updateInfoPanel(cloudEntry);
+        }
+        return;
+    }
 
-        // ============================================================
-        // 全局状态对象 - 修改：配准状态结构重构
-        // ============================================================
-        const state = {
-            scene: null,
-            camera: null,
-            renderer: null,
-            controls: null,
-            raycaster: new THREE.Raycaster(),
-            mouse: new THREE.Vector2(),
+    // 新建
+    const material = new THREE.PointsMaterial({
+        size: adaptiveSize * state.pointSizeScale,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.9,
+    });
+    const mesh = new THREE.Points(geometry, material);
+    mesh.frustumCulled = false;
+    state.scene.add(mesh);
 
-            pointClouds: new Map(),
-            activeCloud: null,
+    cloudEntry = {
+        mesh,
+        geometry,
+        data: {
+            positions: Array.from(posY),
+            colors: Array.from(col),
+            normals: Array.from(normY),
+        },
+        filename,
+        uuid,
+        originalColors: new Float32Array(col),
+        pointCount,
+        center: center.clone(),
+        bbox: bbox.clone(),
+        adaptiveSize,
+    };
+    state.pointClouds.set(uuid, cloudEntry);
 
-            bboxHelper: null,
-            normalHelpers: null,
-            selectionMarker: null,
-            gridHelper: null,
-            axesHelper: null,
+    // 更新场景范围
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > state.sceneRange) {
+        state.sceneRange = maxDim;
+        updateSceneScale();
+    }
 
-            showBbox: false,
-            showNormals: false,
-            selectMode: false,
-            measureMode: false,
+    setActiveCloud(uuid);
+}
 
-            selectedPoint: null,
-            measurePoints: [],
-            measureLine: null,
+function computeAdaptivePointSize(bboxSize) {
+    const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+    if (maxDim > 1000) return 0.3;
+    if (maxDim > 100) return 0.5;
+    if (maxDim > 10) return 1.0;
+    return 2.0;
+}
 
-            pointSizeScale: 1.0,
-            sceneRange: 100,
+function updateInfoPanel(cloud) {
+    document.getElementById('info-filename').textContent = cloud.filename;
+    document.getElementById('info-points').textContent = cloud.pointCount.toLocaleString();
+    const size = new THREE.Vector3();
+    cloud.bbox.getSize(size);
+    document.getElementById('info-bbox').textContent =
+        `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}`;
+    document.getElementById('info-center').textContent =
+        `${cloud.center.x.toFixed(1)}, ${cloud.center.y.toFixed(1)}, ${cloud.center.z.toFixed(1)}`;
+    document.getElementById('info-range').textContent = `${state.sceneRange.toFixed(1)}`;
+}
 
-            // ==========================================================
-            // 配准相关状态 - 核心修复：改为配对式存储，保证1:1对应关系
-            // ==========================================================
-            reg: {
-                mode: false,
-                sourceUUID: null,
-                targetUUID: null,
-                // 改为存储配对关系，保证一一对应
-                correspondences: [], // [{src: Vector3, tgt: Vector3, pairIdx: int, srcLabel: str, tgtLabel: str}]
-                // 当前正在采集的是源还是目标
-                nextIsSource: true,   // true=下一个点采集源点, false=采集目标点
-                tempMarkers: [],      // 场景中的临时标记对象
-                // 配准结果
-                lastTransform: null,  // 4x4 变换矩阵（用于ICP初始值）
-            },
-        };
+function setActiveCloud(uuid, focus = false) {
+    document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
+    const activeEl = document.querySelector(`[data-uuid="${uuid}"]`);
+    if (activeEl) activeEl.classList.add('active');
 
-        // ============================================================
-        // 坐标系转换工具 (Z-up ↔ Y-up)
-        // ============================================================
-        function convertZupToYup(positions) {
-            const count = positions.length / 3;
-            const out = new Float32Array(positions.length);
-            for (let i = 0; i < count; i++) {
-                const x = positions[i * 3];
-                const y = positions[i * 3 + 1];
-                const z = positions[i * 3 + 2];
-                out[i * 3] = x;
-                out[i * 3 + 1] = z;
-                out[i * 3 + 2] = -y;
+    state.activeCloud = state.pointClouds.get(uuid);
+    if (!state.activeCloud) return;
+
+    updateInfoPanel(state.activeCloud);
+    updateButtonState(true);
+
+    if (focus) focusOnCloud(uuid);
+}
+
+function focusOnCloud(uuid) {
+    const cloud = state.pointClouds.get(uuid);
+    if (!cloud) return;
+    const center = cloud.center;
+    const size = new THREE.Vector3();
+    cloud.bbox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const distance = maxDim * 1.5;
+    const endPos = center.clone().add(new THREE.Vector3(distance, distance * 0.8, distance));
+    state.camera.position.copy(endPos);
+    state.controls.target.copy(center);
+    state.controls.update();
+    saveCameraState();
+}
+
+// ============================================================
+// 文件上传
+// ============================================================
+async function uploadFiles(files) {
+    const voxelSize = document.getElementById('voxel-size').value;
+    showProgress('上传处理中...', 0);
+    const formData = new FormData();
+    for (const file of files) formData.append('files', file);
+    formData.append('voxel_size', voxelSize);
+    try {
+        const resp = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+        const results = await resp.json();
+        updateProgress(50);
+        let successCount = 0;
+        for (let i = 0; i < results.length; i++) {
+            const result = results[i];
+            if (result.error) {
+                showStatus(`文件 ${result.filename} 失败: ${result.error}`, 'error');
+                continue;
             }
-            return out;
+            await loadPointCloud(result, result.filename, result.uuid);
+            addFileToList(result.filename, result.uuid, result.positions.length / 3);
+            successCount++;
+            updateProgress(50 + ((i+1)/results.length)*50);
         }
+        hideProgress();
+        showStatus(`成功加载 ${successCount} 个文件`, 'success');
+        // 恢复视角
+        restoreCameraState();
+    } catch (err) {
+        hideProgress();
+        showStatus(`上传失败: ${err.message}`, 'error');
+    }
+}
 
-        function convertZupToYupSingle(pointZ) {
-            return new THREE.Vector3(pointZ[0], pointZ[2], -pointZ[1]);
-        }
-
-        function convertZupToYupNormals(normals) {
-            const count = normals.length / 3;
-            const out = new Float32Array(normals.length);
-            for (let i = 0; i < count; i++) {
-                const nx = normals[i * 3];
-                const ny = normals[i * 3 + 1];
-                const nz = normals[i * 3 + 2];
-                out[i * 3] = nx;
-                out[i * 3 + 1] = nz;
-                out[i * 3 + 2] = -ny;
+function addFileToList(filename, uuid, pointCount) {
+    const list = document.getElementById('file-list');
+    if (list.children.length === 1 && list.children[0].textContent.includes('暂无文件')) list.innerHTML = '';
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.uuid = uuid;
+    item.innerHTML = `
+        <div class="file-icon">📄</div>
+        <div class="file-info">
+            <div class="file-name" title="${filename}">${filename}</div>
+            <div class="file-meta">${pointCount.toLocaleString()} 点</div>
+        </div>
+        <div class="file-remove" data-uuid="${uuid}">✕</div>
+    `;
+    item.addEventListener('click', (e) => {
+        if (e.target.classList.contains('file-remove')) {
+            e.stopPropagation();
+            removeCloud(uuid);
+            item.remove();
+            if (list.children.length === 0) {
+                list.innerHTML = '<div style="text-align:center;color:var(--text-secondary);font-size:12px;padding:20px;">暂无文件，请上传</div>';
             }
-            return out;
-        }
-
-        // ============================================================
-        // 场景初始化
-        // ============================================================
-        function initScene() {
-            const container = document.getElementById('canvas-container');
-
-            state.scene = new THREE.Scene();
-            state.scene.background = new THREE.Color(0x0a0a1a);
-
-            const aspect = container.clientWidth / container.clientHeight;
-            state.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 50000);
-            state.camera.position.set(100, 100, 100);
-
-            state.renderer = new THREE.WebGLRenderer({
-                antialias: true,
-                powerPreference: 'high-performance',
-            });
-            state.renderer.setSize(container.clientWidth, container.clientHeight);
-            state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            container.appendChild(state.renderer.domElement);
-
-            state.controls = new OrbitControls(state.camera, state.renderer.domElement);
-            state.controls.enableDamping = true;
-            state.controls.dampingFactor = 0.05;
-            state.controls.screenSpacePanning = true;
-            state.controls.minDistance = 0.1;
-            state.controls.maxDistance = 20000;
-
-            state.scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-            dirLight.position.set(50, 50, 50);
-            state.scene.add(dirLight);
-
-            state.gridHelper = new THREE.GridHelper(1000, 100, 0x444466, 0x222244);
-            state.scene.add(state.gridHelper);
-            state.axesHelper = new THREE.AxesHelper(50);
-            state.scene.add(state.axesHelper);
-
-            bindEvents();
-            animate();
-            updateToolbarState();
-        }
-
-        // ============================================================
-        // 动态调整网格和坐标轴
-        // ============================================================
-        function updateSceneScale() {
-            const range = state.sceneRange;
-            state.scene.remove(state.gridHelper);
-            state.gridHelper = new THREE.GridHelper(range * 2, 50, 0x444466, 0x222244);
-            state.scene.add(state.gridHelper);
-
-            state.scene.remove(state.axesHelper);
-            state.axesHelper = new THREE.AxesHelper(range * 0.1);
-            state.scene.add(state.axesHelper);
-        }
-
-        // ============================================================
-        // 自适应点大小
-        // ============================================================
-        function computeAdaptivePointSize(bboxSize) {
-            const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
-            if (maxDim > 1000) return 0.3;
-            if (maxDim > 100) return 0.5;
-            if (maxDim > 10) return 1.0;
-            return 2.0;
-        }
-
-        // ============================================================
-        // 加载点云（保留原始坐标）
-        // ============================================================
-        async function loadPointCloud(data, filename, uuid) {
-            const { positions, colors, normals } = data;
-            const pointCount = positions.length / 3;
-
-            const posY = convertZupToYup(positions);
-            const normY = convertZupToYupNormals(normals);
-            const col = new Float32Array(colors);
-
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(posY, 3));
-            geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
-            geometry.setAttribute('normal', new THREE.BufferAttribute(normY, 3));
-
-            const originalColors = new Float32Array(col);
-
-            geometry.computeBoundingBox();
-            const bbox = geometry.boundingBox.clone();
-            const center = new THREE.Vector3();
-            bbox.getCenter(center);
-            const size = new THREE.Vector3();
-            bbox.getSize(size);
-
-            const adaptiveSize = computeAdaptivePointSize(size);
-            const material = new THREE.PointsMaterial({
-                size: adaptiveSize * state.pointSizeScale,
-                vertexColors: true,
-                sizeAttenuation: true,
-                transparent: true,
-                opacity: 0.9,
-            });
-
-            const mesh = new THREE.Points(geometry, material);
-            mesh.frustumCulled = false;
-            mesh.position.set(0, 0, 0);
-
-            state.pointClouds.set(uuid, {
-                mesh,
-                geometry,
-                data: {
-                    positions: Array.from(posY),
-                    colors: Array.from(col),
-                    normals: Array.from(normY),
-                },
-                filename,
-                uuid,
-                originalColors,
-                pointCount,
-                center: center.clone(),
-                bbox: bbox.clone(),
-                adaptiveSize,
-            });
-
-            state.scene.add(mesh);
-
-            const maxDim = Math.max(size.x, size.y, size.z);
-            if (maxDim > state.sceneRange) {
-                state.sceneRange = maxDim;
-                updateSceneScale();
-            }
-
-            // 设置激活并首次聚焦
+        } else {
             setActiveCloud(uuid, true);
         }
+    });
+    list.appendChild(item);
+}
 
-        // ============================================================
-        // 激活点云
-        // ============================================================
-        function setActiveCloud(uuid) {
-            document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
-            const activeEl = document.querySelector(`[data-uuid="${uuid}"]`);
-            if (activeEl) activeEl.classList.add('active');
+function removeCloud(uuid) {
+    const cloud = state.pointClouds.get(uuid);
+    if (!cloud) return;
+    state.scene.remove(cloud.mesh);
+    cloud.geometry.dispose();
+    cloud.mesh.material.dispose();
+    state.pointClouds.delete(uuid);
+    if (state.activeCloud?.uuid === uuid) {
+        state.activeCloud = null;
+        updateButtonState(false);
+        document.getElementById('info-filename').textContent = '-';
+        document.getElementById('info-points').textContent = '-';
+        document.getElementById('info-bbox').textContent = '-';
+        document.getElementById('info-center').textContent = '-';
+        document.getElementById('info-range').textContent = '-';
+    }
+    if (state.reg.sourceUUID === uuid) state.reg.sourceUUID = null;
+    if (state.reg.targetUUID === uuid) state.reg.targetUUID = null;
+    updateRegStatus();
+}
 
-            state.activeCloud = state.pointClouds.get(uuid);
-            if (!state.activeCloud) return;
+function clearAll() {
+    for (const [uuid] of state.pointClouds) removeCloud(uuid);
+    state.pointClouds.clear();
+    document.getElementById('file-list').innerHTML = '<div style="text-align:center;color:var(--text-secondary);font-size:12px;padding:20px;">暂无文件，请上传</div>';
+    if (state.bboxHelper) { state.scene.remove(state.bboxHelper); state.bboxHelper = null; }
+    state.sceneRange = 100;
+    updateSceneScale();
+    updateButtonState(false);
+    clearRegistration();
+    showStatus('已清空所有点云', 'success');
+}
 
-            document.getElementById('info-filename').textContent = state.activeCloud.filename;
-            document.getElementById('info-points').textContent = state.activeCloud.pointCount.toLocaleString();
+// ============================================================
+// 后端操作
+// ============================================================
+async function denoise() {
+    if (!state.activeCloud) return;
+    const { uuid, filename } = state.activeCloud;
+    const voxelSize = document.getElementById('voxel-size').value;
+    showProgress('去噪中...', 0);
+    try {
+        const resp = await fetch(`${API_BASE}/denoise`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        // 更新现有点云
+        await loadPointCloud(result, filename, result.uuid);
+        showStatus('去噪完成', 'success');
+    } catch (err) {
+        showStatus(`去噪失败: ${err.message}`, 'error');
+    } finally { hideProgress(); }
+}
 
-            const bbox = state.activeCloud.bbox;
-            const size = new THREE.Vector3();
-            bbox.getSize(size);
-            document.getElementById('info-bbox').textContent =
-                `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}`;
-            document.getElementById('info-center').textContent =
-                `${state.activeCloud.center.x.toFixed(1)}, ${state.activeCloud.center.y.toFixed(1)}, ${state.activeCloud.center.z.toFixed(1)}`;
-            document.getElementById('info-range').textContent = `${state.sceneRange.toFixed(1)}`;
-
-            updateButtonState(true);
-            // focusOnCloud(uuid);
-            if (focus) focusOnCloud(uuid);   // 只有显式要求时才聚焦
-        }
-
-        // ============================================================
-        // 聚焦到点云
-        // ============================================================
-        function focusOnCloud(uuid) {
-            const cloud = state.pointClouds.get(uuid);
-            if (!cloud) return;
-
-            const center = cloud.center;
-            const size = new THREE.Vector3();
-            cloud.bbox.getSize(size);
-            const maxDim = Math.max(size.x, size.y, size.z);
-            const distance = maxDim * 1.5;
-
-            const startPos = state.camera.position.clone();
-            const endPos = center.clone().add(new THREE.Vector3(distance, distance * 0.8, distance));
-            const startTarget = state.controls.target.clone();
-
-            let progress = 0;
-            function animateFocus() {
-                progress += 0.05;
-                if (progress >= 1) {
-                    state.camera.position.copy(endPos);
-                    state.controls.target.copy(center);
-                    state.controls.update();
-                    return;
-                }
-                const t = 1 - Math.pow(1 - progress, 3);
-                state.camera.position.lerpVectors(startPos, endPos, t);
-                state.controls.target.lerpVectors(startTarget, center, t);
-                state.controls.update();
-                requestAnimationFrame(animateFocus);
-            }
-            animateFocus();
-        }
-
-        // ============================================================
-        // 更新点大小
-        // ============================================================
-        function updatePointSize() {
-            for (const cloud of state.pointClouds.values()) {
-                if (cloud.mesh && cloud.mesh.material) {
-                    cloud.mesh.material.size = cloud.adaptiveSize * state.pointSizeScale;
-                }
-            }
-        }
-
-        // ============================================================
-        // 文件上传
-        // ============================================================
-        async function uploadFiles(files) {
-            const voxelSize = document.getElementById('voxel-size').value;
-            showProgress('正在上传和处理文件...', 0);
-
-            const formData = new FormData();
-            for (const file of files) formData.append('files', file);
-            formData.append('voxel_size', voxelSize);
-
-            try {
-                const response = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
-                const results = await response.json();
-                updateProgress(50);
-
-                let successCount = 0;
-                for (let i = 0; i < results.length; i++) {
-                    const result = results[i];
-                    if (result.error) {
-                        showStatus(`文件 ${result.filename} 处理失败: ${result.error}`, 'error');
-                        continue;
-                    }
-                    await loadPointCloud(result, result.filename, result.uuid);
-                    addFileToList(result.filename, result.uuid, result.positions.length / 3);
-                    successCount++;
-                    updateProgress(50 + ((i + 1) / results.length) * 50);
-                }
-                hideProgress();
-                showStatus(`成功加载 ${successCount} 个文件`, 'success');
-            } catch (err) {
-                hideProgress();
-                showStatus(`上传失败: ${err.message}`, 'error');
-            }
-        }
-
-        // ============================================================
-        // 后端操作：去噪、法向量、边界框
-        // ============================================================
-        async function denoise() {
-            if (!state.activeCloud) return;
-            const { uuid, filename } = state.activeCloud;
-            const voxelSize = document.getElementById('voxel-size').value;
-
-            showProgress('正在去噪处理...', 0);
-            try {
-                const resp = await fetch(`${API_BASE}/denoise`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize), filename }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-
-                removeCloud(uuid);
-                await loadPointCloud(result, filename, result.uuid);
-                showStatus('去噪完成', 'success');
-            } catch (err) {
-                showStatus(`去噪失败: ${err.message}`, 'error');
-            } finally {
-                hideProgress();
-            }
-        }
-
-        async function computeNormals() {
-            if (!state.activeCloud) return;
-            const { uuid } = state.activeCloud;
-            const voxelSize = document.getElementById('voxel-size').value;
-
-            showProgress('正在计算法向量...', 0);
-            try {
-                const resp = await fetch(`${API_BASE}/compute_normals`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-
-                const normY = convertZupToYupNormals(result.normals);
-                const cloud = state.pointClouds.get(uuid);
-                cloud.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normY), 3));
-                cloud.data.normals = Array.from(normY);
-
-                if (state.showNormals) {
-                    hideNormals();
-                    showNormals();
-                }
-                showStatus('法向量计算完成', 'success');
-            } catch (err) {
-                showStatus(`计算失败: ${err.message}`, 'error');
-            } finally {
-                hideProgress();
-            }
-        }
-
-        async function computeBoundingBox() {
-            if (!state.activeCloud) return;
-            const { uuid } = state.activeCloud;
-
-            try {
-                const resp = await fetch(`${API_BASE}/boundingbox`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-
-                const minZ = new THREE.Vector3(result.min[0], result.min[1], result.min[2]);
-                const maxZ = new THREE.Vector3(result.max[0], result.max[1], result.max[2]);
-                const minY = convertZupToYupSingle(minZ);
-                const maxY = convertZupToYupSingle(maxZ);
-                const box = new THREE.Box3(minY, maxY);
-
-                if (state.bboxHelper) state.scene.remove(state.bboxHelper);
-                state.bboxHelper = new THREE.Box3Helper(box, 0xffaa00);
-                state.bboxHelper.visible = state.showBbox;
-                state.scene.add(state.bboxHelper);
-                state.showBbox = true;
-                document.getElementById('btn-bbox').classList.add('active');
-                showStatus('边界框计算完成', 'success');
-            } catch (err) {
-                showStatus(`计算失败: ${err.message}`, 'error');
-            }
-        }
-
-        // ============================================================
-        // 法向量显示
-        // ============================================================
-        function showNormals() {
+async function computeNormals() {
+    if (!state.activeCloud) return;
+    const { uuid } = state.activeCloud;
+    const voxelSize = document.getElementById('voxel-size').value;
+    showProgress('计算法向量...', 0);
+    try {
+        const resp = await fetch(`${API_BASE}/compute_normals`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        const normY = convertZupToYupNormals(result.normals);
+        const cloud = state.pointClouds.get(uuid);
+        cloud.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normY), 3));
+        cloud.data.normals = Array.from(normY);
+        if (state.showNormals) {
             hideNormals();
-            if (!state.activeCloud) return;
-
-            const cloud = state.activeCloud;
-            const positions = cloud.geometry.attributes.position.array;
-            const normals = cloud.geometry.attributes.normal.array;
-            const count = positions.length / 3;
-
-            let hasValid = false;
-            for (let i = 0; i < Math.min(count, 10); i++) {
-                if (normals[i * 3] !== 0 || normals[i * 3 + 1] !== 0 || normals[i * 3 + 2] !== 0) {
-                    hasValid = true;
-                    break;
-                }
-            }
-            if (!hasValid) {
-                showStatus('法向量未计算或全为零，请先计算法向量', 'warning');
-                return;
-            }
-
-            const sampleRate = Math.max(1, Math.floor(count / 8000));
-            const lineCount = Math.floor(count / sampleRate);
-            const linePos = new Float32Array(lineCount * 6);
-            let idx = 0;
-            for (let i = 0; i < count; i += sampleRate) {
-                const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-                const nx = normals[i * 3], ny = normals[i * 3 + 1], nz = normals[i * 3 + 2];
-                linePos[idx++] = x; linePos[idx++] = y; linePos[idx++] = z;
-                linePos[idx++] = x + nx * CONFIG.NORMAL_LENGTH;
-                linePos[idx++] = y + ny * CONFIG.NORMAL_LENGTH;
-                linePos[idx++] = z + nz * CONFIG.NORMAL_LENGTH;
-            }
-
-            const geom = new THREE.BufferGeometry();
-            geom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
-            const mat = new THREE.LineBasicMaterial({ color: CONFIG.NORMAL_COLOR, opacity: 0.6, transparent: true });
-            state.normalHelpers = new THREE.LineSegments(geom, mat);
-            state.normalHelpers.position.copy(cloud.mesh.position);
-            state.scene.add(state.normalHelpers);
+            showNormals();
         }
+        showStatus('法向量计算完成', 'success');
+    } catch (err) {
+        showStatus(`计算失败: ${err.message}`, 'error');
+    } finally { hideProgress(); }
+}
 
-        function hideNormals() {
-            if (state.normalHelpers) {
-                state.scene.remove(state.normalHelpers);
-                state.normalHelpers.geometry.dispose();
-                state.normalHelpers = null;
-            }
+async function computeBoundingBox() {
+    if (!state.activeCloud) return;
+    const { uuid } = state.activeCloud;
+    try {
+        const resp = await fetch(`${API_BASE}/boundingbox`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        const minZ = new THREE.Vector3(result.min[0], result.min[1], result.min[2]);
+        const maxZ = new THREE.Vector3(result.max[0], result.max[1], result.max[2]);
+        const minY = convertZupToYupSingle(minZ);
+        const maxY = convertZupToYupSingle(maxZ);
+        const box = new THREE.Box3(minY, maxY);
+        if (state.bboxHelper) state.scene.remove(state.bboxHelper);
+        state.bboxHelper = new THREE.Box3Helper(box, 0xffaa00);
+        state.bboxHelper.visible = state.showBbox;
+        state.scene.add(state.bboxHelper);
+        state.showBbox = true;
+        document.getElementById('btn-bbox').classList.add('active');
+        showStatus('边界框计算完成', 'success');
+    } catch (err) {
+        showStatus(`计算失败: ${err.message}`, 'error');
+    }
+}
+
+function toggleBoundingBox() {
+    if (!state.bboxHelper && state.activeCloud) {
+        computeBoundingBox();
+        return;
+    }
+    state.showBbox = !state.showBbox;
+    if (state.bboxHelper) state.bboxHelper.visible = state.showBbox;
+    document.getElementById('btn-bbox').classList.toggle('active', state.showBbox);
+}
+
+function toggleNormals() {
+    if (!state.activeCloud) return;
+    const normals = state.activeCloud.geometry.attributes.normal.array;
+    let hasValid = false;
+    for (let i = 0; i < Math.min(normals.length/3, 10); i++) {
+        if (normals[i*3] !== 0 || normals[i*3+1] !== 0 || normals[i*3+2] !== 0) { hasValid = true; break; }
+    }
+    if (!hasValid && !state.showNormals) {
+        computeNormals();
+        return;
+    }
+    state.showNormals = !state.showNormals;
+    if (state.showNormals) showNormals();
+    else hideNormals();
+    document.getElementById('btn-normals').classList.toggle('active', state.showNormals);
+}
+
+function showNormals() {
+    hideNormals();
+    if (!state.activeCloud) return;
+    const cloud = state.activeCloud;
+    const positions = cloud.geometry.attributes.position.array;
+    const normals = cloud.geometry.attributes.normal.array;
+    const count = positions.length / 3;
+    let hasValid = false;
+    for (let i = 0; i < Math.min(count, 10); i++) {
+        if (normals[i*3] !== 0 || normals[i*3+1] !== 0 || normals[i*3+2] !== 0) { hasValid = true; break; }
+    }
+    if (!hasValid) { showStatus('法向量未计算，请先计算', 'warning'); return; }
+    const sampleRate = Math.max(1, Math.floor(count / 8000));
+    const lineCount = Math.floor(count / sampleRate);
+    const linePos = new Float32Array(lineCount * 6);
+    let idx = 0;
+    for (let i = 0; i < count; i += sampleRate) {
+        const x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2];
+        const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
+        linePos[idx++] = x; linePos[idx++] = y; linePos[idx++] = z;
+        linePos[idx++] = x + nx * CONFIG.NORMAL_LENGTH;
+        linePos[idx++] = y + ny * CONFIG.NORMAL_LENGTH;
+        linePos[idx++] = z + nz * CONFIG.NORMAL_LENGTH;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+    const mat = new THREE.LineBasicMaterial({ color: CONFIG.NORMAL_COLOR, opacity: 0.6, transparent: true });
+    state.normalHelpers = new THREE.LineSegments(geom, mat);
+    state.normalHelpers.position.copy(cloud.mesh.position);
+    state.scene.add(state.normalHelpers);
+}
+function hideNormals() {
+    if (state.normalHelpers) {
+        state.scene.remove(state.normalHelpers);
+        state.normalHelpers.geometry.dispose();
+        state.normalHelpers = null;
+    }
+}
+
+// ============================================================
+// 颜色修改
+// ============================================================
+function applyColor() {
+    if (!state.activeCloud) return;
+    const color = new THREE.Color(document.getElementById('color-picker').value);
+    const colors = state.activeCloud.geometry.attributes.color.array;
+    for (let i = 0; i < colors.length / 3; i++) {
+        colors[i*3] = color.r;
+        colors[i*3+1] = color.g;
+        colors[i*3+2] = color.b;
+    }
+    state.activeCloud.geometry.attributes.color.needsUpdate = true;
+    showStatus('颜色已应用', 'success');
+}
+function resetColor() {
+    if (!state.activeCloud) return;
+    const colors = state.activeCloud.geometry.attributes.color.array;
+    colors.set(state.activeCloud.originalColors);
+    state.activeCloud.geometry.attributes.color.needsUpdate = true;
+    showStatus('颜色已恢复', 'success');
+}
+
+// ============================================================
+// 配准
+// ============================================================
+function updateRegStatus() {
+    const count = state.reg.correspondences.filter(p => p.tgt !== null).length;
+    const srcName = state.reg.sourceUUID ?
+        (state.pointClouds.get(state.reg.sourceUUID)?.filename || '已选') : '未选';
+    const tgtName = state.reg.targetUUID ?
+        (state.pointClouds.get(state.reg.targetUUID)?.filename || '已选') : '未选';
+    const nextHint = state.reg.nextIsSource ?
+        '<span style="color:#ff4444;">【下一步：在源点云上采集】</span>' :
+        '<span style="color:#44ff44;">【下一步：在目标点云上采集】</span>';
+    document.getElementById('reg-status').innerHTML =
+        `对应点: <b>${count}</b> 对 | 源: ${srcName} | 目标: ${tgtName}<br>${nextHint}`;
+    const completePairs = state.reg.correspondences.filter(p => p.tgt !== null).length;
+    document.getElementById('btn-execute-reg').disabled = (completePairs < 3);
+    document.getElementById('btn-icp-refine').disabled = (completePairs < 3 || !state.reg.lastTransform);
+    document.getElementById('btn-add-correspondence').disabled = (completePairs === 0);
+    document.getElementById('btn-undo-correspondence').disabled = (state.reg.correspondences.length === 0);
+}
+
+function setTargetCloud() {
+    if (!state.activeCloud) { showStatus('请先激活一个点云', 'warning'); return; }
+    if (state.reg.sourceUUID === state.activeCloud.uuid) { showStatus('目标不能与源相同', 'warning'); return; }
+    state.reg.targetUUID = state.activeCloud.uuid;
+    state.reg.correspondences = [];
+    state.reg.nextIsSource = true;
+    state.reg.lastTransform = null;
+    clearRegMarkers();
+    updateRegStatus();
+    showStatus(`目标点云设为: ${state.activeCloud.filename}`, 'success');
+}
+function setSourceCloud() {
+    if (!state.activeCloud) { showStatus('请先激活一个点云', 'warning'); return; }
+    if (state.reg.targetUUID === state.activeCloud.uuid) { showStatus('源不能与目标相同', 'warning'); return; }
+    state.reg.sourceUUID = state.activeCloud.uuid;
+    state.reg.correspondences = [];
+    state.reg.nextIsSource = true;
+    state.reg.lastTransform = null;
+    clearRegMarkers();
+    updateRegStatus();
+    showStatus(`源点云设为: ${state.activeCloud.filename}`, 'success');
+}
+
+function toggleRegMode() {
+    if (!state.reg.sourceUUID || !state.reg.targetUUID) {
+        showStatus('请先设置源和目标点云', 'warning');
+        return;
+    }
+    state.reg.mode = !state.reg.mode;
+    document.getElementById('btn-reg-mode').classList.toggle('active', state.reg.mode);
+    state.renderer.domElement.style.cursor = state.reg.mode ? 'crosshair' : 'default';
+    if (state.reg.mode) {
+        document.getElementById('hint-text').textContent = '配准模式：交替点击源点云和目标点云采集对应点';
+    } else {
+        document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+    }
+    document.getElementById('btn-exit-reg').disabled = !state.reg.mode;
+}
+
+function exitRegMode() {
+    if (state.reg.mode) toggleRegMode(); // 关闭配准模式
+    state.reg.mode = false;
+    document.getElementById('btn-reg-mode').classList.remove('active');
+    state.renderer.domElement.style.cursor = 'default';
+    document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+    document.getElementById('btn-exit-reg').disabled = true;
+}
+
+function clearRegMarkers() {
+    state.reg.tempMarkers.forEach(m => {
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+            if (m.material.map) m.material.map.dispose();
+            m.material.dispose();
         }
+        state.scene.remove(m);
+    });
+    state.reg.tempMarkers = [];
+}
 
-        async function toggleNormals() {
-            if (!state.activeCloud) return;
-            const normals = state.activeCloud.geometry.attributes.normal.array;
-            let hasValid = false;
-            for (let i = 0; i < Math.min(normals.length / 3, 10); i++) {
-                if (normals[i * 3] !== 0 || normals[i * 3 + 1] !== 0 || normals[i * 3 + 2] !== 0) {
-                    hasValid = true;
-                    break;
-                }
-            }
-            if (!hasValid && !state.showNormals) {
-                computeNormals();
-                return;
-            }
-            state.showNormals = !state.showNormals;
-            if (state.showNormals) showNormals();
-            else hideNormals();
-            document.getElementById('btn-normals').classList.toggle('active', state.showNormals);
+function addTempMarker(position, color, label) {
+    const markerSize = Math.max(CONFIG.REG_MARKER_SIZE, state.sceneRange * 0.0005);
+    const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
+    const material = new THREE.MeshBasicMaterial({ color });
+    const marker = new THREE.Mesh(geometry, material);
+    marker.position.copy(position);
+    state.scene.add(marker);
+    state.reg.tempMarkers.push(marker);
+
+    // 标签
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0,0,128,64);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(2,2,124,60);
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 32px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, 64, 32);
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.copy(position);
+    sprite.position.y += markerSize * 3;
+    sprite.scale.set(markerSize * 8, markerSize * 4, 1);
+    state.scene.add(sprite);
+    state.reg.tempMarkers.push(sprite);
+}
+
+function handleRegClick(event) {
+    if (!state.reg.mode || !state.activeCloud) return;
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.mouse, state.camera);
+    const threshold = Math.max(1.0, state.sceneRange * 0.001);
+    state.raycaster.params.Points.threshold = threshold;
+    const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
+
+    if (intersects.length === 0) {
+        showStatus('未点击到点云，请精确点击特征点', 'warning');
+        return;
+    }
+
+    const point = intersects[0].point.clone();
+    const cloudUUID = state.activeCloud.uuid;
+
+    // 采集源点
+    if (state.reg.nextIsSource) {
+        if (cloudUUID !== state.reg.sourceUUID) {
+            showStatus('当前应采集源点云（红色高亮）', 'warning');
+            return;
         }
-
-        function toggleBoundingBox() {
-            if (!state.bboxHelper && state.activeCloud) {
-                computeBoundingBox();
-                return;
-            }
-            state.showBbox = !state.showBbox;
-            if (state.bboxHelper) state.bboxHelper.visible = state.showBbox;
-            document.getElementById('btn-bbox').classList.toggle('active', state.showBbox);
+        const idx = state.reg.correspondences.length; // 当前配对的索引
+        state.reg.correspondences.push({ src: point, tgt: null, pairIdx: idx });
+        addTempMarker(point, 0xff4444, `S${idx + 1}`);
+        state.reg.nextIsSource = false;
+        showStatus(`源点 ${idx + 1} 已采集，请切换到目标点云`, 'success');
+    }
+    // 采集目标点
+    else {
+        if (cloudUUID !== state.reg.targetUUID) {
+            showStatus('当前应采集目标点云（绿色高亮）', 'warning');
+            return;
         }
-
-        async function saveRegistered() {
-            if (!state.activeCloud) {
-                showStatus('请先激活一个点云', 'warning');
-                return;
-            }
-            const uuid = state.activeCloud.uuid;
-            const filename = state.activeCloud.filename.replace('.ply', '_registered.ply');
-            try {
-                const resp = await fetch(`${API_BASE}/save_registered`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({uuid, filename}),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-                showStatus(`点云已保存至: ${result.path}，点数: ${result.points}`, 'success');
-                // 可选：触发浏览器下载
-                const a = document.createElement('a');
-                a.href = `${API_BASE}/download/${filename}`;  // 需要后端添加下载路由
-                a.download = filename;
-                a.click();
-            } catch (err) {
-                showStatus(`保存失败: ${err.message}`, 'error');
-            }
-        }
-
-        // ============================================================
-        // 点选取
-        // ============================================================
-        function toggleSelectMode() {
-            state.selectMode = !state.selectMode;
-            state.measureMode = false;
-            state.renderer.domElement.style.cursor = state.selectMode ? 'crosshair' : 'default';
-            document.getElementById('tb-select').classList.toggle('active', state.selectMode);
-            document.getElementById('tb-measure').classList.remove('active');
-            if (!state.selectMode) clearSelection();
-            updateHint();
-        }
-
-        function clearSelection() {
-            if (state.activeCloud && state.selectedPoint) {
-                const colors = state.activeCloud.geometry.attributes.color.array;
-                colors.set(state.activeCloud.originalColors);
-                state.activeCloud.geometry.attributes.color.needsUpdate = true;
-            }
-            state.selectedPoint = null;
-            document.getElementById('selected-info').classList.remove('show');
-            if (state.selectionMarker) {
-                state.scene.remove(state.selectionMarker);
-                state.selectionMarker = null;
-            }
-            document.getElementById('btn-clear-selection').disabled = true;
-        }
-
-        function selectPoint(event) {
-            if (!state.selectMode || !state.activeCloud) return;
-
-            const rect = state.renderer.domElement.getBoundingClientRect();
-            state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-            state.raycaster.setFromCamera(state.mouse, state.camera);
-            const threshold = Math.max(1.0, state.sceneRange * 0.001);
-            state.raycaster.params.Points.threshold = threshold;
-
-            const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
-
-            if (intersects.length > 0) {
-                const intersection = intersects[0];
-                const index = intersection.index;
-                const point = intersection.point;
-
-                const colors = state.activeCloud.geometry.attributes.color.array;
-                colors.set(state.activeCloud.originalColors);
-
-                colors[index * 3] = 1.0;
-                colors[index * 3 + 1] = 0.2;
-                colors[index * 3 + 2] = 0.4;
-                state.activeCloud.geometry.attributes.color.needsUpdate = true;
-
-                updateSelectionMarker(point);
-
-                const normals = state.activeCloud.geometry.attributes.normal.array;
-                const nx = normals[index * 3], ny = normals[index * 3 + 1], nz = normals[index * 3 + 2];
-                const r = Math.floor(colors[index * 3] * 255);
-                const g = Math.floor(colors[index * 3 + 1] * 255);
-                const b = Math.floor(colors[index * 3 + 2] * 255);
-
-                document.getElementById('sel-index').textContent = index;
-                document.getElementById('sel-pos').textContent =
-                    `${point.x.toFixed(3)}, ${point.y.toFixed(3)}, ${point.z.toFixed(3)}`;
-                document.getElementById('sel-normal').textContent =
-                    `${nx.toFixed(3)}, ${ny.toFixed(3)}, ${nz.toFixed(3)}`;
-                document.getElementById('sel-color').textContent = `RGB(${r}, ${g}, ${b})`;
-                document.getElementById('selected-info').classList.add('show');
-
-                state.selectedPoint = { index, point };
-                document.getElementById('btn-clear-selection').disabled = false;
-            } else {
-                clearSelection();
-            }
-        }
-
-        function updateSelectionMarker(position) {
-            if (state.selectionMarker) state.scene.remove(state.selectionMarker);
-            const markerSize = Math.max(0.3, state.sceneRange * 0.0005);
-            const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
-            const material = new THREE.MeshBasicMaterial({ color: CONFIG.SELECTION_COLOR, transparent: true, opacity: 0.8 });
-            state.selectionMarker = new THREE.Mesh(geometry, material);
-            state.selectionMarker.position.copy(position);
-            state.scene.add(state.selectionMarker);
-        }
-
-        // ============================================================
-        // 颜色修改
-        // ============================================================
-        function applyColor() {
-            if (!state.activeCloud) return;
-            const color = new THREE.Color(document.getElementById('color-picker').value);
-            const colors = state.activeCloud.geometry.attributes.color.array;
-            for (let i = 0; i < colors.length / 3; i++) {
-                colors[i * 3] = color.r;
-                colors[i * 3 + 1] = color.g;
-                colors[i * 3 + 2] = color.b;
-            }
-            state.activeCloud.geometry.attributes.color.needsUpdate = true;
-            showStatus('颜色已应用', 'success');
-        }
-
-        function resetColor() {
-            if (!state.activeCloud) return;
-            const colors = state.activeCloud.geometry.attributes.color.array;
-            colors.set(state.activeCloud.originalColors);
-            state.activeCloud.geometry.attributes.color.needsUpdate = true;
-            showStatus('颜色已恢复', 'success');
-        }
-
-        // ============================================================
-        // 测量功能
-        // ============================================================
-        function toggleMeasureMode() {
-            state.measureMode = !state.measureMode;
-            state.selectMode = false;
-            state.renderer.domElement.style.cursor = state.measureMode ? 'crosshair' : 'default';
-            document.getElementById('tb-measure').classList.toggle('active', state.measureMode);
-            document.getElementById('tb-select').classList.remove('active');
-            if (!state.measureMode) clearMeasure();
-            updateHint();
-        }
-
-        function addMeasurePoint(event) {
-            if (!state.measureMode || !state.activeCloud) return;
-
-            const rect = state.renderer.domElement.getBoundingClientRect();
-            state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-            state.raycaster.setFromCamera(state.mouse, state.camera);
-            const threshold = Math.max(1.0, state.sceneRange * 0.001);
-            state.raycaster.params.Points.threshold = threshold;
-            const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
-
-            if (intersects.length > 0) {
-                const point = intersects[0].point;
-                const markerSize = Math.max(0.2, state.sceneRange * 0.0003);
-                const marker = new THREE.Mesh(
-                    new THREE.SphereGeometry(markerSize, 8, 8),
-                    new THREE.MeshBasicMaterial({ color: 0xffaa00 })
-                );
-                marker.position.copy(point);
-                state.scene.add(marker);
-                state.measurePoints.push(marker);
-
-                if (state.measurePoints.length >= 2) {
-                    const p1 = state.measurePoints[state.measurePoints.length - 2].position;
-                    const p2 = state.measurePoints[state.measurePoints.length - 1].position;
-                    const distance = p1.distanceTo(p2);
-                    const lineGeom = new THREE.BufferGeometry().setFromPoints([p1, p2]);
-                    const lineMat = new THREE.LineBasicMaterial({ color: 0xffaa00 });
-                    const line = new THREE.Line(lineGeom, lineMat);
-                    state.scene.add(line);
-                    state.measurePoints.push(line);
-                    showStatus(`距离: ${distance.toFixed(4)}`, 'success');
-                }
-            }
-        }
-
-        function clearMeasure() {
-            state.measurePoints.forEach(obj => state.scene.remove(obj));
-            state.measurePoints = [];
-        }
-
-        // ============================================================
-        // 配准功能 - 核心修复部分
-        // ============================================================
-
-        // 更新配准状态显示
-        function updateRegStatus() {
-            const count = state.reg.correspondences.filter(p => p.tgt !== null).length;
-            const srcName = state.reg.sourceUUID ?
-                (state.pointClouds.get(state.reg.sourceUUID)?.filename || '已选') : '未选';
-            const tgtName = state.reg.targetUUID ?
-                (state.pointClouds.get(state.reg.targetUUID)?.filename || '已选') : '未选';
-            const nextHint = state.reg.nextIsSource ?
-                '<span style="color:#ff4444">【下一步：在源点云上采集对应点】</span>' :
-                '<span style="color:#44ff44">【下一步：在目标点云上采集对应点】</span>';
-
-            document.getElementById('reg-status').innerHTML =
-                `对应点: <b>${count}</b> 对 | 源: ${srcName} | 目标: ${tgtName}<br>${nextHint}`;
-
-            // 只有完整的配对才启用执行按钮
-            const completePairs = state.reg.correspondences.filter(p => p.tgt !== null).length;
-            document.getElementById('btn-execute-reg').disabled = (completePairs < 3);
-            document.getElementById('btn-icp-refine').disabled = (completePairs < 3 || !state.reg.lastTransform);
-            document.getElementById('btn-add-correspondence').disabled = (completePairs === 0);
-        }
-
-        // 设置目标点云
-        function setTargetCloud() {
-            if (!state.activeCloud) {
-                showStatus('请先激活一个点云', 'warning');
-                return;
-            }
-            if (state.reg.sourceUUID === state.activeCloud.uuid) {
-                showStatus('目标不能与源相同', 'warning');
-                return;
-            }
-            state.reg.targetUUID = state.activeCloud.uuid;
-            // 重置配对
-            state.reg.correspondences = [];
+        const lastPair = state.reg.correspondences[state.reg.correspondences.length - 1];
+        if (lastPair && lastPair.tgt === null) {
+            lastPair.tgt = point;
+            const idx = lastPair.pairIdx; // 使用存储的索引
+            addTempMarker(point, 0x44ff44, `T${idx + 1}`);
             state.reg.nextIsSource = true;
-            state.reg.lastTransform = null;
-            clearRegMarkers();
-            updateRegStatus();
-            showStatus(`目标点云设为: ${state.activeCloud.filename}`, 'success');
-        }
-
-        // 设置源点云
-        function setSourceCloud() {
-            if (!state.activeCloud) {
-                showStatus('请先激活一个点云', 'warning');
-                return;
-            }
-            if (state.reg.targetUUID === state.activeCloud.uuid) {
-                showStatus('源不能与目标相同', 'warning');
-                return;
-            }
-            state.reg.sourceUUID = state.activeCloud.uuid;
-            // 重置配对
-            state.reg.correspondences = [];
-            state.reg.nextIsSource = true;
-            state.reg.lastTransform = null;
-            clearRegMarkers();
-            updateRegStatus();
-            showStatus(`源点云设为: ${state.activeCloud.filename}`, 'success');
-        }
-
-        // 清除配准标记
-        function clearRegMarkers() {
-            state.reg.tempMarkers.forEach(m => {
-                if (m.geometry) m.geometry.dispose();
-                if (m.material) {
-                    if (m.material.map) m.material.map.dispose();
-                    m.material.dispose();
-                }
-                state.scene.remove(m);
-            });
-            state.reg.tempMarkers = [];
-        }
-
-        // 切换配准采集模式
-        function toggleRegMode() {
-            if (!state.reg.sourceUUID || !state.reg.targetUUID) {
-                showStatus('请先设置源和目标点云', 'warning');
-                return;
-            }
-            state.reg.mode = !state.reg.mode;
-            document.getElementById('btn-reg-mode').classList.toggle('active', state.reg.mode);
-            state.renderer.domElement.style.cursor = state.reg.mode ? 'crosshair' : 'default';
-
-            if (state.reg.mode) {
-                state.selectMode = false;
-                state.measureMode = false;
-                document.getElementById('tb-select').classList.remove('active');
-                document.getElementById('tb-measure').classList.remove('active');
-                updateHint();
-            } else {
-                updateHint();
-            }
-        }
-
-        // 添加临时标记（带编号标签，区分源/目标）
-        function addTempMarker(position, color, label) {
-            const markerSize = Math.max(CONFIG.REG_MARKER_SIZE, state.sceneRange * 0.0005);
-
-            // 球体标记
-            const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
-            const material = new THREE.MeshBasicMaterial({ color });
-            const marker = new THREE.Mesh(geometry, material);
-            marker.position.copy(position);
-            state.scene.add(marker);
-            state.reg.tempMarkers.push(marker);
-
-            // 文字标签
-            const canvas = document.createElement('canvas');
-            canvas.width = 128;
-            canvas.height = 64;
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = 'rgba(0,0,0,0.6)';
-            ctx.fillRect(0, 0, 128, 64);
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(2, 2, 124, 60);
-            ctx.fillStyle = 'white';
-            ctx.font = 'bold 32px Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(label, 64, 32);
-
-            const texture = new THREE.CanvasTexture(canvas);
-            const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
-            const sprite = new THREE.Sprite(spriteMat);
-            sprite.position.copy(position);
-            sprite.position.y += markerSize * 3;
-            sprite.scale.set(markerSize * 8, markerSize * 4, 1);
-            state.scene.add(sprite);
-            state.reg.tempMarkers.push(sprite);
-        }
-
-        // 修复后的配准点击处理 - 核心：强制交替采集，保证1:1配对
-        function handleRegClick(event) {
-            if (!state.reg.mode || !state.activeCloud) return;
-
-            const rect = state.renderer.domElement.getBoundingClientRect();
-            state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-            state.raycaster.setFromCamera(state.mouse, state.camera);
-            const threshold = Math.max(1.0, state.sceneRange * 0.001);
-            state.raycaster.params.Points.threshold = threshold;
-            const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
-
-            if (intersects.length === 0) {
-                showStatus('未点击到点云，请精确点击建筑特征点（如墙角、窗角）', 'warning');
-                return;
-            }
-
-            const point = intersects[0].point.clone();
-            const cloudUUID = state.activeCloud.uuid;
-            const pairIdx = state.reg.correspondences.length;
-
-            // 判断当前应该采集源还是目标
-            if (state.reg.nextIsSource) {
-                // 当前应该采集源点
-                if (cloudUUID !== state.reg.sourceUUID) {
-                    showStatus(`当前应采集源点，请点击红色高亮的源点云`, 'warning');
-                    return;
-                }
-                // 创建新配对，源点已采集，目标点待填充
-                state.reg.correspondences.push({
-                    src: point,
-                    tgt: null,
-                    pairIdx: pairIdx,
-                });
-                addTempMarker(point, 0xff4444, `S${pairIdx + 1}`);
-                state.reg.nextIsSource = false; // 下一步采集目标
-                showStatus(`源点 ${pairIdx + 1} 已采集，请切换到目标点云点击对应位置`, 'success');
-
-            } else {
-                // 当前应该采集目标点
-                if (cloudUUID !== state.reg.targetUUID) {
-                    showStatus(`当前应采集目标点，请点击绿色高亮的目标点云`, 'warning');
-                    return;
-                }
-                // 填充最后一个配对的目标点
-                const lastPair = state.reg.correspondences[state.reg.correspondences.length - 1];
-                if (lastPair && lastPair.tgt === null) {
-                    lastPair.tgt = point;
-                    addTempMarker(point, 0x44ff44, `T${lastPair.pairIdx + 1}`);
-                    state.reg.nextIsSource = true; // 下一步采集源
-                    showStatus(`目标点 ${lastPair.pairIdx + 1} 已采集，配对完成！可继续采集下一对`, 'success');
-                } else {
-                    // 异常情况：没有待填充的源点
-                    showStatus('数据异常，请重新开始采集', 'error');
-                    clearRegistration();
-                    return;
-                }
-            }
-
-            updateRegStatus();
-        }
-
-        // 撤销最后一对（新增功能）
-        function undoLastCorrespondence() {
-            if (state.reg.correspondences.length === 0) {
-                showStatus('没有可撤销的配对', 'warning');
-                return;
-            }
-
-            // 如果最后一个配对不完整（只有源点），直接删除
-            const lastPair = state.reg.correspondences[state.reg.correspondences.length - 1];
-            if (lastPair.tgt === null) {
-                state.reg.nextIsSource = true;
-            } else {
-                state.reg.nextIsSource = true;
-            }
-
-            // 移除对应的标记（每对2个球体+2个标签=4个对象，需要精确追踪）
-            // 简化处理：清除所有标记并重新绘制
-            state.reg.correspondences.pop();
-
-            // 重新绘制所有标记
-            clearRegMarkers();
-            for (let i = 0; i < state.reg.correspondences.length; i++) {
-                const pair = state.reg.correspondences[i];
-                addTempMarker(pair.src, 0xff4444, `S${i + 1}`);
-                if (pair.tgt) {
-                    addTempMarker(pair.tgt, 0x44ff44, `T${i + 1}`);
-                }
-            }
-
-            updateRegStatus();
-            showStatus('已撤销最后一对', 'success');
-        }
-
-        // 记录所有配准点对到后端（一次性发送所有完整配对）
-        async function addCorrespondence() {
-            const completePairs = state.reg.correspondences.filter(p => p.tgt !== null);
-            if (completePairs.length === 0) {
-                showStatus('没有完整的点对', 'warning');
-                return;
-            }
-
-            try {
-                const resp = await fetch(`${API_BASE}/register_correspondences`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        src_uuid: state.reg.sourceUUID,
-                        tgt_uuid: state.reg.targetUUID,
-                        pairs: completePairs.map(p => ({
-                            src_point: p.src.toArray(),
-                            tgt_point: p.tgt.toArray(),
-                        })),
-                    }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-                showStatus(`已记录 ${result.count} 对对应点到后端`, 'success');
-                return result;
-            } catch (err) {
-                showStatus(`记录失败: ${err.message}`, 'error');
-                throw err;
-            }
-        }
-
-        // 执行配准（粗配准 SVD）
-        async function executeRegistration() {
-            if (!state.reg.sourceUUID || !state.reg.targetUUID) {
-                showStatus('请先设置源和目标点云', 'warning');
-                return;
-            }
-
-            const completePairs = state.reg.correspondences.filter(p => p.tgt !== null);
-            if (completePairs.length < 3) {
-                showStatus(`至少需要3对对应点，当前只有${completePairs.length}对`, 'warning');
-                return;
-            }
-
-            showProgress('正在执行粗配准 (SVD)...', 0);
-            try {
-                // 先发送所有点对到后端
-                await addCorrespondence();
-
-                const resp = await fetch(`${API_BASE}/apply_registration`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        src_uuid: state.reg.sourceUUID,
-                        tgt_uuid: state.reg.targetUUID,
-                    }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-
-                // 保存变换矩阵供ICP使用
-                state.reg.lastTransform = result.transformation;
-
-                // 替换源点云
-                const oldCloud = state.pointClouds.get(state.reg.sourceUUID);
-                if (oldCloud) {
-                    state.scene.remove(oldCloud.mesh);
-                    oldCloud.geometry.dispose();
-                    oldCloud.mesh.material.dispose();
-                }
-
-                await loadPointCloud(result, result.filename, result.uuid);
-
-                // 更新源UUID
-                state.reg.sourceUUID = result.uuid;
-
-                hideProgress();
-
-                // 显示配准结果
-                let msg = `粗配准完成！`;
-                if (result.rmse !== undefined) msg += ` RMSE: ${result.rmse.toFixed(4)}m`;
-                if (result.overlap_ratio !== undefined) msg += ` 重叠率: ${(result.overlap_ratio * 100).toFixed(1)}%`;
-                showStatus(msg, 'success');
-
-                updateRegStatus();
-            } catch (err) {
-                hideProgress();
-                showStatus(`配准失败: ${err.message}`, 'error');
-            }
-        }
-
-        // ICP 精配准（使用粗配准结果作为初始变换）
-        async function icpRefine() {
-            if (!state.reg.sourceUUID || !state.reg.targetUUID) {
-                showStatus('请先设置源和目标点云', 'warning');
-                return;
-            }
-            if (!state.reg.lastTransform) {
-                showStatus('请先执行粗配准获取初始变换', 'warning');
-                return;
-            }
-
-            showProgress('ICP 精配准中（多尺度优化）...', 0);
-            try {
-                const resp = await fetch(`${API_BASE}/icp_refine`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        src_uuid: state.reg.sourceUUID,
-                        tgt_uuid: state.reg.targetUUID,
-                        initial_transform: state.reg.lastTransform,
-                        max_iter: 200,
-                        voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
-                    }),
-                });
-                const result = await resp.json();
-                if (result.error) throw new Error(result.error);
-
-                // 替换源点云
-                const oldCloud = state.pointClouds.get(state.reg.sourceUUID);
-                if (oldCloud) {
-                    state.scene.remove(oldCloud.mesh);
-                    oldCloud.geometry.dispose();
-                    oldCloud.mesh.material.dispose();
-                }
-
-                await loadPointCloud(result, result.filename, result.uuid);
-                state.reg.sourceUUID = result.uuid;
-
-                // 更新变换矩阵
-                state.reg.lastTransform = result.transformation;
-
-                hideProgress();
-
-                let msg = `ICP 精配准完成！`;
-                if (result.inlier_rmse !== undefined) msg += ` 内点RMSE: ${result.inlier_rmse.toFixed(4)}m`;
-                if (result.fitness !== undefined) msg += ` 拟合度: ${(result.fitness * 100).toFixed(1)}%`;
-                showStatus(msg, 'success');
-
-                updateRegStatus();
-            } catch (err) {
-                hideProgress();
-                showStatus(`ICP 失败: ${err.message}`, 'error');
-            }
-        }
-
-        // 清除所有配准数据
-        function clearRegistration() {
-            state.reg.correspondences = [];
-            state.reg.nextIsSource = true;
-            state.reg.lastTransform = null;
-            clearRegMarkers();
-            updateRegStatus();
-            showStatus('已清除所有配准数据', 'info');
-        }
-
-        // ============================================================
-        // 工具函数
-        // ============================================================
-        function removeCloud(uuid) {
-            const cloud = state.pointClouds.get(uuid);
-            if (!cloud) return;
-            state.scene.remove(cloud.mesh);
-            cloud.geometry.dispose();
-            cloud.mesh.material.dispose();
-            state.pointClouds.delete(uuid);
-
-            if (state.activeCloud?.uuid === uuid) {
-                state.activeCloud = null;
-                updateButtonState(false);
-                document.getElementById('info-filename').textContent = '-';
-                document.getElementById('info-points').textContent = '-';
-                document.getElementById('info-bbox').textContent = '-';
-                document.getElementById('info-center').textContent = '-';
-                document.getElementById('info-range').textContent = '-';
-                document.getElementById('selected-info').classList.remove('show');
-                clearSelection();
-            }
-            if (state.reg.sourceUUID === uuid) state.reg.sourceUUID = null;
-            if (state.reg.targetUUID === uuid) state.reg.targetUUID = null;
-            updateRegStatus();
-        }
-
-        function clearAll() {
-            for (const [uuid] of state.pointClouds) {
-                removeCloud(uuid);
-            }
-            state.pointClouds.clear();
-            document.getElementById('file-list').innerHTML =
-                '<div style="text-align: center; color: var(--text-secondary); font-size: 12px; padding: 20px;">暂无文件，请上传</div>';
-            hideNormals();
-            if (state.bboxHelper) {
-                state.scene.remove(state.bboxHelper);
-                state.bboxHelper = null;
-            }
-            state.sceneRange = 100;
-            updateSceneScale();
-            updateButtonState(false);
-            clearSelection();
-            clearMeasure();
+            showStatus(`目标点 ${idx + 1} 已采集，配对完成！`, 'success');
+        } else {
+            showStatus('数据异常，请重新开始', 'error');
             clearRegistration();
-            showStatus('已清空所有点云', 'success');
+            return;
         }
+    }
+    updateRegStatus();
+}
 
-        function resetView() {
-            if (!state.activeCloud) {
-                state.camera.position.set(100, 100, 100);
-                state.controls.target.set(0, 0, 0);
-            } else {
-                focusOnCloud(state.activeCloud.uuid);
-            }
-            state.controls.update();
+function undoLastCorrespondence() {
+    if (state.reg.correspondences.length === 0) {
+        showStatus('没有可撤销的配对', 'warning');
+        return;
+    }
+    state.reg.correspondences.pop();
+    state.reg.nextIsSource = true;
+    clearRegMarkers();
+    // 重新绘制剩余配对
+    for (let i = 0; i < state.reg.correspondences.length; i++) {
+        const pair = state.reg.correspondences[i];
+        addTempMarker(pair.src, 0xff4444, `S${i + 1}`);
+        if (pair.tgt) {
+            addTempMarker(pair.tgt, 0x44ff44, `T${i + 1}`);
         }
+    }
+    updateRegStatus();
+    showStatus('已撤销最后一对', 'success');
+}
 
-        function addFileToList(filename, uuid, pointCount) {
-            const list = document.getElementById('file-list');
-            if (list.children.length === 1 && list.children[0].textContent.includes('暂无文件')) {
-                list.innerHTML = '';
-            }
-            const item = document.createElement('div');
-            item.className = 'file-item';
-            item.dataset.uuid = uuid;
-            item.innerHTML = `
-                <div class="file-icon">📄</div>
-                <div class="file-info">
-                    <div class="file-name" title="${filename}">${filename}</div>
-                    <div class="file-meta">${pointCount.toLocaleString()} 点</div>
-                </div>
-                <div class="file-remove" data-uuid="${uuid}">✕</div>
-            `;
-            item.addEventListener('click', (e) => {
-                if (e.target.classList.contains('file-remove')) {
-                    e.stopPropagation();
-                    removeCloud(uuid);
-                    item.remove();
-                    if (list.children.length === 0) {
-                        list.innerHTML =
-                            '<div style="text-align: center; color: var(--text-secondary); font-size: 12px; padding: 20px;">暂无文件，请上传</div>';
-                    }
-                } else {
-                    setActiveCloud(uuid);
-                }
-            });
-            list.appendChild(item);
+async function addCorrespondence() {
+    const completePairs = state.reg.correspondences.filter(p => p.tgt !== null);
+    if (completePairs.length === 0) {
+        showStatus('没有完整的点对', 'warning');
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_BASE}/register_correspondences`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                src_uuid: state.reg.sourceUUID,
+                tgt_uuid: state.reg.targetUUID,
+                pairs: completePairs.map(p => ({
+                    src_point: p.src.toArray(),
+                    tgt_point: p.tgt.toArray(),
+                })),
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        showStatus(`已记录 ${result.count} 对对应点`, 'success');
+        return result;
+    } catch (err) {
+        showStatus(`记录失败: ${err.message}`, 'error');
+        throw err;
+    }
+}
+
+async function executeRegistration() {
+    if (!state.reg.sourceUUID || !state.reg.targetUUID) {
+        showStatus('请先设置源和目标点云', 'warning');
+        return;
+    }
+    const completePairs = state.reg.correspondences.filter(p => p.tgt !== null);
+    if (completePairs.length < 3) {
+        showStatus(`至少需要3对对应点，当前${completePairs.length}对`, 'warning');
+        return;
+    }
+    showProgress('粗配准 (SVD)...', 0);
+    try {
+        await addCorrespondence();
+        const resp = await fetch(`${API_BASE}/apply_registration`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                src_uuid: state.reg.sourceUUID,
+                tgt_uuid: state.reg.targetUUID,
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        state.reg.lastTransform = result.transformation;
+
+        await loadPointCloud(result, result.filename, result.uuid);
+        state.reg.sourceUUID = result.uuid;
+
+        hideProgress();
+        let msg = `粗配准完成！`;
+        if (result.rmse !== undefined) msg += ` RMSE: ${result.rmse.toFixed(4)}m`;
+        if (result.overlap_ratio !== undefined) msg += ` 重叠率: ${(result.overlap_ratio*100).toFixed(1)}%`;
+        showStatus(msg, 'success');
+        updateRegStatus();
+    } catch (err) {
+        hideProgress();
+        showStatus(`配准失败: ${err.message}`, 'error');
+    }
+}
+
+async function icpRefine() {
+    if (!state.reg.sourceUUID || !state.reg.targetUUID) {
+        showStatus('请先设置源和目标点云', 'warning');
+        return;
+    }
+    if (!state.reg.lastTransform) {
+        showStatus('请先执行粗配准', 'warning');
+        return;
+    }
+    showProgress('ICP 精配准中...', 0);
+    try {
+        const resp = await fetch(`${API_BASE}/icp_refine`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                src_uuid: state.reg.sourceUUID,
+                tgt_uuid: state.reg.targetUUID,
+                initial_transform: state.reg.lastTransform,
+                voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        await loadPointCloud(result, result.filename, result.uuid);
+        state.reg.sourceUUID = result.uuid;
+        state.reg.lastTransform = result.transformation;
+
+        hideProgress();
+        let msg = `ICP 精配准完成！`;
+        if (result.inlier_rmse !== undefined) msg += ` 内点RMSE: ${result.inlier_rmse.toFixed(4)}m`;
+        if (result.fitness !== undefined) msg += ` 拟合度: ${(result.fitness*100).toFixed(1)}%`;
+        showStatus(msg, 'success');
+        updateRegStatus();
+    } catch (err) {
+        hideProgress();
+        showStatus(`ICP 失败: ${err.message}`, 'error');
+    }
+}
+
+function clearRegistration() {
+    state.reg.correspondences = [];
+    state.reg.nextIsSource = true;
+    state.reg.lastTransform = null;
+    clearRegMarkers();
+    updateRegStatus();
+    showStatus('已清除所有配准数据', 'info');
+}
+
+// ============================================================
+// 保存配准结果
+// ============================================================
+async function saveRegistered() {
+    if (!state.activeCloud) {
+        showStatus('请先激活一个点云', 'warning');
+        return;
+    }
+
+    // 检查是否在配准状态（源和目标都已设置）
+    if (!state.reg.sourceUUID || !state.reg.targetUUID) {
+        showStatus('未找到配准关系，请先执行配准', 'warning');
+        return;
+    }
+
+    showProgress('合并并保存点云...', 0);
+    try {
+        // 1. 调用合并接口
+        const mergeResp = await fetch(`${API_BASE}/merge_clouds`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid1: state.reg.sourceUUID,
+                uuid2: state.reg.targetUUID,
+            }),
+        });
+        const mergeResult = await mergeResp.json();
+        if (mergeResult.error) throw new Error(mergeResult.error);
+
+        // 2. 保存合并后的点云
+        const filename = `merged_${Date.now()}.ply`;
+        const saveResp = await fetch(`${API_BASE}/save_registered`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid: mergeResult.uuid,
+                filename: filename,
+            }),
+        });
+        const saveResult = await saveResp.json();
+        if (saveResult.error) throw new Error(saveResult.error);
+
+        hideProgress();
+        showStatus(`融合点云已保存，总点数: ${saveResult.points}`, 'success');
+        // 自动下载
+        const a = document.createElement('a');
+        a.href = `${API_BASE}/download/${filename}`;
+        a.download = filename;
+        a.click();
+    } catch (err) {
+        hideProgress();
+        showStatus(`保存融合点云失败: ${err.message}`, 'error');
+    }
+}
+// ============================================================
+// 工具函数
+// ============================================================
+function showStatus(message, type='info') {
+    const bar = document.getElementById('status-bar');
+    bar.className = `status-bar ${type}`;
+    bar.innerHTML = type === 'loading' ? `<div class="spinner"></div><span>${message}</span>` : `<span>${message}</span>`;
+}
+function showProgress(title, percent) {
+    document.getElementById('progress-title').textContent = title;
+    document.getElementById('progress-fill').style.width = `${percent}%`;
+    document.getElementById('progress-text').textContent = `${Math.round(percent)}%`;
+    document.getElementById('progress-overlay').classList.add('show');
+}
+function updateProgress(percent) {
+    document.getElementById('progress-fill').style.width = `${percent}%`;
+    document.getElementById('progress-text').textContent = `${Math.round(percent)}%`;
+}
+function hideProgress() {
+    document.getElementById('progress-overlay').classList.remove('show');
+}
+function updateButtonState(enabled) {
+    ['btn-denoise','btn-normals','btn-bbox','btn-clear','btn-apply-color','btn-reset-color','btn-set-target','btn-set-source','btn-reg-mode'].forEach(id => {
+        document.getElementById(id).disabled = !enabled;
+    });
+    document.getElementById('btn-exit-reg').disabled = true;
+    document.getElementById('btn-add-correspondence').disabled = true;
+    document.getElementById('btn-execute-reg').disabled = true;
+    document.getElementById('btn-icp-refine').disabled = true;
+    document.getElementById('btn-undo-correspondence').disabled = true;
+    document.getElementById('btn-save-reg').disabled = !enabled;
+}
+function updateToolbarState() {
+    document.getElementById('tb-rotate').classList.add('active');
+}
+function resetView() {
+    if (!state.activeCloud) {
+        state.camera.position.set(100, 100, 100);
+        state.controls.target.set(0, 0, 0);
+    } else {
+        focusOnCloud(state.activeCloud.uuid);
+    }
+    state.controls.update();
+    saveCameraState();
+}
+function takeScreenshot() {
+    state.renderer.render(state.scene, state.camera);
+    const link = document.createElement('a');
+    link.download = `pointcloud_${Date.now()}.png`;
+    link.href = state.renderer.domElement.toDataURL('image/png');
+    link.click();
+    showStatus('截图已保存', 'success');
+}
+
+// ============================================================
+// 事件绑定
+// ============================================================
+function bindEvents() {
+    window.addEventListener('resize', () => {
+        const container = document.getElementById('canvas-container');
+        state.camera.aspect = container.clientWidth / container.clientHeight;
+        state.camera.updateProjectionMatrix();
+        state.renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    // 上传
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.ply'));
+        if (files.length) uploadFiles(files);
+    });
+    fileInput.addEventListener('change', e => {
+        if (e.target.files.length) uploadFiles(Array.from(e.target.files));
+    });
+
+    // 滑块
+    document.getElementById('voxel-size').addEventListener('input', e => {
+        document.getElementById('voxel-value').textContent = e.target.value;
+    });
+    document.getElementById('point-size').addEventListener('input', e => {
+        state.pointSizeScale = parseFloat(e.target.value);
+        document.getElementById('point-size-value').textContent = parseFloat(e.target.value).toFixed(2);
+        state.pointClouds.forEach(cloud => {
+            cloud.mesh.material.size = cloud.adaptiveSize * state.pointSizeScale;
+        });
+    });
+
+    // 按钮
+    document.getElementById('btn-denoise').addEventListener('click', denoise);
+    document.getElementById('btn-normals').addEventListener('click', toggleNormals);
+    document.getElementById('btn-bbox').addEventListener('click', toggleBoundingBox);
+    document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
+    document.getElementById('btn-clear').addEventListener('click', clearAll);
+    document.getElementById('btn-reset-view').addEventListener('click', resetView);
+    document.getElementById('btn-apply-color').addEventListener('click', applyColor);
+    document.getElementById('btn-reset-color').addEventListener('click', resetColor);
+
+    document.querySelectorAll('.color-preset').forEach(preset => {
+        preset.addEventListener('click', () => {
+            document.getElementById('color-picker').value = preset.dataset.color;
+        });
+    });
+
+    // 工具栏
+    document.getElementById('tb-rotate').addEventListener('click', () => {
+        state.controls.enableRotate = true;
+        state.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+        document.getElementById('tb-rotate').classList.add('active');
+        document.getElementById('tb-pan').classList.remove('active');
+        document.getElementById('tb-zoom').classList.remove('active');
+    });
+    document.getElementById('tb-pan').addEventListener('click', () => {
+        state.controls.enableRotate = false;
+        state.controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+        document.getElementById('tb-rotate').classList.remove('active');
+        document.getElementById('tb-pan').classList.add('active');
+        document.getElementById('tb-zoom').classList.remove('active');
+    });
+    document.getElementById('tb-zoom').addEventListener('click', () => {
+        state.controls.enableZoom = true;
+        document.getElementById('tb-zoom').classList.add('active');
+    });
+    document.getElementById('tb-grid').addEventListener('click', () => {
+        state.gridHelper.visible = !state.gridHelper.visible;
+        document.getElementById('tb-grid').classList.toggle('active', state.gridHelper.visible);
+    });
+    document.getElementById('tb-axes').addEventListener('click', () => {
+        state.axesHelper.visible = !state.axesHelper.visible;
+        document.getElementById('tb-axes').classList.toggle('active', state.axesHelper.visible);
+    });
+    document.getElementById('tb-screenshot').addEventListener('click', takeScreenshot);
+    document.getElementById('tb-fullscreen').addEventListener('click', () => {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+    });
+
+    // 配准
+    document.getElementById('btn-set-target').addEventListener('click', setTargetCloud);
+    document.getElementById('btn-set-source').addEventListener('click', setSourceCloud);
+    document.getElementById('btn-reg-mode').addEventListener('click', toggleRegMode);
+    document.getElementById('btn-exit-reg').addEventListener('click', exitRegMode);
+    document.getElementById('btn-add-correspondence').addEventListener('click', addCorrespondence);
+    document.getElementById('btn-undo-correspondence').addEventListener('click', undoLastCorrespondence);
+    document.getElementById('btn-execute-reg').addEventListener('click', executeRegistration);
+    document.getElementById('btn-icp-refine').addEventListener('click', icpRefine);
+
+    // 鼠标点击（只处理配准模式）
+    state.renderer.domElement.addEventListener('click', (e) => {
+        if (state.reg.mode) handleRegClick(e);
+    });
+
+    // 键盘
+    document.addEventListener('keydown', (e) => {
+        switch (e.key.toLowerCase()) {
+            case 'r': document.getElementById('tb-rotate').click(); break;
+            case 'p': document.getElementById('tb-pan').click(); break;
+            case 'g': document.getElementById('tb-grid').click(); break;
+            case 'a': document.getElementById('tb-axes').click(); break;
+            case 'c': takeScreenshot(); break;
+            case 'f': document.getElementById('tb-fullscreen').click(); break;
+            case 'z': if (state.reg.mode) undoLastCorrespondence(); break;
+            case 'escape':
+                if (state.reg.mode) exitRegMode();
+                break;
         }
+    });
+}
 
-        // ============================================================
-        // UI 辅助
-        // ============================================================
-        function showStatus(message, type = 'info') {
-            const bar = document.getElementById('status-bar');
-            bar.className = `status-bar ${type}`;
-            bar.innerHTML = type === 'loading' ?
-                `<div class="spinner"></div><span>${message}</span>` :
-                `<span>${message}</span>`;
-        }
+// ============================================================
+// 动画循环
+// ============================================================
+function animate() {
+    requestAnimationFrame(animate);
+    state.controls.update();
+    state.renderer.render(state.scene, state.camera);
+    if (!state._fpsLastTime) state._fpsLastTime = performance.now();
+    if (!state._fpsCount) state._fpsCount = 0;
+    state._fpsCount++;
+    const now = performance.now();
+    if (now - state._fpsLastTime >= CONFIG.FPS_INTERVAL) {
+        const fps = Math.round((state._fpsCount * 1000) / (now - state._fpsLastTime));
+        document.getElementById('fps-counter').textContent = `FPS: ${fps}`;
+        state._fpsCount = 0;
+        state._fpsLastTime = now;
+    }
+}
 
-        function showProgress(title, percent) {
-            document.getElementById('progress-title').textContent = title;
-            document.getElementById('progress-fill').style.width = `${percent}%`;
-            document.getElementById('progress-text').textContent = `${Math.round(percent)}%`;
-            document.getElementById('progress-overlay').classList.add('show');
-        }
-
-        function updateProgress(percent) {
-            document.getElementById('progress-fill').style.width = `${percent}%`;
-            document.getElementById('progress-text').textContent = `${Math.round(percent)}%`;
-        }
-
-        function hideProgress() {
-            document.getElementById('progress-overlay').classList.remove('show');
-        }
-
-        function updateButtonState(enabled) {
-            const ids = [
-                'btn-denoise', 'btn-normals', 'btn-bbox', 'btn-clear',
-                'btn-apply-color', 'btn-reset-color', 'btn-clear-selection',
-                'btn-set-target', 'btn-set-source', 'btn-reg-mode',
-            ];
-            ids.forEach(id => document.getElementById(id).disabled = !enabled);
-            document.getElementById('btn-add-correspondence').disabled = true;
-            document.getElementById('btn-execute-reg').disabled = true;
-            document.getElementById('btn-icp-refine').disabled = true;
-        }
-
-        function updateToolbarState() {
-            document.getElementById('tb-rotate').classList.add('active');
-        }
-
-        function updateHint() {
-            const hint = document.getElementById('hint-text');
-            if (state.selectMode) {
-                hint.textContent = '点击点云选择点 | 按 Esc 取消选择';
-            } else if (state.measureMode) {
-                hint.textContent = '点击两点测量距离 | 按 Esc 清除测量';
-            } else if (state.reg.mode) {
-                hint.textContent = '配准模式：交替点击源点云和目标点云采集对应点';
-            } else {
-                hint.textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
-            }
-        }
-
-        function takeScreenshot() {
-            state.renderer.render(state.scene, state.camera);
-            const link = document.createElement('a');
-            link.download = `pointcloud_${Date.now()}.png`;
-            link.href = state.renderer.domElement.toDataURL('image/png');
-            link.click();
-            showStatus('截图已保存', 'success');
-        }
-
-        // ============================================================
-        // 事件绑定
-        // ============================================================
-        function bindEvents() {
-            window.addEventListener('resize', () => {
-                const container = document.getElementById('canvas-container');
-                state.camera.aspect = container.clientWidth / container.clientHeight;
-                state.camera.updateProjectionMatrix();
-                state.renderer.setSize(container.clientWidth, container.clientHeight);
-            });
-
-            // 文件上传
-            const dropZone = document.getElementById('drop-zone');
-            const fileInput = document.getElementById('file-input');
-            dropZone.addEventListener('click', () => fileInput.click());
-            dropZone.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                dropZone.classList.add('dragover');
-            });
-            dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-            dropZone.addEventListener('drop', (e) => {
-                e.preventDefault();
-                dropZone.classList.remove('dragover');
-                const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.ply'));
-                if (files.length) uploadFiles(files);
-            });
-            fileInput.addEventListener('change', (e) => {
-                if (e.target.files.length) uploadFiles(Array.from(e.target.files));
-            });
-
-            // 滑块
-            document.getElementById('voxel-size').addEventListener('input', (e) => {
-                document.getElementById('voxel-value').textContent = e.target.value;
-            });
-            document.getElementById('point-size').addEventListener('input', (e) => {
-                state.pointSizeScale = parseFloat(e.target.value);
-                document.getElementById('point-size-value').textContent = e.target.value;
-                updatePointSize();
-            });
-
-            // 基本操作按钮
-            document.getElementById('btn-denoise').addEventListener('click', denoise);
-            document.getElementById('btn-normals').addEventListener('click', toggleNormals);
-            document.getElementById('btn-bbox').addEventListener('click', toggleBoundingBox);
-            document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
-            document.getElementById('btn-clear').addEventListener('click', clearAll);
-            document.getElementById('btn-reset-view').addEventListener('click', resetView);
-            document.getElementById('btn-apply-color').addEventListener('click', applyColor);
-            document.getElementById('btn-reset-color').addEventListener('click', resetColor);
-            document.getElementById('btn-clear-selection').addEventListener('click', clearSelection);
-
-            // 颜色预设
-            document.querySelectorAll('.color-preset').forEach(preset => {
-                preset.addEventListener('click', () => {
-                    document.getElementById('color-picker').value = preset.dataset.color;
-                });
-            });
-
-            // 工具栏
-            document.getElementById('tb-rotate').addEventListener('click', () => {
-                state.controls.enableRotate = true;
-                state.controls.mouseButtons = {
-                    LEFT: THREE.MOUSE.ROTATE,
-                    MIDDLE: THREE.MOUSE.DOLLY,
-                    RIGHT: THREE.MOUSE.PAN
-                };
-                document.getElementById('tb-rotate').classList.add('active');
-                document.getElementById('tb-pan').classList.remove('active');
-                document.getElementById('tb-zoom').classList.remove('active');
-            });
-            document.getElementById('tb-pan').addEventListener('click', () => {
-                state.controls.enableRotate = false;
-                state.controls.mouseButtons = {
-                    LEFT: THREE.MOUSE.PAN,
-                    MIDDLE: THREE.MOUSE.DOLLY,
-                    RIGHT: THREE.MOUSE.ROTATE
-                };
-                document.getElementById('tb-rotate').classList.remove('active');
-                document.getElementById('tb-pan').classList.add('active');
-                document.getElementById('tb-zoom').classList.remove('active');
-            });
-            document.getElementById('tb-zoom').addEventListener('click', () => {
-                state.controls.enableZoom = true;
-                document.getElementById('tb-zoom').classList.add('active');
-            });
-            document.getElementById('tb-select').addEventListener('click', toggleSelectMode);
-            document.getElementById('tb-measure').addEventListener('click', toggleMeasureMode);
-            document.getElementById('tb-grid').addEventListener('click', () => {
-                state.gridHelper.visible = !state.gridHelper.visible;
-                document.getElementById('tb-grid').classList.toggle('active', state.gridHelper.visible);
-            });
-            document.getElementById('tb-axes').addEventListener('click', () => {
-                state.axesHelper.visible = !state.axesHelper.visible;
-                document.getElementById('tb-axes').classList.toggle('active', state.axesHelper.visible);
-            });
-            document.getElementById('tb-screenshot').addEventListener('click', takeScreenshot);
-            document.getElementById('tb-fullscreen').addEventListener('click', () => {
-                if (!document.fullscreenElement) {
-                    document.documentElement.requestFullscreen();
-                } else {
-                    document.exitFullscreen();
-                }
-            });
-
-            // 配准相关按钮
-            document.getElementById('btn-set-target').addEventListener('click', setTargetCloud);
-            document.getElementById('btn-set-source').addEventListener('click', setSourceCloud);
-            document.getElementById('btn-reg-mode').addEventListener('click', toggleRegMode);
-            document.getElementById('btn-add-correspondence').addEventListener('click', addCorrespondence);
-            document.getElementById('btn-execute-reg').addEventListener('click', executeRegistration);
-            document.getElementById('btn-icp-refine').addEventListener('click', icpRefine);
-
-            // 鼠标点击事件（统一处理，优先级：配准 > 选择 > 测量）
-            state.renderer.domElement.addEventListener('click', (e) => {
-                if (state.reg.mode) {
-                    handleRegClick(e);
-                    return;
-                }
-                if (state.selectMode) {
-                    selectPoint(e);
-                    return;
-                }
-                if (state.measureMode) {
-                    addMeasurePoint(e);
-                    return;
-                }
-            });
-
-            // 键盘快捷键
-            document.addEventListener('keydown', (e) => {
-                switch (e.key.toLowerCase()) {
-                    case 'r':
-                        document.getElementById('tb-rotate').click();
-                        break;
-                    case 'p':
-                        document.getElementById('tb-pan').click();
-                        break;
-                    case 's':
-                        if (!state.reg.mode) toggleSelectMode();
-                        break;
-                    case 'm':
-                        if (!state.reg.mode) toggleMeasureMode();
-                        break;
-                    case 'g':
-                        document.getElementById('tb-grid').click();
-                        break;
-                    case 'a':
-                        document.getElementById('tb-axes').click();
-                        break;
-                    case 'c':
-                        takeScreenshot();
-                        break;
-                    case 'f':
-                        document.getElementById('tb-fullscreen').click();
-                        break;
-                    case 'z':
-                        if (state.reg.mode) undoLastCorrespondence();
-                        break;
-                    case 'escape':
-                        if (state.reg.mode) {
-                            toggleRegMode();
-                        } else if (state.selectMode) {
-                            clearSelection();
-                            toggleSelectMode();
-                        } else if (state.measureMode) {
-                            clearMeasure();
-                            toggleMeasureMode();
-                        } else {
-                            if (state.selectedPoint) clearSelection();
-                        }
-                        break;
-                }
-            });
-        }
-
-        // ============================================================
-        // 渲染循环
-        // ============================================================
-        function animate() {
-            requestAnimationFrame(animate);
-            state.controls.update();
-            state.renderer.render(state.scene, state.camera);
-
-            if (!state._fpsLastTime) state._fpsLastTime = performance.now();
-            if (!state._fpsCount) state._fpsCount = 0;
-            state._fpsCount++;
-            const now = performance.now();
-            if (now - state._fpsLastTime >= CONFIG.FPS_INTERVAL) {
-                const fps = Math.round((state._fpsCount * 1000) / (now - state._fpsLastTime));
-                document.getElementById('fps-counter').textContent = `FPS: ${fps}`;
-                state._fpsCount = 0;
-                state._fpsLastTime = now;
-            }
-        }
-
-        // ============================================================
-        // 启动
-        // ============================================================
-        initScene();
-    </script>
+// ============================================================
+// 启动
+// ============================================================
+initScene();
+</script>
 
 </body>
 </html>

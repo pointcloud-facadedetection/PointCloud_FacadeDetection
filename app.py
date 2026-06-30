@@ -14,6 +14,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ---------- 全局缓存 ----------
 CACHED_CLOUDS = {}  # uuid -> o3d.geometry.PointCloud
+ORIGINAL_DOWNSAMPLED = {}   # uuid -> 原始下采样点云
 CLOUD_META = {}  # uuid -> {'filename': str}
 REG_PAIRS = {}  # src_uuid -> { tgt_uuid -> [{'src': ndarray, 'tgt': ndarray}, ...] }
 DEFAULT_VOXEL_SIZE = 0.05
@@ -116,6 +117,7 @@ def upload():
 
         try:
             pcd = process_ply(filepath, voxel_size)
+            ORIGINAL_DOWNSAMPLED[unique_name] = copy.deepcopy(pcd)
             CACHED_CLOUDS[unique_name] = pcd
             CLOUD_META[unique_name] = {'filename': file.filename}
             data = pcd_to_json(pcd)
@@ -137,16 +139,38 @@ def denoise():
 
     pcd = CACHED_CLOUDS[uuid_name]
     voxel_size = body.get('voxel_size', 0.05)
+    method = body.get('method', 'radius')          # 'radius' 或 'statistical'
+    radius = body.get('radius', voxel_size * 2)    # 半径滤波器半径
+    min_neighbors = body.get('min_neighbors', 10)  # 半径内最少邻居数
+    nb_neighbors = body.get('nb_neighbors', 20)    # 统计滤波器邻居数
+    std_ratio = body.get('std_ratio', 2.0)         # 统计滤波器标准差倍数
 
     try:
-        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        # 1. 先进行体素下采样（大幅减少点数）
         if voxel_size > 0:
-            pcd = pcd.voxel_down_sample(voxel_size)
-        CACHED_CLOUDS[uuid_name] = pcd
-        data = pcd_to_json(pcd)
+            pcd_down = pcd.voxel_down_sample(voxel_size)
+        else:
+            pcd_down = pcd
+
+        # 2. 去噪处理
+        if method == 'radius':
+            # 半径滤波：剔除半径内邻居数少于 min_neighbors 的点
+            pcd_clean, _ = pcd_down.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
+        else:  # statistical
+            pcd_clean, _ = pcd_down.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+
+        # 如果去噪后点数过少，则回退到原始下采样点云
+        if len(pcd_clean.points) < len(pcd_down.points) * 0.1:
+            pcd_clean = pcd_down
+
+        # 3. 更新缓存
+        ORIGINAL_DOWNSAMPLED[uuid_name] = copy.deepcopy(pcd_clean)
+        CACHED_CLOUDS[uuid_name] = pcd_clean
+        data = pcd_to_json(pcd_clean)
         data['uuid'] = uuid_name
         data['filename'] = CLOUD_META[uuid_name]['filename']
         return jsonify(data)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -297,26 +321,17 @@ def apply_registration():
     transform[:3, :3] = R
     transform[:3, 3] = t
 
-    # ---- 变换源点云 ----
-    src_pcd = copy.deepcopy(CACHED_CLOUDS[src_uuid])
+    # 从原始下采样点云复制并变换
+    src_original = ORIGINAL_DOWNSAMPLED[src_uuid]   # 原始未变换
+    src_pcd = copy.deepcopy(src_original)
     src_pcd.transform(transform)
     CACHED_CLOUDS[src_uuid] = src_pcd
 
-    # ---- 计算配准误差 ----
+    # 计算误差（使用原始点云评估）
     tgt_pcd = CACHED_CLOUDS[tgt_uuid]
+    error_info = compute_registration_error(src_original, tgt_pcd, transform, threshold=1.0)
 
-    # 从原始文件读取未变换的源点云来计算误差
-    original_filepath = os.path.join(UPLOAD_FOLDER, src_uuid)
-    if os.path.exists(original_filepath):
-        original_src = o3d.io.read_point_cloud(original_filepath)
-        error_info = compute_registration_error(original_src, tgt_pcd, transform, threshold=1.0)
-    else:
-        # 如果原始文件不存在，使用缓存中的点云（但注意它可能已经被变换过）
-        # 这里需要重新读取原始数据
-        error_info = {'rmse': 0.0, 'overlap_ratio': 0.0, 'inlier_count': 0, 'total_count': 0}
-
-    # ---- 返回前端----
-    data = pcd_to_json(src_pcd)  # Z-up 格式
+    data = pcd_to_json(src_pcd)
     data['uuid'] = src_uuid
     data['filename'] = CLOUD_META[src_uuid]['filename']
     data['transformation'] = transform.tolist()
@@ -330,108 +345,103 @@ def apply_registration():
     return jsonify(data)
 
 
-# ---------- 配准：ICP 精配准 ----------
+# ---------- ICP 精配准（多尺度 + 自适应阈值） ----------
 @app.route('/icp_refine', methods=['POST'])
 def icp_refine():
-    """
-    ICP精配准，使用原始源点云 + 粗配准变换作为初始值
-    采用 Point-to-Plane ICP，多尺度策略
-    """
     body = request.get_json()
     src_uuid = body['src_uuid']
     tgt_uuid = body['tgt_uuid']
 
-    if src_uuid not in CACHED_CLOUDS or tgt_uuid not in CACHED_CLOUDS:
+    if src_uuid not in ORIGINAL_DOWNSAMPLED or tgt_uuid not in CACHED_CLOUDS:
         return jsonify({'error': '点云未找到'}), 404
 
-    # 从文件加载原始源点云（未变换）
-    original_filepath = os.path.join(UPLOAD_FOLDER, src_uuid)
-    if not os.path.exists(original_filepath):
-        return jsonify({'error': '原始源文件丢失，请重新上传'}), 400
-
-    src_original = o3d.io.read_point_cloud(original_filepath)
-    if len(src_original.points) == 0:
-        return jsonify({'error': '原始点云为空'}), 400
-
+    # 从原始副本获取未变换的源点云
+    src_original = ORIGINAL_DOWNSAMPLED[src_uuid]
     tgt_pcd = CACHED_CLOUDS[tgt_uuid]
 
-    # 获取粗配准变换（如果未提供，则使用单位矩阵）
+    # 粗配准矩阵（前端传入）
     initial_transform = np.array(body.get('initial_transform', np.eye(4).tolist()))
     voxel_size = body.get('voxel_size', 0.05)
 
     try:
-        # ---- 多尺度 ICP（Point-to-Plane） ----
-        # 阶段1：粗尺度 (voxel_coarse = max(0.3, voxel_size*4) )
-        voxel_coarse = max(voxel_size * 4, 0.3)
+        # 自适应阈值多尺度 Point-to-Plane ICP
+        # 1. 粗尺度
+        voxel_coarse = max(voxel_size * 6, 0.3)
         src_coarse = src_original.voxel_down_sample(voxel_coarse)
         tgt_coarse = tgt_pcd.voxel_down_sample(voxel_coarse)
-
-        # 计算法向量（Point-to-Plane 需要）
         src_coarse.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_coarse*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_coarse * 2, max_nn=30))
         tgt_coarse.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_coarse*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_coarse * 2, max_nn=30))
 
         reg_coarse = o3d.pipelines.registration.registration_icp(
             src_coarse, tgt_coarse,
-            max_correspondence_distance=voxel_coarse * 5,  # 增大搜索半径
+            max_correspondence_distance=voxel_coarse * 8,
             init=initial_transform,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=80)
         )
 
-        # 阶段2：中等尺度
-        voxel_medium = max(voxel_size * 2, 0.2)
+        # 2. 中尺度
+        voxel_medium = max(voxel_size * 2, 0.1)
         src_medium = src_original.voxel_down_sample(voxel_medium)
         tgt_medium = tgt_pcd.voxel_down_sample(voxel_medium)
         src_medium.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_medium*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_medium * 2, max_nn=30))
         tgt_medium.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_medium*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_medium * 2, max_nn=30))
 
         reg_medium = o3d.pipelines.registration.registration_icp(
             src_medium, tgt_medium,
-            max_correspondence_distance=voxel_medium * 5,
+            max_correspondence_distance=voxel_medium * 6,
             init=reg_coarse.transformation,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60)
         )
 
-        # 阶段3：精细尺度（使用原始点云或精细下采样）
-        if len(src_original.points) > 1000000:
-            voxel_fine = voxel_size
-            src_fine = src_original.voxel_down_sample(voxel_fine)
-            tgt_fine = tgt_pcd.voxel_down_sample(voxel_fine)
-        else:
-            src_fine = src_original
-            tgt_fine = tgt_pcd
+        # 3. 精细尺度
+        src_fine = src_original  # 原始下采样点云
+        tgt_fine = tgt_pcd
+        # 若点数过大，再下采样一次
+        if len(src_fine.points) > 2000000:
+            src_fine = src_fine.voxel_down_sample(voxel_size)
+            tgt_fine = tgt_fine.voxel_down_sample(voxel_size)
 
         src_fine.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_fine*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
         tgt_fine.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_fine*2, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
 
-        reg_fine = o3d.pipelines.registration.registration_icp(
-            src_fine, tgt_fine,
-            max_correspondence_distance=voxel_fine * 5,
-            init=reg_medium.transformation,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=120)
-        )
+        # 从粗配准结果或中尺度结果开始
+        current_transform = reg_medium.transformation
 
-        final_transform = reg_fine.transformation
+        # 自适应阈值：从较大值逐步减小到精细阈值
+        thresholds = [voxel_size * 6, voxel_size * 3, voxel_size * 1.5]
+        for thresh in thresholds:
+            reg_fine = o3d.pipelines.registration.registration_icp(
+                src_fine, tgt_fine,
+                max_correspondence_distance=thresh,
+                init=current_transform,
+                estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+            )
+            current_transform = reg_fine.transformation
+            # 若 fitness 太低，可能已收敛，提前跳出
+            if reg_fine.fitness < 0.01:
+                break
 
-        # ---- 应用最终变换到原始源点云 ----
+        final_transform = current_transform
+
+        # 应用最终变换到原始点云（精配准结果）
         src_transformed = copy.deepcopy(src_original)
         src_transformed.transform(final_transform)
         CACHED_CLOUDS[src_uuid] = src_transformed
 
-        # ---- 计算误差 ----
+        # 计算误差
         error_info = compute_registration_error(
             src_original, tgt_pcd, final_transform, threshold=voxel_size * 5
         )
 
-        # ---- 返回前端 (Z-up) ----
         data = pcd_to_json(src_transformed)
         data['uuid'] = src_uuid
         data['filename'] = CLOUD_META[src_uuid]['filename']
