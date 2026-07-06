@@ -3,21 +3,18 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>大规模点云可视化与配准系统</title>
+    <title>大规模点云可视化与立面检测系统</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         :root {
-            --bg-primary: #0f0f1a;
-            --bg-secondary: #1a1a2e;
-            --bg-panel: rgba(20, 20, 40, 0.92);
-            --border-color: rgba(100, 100, 200, 0.25);
+            --bg-primary: #0a0a1a;
+            --bg-secondary: #12122a;
+            --bg-panel: rgba(15, 15, 35, 0.95);
+            --border-color: rgba(100, 100, 200, 0.2);
             --accent: #667eea;
             --accent-hover: #764ba2;
+            --accent-glow: rgba(102, 126, 234, 0.4);
             --text-primary: #e0e0ff;
             --text-secondary: #8892b0;
             --success: #48bb78;
@@ -34,18 +31,11 @@
             height: 100vh;
         }
 
-        #app {
-            display: flex;
-            height: 100vh;
-            width: 100vw;
-        }
+        #app { display: flex; height: 100vh; width: 100vw; }
 
-        /* ============================
-                   左侧边栏
-                   ============================ */
         #sidebar {
-            width: 320px;
-            min-width: 320px;
+            width: 340px;
+            min-width: 340px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -57,18 +47,16 @@
         .sidebar-header {
             padding: 20px;
             border-bottom: 1px solid var(--border-color);
-            background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08));
         }
-
         .sidebar-header h1 {
             font-size: 18px;
-            font-weight: 600;
-            background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--accent), #a78bfa);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 4px;
         }
-
         .sidebar-header p {
             font-size: 12px;
             color: var(--text-secondary);
@@ -82,183 +70,135 @@
 
         .sidebar-section {
             margin-bottom: 20px;
+            background: rgba(255,255,255,0.02);
+            border-radius: 12px;
+            padding: 14px;
+            border: 1px solid rgba(255,255,255,0.04);
         }
 
         .section-title {
-            font-size: 13px;
-            font-weight: 600;
+            font-size: 12px;
+            font-weight: 700;
             color: var(--accent);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.8px;
             margin-bottom: 12px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
-        /* -------- 上传区域 -------- */
         .upload-zone {
             border: 2px dashed var(--border-color);
             border-radius: 12px;
-            padding: 32px 20px;
+            padding: 28px 20px;
             text-align: center;
             cursor: pointer;
             transition: all 0.3s ease;
             background: rgba(102, 126, 234, 0.03);
         }
-
-        .upload-zone:hover,
-        .upload-zone.dragover {
+        .upload-zone:hover, .upload-zone.dragover {
             border-color: var(--accent);
             background: rgba(102, 126, 234, 0.08);
             transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.15);
         }
+        .upload-zone .icon { font-size: 36px; margin-bottom: 10px; opacity: 0.8; }
+        .upload-zone p { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+        .upload-zone .hint { font-size: 11px; color: var(--text-secondary); }
 
-        .upload-zone .icon {
-            font-size: 40px;
-            margin-bottom: 12px;
-            opacity: 0.7;
-        }
+        input[type="file"] { display: none; }
 
-        .upload-zone p {
-            font-size: 14px;
-            color: var(--text-primary);
-            margin-bottom: 4px;
-        }
-
-        .upload-zone .hint {
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-
-        input[type="file"] {
-            display: none;
-        }
-
-        /* -------- 参数滑块 -------- */
-        .param-group {
-            margin-bottom: 12px;
-        }
-
+        .param-group { margin-bottom: 12px; }
         .param-group label {
             display: block;
-            font-size: 12px;
+            font-size: 11px;
             color: var(--text-secondary);
             margin-bottom: 6px;
+            font-weight: 500;
         }
-
         .param-group input[type="range"] {
             width: 100%;
             -webkit-appearance: none;
-            height: 6px;
+            height: 5px;
             border-radius: 3px;
             background: var(--bg-primary);
             outline: none;
         }
-
         .param-group input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border-radius: 50%;
             background: var(--accent);
             cursor: pointer;
             border: 2px solid white;
-            box-shadow: 0 2px 6px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 2px 8px var(--accent-glow);
         }
-
         .param-value {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-top: 4px;
         }
-
-        .param-value span {
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-
+        .param-value span { font-size: 11px; color: var(--text-secondary); }
         .param-value .value {
             color: var(--accent);
-            font-weight: 600;
-            font-family: monospace;
+            font-weight: 700;
+            font-family: 'SF Mono', monospace;
+            font-size: 12px;
         }
 
-        /* -------- 按钮 -------- */
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            padding: 10px 16px;
+            gap: 6px;
+            padding: 9px 14px;
             border: none;
             border-radius: 8px;
-            font-size: 13px;
-            font-weight: 500;
+            font-size: 12px;
+            font-weight: 600;
             cursor: pointer;
             transition: all 0.2s ease;
             width: 100%;
             margin-bottom: 8px;
+            letter-spacing: 0.3px;
         }
-
         .btn-primary {
             background: linear-gradient(135deg, var(--accent), var(--accent-hover));
             color: white;
+            box-shadow: 0 2px 12px rgba(102, 126, 234, 0.3);
         }
-
         .btn-primary:hover:not(:disabled) {
             transform: translateY(-1px);
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
         }
-
         .btn-secondary {
-            background: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.06);
             color: var(--text-primary);
             border: 1px solid var(--border-color);
         }
-
         .btn-secondary:hover:not(:disabled) {
-            background: rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.1);
             border-color: var(--accent);
         }
-
         .btn-danger {
-            background: rgba(245, 101, 101, 0.15);
+            background: rgba(245, 101, 101, 0.12);
             color: var(--danger);
-            border: 1px solid rgba(245, 101, 101, 0.3);
+            border: 1px solid rgba(245, 101, 101, 0.25);
         }
-
-        .btn-danger:hover:not(:disabled) {
-            background: rgba(245, 101, 101, 0.25);
-        }
-
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
+        .btn-danger:hover:not(:disabled) { background: rgba(245, 101, 101, 0.2); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
         .btn.active {
             background: linear-gradient(135deg, var(--success), #38a169);
             color: white;
+            box-shadow: 0 2px 12px rgba(72, 187, 120, 0.3);
         }
+        .btn-row { display: flex; gap: 8px; }
+        .btn-row .btn { flex: 1; margin-bottom: 0; }
 
-        .btn-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .btn-row .btn {
-            flex: 1;
-            margin-bottom: 0;
-        }
-
-        /* -------- 文件列表 -------- */
-        .file-list {
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
+        .file-list { max-height: 180px; overflow-y: auto; }
         .file-item {
             display: flex;
             align-items: center;
@@ -271,26 +211,14 @@
             transition: all 0.2s;
             border: 1px solid transparent;
         }
-
-        .file-item:hover {
-            background: rgba(255, 255, 255, 0.06);
-        }
-
+        .file-item:hover { background: rgba(255, 255, 255, 0.06); }
         .file-item.active {
             border-color: var(--accent);
-            background: rgba(102, 126, 234, 0.1);
+            background: rgba(102, 126, 234, 0.12);
+            box-shadow: 0 0 12px rgba(102, 126, 234, 0.15);
         }
-
-        .file-item .file-icon {
-            font-size: 20px;
-            flex-shrink: 0;
-        }
-
-        .file-item .file-info {
-            flex: 1;
-            min-width: 0;
-        }
-
+        .file-item .file-icon { font-size: 18px; flex-shrink: 0; }
+        .file-item .file-info { flex: 1; min-width: 0; }
         .file-item .file-name {
             font-size: 12px;
             font-weight: 500;
@@ -298,26 +226,21 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
-
         .file-item .file-meta {
-            font-size: 11px;
+            font-size: 10px;
             color: var(--text-secondary);
             margin-top: 2px;
         }
-
         .file-item .file-remove {
             opacity: 0;
             transition: opacity 0.2s;
             cursor: pointer;
             color: var(--danger);
-            font-size: 16px;
+            font-size: 14px;
+            padding: 2px 6px;
         }
+        .file-item:hover .file-remove { opacity: 1; }
 
-        .file-item:hover .file-remove {
-            opacity: 1;
-        }
-
-        /* -------- 状态栏 -------- */
         .status-bar {
             padding: 12px 16px;
             border-top: 1px solid var(--border-color);
@@ -326,47 +249,30 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            background: rgba(0,0,0,0.2);
         }
-
-        .status-bar.loading {
-            color: var(--info);
-        }
-        .status-bar.success {
-            color: var(--success);
-        }
-        .status-bar.error {
-            color: var(--danger);
-        }
+        .status-bar.loading { color: var(--info); }
+        .status-bar.success { color: var(--success); }
+        .status-bar.error { color: var(--danger); }
 
         .spinner {
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border: 2px solid rgba(255, 255, 255, 0.1);
             border-top-color: var(--accent);
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
             flex-shrink: 0;
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        @keyframes spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
-        /* -------- 3D 视口 -------- */
         #viewport {
             flex: 1;
             position: relative;
             background: var(--bg-primary);
         }
+        #canvas-container { width: 100%; height: 100%; }
 
-        #canvas-container {
-            width: 100%;
-            height: 100%;
-        }
-
-        /* -------- 悬浮工具栏 -------- */
         .toolbar {
             position: absolute;
             top: 20px;
@@ -376,147 +282,200 @@
             gap: 6px;
             background: var(--bg-panel);
             padding: 8px;
-            border-radius: 12px;
+            border-radius: 14px;
             border: 1px solid var(--border-color);
-            backdrop-filter: blur(12px);
+            backdrop-filter: blur(16px);
             z-index: 100;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }
-
         .toolbar-btn {
-            width: 40px;
-            height: 40px;
+            width: 38px;
+            height: 38px;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             background: transparent;
             color: var(--text-secondary);
-            font-size: 18px;
+            font-size: 16px;
             cursor: pointer;
             transition: all 0.2s;
             display: flex;
             align-items: center;
             justify-content: center;
         }
-
         .toolbar-btn:hover {
             background: rgba(255, 255, 255, 0.08);
             color: var(--text-primary);
         }
-
         .toolbar-btn.active {
             background: var(--accent);
             color: white;
+            box-shadow: 0 2px 12px rgba(102, 126, 234, 0.4);
         }
-
-        .toolbar-btn:disabled {
-            opacity: 0.3;
-            cursor: not-allowed;
-        }
-
+        .toolbar-btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .toolbar-divider {
             width: 1px;
             background: var(--border-color);
             margin: 4px 0;
         }
 
-        /* -------- 信息面板 -------- */
         .info-panel {
             position: absolute;
             top: 20px;
             right: 20px;
-            width: 280px;
+            width: 300px;
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 16px;
-            backdrop-filter: blur(12px);
+            border-radius: 14px;
+            padding: 18px;
+            backdrop-filter: blur(16px);
             z-index: 100;
-            max-height: 70vh;
+            max-height: 75vh;
             overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }
-
         .info-panel h3 {
             font-size: 14px;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
             color: var(--accent);
             display: flex;
             align-items: center;
             gap: 8px;
+            font-weight: 700;
         }
-
         .info-row {
             display: flex;
             justify-content: space-between;
-            padding: 6px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 7px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
             font-size: 12px;
         }
-
-        .info-row:last-child {
-            border-bottom: none;
-        }
-
-        .info-label {
-            color: var(--text-secondary);
-        }
-
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: var(--text-secondary); }
         .info-value {
             color: var(--text-primary);
-            font-weight: 500;
-            font-family: monospace;
-            max-width: 150px;
+            font-weight: 600;
+            font-family: 'SF Mono', monospace;
+            max-width: 160px;
             overflow: hidden;
             text-overflow: ellipsis;
             text-align: right;
+            font-size: 11px;
         }
 
-        .selected-info {
+        .facade-list {
             margin-top: 12px;
-            padding-top: 12px;
-            border-top: 1px solid var(--border-color);
-            display: none;
+            max-height: 200px;
+            overflow-y: auto;
         }
-
-        .selected-info.show {
-            display: block;
+        .facade-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+            font-size: 12px;
         }
+        .facade-item:hover { background: rgba(255,255,255,0.06); }
+        .facade-item.active {
+            border-color: var(--accent);
+            background: rgba(102, 126, 234, 0.15);
+        }
+        .facade-item .facade-info { flex: 1; }
+        .facade-item .facade-name { font-weight: 600; font-size: 11px; }
+        .facade-item .facade-meta { font-size: 10px; color: var(--text-secondary); margin-top: 1px; }
+        .facade-item .facade-btn {
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: none;
+            background: var(--accent);
+            color: white;
+            font-size: 10px;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .facade-item:hover .facade-btn { opacity: 1; }
 
-        /* -------- 颜色编辑器 -------- */
         .color-editor {
             display: flex;
             gap: 8px;
             align-items: center;
             margin-top: 8px;
         }
-
         .color-editor input[type="color"] {
-            width: 40px;
-            height: 32px;
+            width: 36px;
+            height: 30px;
             border: none;
             border-radius: 6px;
             cursor: pointer;
             background: transparent;
         }
-
-        .color-presets {
-            display: flex;
-            gap: 4px;
-        }
-
+        .color-presets { display: flex; gap: 4px; }
         .color-preset {
-            width: 24px;
-            height: 24px;
+            width: 22px;
+            height: 22px;
             border-radius: 4px;
             border: 2px solid transparent;
             cursor: pointer;
             transition: all 0.2s;
         }
+        .color-preset:hover { transform: scale(1.15); border-color: white; }
 
-        .color-preset:hover {
-            transform: scale(1.1);
-            border-color: white;
+        .selection-rect {
+            position: absolute;
+            border: 2px solid rgba(255, 255, 255, 0.95);
+            background: rgba(255, 255, 255, 0.08);
+            pointer-events: none;
+            z-index: 500;
+            display: none;
+            box-shadow: 0 0 12px rgba(255,255,255,0.35);
         }
 
-        /* -------- 底部状态 -------- */
+        .segment-list {
+            margin-top: 12px;
+            max-height: 220px;
+            overflow-y: auto;
+        }
+        .segment-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+            font-size: 12px;
+        }
+        .segment-item:hover {
+            background: rgba(255,255,255,0.06);
+            border-color: var(--accent);
+        }
+        .segment-item.active {
+            border-color: var(--success);
+            background: rgba(72, 187, 120, 0.12);
+        }
+        .segment-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            border: 1px solid rgba(255,255,255,0.5);
+            flex-shrink: 0;
+        }
+        .segment-meta {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+            line-height: 1.5;
+        }
+
         .bottom-bar {
             position: absolute;
             bottom: 20px;
@@ -527,135 +486,220 @@
             align-items: center;
             pointer-events: none;
         }
-
         .fps-counter {
             background: var(--bg-panel);
             padding: 6px 12px;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 12px;
+            border-radius: 8px;
+            font-family: 'SF Mono', monospace;
+            font-size: 11px;
             color: var(--success);
             border: 1px solid var(--border-color);
             pointer-events: auto;
+            font-weight: 600;
         }
-
         .hint-text {
             background: var(--bg-panel);
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 12px;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 11px;
             color: var(--text-secondary);
             border: 1px solid var(--border-color);
             pointer-events: auto;
         }
 
-        /* -------- 进度遮罩 -------- */
         .progress-overlay {
             position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.75);
             display: none;
             align-items: center;
             justify-content: center;
             flex-direction: column;
             z-index: 1000;
-            backdrop-filter: blur(4px);
+            backdrop-filter: blur(6px);
         }
-
-        .progress-overlay.show {
-            display: flex;
-        }
-
+        .progress-overlay.show { display: flex; }
         .progress-card {
             background: var(--bg-secondary);
-            padding: 32px;
-            border-radius: 16px;
+            padding: 36px;
+            border-radius: 18px;
             border: 1px solid var(--border-color);
             text-align: center;
-            min-width: 300px;
+            min-width: 320px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
         }
-
         .progress-card h3 {
-            margin-bottom: 20px;
+            margin-bottom: 24px;
             font-size: 16px;
+            font-weight: 700;
         }
-
         .progress-bar {
             width: 100%;
             height: 6px;
             background: var(--bg-primary);
             border-radius: 3px;
             overflow: hidden;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
         }
-
         .progress-fill {
             height: 100%;
             background: linear-gradient(90deg, var(--accent), var(--accent-hover));
             width: 0%;
-            transition: width 0.3s ease;
+            transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
             border-radius: 3px;
         }
+        .progress-text { font-size: 13px; color: var(--text-secondary); }
 
-        .progress-text {
-            font-size: 13px;
-            color: var(--text-secondary);
-        }
-
-        /* -------- 滚动条 -------- */
-        ::-webkit-scrollbar {
-            width: 6px;
-        }
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 3px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.2);
-        }
-
-        /* -------- 提示框 -------- */
-        .tooltip {
-            position: absolute;
-            background: rgba(0, 0, 0, 0.85);
-            color: white;
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            pointer-events: none;
-            z-index: 1000;
+        .dialog-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
             display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            backdrop-filter: blur(8px);
+        }
+        .dialog-overlay.show { display: flex; }
+        .dialog-card {
+            background: var(--bg-secondary);
             border: 1px solid var(--border-color);
+            border-radius: 18px;
+            padding: 0;
+            max-width: 600px;
+            width: 90%;
+            max-height: 85vh;
+            overflow: hidden;
+            box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+            animation: dialogSlideIn 0.3s ease;
+        }
+        @keyframes dialogSlideIn {
+            from { opacity: 0; transform: translateY(30px) scale(0.95); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .dialog-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.05));
+        }
+        .dialog-header h3 {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .dialog-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .dialog-close:hover { background: rgba(255,255,255,0.1); color: var(--danger); }
+        .dialog-body {
+            padding: 24px;
+            overflow-y: auto;
+            max-height: 60vh;
+        }
+        .dialog-footer {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
         }
 
-        /* -------- 响应式 -------- */
+        .quality-summary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .quality-metric {
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            padding: 14px;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .quality-metric .metric-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .quality-metric .metric-value {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: 'SF Mono', monospace;
+        }
+        .quality-metric .metric-unit {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-left: 4px;
+        }
+        .quality-metric .metric-status {
+            font-size: 11px;
+            margin-top: 6px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            font-weight: 600;
+        }
+        .status-pass { background: rgba(72, 187, 120, 0.15); color: var(--success); }
+        .status-fail { background: rgba(245, 101, 101, 0.15); color: var(--danger); }
+        .status-warn { background: rgba(237, 137, 54, 0.15); color: var(--warning); }
+
+        .grid-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            margin-top: 12px;
+        }
+        .grid-table th {
+            text-align: left;
+            padding: 10px 12px;
+            background: rgba(255,255,255,0.04);
+            color: var(--accent);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .grid-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        .grid-table tr:hover td { background: rgba(255,255,255,0.02); }
+        .grid-table .cell-center { text-align: center; }
+        .grid-table .cell-right { text-align: right; font-family: 'SF Mono', monospace; }
+
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.15); }
+
         @media (max-width: 900px) {
-            #sidebar {
-                width: 280px;
-                min-width: 280px;
-            }
-            .info-panel {
-                width: 220px;
-            }
+            #sidebar { width: 280px; min-width: 280px; }
+            .info-panel { width: 240px; }
         }
     </style>
 </head>
 <body>
 
-    <!-- ==========================================================
-    HTML 结构
-    ========================================================== -->
 <div id="app">
     <aside id="sidebar">
         <div class="sidebar-header">
-            <h1>☁️ 点云可视化</h1>
-            <p>大规模点云处理与配准</p>
+            <h1>点云立面检测系统</h1>
+            <p>大规模点云处理 · 建筑立面检测 · 质量评估</p>
         </div>
         <div class="sidebar-content">
             <!-- 上传 -->
@@ -664,7 +708,7 @@
                 <div class="upload-zone" id="drop-zone">
                     <div class="icon">📂</div>
                     <p>拖拽 PLY 文件到此处</p>
-                    <p class="hint">支持多文件同时上传</p>
+                    <p class="hint">支持多文件同时上传 · 千万级点云自动处理</p>
                 </div>
                 <input type="file" id="file-input" accept=".ply" multiple />
             </div>
@@ -698,11 +742,34 @@
                 <button class="btn btn-secondary" id="btn-denoise" disabled>🧹 去噪处理</button>
                 <button class="btn btn-secondary" id="btn-normals" disabled>📐 计算法向量</button>
                 <button class="btn btn-secondary" id="btn-bbox" disabled>📦 显示边界框</button>
-                <button class="btn btn-secondary" id="btn-save-reg" disabled>💾 保存配准结果</button>
                 <div class="btn-row">
-                    <button class="btn btn-danger" id="btn-clear" disabled>🗑️ 清空</button>
+                    <button class="btn btn-secondary" id="btn-clear" disabled>🗑️ 清空</button>
                     <button class="btn btn-secondary" id="btn-reset-view">🎯 重置视角</button>
                 </div>
+            </div>
+
+            <!-- 立面检测 -->
+            <div class="sidebar-section">
+                <div class="section-title">🏗️ 立面检测</div>
+                <div class="param-group">
+                    <label>最小立面面积 (m²)</label>
+                    <input type="range" id="min-area" min="1" max="50" step="0.5" value="5" />
+                    <div class="param-value"><span>1</span><span class="value" id="min-area-value">5</span><span>50</span></div>
+                </div>
+                <button class="btn btn-primary" id="btn-detect-facades" disabled>🔍 检测建筑立面</button>
+                <div class="facade-list" id="facade-list" style="display:none;">
+                </div>
+                <button class="btn btn-secondary" id="btn-reset-facades" style="display:none; margin-top:8px;">↩️ 恢复原始显示</button>
+            </div>
+
+
+            <!-- 框选细分 -->
+            <div class="sidebar-section">
+                <div class="section-title">🧩 框选细分</div>
+                <button class="btn btn-secondary" id="btn-selection-mode" disabled>⬚ 进入框选模式</button>
+                <button class="btn btn-primary" id="btn-segment-selection" disabled>🧠 分割框选区域</button>
+                <button class="btn btn-secondary" id="btn-reset-segments" style="display:none;">↩️ 恢复分割前颜色</button>
+                <div class="segment-list" id="segment-list" style="display:none;"></div>
             </div>
 
             <!-- 颜色 -->
@@ -746,12 +813,19 @@
                     对应点: 0 对 | 源: 未选 | 目标: 未选
                 </div>
             </div>
+
+            <!-- 保存 -->
+            <div class="sidebar-section">
+                <div class="section-title">💾 导出</div>
+                <button class="btn btn-secondary" id="btn-save-reg" disabled>💾 保存配准结果</button>
+            </div>
         </div>
         <div class="status-bar" id="status-bar"><span>就绪</span></div>
     </aside>
 
     <main id="viewport">
         <div id="canvas-container"></div>
+        <div class="selection-rect" id="selection-rect"></div>
         <div class="toolbar">
             <button class="toolbar-btn active" id="tb-rotate" title="旋转 (R)">🔄</button>
             <button class="toolbar-btn" id="tb-pan" title="平移 (P)">✋</button>
@@ -771,6 +845,9 @@
             <div class="info-row"><span class="info-label">边界框</span><span class="info-value" id="info-bbox">-</span></div>
             <div class="info-row"><span class="info-label">中心</span><span class="info-value" id="info-center">-</span></div>
             <div class="info-row"><span class="info-label">场景范围</span><span class="info-value" id="info-range">-</span></div>
+            <div class="info-row" id="info-facade-row" style="display:none;">
+                <span class="info-label">检测立面</span><span class="info-value" id="info-facade-count">-</span>
+            </div>
         </div>
 
         <div class="bottom-bar">
@@ -788,6 +865,21 @@
     </main>
 </div>
 
+<!-- 质量评估 Dialog -->
+<div class="dialog-overlay" id="quality-dialog">
+    <div class="dialog-card">
+        <div class="dialog-header">
+            <h3>📋 立面质量评估报告</h3>
+            <button class="dialog-close" id="dialog-close">&times;</button>
+        </div>
+        <div class="dialog-body" id="dialog-body">
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-secondary" id="dialog-close-btn" style="width:auto; padding:8px 20px;">关闭</button>
+        </div>
+    </div>
+</div>
+
 <script type="importmap">
 {
     "imports": {
@@ -798,27 +890,24 @@
 </script>
 
 <script type="module">
-// ============================================================
-// 导入
-// ============================================================
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- 后端 API ----------
 const API_BASE = 'http://localhost:5000';
 
-// ---------- 配置 ----------
 const CONFIG = {
     BASE_POINT_SIZE: 0.5,
     NORMAL_LENGTH: 0.5,
     NORMAL_COLOR: 0x00ff88,
     REG_MARKER_SIZE: 0.5,
     FPS_INTERVAL: 500,
+    FACADE_COLORS: [
+        0xff6b6b, 0x4ecdc4, 0x45b7d1, 0xf9ca24,
+        0x6c5ce7, 0xa8e6cf, 0xffd93d, 0xff8b94,
+        0xc7ecee, 0xdfe6e9, 0xfd79a8, 0xfab1a0
+    ],
 };
 
-// ============================================================
-// 全局状态（含视角持久化）
-// ============================================================
 const state = {
     scene: null,
     camera: null,
@@ -840,35 +929,58 @@ const state = {
     pointSizeScale: 1.0,
     sceneRange: 100,
 
-    // 视角状态（用于恢复）
     cameraState: {
         position: null,
         target: null,
     },
 
-    // 配准状态
     reg: {
         mode: false,
         sourceUUID: null,
         targetUUID: null,
-        correspondences: [], // [{src: Vector3, tgt: Vector3}]
+        correspondences: [],
         nextIsSource: true,
         tempMarkers: [],
         lastTransform: null,
     },
+
+    facade: {
+        detected: false,
+        facades: [],
+        selectedFacadeId: null,
+        originalColors: null,
+        sourceUUID: null,
+    },
+
+    selection: {
+        mode: false,
+        dragging: false,
+        start: { x: 0, y: 0 },
+        end: { x: 0, y: 0 },
+        overlay: null,
+        selectedIndices: [],
+    },
+
+    segments: {
+        detected: false,
+        items: [],
+        labels: null,
+        originalColors: null,
+    },
+
 };
 
 // ============================================================
-// 坐标转换工具
+// 坐标转换：Z-up (后端) → Y-up (Three.js前端)
 // ============================================================
 function convertZupToYup(positions) {
     const count = positions.length / 3;
     const out = new Float32Array(positions.length);
     for (let i = 0; i < count; i++) {
         const x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2];
-        out[i*3] = x;
-        out[i*3+1] = z;
-        out[i*3+2] = -y;
+        out[i*3] = x;       // x → x
+        out[i*3+1] = z;     // z → y (Z-up的z变成Y-up的y)
+        out[i*3+2] = -y;    // y → -z (Z-up的y变成Y-up的-z)
     }
     return out;
 }
@@ -894,6 +1006,7 @@ function initScene() {
     const container = document.getElementById('canvas-container');
     state.scene = new THREE.Scene();
     state.scene.background = new THREE.Color(0x0a0a1a);
+    state.scene.fog = new THREE.FogExp2(0x0a0a1a, 0.0005);
 
     const aspect = container.clientWidth / container.clientHeight;
     state.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 50000);
@@ -902,6 +1015,7 @@ function initScene() {
     state.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     state.renderer.setSize(container.clientWidth, container.clientHeight);
     state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    state.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(state.renderer.domElement);
 
     state.controls = new OrbitControls(state.camera, state.renderer.domElement);
@@ -911,27 +1025,26 @@ function initScene() {
     state.controls.minDistance = 0.1;
     state.controls.maxDistance = 20000;
 
-    state.scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-    dirLight.position.set(50, 50, 50);
+    state.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(50, 100, 50);
     state.scene.add(dirLight);
+    const dirLight2 = new THREE.DirectionalLight(0x667eea, 0.3);
+    dirLight2.position.set(-50, 50, -50);
+    state.scene.add(dirLight2);
 
     state.gridHelper = new THREE.GridHelper(1000, 100, 0x444466, 0x222244);
     state.scene.add(state.gridHelper);
     state.axesHelper = new THREE.AxesHelper(50);
     state.scene.add(state.axesHelper);
 
-    // 保存初始相机状态
     saveCameraState();
-
     bindEvents();
+    bindSelectionEvents();
     animate();
     updateToolbarState();
 }
 
-// ============================================================
-// 相机状态持久化
-// ============================================================
 function saveCameraState() {
     if (state.camera && state.controls) {
         state.cameraState.position = state.camera.position.clone();
@@ -946,9 +1059,6 @@ function restoreCameraState() {
     }
 }
 
-// ============================================================
-// 更新场景尺度
-// ============================================================
 function updateSceneScale() {
     const range = state.sceneRange;
     if (state.gridHelper) state.scene.remove(state.gridHelper);
@@ -957,12 +1067,19 @@ function updateSceneScale() {
     if (state.axesHelper) state.scene.remove(state.axesHelper);
     state.axesHelper = new THREE.AxesHelper(range * 0.1);
     state.scene.add(state.axesHelper);
+    if (state.scene.fog) {
+        state.scene.fog.density = 1.0 / (range * 3);
+    }
 }
 
-// ============================================================
-// 加载点云（复用Mesh，保留视角）
-// ============================================================
-async function loadPointCloud(data, filename, uuid, updateOnly = false) {
+// 加载点云
+async function loadPointCloud(data, filename, uuid, options = {}) {
+    const {
+        updateOnly = false,
+        preserveCamera = true,
+        preserveColor = true
+    } = options;
+
     const { positions, colors, normals } = data;
     const pointCount = positions.length / 3;
 
@@ -982,40 +1099,50 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
     bbox.getSize(size);
     const adaptiveSize = computeAdaptivePointSize(size);
 
-    // 如果已经存在该UUID，则更新几何和材质（保留Mesh对象）
     let cloudEntry = state.pointClouds.get(uuid);
     if (cloudEntry) {
-        // 复用现有Mesh
         const mesh = cloudEntry.mesh;
+
+        let currentColors = null;
+        if (preserveColor && cloudEntry.mesh.geometry.attributes.color) {
+            currentColors = new Float32Array(cloudEntry.mesh.geometry.attributes.color.array);
+        }
+
         mesh.geometry.dispose();
         mesh.geometry = geometry;
         mesh.material.size = adaptiveSize * state.pointSizeScale;
-        // 更新数据
+
+        if (currentColors && currentColors.length === col.length) {
+            mesh.geometry.attributes.color.array.set(currentColors);
+            mesh.geometry.attributes.color.needsUpdate = true;
+        }
+
         cloudEntry.geometry = geometry;
         cloudEntry.data = {
             positions: Array.from(posY),
-            colors: Array.from(col),
+            colors: Array.from(mesh.geometry.attributes.color.array),
             normals: Array.from(normY),
         };
         cloudEntry.pointCount = pointCount;
         cloudEntry.center = center;
         cloudEntry.bbox = bbox;
         cloudEntry.adaptiveSize = adaptiveSize;
-        cloudEntry.originalColors = new Float32Array(col);
-        // 如果是激活的，更新信息
+        cloudEntry.facadeLabels = Array.isArray(data.point_labels) ? data.point_labels : cloudEntry.facadeLabels;
+        cloudEntry.facades = Array.isArray(data.facades) ? data.facades : cloudEntry.facades;
+
         if (state.activeCloud && state.activeCloud.uuid === uuid) {
             updateInfoPanel(cloudEntry);
         }
         return;
     }
 
-    // 新建
     const material = new THREE.PointsMaterial({
         size: adaptiveSize * state.pointSizeScale,
         vertexColors: true,
         sizeAttenuation: true,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.92,
+        depthWrite: false,
     });
     const mesh = new THREE.Points(geometry, material);
     mesh.frustumCulled = false;
@@ -1036,10 +1163,14 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
         center: center.clone(),
         bbox: bbox.clone(),
         adaptiveSize,
+        userColors: null,
+        facadeLabels: Array.isArray(data.point_labels) ? data.point_labels : null,
+        facades: Array.isArray(data.facades) ? data.facades : null,
+        segmentLabels: Array.isArray(data.point_labels) ? data.point_labels : null,
+        segments: Array.isArray(data.segments) ? data.segments : null,
     };
     state.pointClouds.set(uuid, cloudEntry);
 
-    // 更新场景范围
     const maxDim = Math.max(size.x, size.y, size.z);
     if (maxDim > state.sceneRange) {
         state.sceneRange = maxDim;
@@ -1047,6 +1178,10 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
     }
 
     setActiveCloud(uuid);
+
+    if (!preserveCamera || !state.cameraState.position) {
+        focusOnCloud(uuid);
+    }
 }
 
 function computeAdaptivePointSize(bboxSize) {
@@ -1067,9 +1202,20 @@ function updateInfoPanel(cloud) {
     document.getElementById('info-center').textContent =
         `${cloud.center.x.toFixed(1)}, ${cloud.center.y.toFixed(1)}, ${cloud.center.z.toFixed(1)}`;
     document.getElementById('info-range').textContent = `${state.sceneRange.toFixed(1)}`;
+
+    if (state.facade.detected && state.facade.facades.length > 0) {
+        document.getElementById('info-facade-row').style.display = 'flex';
+        document.getElementById('info-facade-count').textContent = state.facade.facades.length;
+    } else {
+        document.getElementById('info-facade-row').style.display = 'none';
+    }
 }
 
 function setActiveCloud(uuid, focus = false) {
+    if (state.activeCloud && state.activeCloud.uuid !== uuid) {
+        resetFacades();
+    }
+
     document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
     const activeEl = document.querySelector(`[data-uuid="${uuid}"]`);
     if (activeEl) activeEl.classList.add('active');
@@ -1092,10 +1238,28 @@ function focusOnCloud(uuid) {
     const maxDim = Math.max(size.x, size.y, size.z);
     const distance = maxDim * 1.5;
     const endPos = center.clone().add(new THREE.Vector3(distance, distance * 0.8, distance));
-    state.camera.position.copy(endPos);
-    state.controls.target.copy(center);
-    state.controls.update();
-    saveCameraState();
+
+    const startPos = state.camera.position.clone();
+    const startTarget = state.controls.target.clone();
+    const duration = 800;
+    const startTime = performance.now();
+
+    function animateCamera(currentTime) {
+        const elapsed = currentTime - startTime;
+        const t = Math.min(elapsed / duration, 1);
+        const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+
+        state.camera.position.lerpVectors(startPos, endPos, ease);
+        state.controls.target.lerpVectors(startTarget, center, ease);
+        state.controls.update();
+
+        if (t < 1) {
+            requestAnimationFrame(animateCamera);
+        } else {
+            saveCameraState();
+        }
+    }
+    requestAnimationFrame(animateCamera);
 }
 
 // ============================================================
@@ -1110,7 +1274,7 @@ async function uploadFiles(files) {
     try {
         const resp = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
         const results = await resp.json();
-        updateProgress(50);
+        updateProgress(30);
         let successCount = 0;
         for (let i = 0; i < results.length; i++) {
             const result = results[i];
@@ -1118,15 +1282,13 @@ async function uploadFiles(files) {
                 showStatus(`文件 ${result.filename} 失败: ${result.error}`, 'error');
                 continue;
             }
-            await loadPointCloud(result, result.filename, result.uuid);
+            await loadPointCloud(result, result.filename, result.uuid, { preserveCamera: false });
             addFileToList(result.filename, result.uuid, result.positions.length / 3);
             successCount++;
-            updateProgress(50 + ((i+1)/results.length)*50);
+            updateProgress(30 + ((i+1)/results.length)*70);
         }
         hideProgress();
         showStatus(`成功加载 ${successCount} 个文件`, 'success');
-        // 恢复视角
-        restoreCameraState();
     } catch (err) {
         hideProgress();
         showStatus(`上传失败: ${err.message}`, 'error');
@@ -1156,7 +1318,7 @@ function addFileToList(filename, uuid, pointCount) {
                 list.innerHTML = '<div style="text-align:center;color:var(--text-secondary);font-size:12px;padding:20px;">暂无文件，请上传</div>';
             }
         } else {
-            setActiveCloud(uuid, true);
+            setActiveCloud(uuid, false);
         }
     });
     list.appendChild(item);
@@ -1172,15 +1334,25 @@ function removeCloud(uuid) {
     if (state.activeCloud?.uuid === uuid) {
         state.activeCloud = null;
         updateButtonState(false);
-        document.getElementById('info-filename').textContent = '-';
-        document.getElementById('info-points').textContent = '-';
-        document.getElementById('info-bbox').textContent = '-';
-        document.getElementById('info-center').textContent = '-';
-        document.getElementById('info-range').textContent = '-';
+        resetInfoPanel();
     }
     if (state.reg.sourceUUID === uuid) state.reg.sourceUUID = null;
     if (state.reg.targetUUID === uuid) state.reg.targetUUID = null;
     updateRegStatus();
+
+    if (state.facade.detected) {
+        resetFacades();
+    }
+    if (state.segments.detected) resetSegments();
+}
+
+function resetInfoPanel() {
+    document.getElementById('info-filename').textContent = '-';
+    document.getElementById('info-points').textContent = '-';
+    document.getElementById('info-bbox').textContent = '-';
+    document.getElementById('info-center').textContent = '-';
+    document.getElementById('info-range').textContent = '-';
+    document.getElementById('info-facade-row').style.display = 'none';
 }
 
 function clearAll() {
@@ -1192,15 +1364,16 @@ function clearAll() {
     updateSceneScale();
     updateButtonState(false);
     clearRegistration();
+    resetFacades();
     showStatus('已清空所有点云', 'success');
 }
 
-// ============================================================
 // 后端操作
-// ============================================================
 async function denoise() {
     if (!state.activeCloud) return;
+    saveCameraState();
     const { uuid, filename } = state.activeCloud;
+    const beforeColors = new Float32Array(state.activeCloud.geometry.attributes.color.array);
     const voxelSize = document.getElementById('voxel-size').value;
     showProgress('去噪中...', 0);
     try {
@@ -1211,9 +1384,22 @@ async function denoise() {
         });
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
-        // 更新现有点云
-        await loadPointCloud(result, filename, result.uuid);
-        showStatus('去噪完成', 'success');
+        await loadPointCloud(result, filename, result.uuid, { preserveCamera: true, preserveColor: true });
+
+        const cloud = state.pointClouds.get(uuid);
+        const colors = cloud?.geometry.attributes.color?.array;
+        if (colors && colors.length === beforeColors.length) {
+            colors.set(beforeColors);
+            cloud.geometry.attributes.color.needsUpdate = true;
+            cloud.data.colors = Array.from(beforeColors);
+        } else if (colors && isUniformColor(beforeColors)) {
+            applyUniformColorArray(colors, beforeColors[0], beforeColors[1], beforeColors[2]);
+            cloud.geometry.attributes.color.needsUpdate = true;
+            cloud.data.colors = Array.from(colors);
+        }
+
+        restoreCameraState();
+        showStatus('去噪完成，已保留当前颜色', 'success');
     } catch (err) {
         showStatus(`去噪失败: ${err.message}`, 'error');
     } finally { hideProgress(); }
@@ -1221,6 +1407,7 @@ async function denoise() {
 
 async function computeNormals() {
     if (!state.activeCloud) return;
+    saveCameraState();
     const { uuid } = state.activeCloud;
     const voxelSize = document.getElementById('voxel-size').value;
     showProgress('计算法向量...', 0);
@@ -1240,6 +1427,7 @@ async function computeNormals() {
             hideNormals();
             showNormals();
         }
+        restoreCameraState();
         showStatus('法向量计算完成', 'success');
     } catch (err) {
         showStatus(`计算失败: ${err.message}`, 'error');
@@ -1257,11 +1445,16 @@ async function computeBoundingBox() {
         });
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
-        const minZ = new THREE.Vector3(result.min[0], result.min[1], result.min[2]);
-        const maxZ = new THREE.Vector3(result.max[0], result.max[1], result.max[2]);
-        const minY = convertZupToYupSingle(minZ);
-        const maxY = convertZupToYupSingle(maxZ);
-        const box = new THREE.Box3(minY, maxY);
+        const min = result.min;
+        const max = result.max;
+        const box = new THREE.Box3();
+        for (const x of [min[0], max[0]]) {
+            for (const y of [min[1], max[1]]) {
+                for (const z of [min[2], max[2]]) {
+                    box.expandByPoint(convertZupToYupSingle([x, y, z]));
+                }
+            }
+        }
         if (state.bboxHelper) state.scene.remove(state.bboxHelper);
         state.bboxHelper = new THREE.Box3Helper(box, 0xffaa00);
         state.bboxHelper.visible = state.showBbox;
@@ -1327,7 +1520,7 @@ function showNormals() {
     }
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
-    const mat = new THREE.LineBasicMaterial({ color: CONFIG.NORMAL_COLOR, opacity: 0.6, transparent: true });
+    const mat = new THREE.LineBasicMaterial({ color: CONFIG.NORMAL_COLOR, opacity: 0.5, transparent: true });
     state.normalHelpers = new THREE.LineSegments(geom, mat);
     state.normalHelpers.position.copy(cloud.mesh.position);
     state.scene.add(state.normalHelpers);
@@ -1339,6 +1532,631 @@ function hideNormals() {
         state.normalHelpers = null;
     }
 }
+
+
+// 立面检测功能
+async function detectFacades() {
+    if (!state.activeCloud) {
+        showStatus('请先激活一个点云', 'warning');
+        return;
+    }
+
+    saveCameraState();
+    const { uuid } = state.activeCloud;
+    const voxelSize = parseFloat(document.getElementById('voxel-size').value) || 0.05;
+    const minArea = parseFloat(document.getElementById('min-area').value) || 5.0;
+
+    showProgress('检测建筑平面中...', 0);
+
+    try {
+        const resp = await fetch(`${API_BASE}/detect_facades`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid,
+                voxel_size: voxelSize,
+                min_area: minArea
+            }),
+        });
+
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        updateProgress(50);
+
+        // 保存原始颜色（用于重置）
+        const cloud = state.pointClouds.get(uuid);
+        state.facade.originalColors = new Float32Array(cloud.geometry.attributes.color.array);
+        state.facade.sourceUUID = uuid;
+
+        // 缓存立面信息
+        state.facade.detected = true;
+        state.facade.facades = result.facades || [];
+        state.facade.selectedFacadeId = null;
+
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: true,
+            preserveColor: false
+        });
+        const updatedCloud = state.pointClouds.get(uuid);
+        if (updatedCloud) {
+            updatedCloud.facadeLabels = result.point_labels || null;
+            updatedCloud.facades = result.facades || [];
+        }
+        restoreCameraState();
+
+        renderFacadeList(result.facades);
+
+        updateProgress(100);
+        hideProgress();
+
+        const facadeCount = result.facade_count || 0;
+        showStatus(`检测到 ${facadeCount} 个平面`, 'success');
+        updateInfoPanel(state.pointClouds.get(uuid));
+
+        document.getElementById('btn-reset-facades').style.display = 'block';
+
+    } catch (err) {
+        hideProgress();
+        showStatus(`平面检测失败: ${err.message}`, 'error');
+        console.error(err);
+    }
+}
+
+function renderFacadeList(facades) {
+    const list = document.getElementById('facade-list');
+    list.style.display = 'block';
+    list.innerHTML = '';
+
+    if (!facades || facades.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:var(--text-secondary);font-size:11px;padding:12px;">未检测到平面</div>';
+        return;
+    }
+
+    facades.forEach((facade) => {
+        const item = document.createElement('div');
+        item.className = 'facade-item';
+        item.dataset.facadeId = facade.id;
+
+        item.innerHTML = `
+            <div class="facade-info" style="flex:1;">
+                <div class="facade-name">${facade.type_label || '平面'} #${facade.id + 1}</div>
+                <div class="facade-meta">
+                    面积: ${facade.area.toFixed(1)}m² | 点数: ${facade.point_count} | 垂直度: ${(facade.verticality ?? 0).toFixed(2)}°
+                </div>
+            </div>
+            <button class="facade-btn" data-facade-id="${facade.id}">评估</button>
+        `;
+
+        item.addEventListener('click', (e) => {
+            if (e.target.classList.contains('facade-btn')) {
+                e.stopPropagation();
+                showFacadeQuality(facade.id);
+            } else {
+                selectFacade(facade.id);
+            }
+        });
+
+        list.appendChild(item);
+    });
+}
+
+async function selectFacade(facadeId) {
+    if (!state.activeCloud) return;
+    const uuid = state.activeCloud.uuid;
+
+    // 更新UI选中状态
+    document.querySelectorAll('.facade-item').forEach(el => {
+        el.classList.toggle('active', parseInt(el.dataset.facadeId) === facadeId);
+    });
+
+    state.facade.selectedFacadeId = facadeId;
+
+    showProgress('高亮平面...', 50);
+
+    try {
+        const resp = await fetch(`${API_BASE}/highlight_facade`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid, facade_id: facadeId }),
+        });
+
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        // 高亮显示：只更新颜色属性，保持几何不变
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: true,
+            preserveColor: false
+        });
+        const cloud = state.pointClouds.get(uuid);
+        if (cloud) {
+            cloud.facadeLabels = result.point_labels || cloud.facadeLabels;
+        }
+        restoreCameraState();
+
+        hideProgress();
+        showStatus(`已选中平面 #${facadeId + 1}`, 'success');
+
+    } catch (err) {
+        hideProgress();
+        showStatus(`高亮失败: ${err.message}`, 'error');
+    }
+}
+
+async function showFacadeQuality(facadeId) {
+    if (!state.activeCloud) return;
+    const uuid = state.activeCloud.uuid;
+
+    showProgress('计算立面质量...', 30);
+
+    try {
+        const resp = await fetch(`${API_BASE}/get_facade_quality`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid,
+                facade_id: facadeId,
+                grid_size: 20.0
+            }),
+        });
+
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        hideProgress();
+        renderQualityDialog(result.quality, facadeId);
+
+    } catch (err) {
+        hideProgress();
+        showStatus(`质量评估失败: ${err.message}`, 'error');
+    }
+}
+
+function renderQualityDialog(quality, facadeId) {
+    const dialog = document.getElementById('quality-dialog');
+    const body = document.getElementById('dialog-body');
+
+    const overall = quality.overall || {};
+    const grids = quality.grids || [];
+
+    const vertLimit = 0.5;
+    const flatLimit = quality.flatness_limit || 0.004;
+
+    const sourcePointCount = quality.source_point_count || 0;
+    const selectedPointCount = quality.selected_point_count || 0;
+    const extractTime = quality.extract_time_ms || 0;
+    const computeTime = quality.compute_time_ms || 0;
+
+    const overallGap = overall.gap || 0;
+
+    // 垂直度判定
+    const vertStatus = overall.verticality <= vertLimit ? 'pass' :
+                       (overall.verticality <= vertLimit * 2 ? 'warn' : 'fail');
+
+    // 平整度判定
+    const flatStatus = overallGap <= flatLimit ? 'pass' :
+                       (overallGap <= flatLimit * 2 ? 'warn' : 'fail');
+
+    const statusText = { pass: '合格', warn: '警告', fail: '不合格' };
+    const statusClass = { pass: 'status-pass', warn: 'status-warn', fail: 'status-fail' };
+
+    body.innerHTML = `
+        <div style="margin-bottom:16px;">
+            <span style="font-size:13px;color:var(--accent);font-weight:700;">
+                ${(overall.type_label || '平面')} #${facadeId + 1} 质量评估
+            </span>
+            <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.6;">
+                <strong>数据来源：</strong>当前显示/下采样点云<br>
+                当前总点数：${sourcePointCount.toLocaleString()}，本立面参与评估点数：${selectedPointCount.toLocaleString()}<br>
+                提取耗时：${extractTime}ms，计算耗时：${computeTime}ms
+            </div>
+        </div>
+
+        <div class="quality-summary">
+            <div class="quality-metric">
+                <div class="metric-label">垂直度夹角</div>
+                <div>
+                    <span class="metric-value" style="color: ${vertStatus === 'pass' ? 'var(--success)' : vertStatus === 'warn' ? 'var(--warning)' : 'var(--danger)'}">
+                        ${(overall.verticality || 0).toFixed(3)}
+                    </span>
+                    <span class="metric-unit">°</span>
+                </div>
+                <div class="metric-status ${statusClass[vertStatus]}">${statusText[vertStatus]}</div>
+                <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">
+                    法向量与水平面的夹角，限值 ≤ ${vertLimit}°
+                </div>
+            </div>
+
+            <div class="quality-metric">
+                <div class="metric-label">局部平面最大偏离</div>
+                <div>
+                    <span class="metric-value" style="color: ${flatStatus === 'pass' ? 'var(--success)' : flatStatus === 'warn' ? 'var(--warning)' : 'var(--danger)'}">
+                        ${(overallGap * 1000).toFixed(2)}
+                    </span>
+                    <span class="metric-unit">mm</span>
+                </div>
+                <div class="metric-status ${statusClass[flatStatus]}">${statusText[flatStatus]}</div>
+                <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">
+                    20m区间内2m×2m窗口局部平面中心到区间基准平面的最大距离，限值 ≤ ${(flatLimit * 1000).toFixed(0)}mm
+                </div>
+            </div>
+        </div>
+
+        <h4 style="font-size:13px; color:var(--accent); margin:20px 0 12px; font-weight:700;">
+            📐 20m 区间检测详情
+        </h4>
+
+        <div style="overflow-x:auto;">
+            <table class="grid-table">
+                <thead>
+                    <tr>
+                        <th>区间ID</th>
+                        <th class="cell-center">点数</th>
+                        <th class="cell-right">垂直度(°)</th>
+                        <th class="cell-right">局部平面偏离(mm)</th>
+                        <th class="cell-center">合格</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${grids.map((g, i) => {
+                        const gap = g.gap || 0;
+                        let gStatus = 'pass';
+                        if (gap > flatLimit) gStatus = 'warn';
+                        if (gap > flatLimit * 2) gStatus = 'fail';
+
+                        return `
+                        <tr>
+                            <td>区间 ${i + 1}</td>
+                            <td class="cell-center">${g.point_count.toLocaleString()}</td>
+                            <td class="cell-right">${(g.verticality || 0).toFixed(3)}</td>
+                            <td class="cell-right" style="font-weight:700;color:${gap <= flatLimit ? 'var(--success)' : gap <= flatLimit*2 ? 'var(--warning)' : 'var(--danger)'}">
+                                ${(gap * 1000).toFixed(2)}
+                            </td>
+                            <td class="cell-center">
+                                <span class="metric-status ${statusClass[gStatus]}">${statusText[gStatus]}</span>
+                            </td>
+                        </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+        </div>
+
+        <div style="margin-top:16px; padding:12px; background:rgba(102,126,234,0.05); border-radius:8px; font-size:11px; color:var(--text-secondary); line-height:1.8;">
+           <strong style="color:var(--accent);">判定标准（基于当前显示/下采样点云计算）：</strong><br>
+           • <strong>垂直度</strong>：法向量与水平面夹角，≤ ${vertLimit}° 为合格，≤ ${(vertLimit*2).toFixed(1)}° 为警告<br>
+           • <strong>平整度</strong>：按竖直方向每 ${quality.grid_size}m 分区，在区间内以 ${quality.ruler_size}m×${quality.ruler_size}m 窗口、${(quality.ruler_step * 1000).toFixed(0)}mm 步长滑动<br>
+           • <strong>平整度指标</strong>：每个窗口内拟合局部平面，计算局部平面中心到区间基准平面的距离，取最大偏离值<br>
+           • 当前实现基于<strong>显示/下采样点云</strong>计算；若需验收级精度，建议接入原始稠密点云索引回查
+        </div>
+    `;
+
+    dialog.classList.add('show');
+}
+
+// 重置立面显示（恢复原始颜色）
+function resetFacades() {
+    // 如果当前激活的点云有原始颜色缓存，则恢复
+    if (state.activeCloud && state.facade.originalColors) {
+        const cloud = state.activeCloud;
+        const colors = cloud.geometry.attributes.color.array;
+        const orig = state.facade.originalColors;
+        if (colors.length === orig.length) {
+            colors.set(orig);
+            cloud.geometry.attributes.color.needsUpdate = true;
+            cloud.data.colors = Array.from(orig);
+        }
+    }
+
+    // 重置状态
+    state.facade.detected = false;
+    state.facade.facades = [];
+    state.facade.selectedFacadeId = null;
+    state.facade.originalColors = null;
+    state.facade.sourceUUID = null;
+    if (state.activeCloud) {
+        state.activeCloud.facadeLabels = null;
+        state.activeCloud.facades = null;
+    }
+
+    // 隐藏立面列表和重置按钮
+    document.getElementById('facade-list').style.display = 'none';
+    document.getElementById('btn-reset-facades').style.display = 'none';
+
+    // 更新信息面板
+    if (state.activeCloud) {
+        updateInfoPanel(state.activeCloud);
+    }
+
+    showStatus('已恢复原始显示', 'info');
+}
+
+
+// ============================================================
+// 框选细分
+// ============================================================
+function toggleSelectionMode() {
+    if (!state.activeCloud) {
+        showStatus('请先激活一个点云', 'warning');
+        return;
+    }
+    if (state.reg.mode) {
+        showStatus('请先退出配准模式', 'warning');
+        return;
+    }
+
+    state.selection.mode = !state.selection.mode;
+    document.getElementById('btn-selection-mode').classList.toggle('active', state.selection.mode);
+    state.controls.enabled = !state.selection.mode;
+    state.renderer.domElement.style.cursor = state.selection.mode ? 'crosshair' : 'default';
+
+    if (!state.selection.mode && state.selection.overlay) {
+        state.selection.overlay.style.display = 'none';
+        state.selection.dragging = false;
+    }
+
+    document.getElementById('hint-text').textContent = state.selection.mode
+        ? '框选模式：按住鼠标左键拖拽生成白色选框'
+        : '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+
+    showStatus(state.selection.mode ? '已进入框选模式' : '已退出框选模式', 'info');
+}
+
+function getPointIndicesInScreenRect(cloud, rect) {
+    const indices = [];
+    const positions = cloud.geometry.attributes.position.array;
+    const canvasRect = state.renderer.domElement.getBoundingClientRect();
+
+    const minX = Math.min(rect.x1, rect.x2);
+    const maxX = Math.max(rect.x1, rect.x2);
+    const minY = Math.min(rect.y1, rect.y2);
+    const maxY = Math.max(rect.y1, rect.y2);
+
+    const world = new THREE.Vector3();
+    const projected = new THREE.Vector3();
+
+    for (let i = 0; i < positions.length / 3; i++) {
+        world.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+        projected.copy(world).project(state.camera);
+        if (projected.z < -1 || projected.z > 1) continue;
+
+        const sx = (projected.x + 1) * 0.5 * canvasRect.width;
+        const sy = (-projected.y + 1) * 0.5 * canvasRect.height;
+
+        if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) {
+            indices.push(i);
+        }
+    }
+
+    return indices;
+}
+
+function bindSelectionEvents() {
+    const overlay = document.getElementById('selection-rect');
+    state.selection.overlay = overlay;
+
+    state.renderer.domElement.addEventListener('mousedown', (e) => {
+        if (!state.selection.mode || e.button !== 0) return;
+
+        const rect = state.renderer.domElement.getBoundingClientRect();
+        state.selection.dragging = true;
+        state.selection.start.x = e.clientX - rect.left;
+        state.selection.start.y = e.clientY - rect.top;
+        state.selection.end.x = state.selection.start.x;
+        state.selection.end.y = state.selection.start.y;
+
+        overlay.style.display = 'block';
+        overlay.style.left = `${state.selection.start.x}px`;
+        overlay.style.top = `${state.selection.start.y}px`;
+        overlay.style.width = '0px';
+        overlay.style.height = '0px';
+
+        e.preventDefault();
+    });
+
+    state.renderer.domElement.addEventListener('mousemove', (e) => {
+        if (!state.selection.mode || !state.selection.dragging) return;
+
+        const rect = state.renderer.domElement.getBoundingClientRect();
+        state.selection.end.x = e.clientX - rect.left;
+        state.selection.end.y = e.clientY - rect.top;
+
+        const x = Math.min(state.selection.start.x, state.selection.end.x);
+        const y = Math.min(state.selection.start.y, state.selection.end.y);
+        const w = Math.abs(state.selection.end.x - state.selection.start.x);
+        const h = Math.abs(state.selection.end.y - state.selection.start.y);
+
+        overlay.style.left = `${x}px`;
+        overlay.style.top = `${y}px`;
+        overlay.style.width = `${w}px`;
+        overlay.style.height = `${h}px`;
+    });
+
+    state.renderer.domElement.addEventListener('mouseup', (e) => {
+        if (!state.selection.mode || !state.selection.dragging) return;
+
+        state.selection.dragging = false;
+        if (!state.activeCloud) return;
+
+        const rectInfo = {
+            x1: state.selection.start.x,
+            y1: state.selection.start.y,
+            x2: state.selection.end.x,
+            y2: state.selection.end.y,
+        };
+
+        const width = Math.abs(rectInfo.x2 - rectInfo.x1);
+        const height = Math.abs(rectInfo.y2 - rectInfo.y1);
+        if (width < 8 || height < 8) {
+            overlay.style.display = 'none';
+            showStatus('框选区域过小', 'warning');
+            return;
+        }
+
+        const indices = getPointIndicesInScreenRect(state.activeCloud, rectInfo);
+        state.selection.selectedIndices = indices;
+        document.getElementById('btn-segment-selection').disabled = indices.length === 0;
+        showStatus(`已框选 ${indices.length.toLocaleString()} 个点`, indices.length ? 'success' : 'warning');
+    });
+}
+
+async function segmentSelection() {
+    if (!state.activeCloud) {
+        showStatus('请先激活一个点云', 'warning');
+        return;
+    }
+
+    const selected = state.selection.selectedIndices || [];
+    if (selected.length === 0) {
+        showStatus('请先框选点云区域', 'warning');
+        return;
+    }
+
+    const { uuid } = state.activeCloud;
+    const voxelSize = parseFloat(document.getElementById('voxel-size').value) || 0.05;
+    const cloud = state.pointClouds.get(uuid);
+    if (cloud) {
+        state.segments.originalColors = new Float32Array(cloud.geometry.attributes.color.array);
+    }
+
+    saveCameraState();
+    showProgress('框选区域细分中...', 20);
+
+    try {
+        const resp = await fetch(`${API_BASE}/segment_selection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid,
+                selected_indices: selected,
+                voxel_size: voxelSize,
+                normal_angle_deg: 18.0,
+                min_segment_points: 60,
+                max_segments: 30
+            }),
+        });
+
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: true,
+            preserveColor: false
+        });
+
+        const updatedCloud = state.pointClouds.get(uuid);
+        if (updatedCloud) {
+            updatedCloud.segmentLabels = result.point_labels || null;
+            updatedCloud.segments = result.segments || [];
+        }
+
+        state.segments.detected = true;
+        state.segments.items = result.segments || [];
+        state.segments.labels = result.point_labels || null;
+
+        renderSegmentList(state.segments.items);
+        restoreCameraState();
+
+        if (state.selection.overlay) state.selection.overlay.style.display = 'none';
+        document.getElementById('btn-reset-segments').style.display = 'block';
+
+        hideProgress();
+        showStatus(`框选区域分割完成：${result.segment_count || 0} 个小平面`, 'success');
+
+    } catch (err) {
+        hideProgress();
+        showStatus(`框选分割失败: ${err.message}`, 'error');
+        console.error(err);
+    }
+}
+
+function renderSegmentList(segments) {
+    const list = document.getElementById('segment-list');
+    list.style.display = 'block';
+    list.innerHTML = '';
+
+    if (!segments || segments.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:var(--text-secondary);font-size:11px;padding:12px;">未检测到局部平面</div>';
+        return;
+    }
+
+    segments.forEach(seg => {
+        const color = seg.color || [1, 1, 1];
+        const rgb = color.map(v => Math.round(v * 255));
+
+        const item = document.createElement('div');
+        item.className = 'segment-item';
+        item.dataset.segmentId = seg.id;
+        item.innerHTML = `
+            <div class="segment-color" style="background: rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]});"></div>
+            <div style="flex:1;">
+                <div><strong>局部平面 #${seg.id + 1}</strong> · ${seg.type_label || '平面'}</div>
+                <div class="segment-meta">
+                    高: ${(seg.height || 0).toFixed(2)}m |
+                    宽: ${(seg.width || 0).toFixed(2)}m |
+                    面积: ${(seg.area || 0).toFixed(2)}m² |
+                    平整RMSE: ${((seg.flatness_rmse || 0) * 1000).toFixed(1)}mm |
+                    点数: ${seg.point_count}
+                </div>
+            </div>
+        `;
+
+        item.addEventListener('click', () => highlightLocalSegment(seg.id));
+        list.appendChild(item);
+    });
+}
+
+function highlightLocalSegment(segmentId) {
+    if (!state.activeCloud || !state.segments.labels) return;
+
+    document.querySelectorAll('.segment-item').forEach(el => {
+        el.classList.toggle('active', parseInt(el.dataset.segmentId) === segmentId);
+    });
+
+    const cloud = state.activeCloud;
+    const colors = cloud.geometry.attributes.color.array;
+    const labels = state.segments.labels;
+
+    for (let i = 0; i < labels.length && i * 3 + 2 < colors.length; i++) {
+        if (labels[i] === segmentId) {
+            colors[i * 3] = 0.2;
+            colors[i * 3 + 1] = 1.0;
+            colors[i * 3 + 2] = 0.2;
+        } else if (labels[i] >= 0) {
+            colors[i * 3] *= 0.45;
+            colors[i * 3 + 1] *= 0.45;
+            colors[i * 3 + 2] *= 0.45;
+        }
+    }
+
+    cloud.geometry.attributes.color.needsUpdate = true;
+    showStatus(`已高亮局部平面 #${segmentId + 1}`, 'success');
+}
+
+function resetSegments() {
+    if (state.activeCloud && state.segments.originalColors) {
+        const colors = state.activeCloud.geometry.attributes.color.array;
+        if (colors.length === state.segments.originalColors.length) {
+            colors.set(state.segments.originalColors);
+            state.activeCloud.geometry.attributes.color.needsUpdate = true;
+        }
+    }
+
+    state.segments.detected = false;
+    state.segments.items = [];
+    state.segments.labels = null;
+    state.segments.originalColors = null;
+    state.selection.selectedIndices = [];
+
+    document.getElementById('segment-list').style.display = 'none';
+    document.getElementById('btn-reset-segments').style.display = 'none';
+    document.getElementById('btn-segment-selection').disabled = true;
+    if (state.selection.overlay) state.selection.overlay.style.display = 'none';
+
+    showStatus('已恢复分割前显示', 'info');
+}
+
 
 // ============================================================
 // 颜色修改
@@ -1353,19 +2171,21 @@ function applyColor() {
         colors[i*3+2] = color.b;
     }
     state.activeCloud.geometry.attributes.color.needsUpdate = true;
+    state.activeCloud.userColors = new Float32Array(colors);
     showStatus('颜色已应用', 'success');
 }
+
 function resetColor() {
     if (!state.activeCloud) return;
     const colors = state.activeCloud.geometry.attributes.color.array;
     colors.set(state.activeCloud.originalColors);
     state.activeCloud.geometry.attributes.color.needsUpdate = true;
+    state.activeCloud.userColors = null;
     showStatus('颜色已恢复', 'success');
 }
 
-// ============================================================
-// 配准
-// ============================================================
+
+// 配准（优化：保留视角和颜色 + 融合点云加载到场景）
 function updateRegStatus() {
     const count = state.reg.correspondences.filter(p => p.tgt !== null).length;
     const srcName = state.reg.sourceUUID ?
@@ -1373,10 +2193,10 @@ function updateRegStatus() {
     const tgtName = state.reg.targetUUID ?
         (state.pointClouds.get(state.reg.targetUUID)?.filename || '已选') : '未选';
     const nextHint = state.reg.nextIsSource ?
-        '<span style="color:#ff4444;">【下一步：在源点云上采集】</span>' :
-        '<span style="color:#44ff44;">【下一步：在目标点云上采集】</span>';
+        '<span style="color:#ff6b6b; font-weight:700;">【下一步：在源点云上采集】</span>' :
+        '<span style="color:#48bb78; font-weight:700;">【下一步：在目标点云上采集】</span>';
     document.getElementById('reg-status').innerHTML =
-        `对应点: <b>${count}</b> 对 | 源: ${srcName} | 目标: ${tgtName}<br>${nextHint}`;
+        `对应点: <b style="color:var(--accent);">${count}</b> 对 | 源: ${srcName} | 目标: ${tgtName}<br>${nextHint}`;
     const completePairs = state.reg.correspondences.filter(p => p.tgt !== null).length;
     document.getElementById('btn-execute-reg').disabled = (completePairs < 3);
     document.getElementById('btn-icp-refine').disabled = (completePairs < 3 || !state.reg.lastTransform);
@@ -1423,13 +2243,39 @@ function toggleRegMode() {
     document.getElementById('btn-exit-reg').disabled = !state.reg.mode;
 }
 
+// function highlightRegClouds() {
+//     state.pointClouds.forEach((cloud, uuid) => {
+//         if (uuid === state.reg.sourceUUID) {
+//             cloud.mesh.material.color = new THREE.Color(0xff4444);
+//             cloud.mesh.material.vertexColors = false;
+//             cloud.mesh.material.needsUpdate = true;
+//         } else if (uuid === state.reg.targetUUID) {
+//             cloud.mesh.material.color = new THREE.Color(0x44ff44);
+//             cloud.mesh.material.vertexColors = false;
+//             cloud.mesh.material.needsUpdate = true;
+//         } else {
+//             cloud.mesh.material.opacity = 0.2;
+//         }
+//     });
+// }
+//
+// function restoreRegCloudColors() {
+//     state.pointClouds.forEach((cloud) => {
+//         cloud.mesh.material.color = new THREE.Color(0xffffff);
+//         cloud.mesh.material.vertexColors = true;
+//         cloud.mesh.material.opacity = 0.92;
+//         cloud.mesh.material.needsUpdate = true;
+//     });
+// }
+
 function exitRegMode() {
-    if (state.reg.mode) toggleRegMode(); // 关闭配准模式
-    state.reg.mode = false;
-    document.getElementById('btn-reg-mode').classList.remove('active');
-    state.renderer.domElement.style.cursor = 'default';
-    document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
-    document.getElementById('btn-exit-reg').disabled = true;
+    if (state.reg.mode) {
+        state.reg.mode = false;
+        document.getElementById('btn-reg-mode').classList.remove('active');
+        state.renderer.domElement.style.cursor = 'default';
+        document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+        document.getElementById('btn-exit-reg').disabled = true;
+    }
 }
 
 function clearRegMarkers() {
@@ -1453,17 +2299,16 @@ function addTempMarker(position, color, label) {
     state.scene.add(marker);
     state.reg.tempMarkers.push(marker);
 
-    // 标签
     const canvas = document.createElement('canvas');
     canvas.width = 128; canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(0,0,128,64);
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.strokeRect(2,2,124,60);
     ctx.fillStyle = 'white';
-    ctx.font = 'bold 32px Arial';
+    ctx.font = 'bold 28px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, 64, 32);
@@ -1496,20 +2341,17 @@ function handleRegClick(event) {
     const point = intersects[0].point.clone();
     const cloudUUID = state.activeCloud.uuid;
 
-    // 采集源点
     if (state.reg.nextIsSource) {
         if (cloudUUID !== state.reg.sourceUUID) {
             showStatus('当前应采集源点云（红色高亮）', 'warning');
             return;
         }
-        const idx = state.reg.correspondences.length; // 当前配对的索引
+        const idx = state.reg.correspondences.length;
         state.reg.correspondences.push({ src: point, tgt: null, pairIdx: idx });
         addTempMarker(point, 0xff4444, `S${idx + 1}`);
         state.reg.nextIsSource = false;
         showStatus(`源点 ${idx + 1} 已采集，请切换到目标点云`, 'success');
-    }
-    // 采集目标点
-    else {
+    } else {
         if (cloudUUID !== state.reg.targetUUID) {
             showStatus('当前应采集目标点云（绿色高亮）', 'warning');
             return;
@@ -1517,7 +2359,7 @@ function handleRegClick(event) {
         const lastPair = state.reg.correspondences[state.reg.correspondences.length - 1];
         if (lastPair && lastPair.tgt === null) {
             lastPair.tgt = point;
-            const idx = lastPair.pairIdx; // 使用存储的索引
+            const idx = lastPair.pairIdx;
             addTempMarker(point, 0x44ff44, `T${idx + 1}`);
             state.reg.nextIsSource = true;
             showStatus(`目标点 ${idx + 1} 已采集，配对完成！`, 'success');
@@ -1530,6 +2372,35 @@ function handleRegClick(event) {
     updateRegStatus();
 }
 
+function handleSceneClick(event) {
+    if (state.selection.mode) return;
+    if (state.reg.mode) {
+        handleRegClick(event);
+        return;
+    }
+    if (!state.activeCloud || !state.facade.detected) return;
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.mouse, state.camera);
+    state.raycaster.params.Points.threshold = Math.max(1.0, state.sceneRange * 0.001);
+
+    const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
+    if (intersects.length === 0) return;
+
+    const pointIndex = intersects[0].index;
+    const labels = state.activeCloud.facadeLabels;
+    if (!labels || pointIndex === undefined) return;
+
+    const facadeId = labels[pointIndex];
+    if (facadeId === undefined || facadeId < 0) {
+        showStatus('点击点不属于已检测平面', 'info');
+        return;
+    }
+    selectFacade(facadeId);
+}
+
 function undoLastCorrespondence() {
     if (state.reg.correspondences.length === 0) {
         showStatus('没有可撤销的配对', 'warning');
@@ -1538,7 +2409,6 @@ function undoLastCorrespondence() {
     state.reg.correspondences.pop();
     state.reg.nextIsSource = true;
     clearRegMarkers();
-    // 重新绘制剩余配对
     for (let i = 0; i < state.reg.correspondences.length; i++) {
         const pair = state.reg.correspondences[i];
         addTempMarker(pair.src, 0xff4444, `S${i + 1}`);
@@ -1589,6 +2459,9 @@ async function executeRegistration() {
         showStatus(`至少需要3对对应点，当前${completePairs.length}对`, 'warning');
         return;
     }
+
+    saveCameraState();
+
     showProgress('粗配准 (SVD)...', 0);
     try {
         await addCorrespondence();
@@ -1604,8 +2477,27 @@ async function executeRegistration() {
         if (result.error) throw new Error(result.error);
         state.reg.lastTransform = result.transformation;
 
-        await loadPointCloud(result, result.filename, result.uuid);
+        const srcCloud = state.pointClouds.get(state.reg.sourceUUID);
+        const savedColors = srcCloud ? new Float32Array(srcCloud.geometry.attributes.color.array) : null;
+
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: true,
+            preserveColor: true
+        });
+
+        if (savedColors && state.pointClouds.has(result.uuid)) {
+            const newCloud = state.pointClouds.get(result.uuid);
+            if (newCloud.geometry.attributes.color.array.length === savedColors.length) {
+                newCloud.geometry.attributes.color.array.set(savedColors);
+                newCloud.geometry.attributes.color.needsUpdate = true;
+                newCloud.data.colors = Array.from(savedColors);
+            }
+        }
+
         state.reg.sourceUUID = result.uuid;
+
+        restoreCameraState();
+        // restoreRegCloudColors();
 
         hideProgress();
         let msg = `粗配准完成！`;
@@ -1628,6 +2520,9 @@ async function icpRefine() {
         showStatus('请先执行粗配准', 'warning');
         return;
     }
+
+    saveCameraState();
+
     showProgress('ICP 精配准中...', 0);
     try {
         const resp = await fetch(`${API_BASE}/icp_refine`, {
@@ -1643,9 +2538,32 @@ async function icpRefine() {
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
 
-        await loadPointCloud(result, result.filename, result.uuid);
+        const srcCloud = state.pointClouds.get(state.reg.sourceUUID);
+        const savedColors = srcCloud ? new Float32Array(srcCloud.geometry.attributes.color.array) : null;
+
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: true,
+            preserveColor: true
+        });
+
+        if (savedColors && state.pointClouds.has(result.uuid)) {
+            const newCloud = state.pointClouds.get(result.uuid);
+            if (newCloud.geometry.attributes.color.array.length === savedColors.length) {
+                newCloud.geometry.attributes.color.array.set(savedColors);
+                newCloud.geometry.attributes.color.needsUpdate = true;
+                newCloud.data.colors = Array.from(savedColors);
+            }
+        }
+
         state.reg.sourceUUID = result.uuid;
         state.reg.lastTransform = result.transformation;
+
+        restoreCameraState();
+        clearRegMarkers();                  // 移除场景中的标记点
+        state.reg.correspondences = [];     // 清空对应点列表
+        state.reg.nextIsSource = true;      // 重置采集方向
+        exitRegMode();
+        updateRegStatus();                  // 更新UI状态
 
         hideProgress();
         let msg = `ICP 精配准完成！`;
@@ -1668,16 +2586,13 @@ function clearRegistration() {
     showStatus('已清除所有配准数据', 'info');
 }
 
-// ============================================================
+
 // 保存配准结果
-// ============================================================
 async function saveRegistered() {
     if (!state.activeCloud) {
         showStatus('请先激活一个点云', 'warning');
         return;
     }
-
-    // 检查是否在配准状态（源和目标都已设置）
     if (!state.reg.sourceUUID || !state.reg.targetUUID) {
         showStatus('未找到配准关系，请先执行配准', 'warning');
         return;
@@ -1685,7 +2600,6 @@ async function saveRegistered() {
 
     showProgress('合并并保存点云...', 0);
     try {
-        // 1. 调用合并接口
         const mergeResp = await fetch(`${API_BASE}/merge_clouds`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1697,7 +2611,8 @@ async function saveRegistered() {
         const mergeResult = await mergeResp.json();
         if (mergeResult.error) throw new Error(mergeResult.error);
 
-        // 2. 保存合并后的点云
+        updateProgress(40);
+
         const filename = `merged_${Date.now()}.ply`;
         const saveResp = await fetch(`${API_BASE}/save_registered`, {
             method: 'POST',
@@ -1710,18 +2625,32 @@ async function saveRegistered() {
         const saveResult = await saveResp.json();
         if (saveResult.error) throw new Error(saveResult.error);
 
+        updateProgress(70);
+
+        await loadPointCloud(mergeResult, mergeResult.filename, mergeResult.uuid, {
+            preserveCamera: true,
+            preserveColor: false
+        });
+
+        addFileToList(mergeResult.filename, mergeResult.uuid, mergeResult.positions.length / 3);
+        setActiveCloud(mergeResult.uuid, true);
+
+        updateProgress(100);
         hideProgress();
-        showStatus(`融合点云已保存，总点数: ${saveResult.points}`, 'success');
-        // 自动下载
+
+        showStatus(`融合点云已保存并加载，总点数: ${saveResult.points}`, 'success');
+
         const a = document.createElement('a');
         a.href = `${API_BASE}/download/${filename}`;
         a.download = filename;
         a.click();
+
     } catch (err) {
         hideProgress();
         showStatus(`保存融合点云失败: ${err.message}`, 'error');
     }
 }
+
 // ============================================================
 // 工具函数
 // ============================================================
@@ -1743,8 +2672,26 @@ function updateProgress(percent) {
 function hideProgress() {
     document.getElementById('progress-overlay').classList.remove('show');
 }
+function isUniformColor(colors, eps = 1e-4) {
+    if (!colors || colors.length < 3) return false;
+    const r = colors[0], g = colors[1], b = colors[2];
+    for (let i = 3; i < colors.length; i += 3) {
+        if (Math.abs(colors[i] - r) > eps || Math.abs(colors[i+1] - g) > eps || Math.abs(colors[i+2] - b) > eps) {
+            return false;
+        }
+    }
+    return true;
+}
+function applyUniformColorArray(colors, r, g, b) {
+    for (let i = 0; i < colors.length; i += 3) {
+        colors[i] = r;
+        colors[i+1] = g;
+        colors[i+2] = b;
+    }
+}
 function updateButtonState(enabled) {
-    ['btn-denoise','btn-normals','btn-bbox','btn-clear','btn-apply-color','btn-reset-color','btn-set-target','btn-set-source','btn-reg-mode'].forEach(id => {
+    ['btn-denoise','btn-normals','btn-bbox','btn-clear','btn-apply-color','btn-reset-color',
+     'btn-set-target','btn-set-source','btn-reg-mode','btn-detect-facades','btn-selection-mode'].forEach(id => {
         document.getElementById(id).disabled = !enabled;
     });
     document.getElementById('btn-exit-reg').disabled = true;
@@ -1776,7 +2723,7 @@ function takeScreenshot() {
     showStatus('截图已保存', 'success');
 }
 
-// ============================================================
+
 // 事件绑定
 // ============================================================
 function bindEvents() {
@@ -1814,16 +2761,23 @@ function bindEvents() {
             cloud.mesh.material.size = cloud.adaptiveSize * state.pointSizeScale;
         });
     });
+    document.getElementById('min-area').addEventListener('input', e => {
+        document.getElementById('min-area-value').textContent = e.target.value;
+    });
 
     // 按钮
     document.getElementById('btn-denoise').addEventListener('click', denoise);
     document.getElementById('btn-normals').addEventListener('click', toggleNormals);
     document.getElementById('btn-bbox').addEventListener('click', toggleBoundingBox);
-    document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
     document.getElementById('btn-clear').addEventListener('click', clearAll);
     document.getElementById('btn-reset-view').addEventListener('click', resetView);
     document.getElementById('btn-apply-color').addEventListener('click', applyColor);
     document.getElementById('btn-reset-color').addEventListener('click', resetColor);
+    document.getElementById('btn-detect-facades').addEventListener('click', detectFacades);
+    document.getElementById('btn-reset-facades').addEventListener('click', resetFacades);
+    document.getElementById('btn-selection-mode').addEventListener('click', toggleSelectionMode);
+    document.getElementById('btn-segment-selection').addEventListener('click', segmentSelection);
+    document.getElementById('btn-reset-segments').addEventListener('click', resetSegments);
 
     document.querySelectorAll('.color-preset').forEach(preset => {
         preset.addEventListener('click', () => {
@@ -1837,18 +2791,12 @@ function bindEvents() {
         state.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
         document.getElementById('tb-rotate').classList.add('active');
         document.getElementById('tb-pan').classList.remove('active');
-        document.getElementById('tb-zoom').classList.remove('active');
     });
     document.getElementById('tb-pan').addEventListener('click', () => {
         state.controls.enableRotate = false;
         state.controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
         document.getElementById('tb-rotate').classList.remove('active');
         document.getElementById('tb-pan').classList.add('active');
-        document.getElementById('tb-zoom').classList.remove('active');
-    });
-    document.getElementById('tb-zoom').addEventListener('click', () => {
-        state.controls.enableZoom = true;
-        document.getElementById('tb-zoom').classList.add('active');
     });
     document.getElementById('tb-grid').addEventListener('click', () => {
         state.gridHelper.visible = !state.gridHelper.visible;
@@ -1873,11 +2821,23 @@ function bindEvents() {
     document.getElementById('btn-undo-correspondence').addEventListener('click', undoLastCorrespondence);
     document.getElementById('btn-execute-reg').addEventListener('click', executeRegistration);
     document.getElementById('btn-icp-refine').addEventListener('click', icpRefine);
+    document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
 
-    // 鼠标点击（只处理配准模式）
-    state.renderer.domElement.addEventListener('click', (e) => {
-        if (state.reg.mode) handleRegClick(e);
+    // Dialog 关闭
+    document.getElementById('dialog-close').addEventListener('click', () => {
+        document.getElementById('quality-dialog').classList.remove('show');
     });
+    document.getElementById('dialog-close-btn').addEventListener('click', () => {
+        document.getElementById('quality-dialog').classList.remove('show');
+    });
+    document.getElementById('quality-dialog').addEventListener('click', (e) => {
+        if (e.target === document.getElementById('quality-dialog')) {
+            document.getElementById('quality-dialog').classList.remove('show');
+        }
+    });
+
+    // 鼠标点击：配准模式采点，普通模式选择已检测平面
+    state.renderer.domElement.addEventListener('click', handleSceneClick);
 
     // 键盘
     document.addEventListener('keydown', (e) => {
@@ -1890,7 +2850,11 @@ function bindEvents() {
             case 'f': document.getElementById('tb-fullscreen').click(); break;
             case 'z': if (state.reg.mode) undoLastCorrespondence(); break;
             case 'escape':
+                if (state.selection.mode) toggleSelectionMode();
                 if (state.reg.mode) exitRegMode();
+                if (document.getElementById('quality-dialog').classList.contains('show')) {
+                    document.getElementById('quality-dialog').classList.remove('show');
+                }
                 break;
         }
     });
@@ -1915,9 +2879,7 @@ function animate() {
     }
 }
 
-// ============================================================
 // 启动
-// ============================================================
 initScene();
 </script>
 
