@@ -739,6 +739,13 @@
             <!-- 基本操作 -->
             <div class="sidebar-section">
                 <div class="section-title">🔧 处理操作</div>
+                    <div class="param-group">
+                        <label>去噪方法</label>
+                        <div class="btn-row" id="denoise-method-group">
+                            <button class="btn btn-secondary" data-method="radius">🧹 半径去噪</button>
+                            <button class="btn btn-secondary" data-method="statistical">🧹 滤波去噪</button>
+                        </div>
+                    </div>
                 <button class="btn btn-secondary" id="btn-denoise" disabled>🧹 去噪处理</button>
                 <button class="btn btn-secondary" id="btn-normals" disabled>📐 计算法向量</button>
                 <button class="btn btn-secondary" id="btn-bbox" disabled>📦 显示边界框</button>
@@ -832,7 +839,7 @@
             <button class="toolbar-btn" id="tb-zoom" title="缩放 (Z)">🔍</button>
             <div class="toolbar-divider"></div>
             <button class="toolbar-btn active" id="tb-grid" title="切换网格 (G)">⊞</button>
-            <button class="toolbar-btn active" id="tb-axes" title="切换坐标轴 (A)">📍</button>
+            <button class="toolbar-btn" id="tb-axes" title="切换坐标轴 (A)">📍</button>
             <div class="toolbar-divider"></div>
             <button class="toolbar-btn" id="tb-screenshot" title="截图 (C)">📷</button>
             <button class="toolbar-btn" id="tb-fullscreen" title="全屏 (F)">⛶</button>
@@ -1037,6 +1044,7 @@ function initScene() {
     state.scene.add(state.gridHelper);
     state.axesHelper = new THREE.AxesHelper(50);
     state.scene.add(state.axesHelper);
+    state.axesHelper.visible = false;
 
     saveCameraState();
     bindEvents();
@@ -1067,6 +1075,7 @@ function updateSceneScale() {
     if (state.axesHelper) state.scene.remove(state.axesHelper);
     state.axesHelper = new THREE.AxesHelper(range * 0.1);
     state.scene.add(state.axesHelper);
+    state.axesHelper.visible = false;
     if (state.scene.fog) {
         state.scene.fog.density = 1.0 / (range * 3);
     }
@@ -1375,12 +1384,14 @@ async function denoise() {
     const { uuid, filename } = state.activeCloud;
     const beforeColors = new Float32Array(state.activeCloud.geometry.attributes.color.array);
     const voxelSize = document.getElementById('voxel-size').value;
+    const activeMethodBtn = document.querySelector('#denoise-method-group .btn.active');
+    const method = activeMethodBtn ? activeMethodBtn.dataset.method : 'radius';
     showProgress('去噪中...', 0);
     try {
         const resp = await fetch(`${API_BASE}/denoise`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
+            body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize), method: method, }),
         });
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
@@ -1649,7 +1660,6 @@ async function selectFacade(facadeId) {
     document.querySelectorAll('.facade-item').forEach(el => {
         el.classList.toggle('active', parseInt(el.dataset.facadeId) === facadeId);
     });
-
     state.facade.selectedFacadeId = facadeId;
 
     showProgress('高亮平面...', 50);
@@ -1664,16 +1674,25 @@ async function selectFacade(facadeId) {
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
 
-        // 高亮显示：只更新颜色属性，保持几何不变
-        await loadPointCloud(result, result.filename, result.uuid, {
-            preserveCamera: true,
-            preserveColor: false
-        });
         const cloud = state.pointClouds.get(uuid);
-        if (cloud) {
-            cloud.facadeLabels = result.point_labels || cloud.facadeLabels;
+        if (cloud && result.colors) {
+            const newColors = new Float32Array(result.colors);
+            const currentColors = cloud.geometry.attributes.color.array;
+
+            // 长度校验
+            if (newColors.length === currentColors.length) {
+                currentColors.set(newColors);
+                cloud.geometry.attributes.color.needsUpdate = true;
+                // 同步 data.colors 缓存
+                cloud.data.colors = Array.from(newColors);
+            } else {
+                console.warn('颜色数组长度不匹配，回退到完整加载');
+                await loadPointCloud(result, cloud.filename, uuid, {
+                    preserveCamera: true,
+                    preserveColor: false
+                });
+            }
         }
-        restoreCameraState();
 
         hideProgress();
         showStatus(`已选中平面 #${facadeId + 1}`, 'success');
@@ -1749,7 +1768,6 @@ function renderQualityDialog(quality, facadeId) {
             <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.6;">
                 <strong>数据来源：</strong>当前显示/下采样点云<br>
                 当前总点数：${sourcePointCount.toLocaleString()}，本立面参与评估点数：${selectedPointCount.toLocaleString()}<br>
-                提取耗时：${extractTime}ms，计算耗时：${computeTime}ms
             </div>
         </div>
 
@@ -1828,7 +1846,6 @@ function renderQualityDialog(quality, facadeId) {
            • <strong>垂直度</strong>：法向量与水平面夹角，≤ ${vertLimit}° 为合格，≤ ${(vertLimit*2).toFixed(1)}° 为警告<br>
            • <strong>平整度</strong>：按竖直方向每 ${quality.grid_size}m 分区，在区间内以 ${quality.ruler_size}m×${quality.ruler_size}m 窗口、${(quality.ruler_step * 1000).toFixed(0)}mm 步长滑动<br>
            • <strong>平整度指标</strong>：每个窗口内拟合局部平面，计算局部平面中心到区间基准平面的距离，取最大偏离值<br>
-           • 当前实现基于<strong>显示/下采样点云</strong>计算；若需验收级精度，建议接入原始稠密点云索引回查
         </div>
     `;
 
@@ -2811,6 +2828,22 @@ function bindEvents() {
         if (!document.fullscreenElement) document.documentElement.requestFullscreen();
         else document.exitFullscreen();
     });
+
+    //去噪方法选择
+    const methodGroup = document.getElementById('denoise-method-group');
+    if (methodGroup) {
+        // 默认选中第一个（半径去噪）
+        const firstBtn = methodGroup.querySelector('.btn');
+        if (firstBtn) firstBtn.classList.add('active');
+
+        methodGroup.querySelectorAll('.btn').forEach(btn => {
+            btn.addEventListener('click', function(e) {
+                // 移除同组所有 active
+                methodGroup.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+    }
 
     // 配准
     document.getElementById('btn-set-target').addEventListener('click', setTargetCloud);
