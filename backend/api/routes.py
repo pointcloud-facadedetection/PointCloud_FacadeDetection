@@ -467,39 +467,42 @@ def register_routes(app):
             return jsonify({'error': '请先执行立面检测'}), 400
 
         try:
-            pcd = cache.get_display(uuid_name)
             cache_data = cache.get_facade_cache(uuid_name)
             point_labels = np.asarray(cache_data['point_labels'], dtype=int)
             facades = cache_data.get('facades', [])
             facade_by_id = {f['id']: f for f in facades}
 
-            points = np.asarray(pcd.points)
-            normals = np.asarray(pcd.normals) if pcd.has_normals() else np.zeros_like(points)
+            # 获取基础颜色（
             base_colors = np.asarray(cache_data.get('base_colors', []), dtype=float)
-            if base_colors.shape != points.shape:
-                base_colors = np.asarray(pcd.colors) if pcd.has_colors() else np.ones_like(points) * 0.7
+            if base_colors.shape[0] != len(point_labels):
+                # 回退：从display pcd读取
+                pcd = cache.get_display(uuid_name)
+                base_colors = np.asarray(pcd.colors) if pcd.has_colors() else np.ones((len(point_labels), 3)) * 0.7
 
             type_dim_colors = Config.FACADE_DIM_COLORS
-            highlight_color = np.array(Config.HIGHLIGHT_COLOR)
-            colors = np.zeros_like(base_colors, dtype=float)
+            highlight_color = np.array(Config.HIGHLIGHT_COLOR, dtype=float)
+            colors = base_colors.copy() * 0.22  # 默认：所有点变暗
 
-            for i in range(len(points)):
-                label = point_labels[i] if i < len(point_labels) else -1
-                if label == facade_id:
-                    colors[i] = highlight_color
-                elif label >= 0 and label in facade_by_id:
-                    colors[i] = type_dim_colors.get(facade_by_id[label]['type'], np.array([0.18, 0.18, 0.18]))
-                else:
-                    colors[i] = base_colors[i] * 0.22
+            # 非选中立面：使用类型暗色
+            other_mask = (point_labels >= 0) & (point_labels != facade_id)
+            other_labels = point_labels[other_mask]
+            if len(other_labels) > 0:
+                # 批量映射类型颜色
+                type_colors = np.array([
+                    type_dim_colors.get(facade_by_id.get(lid, {}).get('type'), np.array([0.18, 0.18, 0.18]))
+                    for lid in other_labels
+                ], dtype=float)
+                colors[other_mask] = type_colors
+
+            # 选中立面：高亮色
+            highlight_mask = point_labels == facade_id
+            colors[highlight_mask] = highlight_color
 
             return jsonify({
                 'status': 'ok',
-                'positions': points.astype(np.float32).flatten().tolist(),
                 'colors': colors.astype(np.float32).flatten().tolist(),
-                'normals': normals.astype(np.float32).flatten().tolist(),
-                'point_labels': point_labels.tolist(),
+                'highlighted_facade_id': facade_id,
                 'uuid': uuid_name,
-                'filename': cache.get_meta(uuid_name)['filename']
             })
 
         except Exception as e:

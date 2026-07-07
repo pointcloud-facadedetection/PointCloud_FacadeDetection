@@ -145,6 +145,103 @@ def vertical_deviation_from_normal(normal, measure_height=2.0):
 
     return verticality_deg, deviation_m, deviation_m * 1000.0
 
+def project_to_uv(points, plane_model, facade_type=None):
+    """
+    将3D点投影到平面的局部UV坐标系。
+
+    返回:
+        uv: (N, 2) 数组，u为水平轴，v为竖直轴（立面时v沿Z轴）
+        u_axis, v_axis: 局部坐标轴
+        center: 平面中心（用于反投影）
+    """
+    normal = np.asarray(plane_model[:3], dtype=float)
+    normal = normal / (np.linalg.norm(normal) + 1e-12)
+    center = np.mean(points, axis=0)
+
+    u, v = plane_axes(normal, facade_type)
+
+    # 投影：偏移到中心后点乘u、v轴
+    centered = points - center
+    u_coords = centered @ u
+    v_coords = centered @ v
+
+    return np.column_stack([u_coords, v_coords]), u, v, center
+
+def connected_components_2d_grid(uv_points, grid_size, min_cells=3):
+    """
+    基于网格的2D连通域分析。
+
+    参数:
+        uv_points: (N, 2) 投影坐标
+        grid_size: 网格单元大小（如 voxel_size * 2）
+        min_cells: 最小连通域占用的网格数（过滤噪声）
+
+    返回:
+        list of np.array(bool_mask)，每个连通域一个掩码
+    """
+    if len(uv_points) == 0:
+        return []
+
+    # 1. 坐标归一化到网格索引
+    u_min, v_min = np.min(uv_points, axis=0)
+    u_max, v_max = np.max(uv_points, axis=0)
+
+    # 避免单点或极小范围导致的除零
+    if u_max - u_min < 1e-6 and v_max - v_min < 1e-6:
+        return [np.ones(len(uv_points), dtype=bool)]
+
+    # 网格索引（向下取整）
+    grid_u = np.floor((uv_points[:, 0] - u_min) / grid_size).astype(np.int32)
+    grid_v = np.floor((uv_points[:, 1] - v_min) / grid_size).astype(np.int32)
+
+    # 2. 构建稀疏占用图（用字典记录每个网格中的点索引）
+    grid_to_indices = {}
+    for i, (gu, gv) in enumerate(zip(grid_u, grid_v)):
+        key = (gu, gv)
+        if key not in grid_to_indices:
+            grid_to_indices[key] = []
+        grid_to_indices[key].append(i)
+
+    if not grid_to_indices:
+        return []
+
+    # 3. 四连通BFS/DFS找连通域
+    visited = set()
+    components = []
+
+    for key in grid_to_indices:
+        if key in visited:
+            continue
+
+        # BFS
+        queue = [key]
+        visited.add(key)
+        cell_cluster = [key]
+
+        while queue:
+            cu, cv = queue.pop(0)
+            # 四邻域
+            for du, dv in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nb = (cu + du, cv + dv)
+                if nb in grid_to_indices and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+                    cell_cluster.append(nb)
+
+        # 过滤小连通域
+        if len(cell_cluster) < min_cells:
+            continue
+
+        # 收集该连通域包含的所有原始点
+        point_mask = np.zeros(len(uv_points), dtype=bool)
+        for cell in cell_cluster:
+            for idx in grid_to_indices[cell]:
+                point_mask[idx] = True
+
+        components.append(point_mask)
+
+    return components
+
 def compute_registration_error(src_pcd, tgt_pcd, transformation, threshold=1.0):
     """计算配准后的RMSE和重叠率"""
     import copy
