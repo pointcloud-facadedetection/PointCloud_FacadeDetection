@@ -46,7 +46,7 @@ PointCloud_FacadeDetection/
 │
 ├── algorithms/                     # 【算法层】— liying / ruiqi / tiexin
 │
-├── services/                       # 【业务编排层】— ruiqi / haolin
+├── services/                       # 【业务编排层】— haolin
 │   └── ...                         # 流程编排（示意）
 │
 ├── utils/                          # 【工具】
@@ -70,7 +70,7 @@ services/ 负责流程编排，代码模式固定为四步：**取数据 → 调
 | `db/` | haolin | 数据库连接、会话管理、Alembic 迁移 |
 | `models/` | haolin | SQLAlchemy ORM 表定义 |
 | `algorithms/` | liying / ruiqi / tiexin | 纯算法实现（检测、分割、配准、质量评估） |
-| `services/` | ruiqi / haolin | 业务编排，串联上述模块完成用户操作流程 |
+| `services/` | haolin | 业务编排，串联上述模块完成用户操作流程 |
 | `config/` | 共享 | 全局常量 |
 | `utils/` | 共享 | 文件转换等工具 |
 
