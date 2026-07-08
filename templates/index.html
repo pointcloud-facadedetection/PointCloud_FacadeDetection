@@ -804,8 +804,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- 后端 API ----------
-const API_BASE = 'http://localhost:5000';
+// ---------- 后端 API（同源，页面由 Flask 提供） ----------
+const API_BASE = '';
 
 // ---------- 配置 ----------
 const CONFIG = {
@@ -885,6 +885,46 @@ function convertZupToYupNormals(normals) {
         out[i*3+2] = -ny;
     }
     return out;
+}
+
+// ============================================================
+// 二进制点云协议
+// 布局（小端）: [uint32 头长度][JSON头(4字节对齐)]
+//              [positions f32][normals f32(可选)][colors u8]
+// ============================================================
+function parseBinaryCloud(buffer) {
+    const headerLen = new DataView(buffer).getUint32(0, true);
+    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, headerLen)));
+    const n = meta.point_count;
+    let offset = 4 + headerLen;
+
+    const positions = new Float32Array(buffer, offset, n * 3);
+    offset += n * 12;
+
+    let normals;
+    if (meta.has_normals) {
+        normals = new Float32Array(buffer, offset, n * 3);
+        offset += n * 12;
+    } else {
+        normals = new Float32Array(n * 3);
+    }
+
+    const colorsU8 = new Uint8Array(buffer, offset, n * 3);
+    const colors = new Float32Array(n * 3);
+    for (let i = 0; i < n * 3; i++) colors[i] = colorsU8[i] / 255;
+
+    return { meta, positions, colors, normals };
+}
+
+async function fetchCloud(url, options) {
+    const resp = await fetch(url, options);
+    const contentType = resp.headers.get('Content-Type') || '';
+    if (contentType.includes('application/json')) {
+        const result = await resp.json();
+        throw new Error(result.error || `请求失败 (${resp.status})`);
+    }
+    if (!resp.ok) throw new Error(`请求失败 (${resp.status})`);
+    return parseBinaryCloud(await resp.arrayBuffer());
 }
 
 // ============================================================
@@ -968,7 +1008,7 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
 
     const posY = convertZupToYup(positions);
     const normY = convertZupToYupNormals(normals);
-    const col = new Float32Array(colors);
+    const col = colors instanceof Float32Array ? colors : new Float32Array(colors);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(posY, 3));
@@ -992,11 +1032,6 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
         mesh.material.size = adaptiveSize * state.pointSizeScale;
         // 更新数据
         cloudEntry.geometry = geometry;
-        cloudEntry.data = {
-            positions: Array.from(posY),
-            colors: Array.from(col),
-            normals: Array.from(normY),
-        };
         cloudEntry.pointCount = pointCount;
         cloudEntry.center = center;
         cloudEntry.bbox = bbox;
@@ -1024,11 +1059,6 @@ async function loadPointCloud(data, filename, uuid, updateOnly = false) {
     cloudEntry = {
         mesh,
         geometry,
-        data: {
-            positions: Array.from(posY),
-            colors: Array.from(col),
-            normals: Array.from(normY),
-        },
         filename,
         uuid,
         originalColors: new Float32Array(col),
@@ -1104,33 +1134,27 @@ function focusOnCloud(uuid) {
 async function uploadFiles(files) {
     const voxelSize = document.getElementById('voxel-size').value;
     showProgress('上传处理中...', 0);
-    const formData = new FormData();
-    for (const file of files) formData.append('files', file);
-    formData.append('voxel_size', voxelSize);
-    try {
-        const resp = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
-        const results = await resp.json();
-        updateProgress(50);
-        let successCount = 0;
-        for (let i = 0; i < results.length; i++) {
-            const result = results[i];
-            if (result.error) {
-                showStatus(`文件 ${result.filename} 失败: ${result.error}`, 'error');
-                continue;
-            }
-            await loadPointCloud(result, result.filename, result.uuid);
-            addFileToList(result.filename, result.uuid, result.positions.length / 3);
+    const fileArr = Array.from(files);
+    let successCount = 0;
+    for (let i = 0; i < fileArr.length; i++) {
+        const file = fileArr[i];
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('voxel_size', voxelSize);
+            const parsed = await fetchCloud(`${API_BASE}/upload`, { method: 'POST', body: formData });
+            await loadPointCloud(parsed, parsed.meta.filename, parsed.meta.uuid);
+            addFileToList(parsed.meta.filename, parsed.meta.uuid, parsed.meta.point_count);
             successCount++;
-            updateProgress(50 + ((i+1)/results.length)*50);
+        } catch (err) {
+            showStatus(`文件 ${file.name} 失败: ${err.message}`, 'error');
         }
-        hideProgress();
-        showStatus(`成功加载 ${successCount} 个文件`, 'success');
-        // 恢复视角
-        restoreCameraState();
-    } catch (err) {
-        hideProgress();
-        showStatus(`上传失败: ${err.message}`, 'error');
+        updateProgress(((i + 1) / fileArr.length) * 100);
     }
+    hideProgress();
+    if (successCount > 0) showStatus(`成功加载 ${successCount} 个文件`, 'success');
+    // 恢复视角
+    restoreCameraState();
 }
 
 function addFileToList(filename, uuid, pointCount) {
@@ -1204,15 +1228,13 @@ async function denoise() {
     const voxelSize = document.getElementById('voxel-size').value;
     showProgress('去噪中...', 0);
     try {
-        const resp = await fetch(`${API_BASE}/denoise`, {
+        const parsed = await fetchCloud(`${API_BASE}/denoise`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
         });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error);
         // 更新现有点云
-        await loadPointCloud(result, filename, result.uuid);
+        await loadPointCloud(parsed, filename, parsed.meta.uuid);
         showStatus('去噪完成', 'success');
     } catch (err) {
         showStatus(`去噪失败: ${err.message}`, 'error');
@@ -1225,17 +1247,13 @@ async function computeNormals() {
     const voxelSize = document.getElementById('voxel-size').value;
     showProgress('计算法向量...', 0);
     try {
-        const resp = await fetch(`${API_BASE}/compute_normals`, {
+        const parsed = await fetchCloud(`${API_BASE}/compute_normals`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ uuid, voxel_size: parseFloat(voxelSize) }),
         });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error);
-        const normY = convertZupToYupNormals(result.normals);
-        const cloud = state.pointClouds.get(uuid);
-        cloud.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normY), 3));
-        cloud.data.normals = Array.from(normY);
+        // 后端会重新下采样，点数可能变化，因此整体重载几何而非只替换法向量
+        await loadPointCloud(parsed, parsed.meta.filename, uuid);
         if (state.showNormals) {
             hideNormals();
             showNormals();
@@ -1592,7 +1610,7 @@ async function executeRegistration() {
     showProgress('粗配准 (SVD)...', 0);
     try {
         await addCorrespondence();
-        const resp = await fetch(`${API_BASE}/apply_registration`, {
+        const parsed = await fetchCloud(`${API_BASE}/apply_registration`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1600,11 +1618,10 @@ async function executeRegistration() {
                 tgt_uuid: state.reg.targetUUID,
             }),
         });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error);
+        const result = parsed.meta;
         state.reg.lastTransform = result.transformation;
 
-        await loadPointCloud(result, result.filename, result.uuid);
+        await loadPointCloud(parsed, result.filename, result.uuid);
         state.reg.sourceUUID = result.uuid;
 
         hideProgress();
@@ -1630,7 +1647,7 @@ async function icpRefine() {
     }
     showProgress('ICP 精配准中...', 0);
     try {
-        const resp = await fetch(`${API_BASE}/icp_refine`, {
+        const parsed = await fetchCloud(`${API_BASE}/icp_refine`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1640,10 +1657,9 @@ async function icpRefine() {
                 voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
             }),
         });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error);
+        const result = parsed.meta;
 
-        await loadPointCloud(result, result.filename, result.uuid);
+        await loadPointCloud(parsed, result.filename, result.uuid);
         state.reg.sourceUUID = result.uuid;
         state.reg.lastTransform = result.transformation;
 
