@@ -1,8 +1,10 @@
 import os
 import copy
+import json
+import struct
 import numpy as np
 import open3d as o3d
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 from flask_cors import CORS
 import uuid
 
@@ -30,16 +32,41 @@ def process_ply(filepath, voxel_size):
     return pcd
 
 
-def pcd_to_json(pcd):
-    """将Open3D点云转换为JSON格式（Z-up坐标系）"""
-    points = np.asarray(pcd.points, dtype=np.float32)
-    colors = np.asarray(pcd.colors, dtype=np.float32) if pcd.has_colors() else np.ones_like(points) * 0.7
-    normals = np.asarray(pcd.normals, dtype=np.float32) if pcd.has_normals() else np.zeros_like(points)
-    return {
-        'positions': points.flatten().tolist(),
-        'colors': colors.flatten().tolist(),
-        'normals': normals.flatten().tolist()
-    }
+def pcd_to_binary(pcd, **meta):
+    """
+    将Open3D点云序列化为二进制响应（Z-up坐标系）。
+
+    布局（小端）:
+        [uint32 头长度][JSON头，空格补齐到4字节对齐]
+        [positions: N*3 float32]
+        [normals: N*3 float32]（仅当 has_normals 时存在）
+        [colors: N*3 uint8]
+    JSON头包含 point_count / has_normals 以及调用方传入的元数据
+    （uuid、filename、transformation、rmse 等）。
+    """
+    points = np.ascontiguousarray(np.asarray(pcd.points), dtype=np.float32)
+    n = len(points)
+    has_normals = pcd.has_normals()
+
+    if pcd.has_colors():
+        colors = (np.asarray(pcd.colors) * 255).clip(0, 255).astype(np.uint8)
+    else:
+        colors = np.full((n, 3), 178, dtype=np.uint8)  # 默认灰色 0.7
+
+    header = {'point_count': n, 'has_normals': bool(has_normals)}
+    header.update(meta)
+    header_bytes = json.dumps(header).encode('utf-8')
+    # 补齐到4字节对齐，前端可直接在buffer上建立Float32Array视图
+    pad = (-len(header_bytes)) % 4
+    header_bytes += b' ' * pad
+
+    parts = [struct.pack('<I', len(header_bytes)), header_bytes, points.tobytes()]
+    if has_normals:
+        normals = np.ascontiguousarray(np.asarray(pcd.normals), dtype=np.float32)
+        parts.append(normals.tobytes())
+    parts.append(np.ascontiguousarray(colors).tobytes())
+
+    return Response(b''.join(parts), mimetype='application/octet-stream')
 
 
 # ---------- 坐标转换 ----------
@@ -103,31 +130,26 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    """支持多文件上传"""
-    files = request.files.getlist('files')
+    """单文件上传，返回二进制点云（前端逐个文件请求）"""
+    file = request.files.get('file')
+    if file is None:
+        return jsonify({'error': '缺少文件'}), 400
+    if not file.filename.lower().endswith('.ply'):
+        return jsonify({'error': '仅支持PLY文件', 'filename': file.filename}), 400
+
     voxel_size = float(request.form.get('voxel_size', 0.05))
-    results = []
+    unique_name = f"{uuid.uuid4().hex}_{file.filename}"
+    filepath = os.path.join(UPLOAD_FOLDER, unique_name)
+    file.save(filepath)
 
-    for file in files:
-        if not file.filename.lower().endswith('.ply'):
-            continue
-        unique_name = f"{uuid.uuid4().hex}_{file.filename}"
-        filepath = os.path.join(UPLOAD_FOLDER, unique_name)
-        file.save(filepath)
-
-        try:
-            pcd = process_ply(filepath, voxel_size)
-            ORIGINAL_DOWNSAMPLED[unique_name] = copy.deepcopy(pcd)
-            CACHED_CLOUDS[unique_name] = pcd
-            CLOUD_META[unique_name] = {'filename': file.filename}
-            data = pcd_to_json(pcd)
-            data['filename'] = file.filename
-            data['uuid'] = unique_name
-            results.append(data)
-        except Exception as e:
-            results.append({'error': str(e), 'filename': file.filename})
-
-    return jsonify(results)
+    try:
+        pcd = process_ply(filepath, voxel_size)
+        ORIGINAL_DOWNSAMPLED[unique_name] = copy.deepcopy(pcd)
+        CACHED_CLOUDS[unique_name] = pcd
+        CLOUD_META[unique_name] = {'filename': file.filename}
+        return pcd_to_binary(pcd, uuid=unique_name, filename=file.filename)
+    except Exception as e:
+        return jsonify({'error': str(e), 'filename': file.filename}), 500
 
 
 @app.route('/denoise', methods=['POST'])
@@ -166,10 +188,8 @@ def denoise():
         # 3. 更新缓存
         ORIGINAL_DOWNSAMPLED[uuid_name] = copy.deepcopy(pcd_clean)
         CACHED_CLOUDS[uuid_name] = pcd_clean
-        data = pcd_to_json(pcd_clean)
-        data['uuid'] = uuid_name
-        data['filename'] = CLOUD_META[uuid_name]['filename']
-        return jsonify(data)
+        return pcd_to_binary(pcd_clean, uuid=uuid_name,
+                             filename=CLOUD_META[uuid_name]['filename'])
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -199,9 +219,8 @@ def compute_normals():
         # 更新缓存
         CACHED_CLOUDS[uuid_name] = pcd_work
 
-        data = pcd_to_json(pcd_work)
-        data['uuid'] = uuid_name
-        return jsonify(data)
+        return pcd_to_binary(pcd_work, uuid=uuid_name,
+                             filename=CLOUD_META[uuid_name]['filename'])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -331,18 +350,18 @@ def apply_registration():
     tgt_pcd = CACHED_CLOUDS[tgt_uuid]
     error_info = compute_registration_error(src_original, tgt_pcd, transform, threshold=1.0)
 
-    data = pcd_to_json(src_pcd)
-    data['uuid'] = src_uuid
-    data['filename'] = CLOUD_META[src_uuid]['filename']
-    data['transformation'] = transform.tolist()
-    data['rmse'] = error_info['rmse']
-    data['overlap_ratio'] = error_info['overlap_ratio']
-
     # 清空已使用的配准点对
     if src_uuid in REG_PAIRS and tgt_uuid in REG_PAIRS[src_uuid]:
         del REG_PAIRS[src_uuid][tgt_uuid]
 
-    return jsonify(data)
+    return pcd_to_binary(
+        src_pcd,
+        uuid=src_uuid,
+        filename=CLOUD_META[src_uuid]['filename'],
+        transformation=transform.tolist(),
+        rmse=error_info['rmse'],
+        overlap_ratio=error_info['overlap_ratio'],
+    )
 
 
 # ---------- ICP 精配准（多尺度 + 自适应阈值） ----------
@@ -442,16 +461,16 @@ def icp_refine():
             src_original, tgt_pcd, final_transform, threshold=voxel_size * 5
         )
 
-        data = pcd_to_json(src_transformed)
-        data['uuid'] = src_uuid
-        data['filename'] = CLOUD_META[src_uuid]['filename']
-        data['transformation'] = final_transform.tolist()
-        data['fitness'] = float(reg_fine.fitness)
-        data['inlier_rmse'] = float(reg_fine.inlier_rmse)
-        data['rmse'] = error_info['rmse']
-        data['overlap_ratio'] = error_info['overlap_ratio']
-
-        return jsonify(data)
+        return pcd_to_binary(
+            src_transformed,
+            uuid=src_uuid,
+            filename=CLOUD_META[src_uuid]['filename'],
+            transformation=np.asarray(final_transform).tolist(),
+            fitness=float(reg_fine.fitness),
+            inlier_rmse=float(reg_fine.inlier_rmse),
+            rmse=error_info['rmse'],
+            overlap_ratio=error_info['overlap_ratio'],
+        )
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -482,15 +501,19 @@ def merge_clouds():
 
     merged = pcd1 + pcd2
 
-    data = pcd_to_json(merged)
     new_uuid = f"merged_{uuid.uuid4().hex[:8]}"
     CACHED_CLOUDS[new_uuid] = merged
     CLOUD_META[new_uuid] = {'filename': f'merged_{CLOUD_META[uuid1]["filename"]}_{CLOUD_META[uuid2]["filename"]}'}
 
-    data['uuid'] = new_uuid
-    data['filename'] = CLOUD_META[new_uuid]['filename']
+    # 默认只返回元数据（前端保存流程不需要点云数据本身）
+    if body.get('return_data', False):
+        return pcd_to_binary(merged, uuid=new_uuid, filename=CLOUD_META[new_uuid]['filename'])
 
-    return jsonify(data)
+    return jsonify({
+        'uuid': new_uuid,
+        'filename': CLOUD_META[new_uuid]['filename'],
+        'point_count': len(merged.points),
+    })
 
 
 # ---------- 新增：保存配准结果 ----------
@@ -521,4 +544,4 @@ def download_file(filename):
         return jsonify({'error': '文件不存在'}), 404
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
