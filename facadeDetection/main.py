@@ -1,15 +1,21 @@
 import sys
 from PySide6.QtWidgets import QApplication
 
-from ui.main_window import MainWindow
+try:
+    from .ui.main_window import MainWindow
+except ImportError:
+    from ui.main_window import MainWindow
 
 
-def main():
+def main() -> int:
     app = QApplication(sys.argv)
+    app.setApplicationName('PointCloud FacadeDetection')
+    app.setOrganizationName('pointcloud-facadedetection')
+    app.setStyle('Fusion')
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
