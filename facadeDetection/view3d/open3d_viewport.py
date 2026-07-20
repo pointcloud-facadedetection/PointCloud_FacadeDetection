@@ -1,5 +1,3 @@
-import uuid
-
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt
 from PySide6.QtGui import QImage, QWindow
@@ -8,7 +6,10 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from .base_viewport import BaseViewport
 
 from .camera import CameraController
-from .geometry_factory import make_bbox, make_normals, make_pair_lines, make_sphere
+from .geometry_factory import (
+    make_bbox, make_grid_lines,
+    make_normals, make_pair_lines, make_sphere,
+)
 from .interaction import ViewportInteractor
 from .open3d_adapter import Open3DAdapter
 from .scene import PointCloudScene
@@ -42,9 +43,6 @@ class Open3DViewport(BaseViewport):
     """
     Open3D legacy Visualizer embedded in Qt.
 
-    The widget remains the public API used by facade.ui.main_window, while
-    rendering, LOD, camera, interaction and geometry helpers are split into
-    focused modules under facade.ui.render.
     """
 
     def __init__(self, parent=None):
@@ -64,9 +62,12 @@ class Open3DViewport(BaseViewport):
         self._event_bridge = None
         self._render_paused = False
         self._updating_geometry = False
-        self._window_title = f"Open3DQtRenderer_{uuid.uuid4().hex}"
+        self._window_title = f"PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
+        self._init_success = False
+        self._grid_visible = True
+        self._default_elements_added = False
 
         self.native = self
         self.app = _Open3DAppProxy(self)
@@ -153,21 +154,73 @@ class Open3DViewport(BaseViewport):
 
             self._camera.viewport_widget = self._container
             self._adapter.configure_render_options()
+
+            # 标记初始化成功后再添加场景元素
+            self._init_success = True
+
+            # 添加默认场景元素：只保留网格
+            self._add_default_scene_elements()
+
+            # 设置初始相机视角
+            self._setup_initial_camera()
+
         except Exception as exc:
-            self._fallback_label = QLabel(
-                "Open3D render initialization failed.\n"
-                "Please check GPU driver/OpenGL availability and native window embedding.\n\n"
-                f"{type(exc).__name__}: {exc}"
-            )
+            import traceback
+            error_msg = f"Open3D render initialization failed.\\n\\n{type(exc).__name__}: {exc}\\n\\n{traceback.format_exc()}"
+            self._fallback_label = QLabel(error_msg)
             self._fallback_label.setAlignment(Qt.AlignCenter)
             self._fallback_label.setStyleSheet(
-                "background:#0a0a1a;color:#f56565;font-size:14px;padding:24px;"
+                "background:#0a0a1a;color:#f56565;font-size:12px;padding:24px;"
             )
             layout.addWidget(self._fallback_label)
             self._adapter.destroy()
+            self._init_success = False
+
+    def _add_default_scene_elements(self):
+        """添加默认场景元素：只保留网格。"""
+        if not self._init_success or self._adapter.vis is None:
+            print("[Open3DViewport] Cannot add default elements: init not ready")
+            return
+
+        if self._default_elements_added:
+            return
+
+        # 添加地面网格 (10x10, 步长1.0) - 使用更亮的颜色确保可见
+        grid = make_grid_lines(size=10.0, step=1.0, plane='xz', color=(0.6, 0.6, 0.65))
+        self._adapter.add_geometry("__grid_lines", grid, reset_bounding_box=True)
+
+        # 强制刷新一次，确保几何体被渲染
+        self._adapter.poll()
+
+        self._default_elements_added = True
+        print("[Open3DViewport] Default grid added successfully")
+
+    def _setup_initial_camera(self):
+        """设置初始相机视角，看向原点，距离适中。"""
+        try:
+            ctr = self._adapter.get_view_control()
+            if ctr is None:
+                print("[Open3DViewport] Camera control is None")
+                return
+
+            # 使用归一化的 front 向量
+            front = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
+            front = front / np.linalg.norm(front)
+
+            # 设置相机：从远处看向原点
+            ctr.set_lookat(np.array([0.0, 0.0, 0.0], dtype=np.float64))
+            ctr.set_front(front)
+            ctr.set_up(np.array([0.0, 1.0, 0.0], dtype=np.float64))
+
+            # 使用 set_zoom 调整距离
+            ctr.set_zoom(0.6)
+
+            print("[Open3DViewport] Initial camera setup done")
+        except Exception as e:
+            print(f"[Open3DViewport] Camera setup failed: {e}")
 
     def process_events(self):
-        if self._render_paused or self._updating_geometry:
+        if not self._init_success or self._render_paused or self._updating_geometry:
             return
         try:
             self._adapter.poll()
@@ -178,6 +231,9 @@ class Open3DViewport(BaseViewport):
         self.destroy()
 
     def destroy(self):
+        self._init_success = False
+        if hasattr(self, '_timer') and self._timer is not None:
+            self._timer.stop()
         self._adapter.destroy()
 
     def get_widget(self):
@@ -216,6 +272,9 @@ class Open3DViewport(BaseViewport):
     def clear(self):
         self.clear_pick_markers()
         self._scene.clear()
+        # 清除后重新添加默认场景元素（只保留网格）
+        self._default_elements_added = False
+        self._add_default_scene_elements()
 
     def set_point_size(self, name, size):
         self._scene.set_point_size(name, size)
@@ -258,6 +317,9 @@ class Open3DViewport(BaseViewport):
     def auto_range(self):
         if self._scene.point_data:
             self._camera.auto_range()
+        else:
+            # 没有点云时，确保看向原点
+            self._setup_initial_camera()
 
     def reset_view(self):
         self.auto_range()
@@ -328,7 +390,3 @@ class Open3DViewport(BaseViewport):
             return 0.2
         max_dim = float(np.max(np.vstack(extents)))
         return max(max_dim * 0.005, 0.05)
-
-
-# Backward-compatible name used by facade.ui.main_window.
-Open3DPointCloudWidget = Open3DViewport
