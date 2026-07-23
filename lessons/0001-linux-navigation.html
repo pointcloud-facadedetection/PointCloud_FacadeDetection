@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第一课：在 Linux 中知道自己在哪</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main class="page">
+  <header>
+    <div class="eyebrow">Lesson 0001 · 约 8 分钟</div>
+    <h1>知道自己在哪，才能安全地动手</h1>
+    <p class="lead">这一课只练一个能力：读懂路径，并在 Ubuntu 目录与 Windows 文件之间安全移动。</p>
+  </header>
+
+  <div class="callout">
+    <strong>完成标准：</strong>你能不看答案回到家目录、显示隐藏文件，并解释常见路径符号。
+  </div>
+
+  <h2>1. 打开终端，先问三个问题</h2>
+  <div class="step">
+    <div class="step-number">STEP 01</div>
+    <h3>我是谁？我在哪？这里有什么？</h3>
+    <pre>whoami
+pwd
+ls</pre>
+    <p>本机预期看到用户 <code>ubuntu</code>，家目录是 <code>/home/ubuntu</code>。终端只处理你输入的命令，不会自动替你猜目标路径。</p>
+  </div>
+
+  <h2>2. 在安全练习区操作</h2>
+  <div class="step">
+    <div class="step-number">STEP 02</div>
+    <h3>创建目录并进入</h3>
+    <pre>mkdir -p ~/linux-practice/docs
+cd ~/linux-practice
+pwd</pre>
+    <p><code>~</code> 代表 <code>/home/ubuntu</code>；因此最后一行应输出 <code>/home/ubuntu/linux-practice</code>。</p>
+  </div>
+
+  <div class="step">
+    <div class="step-number">STEP 03</div>
+    <h3>创建、复制、改名</h3>
+    <pre>touch docs/first-note.txt
+cp docs/first-note.txt docs/note-copy.txt
+mv docs/note-copy.txt docs/renamed.txt
+ls -la docs</pre>
+    <p>你应看到 <code>first-note.txt</code> 和 <code>renamed.txt</code>。这里没有删除操作，失败时可直接重来。</p>
+  </div>
+
+  <h2>3. 绝对路径与相对路径</h2>
+  <div class="step">
+    <div class="step-number">STEP 04</div>
+    <h3>用 . 和 .. 在目录之间移动</h3>
+    <pre>cd ~/linux-practice/docs
+pwd
+cd ..
+pwd
+cd ./docs
+pwd</pre>
+    <p><code>..</code> 表示上一级，<code>.</code> 表示当前目录。以 <code>/</code> 开头的是绝对路径；其他写法通常是相对路径。</p>
+  </div>
+
+  <h2>4. 从 Linux 查看 Windows 文件</h2>
+  <div class="step">
+    <div class="step-number">STEP 05</div>
+    <h3>Windows C 盘在 Linux 中位于 /mnt/c</h3>
+    <pre>cd /mnt/c/Users/12924/Desktop
+pwd
+ls
+cd ~</pre>
+    <p>最后一条命令会让你回到 Linux 家目录。这里只查看 Windows 桌面，不修改其中的文件。</p>
+  </div>
+
+  <h2>5. 闭卷自测</h2>
+  <p>先在终端作答，再展开答案。不要边看边抄。</p>
+  <details><summary>任务 A：不管当前在哪，一条命令回到家目录</summary><pre>cd ~</pre></details>
+  <details><summary>任务 B：列出当前目录，包含隐藏项并显示易读大小</summary><pre>ls -lah</pre></details>
+  <details><summary>任务 C：进入练习区的 docs，再用一个命令回到上一级</summary><pre>cd ~/linux-practice/docs
+cd ..</pre></details>
+
+  <h2>今天要记住的路径符号</h2>
+  <table>
+    <thead><tr><th>符号</th><th>含义</th><th>例子</th></tr></thead>
+    <tbody>
+      <tr><td><code>/</code></td><td>根目录</td><td>Linux 目录树最顶层</td></tr>
+      <tr><td><code>~</code></td><td>家目录</td><td>本机是 <code>/home/ubuntu</code></td></tr>
+      <tr><td><code>.</code></td><td>当前目录</td><td><code>./docs</code></td></tr>
+      <tr><td><code>..</code></td><td>上一级目录</td><td><code>cd ..</code></td></tr>
+      <tr><td><code>/mnt/c</code></td><td>Windows C 盘</td><td><code>/mnt/c/Users</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <a class="button" href="../reference/linux-command-cheatsheet.html">打开命令速查表</a>
+    <a class="button" href="https://documentation.ubuntu.com/desktop/en/latest/tutorial/the-linux-command-line-for-beginners/">Ubuntu 官方教程</a>
+  </div>
+
+  <div class="callout warning">
+    <strong>安全习惯：</strong>以后学习删除命令前，先执行 <code>pwd</code> 和 <code>ls</code> 确认位置。现在不要尝试 <code>sudo rm</code> 或 <code>rm -rf</code>。
+  </div>
+
+  <footer>
+    下一课：创建、复制、移动与安全删除文件。完成自测后，把你输入的命令或遇到的报错发给我，我会按结果调整难度。参考：<a href="https://learn.microsoft.com/en-us/windows/wsl/filesystems">Microsoft WSL 文件系统指南</a>。
+  </footer>
+</main>
+</body>
+</html>

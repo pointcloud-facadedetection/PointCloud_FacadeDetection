@@ -1,273 +1,133 @@
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtWidgets import (
-    QDockWidget,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QPushButton,
-    QToolButton,
-    QWidget,
-)
+"""Main application shell for the first-version UI prototype."""
 
-from .widgets.flow_layout import FlowLayout
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QVBoxLayout, QWidget
+
 from services.button_service import ButtonService
-from view3d.open3d_viewport import Open3DViewport
-
-
-HEADER_ACTIONS = (
-    ('上传文件', 'upload_file'),
-    ('点云去噪', 'point_cloud_denoise'),
-    ('立面检测', 'facade_detection'),
-)
+from ui.dialogs.new_project_dialog import NewProjectDialog
+from ui.pages.home_page import HomePage
+from ui.pages.report_page import ReportPage
+from ui.pages.workbench_page import WorkbenchPage
+from ui.styles import APP_STYLESHEET
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle('PointCloud FacadeDetection')
-        self.resize(1600, 900)
-        self.viewport = Open3DViewport()
+    """Own the Home → Workbench → Report navigation and placeholder services."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('mainWindow')
+        self.setWindowTitle('外立面激光检测工作台')
+        self.setMinimumSize(1180, 760)
+        self.resize(1500, 920)
         self.button_service = ButtonService()
-        self.header_buttons = {}
-        self._header_resize_pending = False
+        self.new_project_dialog = None
+        self.current_project_id = None
         self._setup_ui()
-        self._connect_buttons()
+        self._connect_pages()
+        self.show_home()
 
     def _setup_ui(self):
-        # 中央区域来自 view3d，后续真实 Open3D 渲染接入时无需改主窗口布局。
-        self.setCentralWidget(self.viewport.get_widget())
+        root = QWidget()
+        root.setObjectName('appRoot')
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.setDockNestingEnabled(False)
-        self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.TopDockWidgetArea)
-        self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.TopDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName('mainPageStack')
+        self.home_page = HomePage()
+        self.workbench_page = WorkbenchPage()
+        self.report_page = ReportPage()
+        self.page_stack.addWidget(self.home_page)
+        self.page_stack.addWidget(self.workbench_page)
+        self.page_stack.addWidget(self.report_page)
+        layout.addWidget(self.page_stack)
+        self.setCentralWidget(root)
+        self.setStyleSheet(APP_STYLESHEET)
 
-        (
-            self.left_dock,
-            self.left_sidebar_button,
-        ) = self._create_sidebar(
-            'Left Sidebar', 'leftDock', 'left', Qt.DockWidgetArea.LeftDockWidgetArea
-        )
-        (
-            self.right_dock,
-            self.right_sidebar_button,
-        ) = self._create_sidebar(
-            'Right Sidebar', 'rightDock', 'right', Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
-        self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
-        self.centralWidget().installEventFilter(self)
-        self.header_dock = self._create_header()
-        self.bottom_dock = self._create_bottom()
+    def _connect_pages(self):
+        self.home_page.new_project_requested.connect(self.open_new_project)
+        self.home_page.enter_project_requested.connect(self.open_project)
+        self.home_page.report_requested.connect(self.open_project_report)
+        self.home_page.action_requested.connect(self.button_service.trigger)
 
-        self.resizeDocks(
-            [self.left_dock, self.right_dock],
-            [210, 210],
-            Qt.Orientation.Horizontal,
-        )
-        self.resizeDocks(
-            [self.bottom_dock],
-            [80],
-            Qt.Orientation.Vertical,
-        )
+        self.workbench_page.back_requested.connect(self.show_home)
+        self.workbench_page.report_requested.connect(self.show_report)
+        self.workbench_page.action_requested.connect(self.button_service.trigger)
 
-    def _create_header(self):
-        dock = QDockWidget('Header', self)
-        dock.setObjectName('headerDock')
-        dock.setAllowedAreas(Qt.DockWidgetArea.TopDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.report_page.back_requested.connect(self.show_workbench)
+        self.report_page.action_requested.connect(self.button_service.trigger)
 
-        panel = QWidget()
-        panel.setObjectName('headerPanel')
-        self.header_panel = panel
-        panel.installEventFilter(self)
-        self.header_layout = FlowLayout(
-            panel,
-            margin=10,
-            horizontal_spacing=8,
-            vertical_spacing=8,
-        )
+    @property
+    def current_page_name(self) -> str:
+        current = self.page_stack.currentWidget()
+        if current is self.home_page:
+            return 'home'
+        if current is self.workbench_page:
+            return 'workbench'
+        return 'report'
 
-        for label, action_name in HEADER_ACTIONS:
-            button = QPushButton(label)
-            button.setObjectName(action_name)
-            button.setMinimumSize(120, 34)
-            self.header_buttons[action_name] = button
-            self.header_layout.addWidget(button)
+    def show_home(self):
+        self.page_stack.setCurrentWidget(self.home_page)
 
-        dock.setWidget(panel)
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, dock)
-        QTimer.singleShot(0, self._resize_header_to_contents)
-        return dock
+    def show_workbench(self):
+        self.page_stack.setCurrentWidget(self.workbench_page)
 
-    def _create_sidebar(self, title, object_name, side, area):
-        dock = QDockWidget(title, self)
-        dock.setObjectName(object_name)
-        dock.setAllowedAreas(area)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+    def show_report(self):
+        self.page_stack.setCurrentWidget(self.report_page)
 
-        title_bar = QWidget()
-        title_bar.setObjectName(f'{object_name}TitleBar')
-        title_bar.setStyleSheet(
-            f'QWidget#{object_name}TitleBar {{ background-color: #d9d9d9; }}'
-        )
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(6, 4, 6, 4)
-
-        title_label = QLabel(title)
-        title_label.setObjectName(f'{object_name}TitleLabel')
-        title_layout.addWidget(title_label)
-
-        toggle_button = QToolButton()
-        toggle_button.setObjectName(f'toggle_{side}_sidebar')
-        toggle_button.setText('◀' if side == 'left' else '▶')
-        label = '左侧栏' if side == 'left' else '右侧栏'
-        toggle_button.setToolTip(f'收起{label}')
-        toggle_button.setAccessibleName(f'收起{label}')
-        toggle_button.setFixedSize(28, 28)
-        toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        title_layout.addWidget(
-            toggle_button,
-            alignment=Qt.AlignmentFlag.AlignVCenter,
-        )
-        title_layout.addStretch(1)
-        dock.setTitleBarWidget(title_bar)
-
-        panel = QWidget()
-        panel.setObjectName(f'{object_name}Panel')
-        dock.setWidget(panel)
-        dock.setMinimumWidth(180)
-        dock.setMaximumWidth(260)
-        dock.setProperty('expandedWidth', 210)
-        self.addDockWidget(area, dock)
-        return dock, toggle_button
-
-    def _create_sidebar_expand_button(self, side):
-        button = QToolButton(self.centralWidget())
-        button.setObjectName(f'expand_{side}_sidebar')
-        button.setText('▶' if side == 'left' else '◀')
-        label = '左侧栏' if side == 'left' else '右侧栏'
-        button.setToolTip(f'展开{label}')
-        button.setAccessibleName(f'展开{label}')
-        button.setFixedSize(30, 46)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.hide()
-        return button
-
-    def _create_bottom(self):
-        """保留空的 Bottom 区域，当前阶段不放置功能控件。"""
-        dock = QDockWidget('Bottom', self)
-        dock.setObjectName('bottomDock')
-        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
-
-        panel = QWidget()
-        panel.setObjectName('bottomDockPanel')
-        dock.setWidget(panel)
-        dock.setMinimumHeight(70)
-        dock.setMaximumHeight(100)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        return dock
-
-    def _connect_buttons(self):
-        # objectName 与 service 方法名一一对应，当前只验证事件链，不接业务算法。
-        for action_name, button in self.header_buttons.items():
-            button.clicked.connect(getattr(self.button_service, action_name))
-
-        self.left_sidebar_button.clicked.connect(
-            lambda: self._collapse_sidebar(
-                self.left_dock,
-                self.left_sidebar_expand_button,
-            )
-        )
-        self.right_sidebar_button.clicked.connect(
-            lambda: self._collapse_sidebar(
-                self.right_dock,
-                self.right_sidebar_expand_button,
-            )
-        )
-        self.left_sidebar_expand_button.clicked.connect(
-            lambda: self._expand_sidebar(
-                self.left_dock,
-                self.left_sidebar_expand_button,
-            )
-        )
-        self.right_sidebar_expand_button.clicked.connect(
-            lambda: self._expand_sidebar(
-                self.right_dock,
-                self.right_sidebar_expand_button,
-            )
-        )
-
-    def _collapse_sidebar(self, dock, expand_button):
-        dock.setProperty('expandedWidth', max(180, min(dock.width(), 260)))
-        dock.hide()
-        expand_button.show()
-        expand_button.raise_()
-        QTimer.singleShot(0, self._position_sidebar_expand_buttons)
-
-    def _expand_sidebar(self, dock, expand_button):
-        expand_button.hide()
-        dock.show()
-        target_width = int(dock.property('expandedWidth') or 210)
-        QTimer.singleShot(
-            0,
-            lambda: self.resizeDocks(
-                [dock],
-                [target_width],
-                Qt.Orientation.Horizontal,
-            ),
-        )
-
-    def _position_sidebar_expand_buttons(self):
-        viewport = self.centralWidget()
-        top = 8
-        if self.left_sidebar_expand_button.isVisible():
-            self.left_sidebar_expand_button.move(0, top)
-            self.left_sidebar_expand_button.raise_()
-        if self.right_sidebar_expand_button.isVisible():
-            self.right_sidebar_expand_button.move(
-                max(0, viewport.width() - self.right_sidebar_expand_button.width()),
-                top,
-            )
-            self.right_sidebar_expand_button.raise_()
-
-    def eventFilter(self, watched, event):
-        if watched is self.header_panel and event.type() == QEvent.Type.Resize:
-            self._schedule_header_resize()
-        if watched is self.centralWidget() and event.type() in (
-            QEvent.Type.Resize,
-            QEvent.Type.Show,
-        ):
-            QTimer.singleShot(0, self._position_sidebar_expand_buttons)
-        return super().eventFilter(watched, event)
-
-    def _schedule_header_resize(self):
-        if self._header_resize_pending:
-            return
-        self._header_resize_pending = True
-        QTimer.singleShot(0, self._resize_header_to_contents)
-
-    def _resize_header_to_contents(self):
-        self._header_resize_pending = False
-        if not hasattr(self, 'header_dock') or self.header_panel.width() <= 0:
+    def open_new_project(self):
+        if self.new_project_dialog is not None and self.new_project_dialog.isVisible():
+            self.new_project_dialog.raise_()
+            self.new_project_dialog.activateWindow()
             return
 
-        content_height = self.header_layout.heightForWidth(self.header_panel.width())
-        title_height = max(self.header_dock.height() - self.header_panel.height(), 16)
-        target_height = max(70, min(content_height + title_height, 180))
-
-        if (
-            self.header_dock.minimumHeight() == target_height
-            and self.header_dock.maximumHeight() == target_height
-        ):
-            return
-
-        self.header_dock.setMinimumHeight(target_height)
-        self.header_dock.setMaximumHeight(target_height)
-        self.resizeDocks(
-            [self.header_dock],
-            [target_height],
-            Qt.Orientation.Vertical,
+        dialog = NewProjectDialog(self)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.project_created.connect(self._create_project)
+        dialog.close_button.clicked.connect(
+            lambda: self.button_service.trigger('close_new_project', '关闭')
         )
+        dialog.cancel_button.clicked.connect(
+            lambda: self.button_service.trigger('cancel_new_project', '取消')
+        )
+        dialog.create_button.clicked.connect(
+            lambda: self.button_service.trigger(
+                'create_project_and_enter', '创建项目并进入工作台'
+            )
+        )
+        dialog.finished.connect(self._clear_new_project_dialog)
+        self.new_project_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _create_project(self, project_data: dict):
+        card = self.home_page.add_project(project_data)
+        self._load_project(card.project_id)
+        self.show_workbench()
+
+    def _load_project(self, project_id: str):
+        project_data = self.home_page.get_project_data(project_id)
+        self.current_project_id = project_id
+        self.workbench_page.set_project_data(project_data)
+        self.report_page.set_project_data(project_data)
+
+    def open_project(self, project_id: str):
+        self._load_project(project_id)
+        self.show_workbench()
+
+    def open_project_report(self, project_id: str):
+        self._load_project(project_id)
+        self.show_report()
+
+    def _clear_new_project_dialog(self, _result: int):
+        dialog = self.sender()
+        if dialog is self.new_project_dialog:
+            self.new_project_dialog = None
+
+    def closeEvent(self, event):
+        if self.new_project_dialog is not None:
+            self.new_project_dialog.close()
+        super().closeEvent(event)
