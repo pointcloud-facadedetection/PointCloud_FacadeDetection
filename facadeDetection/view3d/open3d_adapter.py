@@ -6,6 +6,7 @@ class Open3DAdapter:
     def __init__(self):
         self.vis = None
         self.geometries = {}
+        self._grid_lines = None
 
     def create_window(self, title, width=1280, height=960, visible=True):
         self.vis = o3d.visualization.Visualizer()
@@ -23,9 +24,9 @@ class Open3DAdapter:
         if self.vis is None:
             return
         opt = self.vis.get_render_option()
-        opt.background_color = np.array([0.04, 0.04, 0.10])
+        opt.background_color = np.array([0.12, 0.12, 0.18])
         opt.point_size = 2.0
-        opt.show_coordinate_frame = False
+        opt.show_coordinate_frame = True
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
         if self.vis is None:
