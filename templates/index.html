@@ -109,6 +109,92 @@
 
         input[type="file"] { display: none; }
 
+        .photo-view-panel {
+            position: absolute;
+            right: 22px;
+            bottom: 58px;
+            width: 480px;
+            max-height: min(58vh, 620px);
+            padding: 14px;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+            background: rgba(20, 22, 30, 0.92);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            z-index: 25;
+            display: none;
+            pointer-events: auto;
+        }
+        .photo-view-panel.show { display: block; }
+        .photo-view-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .photo-view-title button {
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+        .photo-view-body {
+            position: relative;
+            width: 100%;
+            min-height: 320px;
+            max-height: calc(min(58vh, 620px) - 80px);
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.08);
+            cursor: default;
+        }
+        .photo-view-body.annotate-ready {
+            cursor: crosshair;
+            box-shadow: inset 0 0 0 2px rgba(102, 126, 234, 0.55);
+        }
+        .photo-marker-layer {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+        }
+        .photo-match-marker {
+            position: absolute;
+            transform: translate(-50%, -50%);
+            min-width: 22px;
+            height: 22px;
+            padding: 0 6px;
+            border-radius: 11px;
+            background: rgba(255, 107, 107, 0.95);
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 22px;
+            text-align: center;
+            border: 2px solid #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+            pointer-events: none;
+        }
+        .photo-view-img {
+            width: 100%;
+            height: 100%;
+            max-height: calc(min(58vh, 620px) - 80px);
+            object-fit: contain;
+            display: block;
+            user-select: none;
+        }
+        .photo-view-meta {
+            margin-top: 8px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            word-break: break-all;
+        }
+
         .param-group { margin-bottom: 12px; }
         .param-group label {
             display: block;
@@ -834,6 +920,21 @@
                     保存后会写入变换矩阵与合并点云；下次可直接加载，无需重新手动采点配准。
                 </div>
             </div>
+
+            <!-- 2D 照片与点云匹配 -->
+            <div class="sidebar-section">
+                <div class="section-title">🖼️ 2D-3D 匹配</div>
+                <button class="btn btn-primary" id="btn-upload-photo">📷 上传2D照片</button>
+                <button class="btn btn-secondary" id="btn-annotate-matches" style="margin-top:6px;" disabled>✏️ 进入标注模式</button>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="btn-undo-photo-match" disabled>↩️ 撤销点对</button>
+                    <button class="btn btn-danger" id="btn-exit-photo-annotate" disabled>🚪 退出标注</button>
+                </div>
+                <button class="btn btn-secondary" id="btn-photo-cloud-match" style="margin-top:6px;" disabled>🔗 2D照片-3D点云匹配</button>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.5;" id="photo-match-status">
+                    尚未上传照片
+                </div>
+            </div>
         </div>
         <div class="status-bar" id="status-bar"><span>就绪</span></div>
     </aside>
@@ -870,6 +971,18 @@
             <div class="hint-text" id="hint-text">鼠标左键旋转 | 右键平移 | 滚轮缩放</div>
         </div>
 
+        <div class="photo-view-panel" id="photo-view-panel">
+            <div class="photo-view-title">
+                <span>2D 照片视图</span>
+                <button id="btn-close-photo-view" title="关闭照片视图">&times;</button>
+            </div>
+            <div class="photo-view-body" id="photo-view-body">
+                <img class="photo-view-img" id="photo-view-img" alt="uploaded photo" />
+                <div class="photo-marker-layer" id="photo-marker-layer"></div>
+            </div>
+            <div class="photo-view-meta" id="photo-view-meta"></div>
+        </div>
+
         <div class="progress-overlay" id="progress-overlay">
             <div class="progress-card">
                 <h3 id="progress-title">处理中...</h3>
@@ -878,6 +991,30 @@
             </div>
         </div>
     </main>
+</div>
+
+<!-- 上传 2D 照片 Dialog -->
+<div class="dialog-overlay" id="photo-upload-dialog">
+    <div class="dialog-card">
+        <div class="dialog-header">
+            <h3>📷 上传 2D 照片</h3>
+            <button class="dialog-close" id="photo-upload-close">&times;</button>
+        </div>
+        <div class="dialog-body">
+            <div class="upload-zone" id="photo-drop-zone">
+                <div class="icon">🖼️</div>
+                <p>拖拽照片到此处，或点击从本地选择</p>
+                <p class="hint">支持 jpg / jpeg / png / bmp / webp</p>
+            </div>
+            <input type="file" id="photo-file-input" accept="image/jpeg,image/png,image/bmp,image/webp,.jpg,.jpeg,.png,.bmp,.webp" />
+            <div id="photo-upload-hint" style="margin-top:12px; font-size:12px; color:var(--text-secondary); line-height:1.6;">
+                上传后会在 3D 视口右下角显示照片视图，再进行匹配点标注与 2D-3D 匹配。
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-secondary" id="photo-upload-cancel" style="width:auto; padding:8px 20px;">取消</button>
+        </div>
+    </div>
 </div>
 
 <!-- 质量评估 Dialog -->
@@ -981,6 +1118,18 @@ const state = {
         items: [],
         labels: null,
         originalColors: null,
+    },
+
+    photo: {
+        id: null,
+        filename: null,
+        url: null,
+        annotateMode: false,
+        nextIsPhoto: true,
+        correspondences: [],
+        photoMarkers: [],
+        cloudMarkers: [],
+        matchResult: null,
     },
 
 };
@@ -1242,6 +1391,7 @@ function setActiveCloud(uuid, focus = false) {
 
     updateInfoPanel(state.activeCloud);
     updateButtonState(true);
+    updatePhotoMatchStatus();
 
     if (focus) focusOnCloud(uuid);
 }
@@ -2399,6 +2549,17 @@ function handleRegClick(event) {
 
 function handleSceneClick(event) {
     if (state.selection.mode) return;
+    if (state.photo.annotateMode) {
+        if (!state.photo.nextIsPhoto) {
+            handlePhotoMatchCloudClick(event);
+            const photoBody = document.getElementById('photo-view-body');
+            photoBody.classList.toggle('annotate-ready', state.photo.nextIsPhoto);
+            state.renderer.domElement.style.cursor = state.photo.nextIsPhoto ? 'default' : 'crosshair';
+        } else {
+            showStatus('请先在右侧照片中选点', 'warning');
+        }
+        return;
+    }
     if (state.reg.mode) {
         handleRegClick(event);
         return;
@@ -2611,6 +2772,376 @@ function clearRegistration() {
     showStatus('已清除所有配准数据', 'info');
 }
 
+
+function updatePhotoMatchStatus() {
+    const statusEl = document.getElementById('photo-match-status');
+    if (!state.photo.id) {
+        statusEl.textContent = '尚未上传照片';
+        document.getElementById('btn-annotate-matches').disabled = true;
+        document.getElementById('btn-undo-photo-match').disabled = true;
+        document.getElementById('btn-exit-photo-annotate').disabled = true;
+        document.getElementById('btn-photo-cloud-match').disabled = true;
+        return;
+    }
+
+    const completePairs = state.photo.correspondences.filter(p => p.cloud !== null).length;
+    const cloudName = state.activeCloud ? state.activeCloud.filename : '未加载点云';
+
+    if (state.photo.annotateMode) {
+        const nextHint = state.photo.nextIsPhoto
+            ? '<span style="color:#ff6b6b; font-weight:700;">【下一步：在右侧照片中选点】</span>'
+            : '<span style="color:#48bb78; font-weight:700;">【下一步：在 3D 点云中选点】</span>';
+        statusEl.innerHTML =
+            `匹配点: <b style="color:var(--accent);">${completePairs}</b> 对 | 点云: ${cloudName}<br>${nextHint}`;
+    } else {
+        statusEl.innerHTML =
+            `已上传: ${state.photo.filename}<br>匹配点: ${completePairs} 对（至少 4 对后可执行匹配）`;
+    }
+
+    document.getElementById('btn-annotate-matches').disabled = false;
+    document.getElementById('btn-undo-photo-match').disabled =
+        !state.photo.annotateMode || state.photo.correspondences.length === 0;
+    document.getElementById('btn-exit-photo-annotate').disabled = !state.photo.annotateMode;
+    document.getElementById('btn-photo-cloud-match').disabled = completePairs < 4;
+}
+
+function openPhotoUploadDialog() {
+    document.getElementById('photo-upload-dialog').classList.add('show');
+}
+
+function closePhotoUploadDialog() {
+    document.getElementById('photo-upload-dialog').classList.remove('show');
+    const input = document.getElementById('photo-file-input');
+    if (input) input.value = '';
+}
+
+function showPhotoPreview(photo) {
+    const panel = document.getElementById('photo-view-panel');
+    const img = document.getElementById('photo-view-img');
+    const meta = document.getElementById('photo-view-meta');
+    img.src = `${API_BASE}${photo.url}`;
+    meta.textContent = `${photo.filename}`;
+    panel.classList.add('show');
+}
+
+function hidePhotoPreview() {
+    document.getElementById('photo-view-panel').classList.remove('show');
+}
+
+function clearPhotoMatchMarkers() {
+    state.photo.photoMarkers.forEach(el => el.remove());
+    state.photo.photoMarkers = [];
+    state.photo.cloudMarkers.forEach(m => {
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+            if (m.material.map) m.material.map.dispose();
+            m.material.dispose();
+        }
+        state.scene.remove(m);
+    });
+    state.photo.cloudMarkers = [];
+    document.getElementById('photo-marker-layer').innerHTML = '';
+}
+
+function getPhotoClickNormalized(event, img) {
+    const rect = img.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    const clickY = event.clientY - rect.top;
+    const naturalW = img.naturalWidth;
+    const naturalH = img.naturalHeight;
+    if (!naturalW || !naturalH) return null;
+
+    const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+    const displayW = naturalW * scale;
+    const displayH = naturalH * scale;
+    const offsetX = (rect.width - displayW) / 2;
+    const offsetY = (rect.height - displayH) / 2;
+    const x = clickX - offsetX;
+    const y = clickY - offsetY;
+    if (x < 0 || y < 0 || x > displayW || y > displayH) return null;
+
+    return {
+        normX: x / displayW,
+        normY: y / displayH,
+        pixelX: x / scale,
+        pixelY: y / scale,
+        displayX: clickX,
+        displayY: clickY,
+    };
+}
+
+function addPhotoMatchMarker(displayX, displayY, label) {
+    const layer = document.getElementById('photo-marker-layer');
+    const marker = document.createElement('div');
+    marker.className = 'photo-match-marker';
+    marker.textContent = label;
+    marker.style.left = `${displayX}px`;
+    marker.style.top = `${displayY}px`;
+    layer.appendChild(marker);
+    state.photo.photoMarkers.push(marker);
+}
+
+function addPhotoCloudMarker(position, label) {
+    const markerSize = Math.max(CONFIG.REG_MARKER_SIZE, state.sceneRange * 0.0005);
+    const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
+    const material = new THREE.MeshBasicMaterial({ color: 0x48bb78 });
+    const marker = new THREE.Mesh(geometry, material);
+    marker.position.copy(position);
+    state.scene.add(marker);
+    state.photo.cloudMarkers.push(marker);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, 128, 64);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(2, 2, 124, 60);
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 28px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, 64, 32);
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.copy(position);
+    sprite.position.y += markerSize * 3;
+    sprite.scale.set(markerSize * 8, markerSize * 4, 1);
+    state.scene.add(sprite);
+    state.photo.cloudMarkers.push(sprite);
+}
+
+function redrawPhotoMatchMarkers() {
+    clearPhotoMatchMarkers();
+    state.photo.correspondences.forEach((pair, i) => {
+        if (pair.photo) {
+            addPhotoMatchMarker(pair.photo.displayX, pair.photo.displayY, `P${i + 1}`);
+        }
+        if (pair.cloud) {
+            addPhotoCloudMarker(pair.cloud, `3D${i + 1}`);
+        }
+    });
+}
+
+function handlePhotoAnnotateClick(event) {
+    if (!state.photo.annotateMode || !state.photo.nextIsPhoto) return;
+
+    const img = document.getElementById('photo-view-img');
+    const click = getPhotoClickNormalized(event, img);
+    if (!click) {
+        showStatus('请点击照片有效区域（不要点在空白边距上）', 'warning');
+        return;
+    }
+
+    const idx = state.photo.correspondences.length;
+    state.photo.correspondences.push({
+        photo: click,
+        cloud: null,
+        pairIdx: idx,
+    });
+    addPhotoMatchMarker(click.displayX, click.displayY, `P${idx + 1}`);
+    state.photo.nextIsPhoto = false;
+    updatePhotoMatchStatus();
+    showStatus(`照片点 P${idx + 1} 已采集，请在 3D 点云中点击对应位置`, 'success');
+}
+
+function handlePhotoMatchCloudClick(event) {
+    if (!state.photo.annotateMode || state.photo.nextIsPhoto) return;
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.mouse, state.camera);
+    state.raycaster.params.Points.threshold = Math.max(1.0, state.sceneRange * 0.001);
+    const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
+    if (intersects.length === 0) {
+        showStatus('未点击到点云，请精确点击特征点', 'warning');
+        return;
+    }
+
+    const point = intersects[0].point.clone();
+    const lastPair = state.photo.correspondences[state.photo.correspondences.length - 1];
+    if (!lastPair || lastPair.cloud !== null) {
+        showStatus('请先在照片中选点', 'warning');
+        return;
+    }
+
+    lastPair.cloud = point;
+    addPhotoCloudMarker(point, `3D${lastPair.pairIdx + 1}`);
+    state.photo.nextIsPhoto = true;
+    updatePhotoMatchStatus();
+    showStatus(`3D 点 3D${lastPair.pairIdx + 1} 已采集，配对完成！请继续在照片中选下一点`, 'success');
+}
+
+function togglePhotoAnnotateMode() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+
+    if (state.reg.mode) exitRegMode();
+
+    state.photo.annotateMode = !state.photo.annotateMode;
+    const btn = document.getElementById('btn-annotate-matches');
+    btn.classList.toggle('active', state.photo.annotateMode);
+    btn.textContent = state.photo.annotateMode ? '✏️ 标注模式中' : '✏️ 进入标注模式';
+
+    const photoBody = document.getElementById('photo-view-body');
+    photoBody.classList.toggle('annotate-ready', state.photo.annotateMode && state.photo.nextIsPhoto);
+
+    if (state.photo.annotateMode) {
+        showPhotoPreview(state.photo);
+        state.renderer.domElement.style.cursor = state.photo.nextIsPhoto ? 'default' : 'crosshair';
+        document.getElementById('hint-text').textContent =
+            '2D-3D 标注：先在右侧照片中选点，再在 3D 点云中选对应点';
+        showStatus('已进入标注模式：请先在右侧照片中点击第一个匹配点', 'info');
+    } else {
+        exitPhotoAnnotateMode(false);
+    }
+    updatePhotoMatchStatus();
+}
+
+function exitPhotoAnnotateMode(showMsg = true) {
+    state.photo.annotateMode = false;
+    state.photo.nextIsPhoto = true;
+    document.getElementById('btn-annotate-matches').classList.remove('active');
+    document.getElementById('btn-annotate-matches').textContent = '✏️ 进入标注模式';
+    document.getElementById('photo-view-body').classList.remove('annotate-ready');
+    state.renderer.domElement.style.cursor = 'default';
+    document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+    updatePhotoMatchStatus();
+    if (showMsg) showStatus('已退出 2D-3D 标注模式', 'info');
+}
+
+function undoLastPhotoMatch() {
+    if (state.photo.correspondences.length === 0) {
+        showStatus('没有可撤销的匹配点', 'warning');
+        return;
+    }
+    state.photo.correspondences.pop();
+    state.photo.nextIsPhoto = true;
+    redrawPhotoMatchMarkers();
+    updatePhotoMatchStatus();
+    showStatus('已撤销最后一对匹配点', 'success');
+}
+
+function isSupportedPhotoFile(file) {
+    const name = (file.name || '').toLowerCase();
+    return /\.(jpe?g|png|bmp|webp)$/i.test(name) || (file.type || '').startsWith('image/');
+}
+
+async function uploadPhotoFile(file) {
+    if (!file || !isSupportedPhotoFile(file)) {
+        showStatus('请选择 jpg / png / bmp / webp 图片文件', 'warning');
+        return;
+    }
+
+    showProgress('上传 2D 照片...', 20);
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const resp = await fetch(`${API_BASE}/upload_photo`, {
+            method: 'POST',
+            body: formData,
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        state.photo.id = result.photo_id;
+        state.photo.filename = result.filename;
+        state.photo.url = result.url;
+        state.photo.annotateMode = false;
+        state.photo.nextIsPhoto = true;
+        state.photo.correspondences = [];
+        state.photo.matchResult = null;
+        clearPhotoMatchMarkers();
+
+        showPhotoPreview(state.photo);
+        document.getElementById('btn-annotate-matches').disabled = false;
+        updatePhotoMatchStatus();
+        closePhotoUploadDialog();
+        updateProgress(100);
+        hideProgress();
+        showStatus(`照片上传成功: ${result.filename}`, 'success');
+    } catch (err) {
+        hideProgress();
+        showStatus(`照片上传失败: ${err.message}`, 'error');
+    }
+}
+
+function startAnnotateMatches() {
+    togglePhotoAnnotateMode();
+}
+
+async function runPhotoCloudMatch() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    const completePairs = state.photo.correspondences.filter(p => p.cloud !== null);
+    if (completePairs.length < 4) {
+        showStatus(`至少需要 4 对匹配点，当前 ${completePairs.length} 对`, 'warning');
+        return;
+    }
+
+    const img = document.getElementById('photo-view-img');
+    if (!img.naturalWidth || !img.naturalHeight) {
+        showStatus('照片尚未加载完成', 'warning');
+        return;
+    }
+
+    showProgress('求解相机位姿...', 20);
+    try {
+        const resp = await fetch(`${API_BASE}/match_photo_pointcloud`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                photo_id: state.photo.id,
+                image_width: img.naturalWidth,
+                image_height: img.naturalHeight,
+                horizontal_fov_deg: 60.0,
+                reprojection_error_px: 8.0,
+                pairs: completePairs.map(pair => ({
+                    image_point: [pair.photo.pixelX, pair.photo.pixelY],
+                    cloud_point: pair.cloud.toArray(),
+                })),
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        state.photo.matchResult = result.pose;
+        exitPhotoAnnotateMode(false);
+        updateProgress(100);
+        hideProgress();
+
+        const pose = result.pose;
+        updatePhotoMatchStatus();
+        document.getElementById('photo-match-status').innerHTML +=
+            `<br><span style="color:var(--success);">位姿求解成功：` +
+            `${pose.inlier_count}/${pose.point_count} 个内点，` +
+            `重投影 RMSE ${pose.reprojection_rmse_px.toFixed(2)} px</span>`;
+        showStatus(
+            `2D-3D 匹配成功：重投影 RMSE ${pose.reprojection_rmse_px.toFixed(2)} px`,
+            'success'
+        );
+        console.info('2D-3D 相机位姿', pose);
+    } catch (err) {
+        hideProgress();
+        showStatus(`2D-3D 匹配失败: ${err.message}`, 'error');
+    }
+}
 
 async function refreshRegistrationResults(selectId = null) {
     const select = document.getElementById('reg-result-select');
@@ -2844,6 +3375,44 @@ function bindEvents() {
         if (e.target.files.length) uploadFiles(Array.from(e.target.files));
     });
 
+    // 2D 照片上传
+    const photoDropZone = document.getElementById('photo-drop-zone');
+    const photoFileInput = document.getElementById('photo-file-input');
+    document.getElementById('btn-upload-photo').addEventListener('click', openPhotoUploadDialog);
+    document.getElementById('photo-upload-close').addEventListener('click', closePhotoUploadDialog);
+    document.getElementById('photo-upload-cancel').addEventListener('click', closePhotoUploadDialog);
+    document.getElementById('photo-upload-dialog').addEventListener('click', (e) => {
+        if (e.target === document.getElementById('photo-upload-dialog')) closePhotoUploadDialog();
+    });
+    document.getElementById('btn-close-photo-view').addEventListener('click', hidePhotoPreview);
+    document.getElementById('btn-annotate-matches').addEventListener('click', startAnnotateMatches);
+    document.getElementById('btn-undo-photo-match').addEventListener('click', undoLastPhotoMatch);
+    document.getElementById('btn-exit-photo-annotate').addEventListener('click', () => exitPhotoAnnotateMode());
+    document.getElementById('btn-photo-cloud-match').addEventListener('click', runPhotoCloudMatch);
+    document.getElementById('photo-view-body').addEventListener('click', handlePhotoAnnotateClick);
+
+    photoDropZone.addEventListener('click', () => photoFileInput.click());
+    photoDropZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        photoDropZone.classList.add('dragover');
+    });
+    photoDropZone.addEventListener('dragleave', () => photoDropZone.classList.remove('dragover'));
+    photoDropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        photoDropZone.classList.remove('dragover');
+        const files = Array.from(e.dataTransfer.files).filter(isSupportedPhotoFile);
+        if (!files.length) {
+            showStatus('请拖入图片文件（jpg/png/bmp/webp）', 'warning');
+            return;
+        }
+        uploadPhotoFile(files[0]);
+    });
+    photoFileInput.addEventListener('change', e => {
+        if (e.target.files && e.target.files[0]) {
+            uploadPhotoFile(e.target.files[0]);
+        }
+    });
+
     // 滑块
     document.getElementById('voxel-size').addEventListener('input', e => {
         document.getElementById('voxel-value').textContent = e.target.value;
@@ -2938,6 +3507,7 @@ function bindEvents() {
         document.getElementById('btn-load-reg').disabled = !e.target.value;
     });
     refreshRegistrationResults();
+    updatePhotoMatchStatus();
 
     // Dialog 关闭
     document.getElementById('dialog-close').addEventListener('click', () => {
@@ -2964,9 +3534,13 @@ function bindEvents() {
             case 'a': document.getElementById('tb-axes').click(); break;
             case 'c': takeScreenshot(); break;
             case 'f': document.getElementById('tb-fullscreen').click(); break;
-            case 'z': if (state.reg.mode) undoLastCorrespondence(); break;
+            case 'z':
+                if (state.photo.annotateMode) undoLastPhotoMatch();
+                else if (state.reg.mode) undoLastCorrespondence();
+                break;
             case 'escape':
                 if (state.selection.mode) toggleSelectionMode();
+                if (state.photo.annotateMode) exitPhotoAnnotateMode();
                 if (state.reg.mode) exitRegMode();
                 if (document.getElementById('quality-dialog').classList.contains('show')) {
                     document.getElementById('quality-dialog').classList.remove('show');
