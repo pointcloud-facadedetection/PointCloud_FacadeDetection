@@ -821,10 +821,18 @@
                 </div>
             </div>
 
-            <!-- 保存 -->
+            <!-- 保存 / 加载配准结果 -->
             <div class="sidebar-section">
-                <div class="section-title">💾 导出</div>
+                <div class="section-title">💾 配准结果</div>
                 <button class="btn btn-secondary" id="btn-save-reg" disabled>💾 保存配准结果</button>
+                <button class="btn btn-secondary" id="btn-refresh-reg-results" style="margin-top:6px;">🔄 刷新结果列表</button>
+                <select id="reg-result-select" style="width:100%; margin-top:8px; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.25); color:var(--text-primary); font-size:12px;">
+                    <option value="">暂无已保存的配准结果</option>
+                </select>
+                <button class="btn btn-primary" id="btn-load-reg" style="margin-top:8px;" disabled>📂 加载配准结果</button>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.5;">
+                    保存后会写入变换矩阵与合并点云；下次可直接加载，无需重新手动采点配准。
+                </div>
             </div>
         </div>
         <div class="status-bar" id="status-bar"><span>就绪</span></div>
@@ -2604,67 +2612,136 @@ function clearRegistration() {
 }
 
 
-// 保存配准结果
-async function saveRegistered() {
-    if (!state.activeCloud) {
-        showStatus('请先激活一个点云', 'warning');
-        return;
+async function refreshRegistrationResults(selectId = null) {
+    const select = document.getElementById('reg-result-select');
+    const loadBtn = document.getElementById('btn-load-reg');
+    try {
+        const resp = await fetch(`${API_BASE}/list_registration_results`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const results = data.results || [];
+        select.innerHTML = '';
+        if (results.length === 0) {
+            select.innerHTML = '<option value="">暂无已保存的配准结果</option>';
+            loadBtn.disabled = true;
+            return results;
+        }
+
+        results.forEach((item) => {
+            const opt = document.createElement('option');
+            opt.value = item.id;
+            const created = item.created_at ? ` | ${item.created_at}` : '';
+            const points = item.point_count ? ` | ${Number(item.point_count).toLocaleString()}点` : '';
+            opt.textContent = `${item.source_filename || '?'} → ${item.target_filename || '?'}${points}${created}`;
+            select.appendChild(opt);
+        });
+
+        if (selectId) {
+            select.value = selectId;
+        }
+        loadBtn.disabled = !select.value;
+        return results;
+    } catch (err) {
+        select.innerHTML = '<option value="">加载列表失败</option>';
+        loadBtn.disabled = true;
+        showStatus(`读取配准结果列表失败: ${err.message}`, 'error');
+        return [];
     }
+}
+
+// 保存配准结果（变换矩阵 JSON + 合并点云）
+async function saveRegistered() {
     if (!state.reg.sourceUUID || !state.reg.targetUUID) {
         showStatus('未找到配准关系，请先执行配准', 'warning');
         return;
     }
+    if (!state.reg.lastTransform) {
+        showStatus('请先完成粗配准或 ICP 精配准', 'warning');
+        return;
+    }
 
-    showProgress('合并并保存点云...', 0);
+    showProgress('保存配准结果...', 0);
     try {
-        const mergeResp = await fetch(`${API_BASE}/merge_clouds`, {
+        const resp = await fetch(`${API_BASE}/save_registration_result`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                uuid1: state.reg.sourceUUID,
-                uuid2: state.reg.targetUUID,
+                src_uuid: state.reg.sourceUUID,
+                tgt_uuid: state.reg.targetUUID,
+                transformation: state.reg.lastTransform,
+                voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
+                also_save_download: true,
             }),
         });
-        const mergeResult = await mergeResp.json();
-        if (mergeResult.error) throw new Error(mergeResult.error);
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
 
-        updateProgress(40);
-
-        const filename = `merged_${Date.now()}.ply`;
-        const saveResp = await fetch(`${API_BASE}/save_registered`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                uuid: mergeResult.uuid,
-                filename: filename,
-            }),
-        });
-        const saveResult = await saveResp.json();
-        if (saveResult.error) throw new Error(saveResult.error);
-
-        updateProgress(70);
-
-        await loadPointCloud(mergeResult, mergeResult.filename, mergeResult.uuid, {
+        updateProgress(60);
+        await loadPointCloud(result, result.filename, result.uuid, {
             preserveCamera: true,
             preserveColor: false
         });
+        addFileToList(result.filename, result.uuid, result.positions.length / 3);
+        setActiveCloud(result.uuid, true);
 
-        addFileToList(mergeResult.filename, mergeResult.uuid, mergeResult.positions.length / 3);
-        setActiveCloud(mergeResult.uuid, true);
+        await refreshRegistrationResults(result.result_id);
 
         updateProgress(100);
         hideProgress();
+        showStatus(`配准结果已保存: ${result.result_id}（${result.point_count.toLocaleString()} 点）`, 'success');
 
-        showStatus(`融合点云已保存并加载，总点数: ${saveResult.points}`, 'success');
-
-        const a = document.createElement('a');
-        a.href = `${API_BASE}/download/${filename}`;
-        a.download = filename;
-        a.click();
-
+        if (result.download_filename) {
+            const a = document.createElement('a');
+            a.href = `${API_BASE}/download/${result.download_filename}`;
+            a.download = result.download_filename;
+            a.click();
+        }
     } catch (err) {
         hideProgress();
-        showStatus(`保存融合点云失败: ${err.message}`, 'error');
+        showStatus(`保存配准结果失败: ${err.message}`, 'error');
+    }
+}
+
+// 直接加载已保存的合并配准点云
+async function loadRegisteredResult() {
+    const resultId = document.getElementById('reg-result-select').value;
+    if (!resultId) {
+        showStatus('请先选择一个配准结果', 'warning');
+        return;
+    }
+
+    showProgress('加载配准结果...', 20);
+    try {
+        const resp = await fetch(`${API_BASE}/load_registration_result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ result_id: resultId }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        updateProgress(70);
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: false,
+            preserveColor: false
+        });
+        addFileToList(result.filename, result.uuid, result.positions.length / 3);
+        setActiveCloud(result.uuid, true);
+
+        if (result.transformation) {
+            state.reg.lastTransform = result.transformation;
+        }
+
+        updateProgress(100);
+        hideProgress();
+        showStatus(
+            `已加载配准结果 ${resultId}（${result.point_count.toLocaleString()} 点，${result.load_time_s || '?'}s）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`加载配准结果失败: ${err.message}`, 'error');
     }
 }
 
@@ -2855,6 +2932,12 @@ function bindEvents() {
     document.getElementById('btn-execute-reg').addEventListener('click', executeRegistration);
     document.getElementById('btn-icp-refine').addEventListener('click', icpRefine);
     document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
+    document.getElementById('btn-refresh-reg-results').addEventListener('click', () => refreshRegistrationResults());
+    document.getElementById('btn-load-reg').addEventListener('click', loadRegisteredResult);
+    document.getElementById('reg-result-select').addEventListener('change', (e) => {
+        document.getElementById('btn-load-reg').disabled = !e.target.value;
+    });
+    refreshRegistrationResults();
 
     // Dialog 关闭
     document.getElementById('dialog-close').addEventListener('click', () => {

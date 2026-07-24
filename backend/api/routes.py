@@ -16,7 +16,11 @@ from ..config import Config
 from ..services.file import process_ply, save_cloud, denoise_cloud, compute_normals, get_bounding_box
 from ..services.facade_detection import detect_facades
 from ..services.segmentation import segment_selected_region
-from ..services.registration import register_correspondences, apply_registration, icp_refine, merge_clouds
+from ..services.registration import (
+    register_correspondences, apply_registration, icp_refine, merge_clouds,
+    save_registration_result, list_registration_results,
+    load_registration_result, apply_saved_registration
+)
 from ..core.quality_assessment import compute_facade_quality
 
 
@@ -44,7 +48,9 @@ def register_routes(app):
             file.save(filepath)
 
             try:
-                display_pcd = process_ply(filepath, voxel_size)
+                display_pcd = process_ply(
+                    filepath, voxel_size, original_filename=file.filename
+                )
 
                 # 同时设置 DISPLAY 和 ORIGINAL_DOWNSAMPLED
                 cache.set_display(unique_name, display_pcd)
@@ -52,7 +58,9 @@ def register_routes(app):
                 cache.set_transform(unique_name, np.eye(4))
                 cache.set_meta(unique_name, {
                     'filename': file.filename,
-                    'point_count': len(display_pcd.points)
+                    'point_count': len(display_pcd.points),
+                    'source_size': os.path.getsize(filepath),
+                    'voxel_size': voxel_size,
                 })
 
                 data = pcd_to_json(display_pcd)
@@ -230,6 +238,80 @@ def register_routes(app):
                 'points': point_count
             })
         except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/save_registration_result', methods=['POST'])
+    def save_registration_result_api():
+        """保存配准变换与合并点云，供下次直接加载。"""
+        body = request.get_json() or {}
+        src_uuid = body.get('src_uuid')
+        tgt_uuid = body.get('tgt_uuid')
+        if not src_uuid or not tgt_uuid:
+            return jsonify({'error': '需要 src_uuid 与 tgt_uuid'}), 400
+
+        try:
+            data = save_registration_result(
+                src_uuid=src_uuid,
+                tgt_uuid=tgt_uuid,
+                transformation=body.get('transformation'),
+                voxel_size=float(body.get('voxel_size', Config.DEFAULT_VOXEL_SIZE)),
+                metrics=body.get('metrics'),
+                also_save_download=bool(body.get('also_save_download', True)),
+            )
+            data['status'] = 'ok'
+            return jsonify(data)
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/list_registration_results', methods=['GET', 'POST'])
+    def list_registration_results_api():
+        try:
+            return jsonify({
+                'status': 'ok',
+                'results': list_registration_results()
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/load_registration_result', methods=['POST'])
+    def load_registration_result_api():
+        """直接加载已保存的合并配准点云。"""
+        body = request.get_json() or {}
+        result_id = body.get('result_id')
+        if not result_id:
+            return jsonify({'error': '缺少 result_id'}), 400
+        try:
+            data = load_registration_result(result_id)
+            data['status'] = 'ok'
+            return jsonify(data)
+        except FileNotFoundError as e:
+            return jsonify({'error': str(e)}), 404
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/apply_saved_registration', methods=['POST'])
+    def apply_saved_registration_api():
+        """对已上传的源/目标点云应用保存的变换矩阵。"""
+        body = request.get_json() or {}
+        src_uuid = body.get('src_uuid')
+        tgt_uuid = body.get('tgt_uuid')
+        if not src_uuid or not tgt_uuid:
+            return jsonify({'error': '需要 src_uuid 与 tgt_uuid'}), 400
+        try:
+            data = apply_saved_registration(
+                src_uuid=src_uuid,
+                tgt_uuid=tgt_uuid,
+                result_id=body.get('result_id'),
+                transformation=body.get('transformation'),
+            )
+            data['status'] = 'ok'
+            return jsonify(data)
+        except FileNotFoundError as e:
+            return jsonify({'error': str(e)}), 404
+        except Exception as e:
+            traceback.print_exc()
             return jsonify({'error': str(e)}), 500
 
     @app.route('/detect_facades', methods=['POST'])
