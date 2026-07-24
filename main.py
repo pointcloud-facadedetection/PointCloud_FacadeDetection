@@ -20,8 +20,10 @@ def create_app():
     )
     CORS(app, resources={r"/*": {"origins": "*"}})
 
-    # 确保上传目录存在
+    # 确保上传目录、下采样缓存与配准结果目录存在
     os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(Config.CACHE_FOLDER, exist_ok=True)
+    os.makedirs(Config.REGISTRATION_FOLDER, exist_ok=True)
 
     # 注册路由
     register_routes(app)

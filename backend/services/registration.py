@@ -1,11 +1,41 @@
 import copy
+import json
+import os
+import re
+import time
+import uuid as uuid_module
+from datetime import datetime
+
 import numpy as np
 import open3d as o3d
 
+from ..config import Config
 from ..core.geometry_utils import (
-    to_zup, compute_registration_error
+    to_zup, compute_registration_error, pcd_to_json
 )
 from ..core.cache import get_cache
+
+
+def _safe_stem(filename):
+    base = os.path.basename(filename or 'cloud.ply')
+    stem, _ = os.path.splitext(base)
+    stem = re.sub(r'[^\w.\-]+', '_', stem, flags=re.UNICODE)
+    return stem or 'cloud'
+
+
+def _voxel_tag(voxel_size):
+    return f"{float(voxel_size):.6g}".replace('.', 'p')
+
+
+def _registration_result_id(src_filename, tgt_filename, voxel_size):
+    return f"{_safe_stem(src_filename)}__{_safe_stem(tgt_filename)}_v{_voxel_tag(voxel_size)}"
+
+
+def _registration_paths(result_id):
+    os.makedirs(Config.REGISTRATION_FOLDER, exist_ok=True)
+    json_path = os.path.join(Config.REGISTRATION_FOLDER, f"{result_id}.json")
+    ply_path = os.path.join(Config.REGISTRATION_FOLDER, f"{result_id}.ply")
+    return json_path, ply_path
 
 
 def register_correspondences(src_uuid, tgt_uuid, pairs):
@@ -204,7 +234,6 @@ def merge_clouds(uuid1, uuid2):
         pcd2.paint_uniform_color([0.4, 0.4, 1.0])
 
     merged = pcd1 + pcd2
-    import uuid as uuid_module
     new_uuid = f"merged_{uuid_module.uuid4().hex[:8]}"
 
     cache.set_display(new_uuid, merged)
@@ -229,3 +258,207 @@ def is_uniform_color(colors, eps=1e-4):
         if abs(colors[i][0] - r) > eps or abs(colors[i][1] - g) > eps or abs(colors[i][2] - b) > eps:
             return False
     return True
+
+
+def save_registration_result(src_uuid, tgt_uuid, transformation=None, voxel_size=0.05,
+                             metrics=None, also_save_download=True):
+    """保存配准变换 JSON + 合并后的点云 PLY，便于下次直接加载。"""
+    cache = get_cache()
+    src_meta = cache.get_meta(src_uuid) or {}
+    tgt_meta = cache.get_meta(tgt_uuid) or {}
+    if cache.get_display(src_uuid) is None or cache.get_display(tgt_uuid) is None:
+        raise ValueError('源或目标点云未找到')
+
+    transform = np.asarray(
+        transformation if transformation is not None else cache.get_transform(src_uuid),
+        dtype=float
+    )
+    if transform.shape != (4, 4):
+        raise ValueError('变换矩阵必须是 4x4')
+
+    src_filename = src_meta.get('filename', src_uuid)
+    tgt_filename = tgt_meta.get('filename', tgt_uuid)
+    result_id = _registration_result_id(src_filename, tgt_filename, voxel_size)
+    json_path, ply_path = _registration_paths(result_id)
+
+    # 确保源点云已应用当前变换后再合并
+    current = cache.get_transform(src_uuid)
+    if not np.allclose(current, transform, atol=1e-6):
+        src_original = cache.get_original(src_uuid)
+        if src_original is None:
+            raise ValueError('源点云原始备份未找到，请重新上传后再保存')
+        src_aligned = copy.deepcopy(src_original)
+        src_aligned.transform(transform)
+        cache.set_display(src_uuid, src_aligned)
+        cache.set_transform(src_uuid, transform)
+
+    merged_uuid, merged = merge_clouds(src_uuid, tgt_uuid)
+    ok = o3d.io.write_point_cloud(ply_path, merged)
+    if not ok:
+        raise RuntimeError(f'写入配准点云失败: {ply_path}')
+
+    payload = {
+        'id': result_id,
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'source_filename': src_filename,
+        'target_filename': tgt_filename,
+        'source_uuid': src_uuid,
+        'target_uuid': tgt_uuid,
+        'voxel_size': float(voxel_size),
+        'transformation': transform.tolist(),
+        'point_count': int(len(merged.points)),
+        'metrics': metrics or {},
+        'ply_file': os.path.basename(ply_path),
+        'json_file': os.path.basename(json_path),
+    }
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    download_name = None
+    download_path = None
+    if also_save_download:
+        download_name = f"registered_{result_id}_{int(time.time())}.ply"
+        download_path = os.path.join(Config.UPLOAD_FOLDER, download_name)
+        o3d.io.write_point_cloud(download_path, merged)
+
+    data = pcd_to_json(merged)
+    data.update({
+        'uuid': merged_uuid,
+        'filename': f'registered_{src_filename}_{tgt_filename}',
+        'point_count': len(merged.points),
+        'result_id': result_id,
+        'json_path': json_path,
+        'ply_path': ply_path,
+        'download_filename': download_name,
+        'download_path': download_path,
+        'transformation': transform.tolist(),
+    })
+    print(f"[INFO] 配准结果已保存: {json_path}")
+    return data
+
+
+def list_registration_results():
+    """列出已保存的配准结果。"""
+    os.makedirs(Config.REGISTRATION_FOLDER, exist_ok=True)
+    results = []
+    for name in sorted(os.listdir(Config.REGISTRATION_FOLDER)):
+        if not name.endswith('.json'):
+            continue
+        path = os.path.join(Config.REGISTRATION_FOLDER, name)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                info = json.load(f)
+            result_id = info.get('id') or os.path.splitext(name)[0]
+            _, ply_path = _registration_paths(result_id)
+            results.append({
+                'id': result_id,
+                'source_filename': info.get('source_filename'),
+                'target_filename': info.get('target_filename'),
+                'voxel_size': info.get('voxel_size'),
+                'point_count': info.get('point_count'),
+                'created_at': info.get('created_at'),
+                'has_ply': os.path.isfile(ply_path),
+                'metrics': info.get('metrics', {}),
+            })
+        except Exception as e:
+            print(f"[WARN] 读取配准结果失败 {path}: {e}")
+    results.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+    return results
+
+
+def load_registration_result(result_id):
+    """直接加载已保存的合并配准点云，无需重新手动配准。"""
+    if not result_id:
+        raise ValueError('缺少配准结果 ID')
+    json_path, ply_path = _registration_paths(result_id)
+    if not os.path.isfile(json_path):
+        raise FileNotFoundError(f'未找到配准结果: {result_id}')
+    if not os.path.isfile(ply_path):
+        raise FileNotFoundError(f'未找到配准点云文件: {os.path.basename(ply_path)}')
+
+    with open(json_path, 'r', encoding='utf-8') as f:
+        info = json.load(f)
+
+    start = time.time()
+    merged = o3d.io.read_point_cloud(ply_path)
+    if len(merged.points) == 0:
+        raise ValueError('配准点云为空')
+    if not merged.has_colors():
+        merged.paint_uniform_color([0.7, 0.7, 0.7])
+
+    cache = get_cache()
+    new_uuid = f"registered_{uuid_module.uuid4().hex[:8]}"
+    cache.set_display(new_uuid, merged)
+    cache.set_original(new_uuid, copy.deepcopy(merged))
+    cache.set_transform(new_uuid, np.eye(4))
+    filename = (
+        f"registered_{info.get('source_filename', 'src')}_"
+        f"{info.get('target_filename', 'tgt')}"
+    )
+    cache.set_meta(new_uuid, {
+        'filename': filename,
+        'point_count': len(merged.points),
+        'registration_result_id': result_id,
+    })
+
+    data = pcd_to_json(merged)
+    data.update({
+        'uuid': new_uuid,
+        'filename': filename,
+        'point_count': len(merged.points),
+        'result_id': result_id,
+        'transformation': info.get('transformation'),
+        'source_filename': info.get('source_filename'),
+        'target_filename': info.get('target_filename'),
+        'voxel_size': info.get('voxel_size'),
+        'metrics': info.get('metrics', {}),
+        'load_time_s': round(time.time() - start, 3),
+    })
+    print(f"[INFO] 已加载配准结果 {result_id}: {len(merged.points):,} 点")
+    return data
+
+
+def apply_saved_registration(src_uuid, tgt_uuid, result_id=None, transformation=None):
+    """将已保存的变换应用到当前源点云（不重新采点）。"""
+    cache = get_cache()
+    if cache.get_display(src_uuid) is None or cache.get_display(tgt_uuid) is None:
+        raise ValueError('源或目标点云未找到')
+
+    info = {}
+    if transformation is None:
+        if not result_id:
+            raise ValueError('需要 result_id 或 transformation')
+        json_path, _ = _registration_paths(result_id)
+        if not os.path.isfile(json_path):
+            raise FileNotFoundError(f'未找到配准结果: {result_id}')
+        with open(json_path, 'r', encoding='utf-8') as f:
+            info = json.load(f)
+        transformation = info.get('transformation')
+
+    transform = np.asarray(transformation, dtype=float)
+    if transform.shape != (4, 4):
+        raise ValueError('变换矩阵必须是 4x4')
+
+    src_original = cache.get_original(src_uuid)
+    if src_original is None:
+        raise ValueError('源点云原始备份未找到，请重新上传')
+
+    src_transformed = copy.deepcopy(src_original)
+    src_transformed.transform(transform)
+    cache.set_display(src_uuid, src_transformed)
+    cache.set_transform(src_uuid, transform)
+
+    tgt_pcd = cache.get_display(tgt_uuid)
+    error_info = compute_registration_error(src_original, tgt_pcd, transform, threshold=1.0)
+
+    data = pcd_to_json(src_transformed)
+    data.update({
+        'uuid': src_uuid,
+        'filename': cache.get_meta(src_uuid)['filename'],
+        'point_count': len(src_transformed.points),
+        'transformation': transform.tolist(),
+        'rmse': error_info['rmse'],
+        'overlap_ratio': error_info['overlap_ratio'],
+        'result_id': result_id or info.get('id'),
+    })
+    return data

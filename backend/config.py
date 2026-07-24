@@ -3,6 +3,8 @@ import os
 class Config:
     """应用配置"""
     UPLOAD_FOLDER = 'uploads'
+    CACHE_FOLDER = os.path.join(UPLOAD_FOLDER, 'cache')
+    REGISTRATION_FOLDER = os.path.join(CACHE_FOLDER, 'registration')
     DEFAULT_VOXEL_SIZE = 0.05
 
     # 质量评估参数
