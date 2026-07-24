@@ -5,6 +5,8 @@ class Config:
     UPLOAD_FOLDER = 'uploads'
     CACHE_FOLDER = os.path.join(UPLOAD_FOLDER, 'cache')
     REGISTRATION_FOLDER = os.path.join(CACHE_FOLDER, 'registration')
+    PHOTO_FOLDER = os.path.join(UPLOAD_FOLDER, 'photos')
+    ALLOWED_PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
     DEFAULT_VOXEL_SIZE = 0.05
 
     # 质量评估参数

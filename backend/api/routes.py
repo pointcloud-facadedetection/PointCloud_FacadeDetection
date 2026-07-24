@@ -22,6 +22,7 @@ from ..services.registration import (
     load_registration_result, apply_saved_registration
 )
 from ..core.quality_assessment import compute_facade_quality
+from facadeDetection.algorithms.photo_pointcloud_matching import solve_camera_pose
 
 
 def register_routes(app):
@@ -590,6 +591,90 @@ def register_routes(app):
         except Exception as e:
             traceback.print_exc()
             return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+    @app.route('/match_photo_pointcloud', methods=['POST'])
+    def match_photo_pointcloud():
+        """根据手动 2D-3D 匹配点估计相机外参。"""
+        body = request.get_json() or {}
+        pairs = body.get('pairs', [])
+        image_width = body.get('image_width')
+        image_height = body.get('image_height')
+
+        if len(pairs) < 4:
+            return jsonify({'error': '至少需要 4 对完整的 2D-3D 匹配点'}), 400
+        if not image_width or not image_height:
+            return jsonify({'error': '缺少照片原始宽高'}), 400
+
+        try:
+            image_points = []
+            object_points = []
+            for pair in pairs:
+                image_point = pair.get('image_point')
+                cloud_point_yup = pair.get('cloud_point')
+                if image_point is None or cloud_point_yup is None:
+                    continue
+                image_points.append(image_point)
+                # Three.js 使用 Y-up；PnP 统一使用后端/Open3D 的 Z-up 坐标。
+                object_points.append(to_zup(np.asarray(cloud_point_yup, dtype=float)))
+
+            if len(object_points) < 4:
+                return jsonify({'error': '有效匹配点少于 4 对'}), 400
+
+            camera_matrix = body.get('camera_matrix')
+            distortion = body.get('distortion_coefficients')
+            result = solve_camera_pose(
+                object_points=object_points,
+                image_points=image_points,
+                image_width=float(image_width),
+                image_height=float(image_height),
+                camera_matrix=camera_matrix,
+                distortion_coefficients=distortion,
+                horizontal_fov_deg=float(body.get('horizontal_fov_deg', 60.0)),
+                reprojection_error_px=float(body.get('reprojection_error_px', 8.0)),
+            )
+            return jsonify({'status': 'ok', 'pose': result})
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+    @app.route('/upload_photo', methods=['POST'])
+    def upload_photo():
+        """上传 2D 照片（jpg/png/bmp/webp）"""
+        file = request.files.get('file') or request.files.get('photo')
+        if file is None or not file.filename:
+            return jsonify({'error': '未收到照片文件'}), 400
+
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in Config.ALLOWED_PHOTO_EXTENSIONS:
+            return jsonify({
+                'error': f'不支持的图片格式: {ext or "(无扩展名)"}，请上传 jpg/png/bmp/webp'
+            }), 400
+
+        os.makedirs(Config.PHOTO_FOLDER, exist_ok=True)
+        photo_id = f"{uuid.uuid4().hex}{ext}"
+        save_path = os.path.join(Config.PHOTO_FOLDER, photo_id)
+        try:
+            file.save(save_path)
+            return jsonify({
+                'status': 'ok',
+                'photo_id': photo_id,
+                'filename': file.filename,
+                'url': f'/photo/{photo_id}',
+                'size': os.path.getsize(save_path),
+            })
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/photo/<path:filename>')
+    def serve_photo(filename):
+        """预览已上传的 2D 照片"""
+        try:
+            return send_from_directory(Config.PHOTO_FOLDER, filename)
+        except FileNotFoundError:
+            return jsonify({'error': '照片不存在'}), 404
 
     @app.route('/download/<filename>')
     def download_file(filename):
