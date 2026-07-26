@@ -13,7 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT / 'facadeDetection'))
 from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, PAGE_DEFINITIONS
 
 
 class MainWindowTests(unittest.TestCase):
@@ -77,16 +77,18 @@ class MainWindowTests(unittest.TestCase):
 
     def test_sidebars_hide_completely_and_expand_from_edge_buttons(self):
         viewport = self.window.centralWidget()
-        for collapse_button, expand_button, dock, side in (
+        for collapse_button, expand_button, expand_dock, dock, side in (
             (
                 self.window.left_sidebar_button,
                 self.window.left_sidebar_expand_button,
+                self.window.left_sidebar_expand_dock,
                 self.window.left_dock,
                 'left',
             ),
             (
                 self.window.right_sidebar_button,
                 self.window.right_sidebar_expand_button,
+                self.window.right_sidebar_expand_dock,
                 self.window.right_dock,
                 'right',
             ),
@@ -94,7 +96,8 @@ class MainWindowTests(unittest.TestCase):
             content = dock.widget()
             self.assertTrue(dock.isVisible())
             self.assertIs(collapse_button.parentWidget(), dock.titleBarWidget())
-            self.assertIs(expand_button.parentWidget(), viewport)
+            self.assertIs(expand_button.parentWidget(), expand_dock.widget())
+            self.assertFalse(expand_dock.isVisible())
             self.assertFalse(expand_button.isVisible())
             title_label = dock.titleBarWidget().findChild(
                 QLabel,
@@ -125,26 +128,29 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(dock.isVisible())
             self.assertTrue(dock.visibleRegion().isEmpty())
             self.assertFalse(content.isVisible())
+            self.assertTrue(expand_dock.isVisible())
             self.assertTrue(expand_button.isVisible())
             self.assertTrue(expand_button.isEnabled())
             self.assertGreaterEqual(
                 viewport.width(),
-                expanded_viewport_width + expanded_dock_width,
+                expanded_viewport_width + expanded_dock_width - expand_dock.width(),
             )
 
-            button_origin = expand_button.mapToGlobal(QPoint(0, 0))
-            viewport_origin = viewport.mapToGlobal(QPoint(0, 0))
-            if side == 'left':
-                self.assertLessEqual(abs(button_origin.x() - viewport_origin.x()), 2)
-            else:
-                button_right = button_origin.x() + expand_button.width()
-                viewport_right = viewport_origin.x() + viewport.width()
-                self.assertLessEqual(abs(button_right - viewport_right), 2)
+            button_rect = QRect(
+                expand_button.mapToGlobal(QPoint(0, 0)),
+                expand_button.size(),
+            )
+            viewport_rect = QRect(
+                viewport.mapToGlobal(QPoint(0, 0)),
+                viewport.size(),
+            )
+            self.assertFalse(button_rect.intersects(viewport_rect))
 
             hidden_viewport_width = viewport.width()
             expand_button.click()
             self._process_layout()
             self.assertTrue(dock.isVisible())
+            self.assertFalse(expand_dock.isVisible())
             self.assertFalse(expand_button.isVisible())
             self.assertTrue(content.isVisible())
             self.assertGreaterEqual(dock.width(), 180)
@@ -160,6 +166,8 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertFalse(self.window.left_dock.isVisible())
         self.assertFalse(self.window.right_dock.isVisible())
+        self.assertTrue(self.window.left_sidebar_expand_dock.isVisible())
+        self.assertTrue(self.window.right_sidebar_expand_dock.isVisible())
         self.assertTrue(self.window.left_sidebar_expand_button.isVisible())
         self.assertTrue(self.window.right_sidebar_expand_button.isVisible())
         self.assertGreater(viewport.width(), initial_viewport_width)
@@ -170,6 +178,8 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertTrue(self.window.left_dock.isVisible())
         self.assertFalse(self.window.right_dock.isVisible())
+        self.assertFalse(self.window.left_sidebar_expand_dock.isVisible())
+        self.assertTrue(self.window.right_sidebar_expand_dock.isVisible())
         self.assertFalse(self.window.left_sidebar_expand_button.isVisible())
         self.assertTrue(self.window.right_sidebar_expand_button.isVisible())
         self.assertLess(viewport.width(), both_hidden_width)
@@ -179,13 +189,30 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(self.window.left_sidebar_expand_button.isVisible())
         self.assertFalse(self.window.right_sidebar_expand_button.isVisible())
 
-    def test_bottom_bar_is_visible_and_contains_no_buttons(self):
+    def test_bottom_bar_contains_four_mutually_exclusive_page_tabs(self):
         self.assertTrue(self.window.bottom_dock.isVisible())
         self.assertEqual(self.window.bottom_dock.objectName(), 'bottomDock')
         self.assertEqual(
-            self.window.bottom_dock.widget().findChildren(QPushButton),
-            [],
+            [button.text() for button in self.window.page_buttons.values()],
+            [title for title, _key in PAGE_DEFINITIONS],
         )
+        self.assertEqual(self.window.centralWidget().currentIndex(), 0)
+        self.assertIs(
+            self.window.centralWidget().widget(0),
+            self.window.viewport.get_widget(),
+        )
+
+        for index, (_title, page_key) in enumerate(PAGE_DEFINITIONS):
+            button = self.window.page_buttons[page_key]
+            button.click()
+            self._process_layout()
+
+            self.assertEqual(self.window.centralWidget().currentIndex(), index)
+            self.assertTrue(button.isChecked())
+            self.assertEqual(
+                sum(tab.isChecked() for tab in self.window.page_buttons.values()),
+                1,
+            )
 
     def test_business_buttons_trigger_matching_service_methods(self):
         output = io.StringIO()
