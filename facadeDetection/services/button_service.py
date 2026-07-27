@@ -12,39 +12,40 @@ class ButtonService:
     def _notify(action_name):
         print(f'{action_name} triggered', flush=True)
 
-    def upload_files(self, file_paths):
+    # 算法工程师可在以下 btn_* 方法体中接入对应的业务/算法接口。
+    def btn_upload(self, file_paths):
         self.selected_file_paths = list(file_paths)
-        self._notify('upload_files')
+        self._notify('btn_upload')
         self.extract_files(self.selected_file_paths)
 
     def extract_files(self, file_paths):
         self.extracted_file_paths = list(file_paths)
         self._notify('extract_files')
 
-    def reset(self):
-        self._notify('reset')
+    def btn_reset_view(self):
+        self._notify('btn_reset_view')
 
-    def change_colors(self):
-        self._notify('change_colors')
+    def btn_change_color(self):
+        self._notify('btn_change_color')
 
-    def denoise(self):
-        self._notify('denoise')
+    def btn_denoise(self):
+        self._notify('btn_denoise')
 
-    def registration(self):
-        self._notify('registration')
+    def btn_registration(self):
+        self._notify('btn_registration')
 
-    def facade_detection(self):
-        self._notify('facade_detection')
+    def btn_facade_detection(self):
+        self._notify('btn_facade_detection')
 
-    def compute_quality(self):
-        self._notify('compute_quality')
+    def btn_quality_inspection(self):
+        self._notify('btn_quality_inspection')
 
-    def segmentation(self):
-        self._notify('segmentation')
+    def btn_box_segmentation(self):
+        self._notify('btn_box_segmentation')
 
-    def compute_detail(self):
-        self._notify('compute_detail')
+    def btn_calculate_detail(self):
+        self._notify('btn_calculate_detail')
 
-    def align_2d_3d(self):
+    def btn_align_2d_3d(self):
         # 设计文档暂称“2D_align_3D”，这里使用合法的 Python 方法名。
-        self._notify('align_2d_3d')
+        self._notify('btn_align_2d_3d')

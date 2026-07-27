@@ -68,7 +68,7 @@ class MainWindowTests(unittest.TestCase):
             [button.text() for button in self._visible_header_buttons()],
             [
                 label
-                for label, _button_name, _action_name
+                for label, _button_name
                 in PAGE_HEADER_ACTIONS['project_operation']
             ],
         )
@@ -272,26 +272,23 @@ class MainWindowTests(unittest.TestCase):
         with redirect_stdout(output):
             self.window.page_buttons['project_operation'].click()
             self._process_layout()
-            for (
-                _label,
-                button_name,
-                _action_name,
-            ) in PAGE_HEADER_ACTIONS['project_operation']:
+            for _label, button_name in PAGE_HEADER_ACTIONS['project_operation']:
                 button = self.window.header_buttons[button_name]
+                self.assertIs(getattr(self.window, button_name), button)
                 button.click()
 
         self.assertEqual(
             output.getvalue().splitlines(),
             [
-                'reset triggered',
-                'change_colors triggered',
-                'denoise triggered',
-                'registration triggered',
-                'facade_detection triggered',
-                'compute_quality triggered',
-                'segmentation triggered',
-                'compute_detail triggered',
-                'align_2d_3d triggered',
+                'btn_reset_view triggered',
+                'btn_change_color triggered',
+                'btn_denoise triggered',
+                'btn_registration triggered',
+                'btn_facade_detection triggered',
+                'btn_quality_inspection triggered',
+                'btn_box_segmentation triggered',
+                'btn_calculate_detail triggered',
+                'btn_align_2d_3d triggered',
             ],
         )
 
@@ -325,7 +322,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._last_upload_directory, 'C:\\data')
         self.assertEqual(
             output.getvalue().splitlines(),
-            ['upload_files triggered', 'extract_files triggered'],
+            ['btn_upload triggered', 'extract_files triggered'],
         )
 
     def test_canceling_upload_dialog_does_not_trigger_service(self):
