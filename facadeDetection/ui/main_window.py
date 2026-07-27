@@ -36,18 +36,18 @@ PAGE_BUTTON_NAMES = {
 
 PAGE_HEADER_ACTIONS = {
     'project_overview': (
-        ('上传文件', 'btn_upload', 'upload_files'),
+        ('上传文件', 'btn_upload'),
     ),
     'project_operation': (
-        ('重置视图', 'btn_reset_view', 'reset'),
-        ('改变颜色', 'btn_change_color', 'change_colors'),
-        ('点云去噪', 'btn_denoise', 'denoise'),
-        ('点云配准', 'btn_registration', 'registration'),
-        ('立面检测', 'btn_facade_detection', 'facade_detection'),
-        ('质量检测', 'btn_quality_inspection', 'compute_quality'),
-        ('框选分割', 'btn_box_segmentation', 'segmentation'),
-        ('计算细节', 'btn_calculate_detail', 'compute_detail'),
-        ('二维-三维对齐', 'btn_align_2d_3d', 'align_2d_3d'),
+        ('重置视图', 'btn_reset_view'),
+        ('改变颜色', 'btn_change_color'),
+        ('点云去噪', 'btn_denoise'),
+        ('点云配准', 'btn_registration'),
+        ('立面检测', 'btn_facade_detection'),
+        ('质量检测', 'btn_quality_inspection'),
+        ('框选分割', 'btn_box_segmentation'),
+        ('计算细节', 'btn_calculate_detail'),
+        ('二维-三维对齐', 'btn_align_2d_3d'),
     ),
     'inspection_review': (),
     'report_export': (),
@@ -77,7 +77,6 @@ class MainWindow(QMainWindow):
         self.viewport = Open3DViewport()
         self.button_service = ButtonService()
         self.header_buttons = {}
-        self.header_button_methods = {}
         self._last_upload_directory = str(Path.home())
         self._header_resize_pending = False
         self._setup_ui()
@@ -167,12 +166,12 @@ class MainWindow(QMainWindow):
             vertical_spacing=8,
         )
 
-        for label, button_name, action_name in HEADER_ACTIONS:
+        for label, button_name in HEADER_ACTIONS:
             button = QPushButton(label)
             button.setObjectName(button_name)
             button.setMinimumSize(120, 34)
+            setattr(self, button_name, button)
             self.header_buttons[button_name] = button
-            self.header_button_methods[button_name] = action_name
             self.header_layout.addWidget(button)
 
         dock.setWidget(panel)
@@ -329,8 +328,7 @@ class MainWindow(QMainWindow):
         page_key = PAGE_DEFINITIONS[page_index][1]
         visible_buttons = {
             button_name
-            for _label, button_name, _action_name
-            in PAGE_HEADER_ACTIONS[page_key]
+            for _label, button_name in PAGE_HEADER_ACTIONS[page_key]
         }
         for button_name, button in self.header_buttons.items():
             button.setVisible(button_name in visible_buttons)
@@ -340,13 +338,12 @@ class MainWindow(QMainWindow):
         self._schedule_header_resize()
 
     def _connect_buttons(self):
-        # Button object names identify UI controls; service names identify interfaces.
+        # 按钮对象名与 ButtonService 接口名一致，便于算法工程师直接接入业务。
         for button_name, button in self.header_buttons.items():
-            action_name = self.header_button_methods[button_name]
-            if action_name == 'upload_files':
+            if button_name == 'btn_upload':
                 button.clicked.connect(self._open_upload_file_dialog)
             else:
-                button.clicked.connect(getattr(self.button_service, action_name))
+                button.clicked.connect(getattr(self.button_service, button_name))
 
         self.left_sidebar_button.clicked.connect(
             lambda: self._collapse_sidebar(
@@ -384,7 +381,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
-        self.button_service.upload_files(file_paths)
+        self.button_service.btn_upload(file_paths)
 
     def _collapse_sidebar(self, dock, expand_button):
         dock.setProperty('expandedWidth', max(180, min(dock.width(), 260)))
