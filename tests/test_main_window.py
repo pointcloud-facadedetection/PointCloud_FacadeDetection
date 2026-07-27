@@ -1,9 +1,10 @@
-import io
 import os
 import sys
 import unittest
 from contextlib import redirect_stdout
+import io
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -13,7 +14,13 @@ sys.path.insert(0, str(PROJECT_ROOT / 'facadeDetection'))
 from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
-from ui.main_window import MainWindow, PAGE_DEFINITIONS
+from ui.main_window import (
+    MainWindow,
+    PAGE_BUTTON_NAMES,
+    PAGE_DEFINITIONS,
+    PAGE_HEADER_ACTIONS,
+    UPLOAD_FILE_FILTER,
+)
 
 
 class MainWindowTests(unittest.TestCase):
@@ -34,35 +41,70 @@ class MainWindowTests(unittest.TestCase):
         self.app.processEvents()
         self.app.processEvents()
 
-    def test_header_contains_required_business_buttons(self):
+    def _visible_header_buttons(self):
+        return [
+            button
+            for button in self.window.header_buttons.values()
+            if button.isVisible()
+        ]
+
+    def test_header_actions_follow_current_page(self):
         self.assertEqual(
-            [button.text() for button in self.window.header_buttons.values()],
-            ['上传文件', '点云去噪', '立面检测'],
+            [button.text() for button in self._visible_header_buttons()],
+            ['上传文件'],
         )
         self.assertEqual(
-            list(self.window.header_buttons),
-            ['upload_file', 'point_cloud_denoise', 'facade_detection'],
+            [
+                button_name
+                for button_name, button in self.window.header_buttons.items()
+                if button.isVisible()
+            ],
+            ['btn_upload'],
         )
 
+        self.window.page_buttons['project_operation'].click()
+        self._process_layout()
+        self.assertEqual(
+            [button.text() for button in self._visible_header_buttons()],
+            [
+                label
+                for label, _button_name, _action_name
+                in PAGE_HEADER_ACTIONS['project_operation']
+            ],
+        )
+
+        self.window.page_buttons['inspection_review'].click()
+        self._process_layout()
+        self.assertEqual(self._visible_header_buttons(), [])
+
     def test_header_buttons_start_top_left_and_wrap_without_overflow(self):
+        self.window.page_buttons['project_operation'].click()
+        self._process_layout()
         layout = self.window.header_layout
         layout.setGeometry(QRect(0, 0, 280, 200))
-        geometries = [layout.itemAt(index).geometry() for index in range(layout.count())]
+        visible_items = [
+            layout.itemAt(index)
+            for index in range(layout.count())
+            if not layout.itemAt(index).isEmpty()
+        ]
+        geometries = [item.geometry() for item in visible_items]
 
         self.assertEqual((geometries[0].x(), geometries[0].y()), (10, 10))
         self.assertGreater(len({geometry.y() for geometry in geometries}), 1)
         self.assertTrue(all(geometry.right() <= 270 for geometry in geometries))
 
-        layout.setGeometry(QRect(0, 0, 900, 100))
+        layout.setGeometry(QRect(0, 0, 1400, 100))
         self.assertEqual(
-            {layout.itemAt(index).geometry().y() for index in range(layout.count())},
+            {item.geometry().y() for item in visible_items},
             {10},
         )
 
     def test_header_height_calculation_tracks_wrapped_rows(self):
+        self.window.page_buttons['project_operation'].click()
+        self._process_layout()
         self.assertGreater(
             self.window.header_layout.heightForWidth(280),
-            self.window.header_layout.heightForWidth(900),
+            self.window.header_layout.heightForWidth(1400),
         )
 
     def test_header_spans_above_both_sidebars(self):
@@ -77,18 +119,16 @@ class MainWindowTests(unittest.TestCase):
 
     def test_sidebars_hide_completely_and_expand_from_edge_buttons(self):
         viewport = self.window.centralWidget()
-        for collapse_button, expand_button, expand_dock, dock, side in (
+        for collapse_button, expand_button, dock, side in (
             (
                 self.window.left_sidebar_button,
                 self.window.left_sidebar_expand_button,
-                self.window.left_sidebar_expand_dock,
                 self.window.left_dock,
                 'left',
             ),
             (
                 self.window.right_sidebar_button,
                 self.window.right_sidebar_expand_button,
-                self.window.right_sidebar_expand_dock,
                 self.window.right_dock,
                 'right',
             ),
@@ -96,8 +136,7 @@ class MainWindowTests(unittest.TestCase):
             content = dock.widget()
             self.assertTrue(dock.isVisible())
             self.assertIs(collapse_button.parentWidget(), dock.titleBarWidget())
-            self.assertIs(expand_button.parentWidget(), expand_dock.widget())
-            self.assertFalse(expand_dock.isVisible())
+            self.assertIs(expand_button.parentWidget(), self.window)
             self.assertFalse(expand_button.isVisible())
             title_label = dock.titleBarWidget().findChild(
                 QLabel,
@@ -113,6 +152,14 @@ class MainWindowTests(unittest.TestCase):
             )
             self.assertEqual(collapse_button.text(), '◀' if side == 'left' else '▶')
             self.assertEqual(expand_button.text(), '▶' if side == 'left' else '◀')
+            self.assertEqual(
+                collapse_button.objectName(),
+                f'btn_collapse_{side}_sidebar',
+            )
+            self.assertEqual(
+                expand_button.objectName(),
+                f'btn_expand_{side}_sidebar',
+            )
             self.assertIsNone(
                 self.window.header_panel.findChild(
                     QPushButton,
@@ -128,12 +175,11 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(dock.isVisible())
             self.assertTrue(dock.visibleRegion().isEmpty())
             self.assertFalse(content.isVisible())
-            self.assertTrue(expand_dock.isVisible())
             self.assertTrue(expand_button.isVisible())
             self.assertTrue(expand_button.isEnabled())
             self.assertGreaterEqual(
                 viewport.width(),
-                expanded_viewport_width + expanded_dock_width - expand_dock.width(),
+                expanded_viewport_width + expanded_dock_width,
             )
 
             button_rect = QRect(
@@ -144,13 +190,17 @@ class MainWindowTests(unittest.TestCase):
                 viewport.mapToGlobal(QPoint(0, 0)),
                 viewport.size(),
             )
-            self.assertFalse(button_rect.intersects(viewport_rect))
+            self.assertTrue(viewport_rect.contains(button_rect))
+            self.assertLessEqual(button_rect.top() - viewport_rect.top(), 8)
+            if side == 'left':
+                self.assertLessEqual(button_rect.left() - viewport_rect.left(), 8)
+            else:
+                self.assertLessEqual(viewport_rect.right() - button_rect.right(), 8)
 
             hidden_viewport_width = viewport.width()
             expand_button.click()
             self._process_layout()
             self.assertTrue(dock.isVisible())
-            self.assertFalse(expand_dock.isVisible())
             self.assertFalse(expand_button.isVisible())
             self.assertTrue(content.isVisible())
             self.assertGreaterEqual(dock.width(), 180)
@@ -166,8 +216,6 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertFalse(self.window.left_dock.isVisible())
         self.assertFalse(self.window.right_dock.isVisible())
-        self.assertTrue(self.window.left_sidebar_expand_dock.isVisible())
-        self.assertTrue(self.window.right_sidebar_expand_dock.isVisible())
         self.assertTrue(self.window.left_sidebar_expand_button.isVisible())
         self.assertTrue(self.window.right_sidebar_expand_button.isVisible())
         self.assertGreater(viewport.width(), initial_viewport_width)
@@ -178,8 +226,6 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertTrue(self.window.left_dock.isVisible())
         self.assertFalse(self.window.right_dock.isVisible())
-        self.assertFalse(self.window.left_sidebar_expand_dock.isVisible())
-        self.assertTrue(self.window.right_sidebar_expand_dock.isVisible())
         self.assertFalse(self.window.left_sidebar_expand_button.isVisible())
         self.assertTrue(self.window.right_sidebar_expand_button.isVisible())
         self.assertLess(viewport.width(), both_hidden_width)
@@ -196,9 +242,16 @@ class MainWindowTests(unittest.TestCase):
             [button.text() for button in self.window.page_buttons.values()],
             [title for title, _key in PAGE_DEFINITIONS],
         )
+        self.assertEqual(
+            [button.objectName() for button in self.window.page_buttons.values()],
+            [
+                PAGE_BUTTON_NAMES[page_key]
+                for _title, page_key in PAGE_DEFINITIONS
+            ],
+        )
         self.assertEqual(self.window.centralWidget().currentIndex(), 0)
         self.assertIs(
-            self.window.centralWidget().widget(0),
+            self.window.centralWidget().widget(1),
             self.window.viewport.get_widget(),
         )
 
@@ -217,17 +270,76 @@ class MainWindowTests(unittest.TestCase):
     def test_business_buttons_trigger_matching_service_methods(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            for button in self.window.header_buttons.values():
+            self.window.page_buttons['project_operation'].click()
+            self._process_layout()
+            for (
+                _label,
+                button_name,
+                _action_name,
+            ) in PAGE_HEADER_ACTIONS['project_operation']:
+                button = self.window.header_buttons[button_name]
                 button.click()
 
         self.assertEqual(
             output.getvalue().splitlines(),
             [
-                'upload_file被点击了',
-                'point_cloud_denoise被点击了',
-                'facade_detection被点击了',
+                'reset triggered',
+                'change_colors triggered',
+                'denoise triggered',
+                'registration triggered',
+                'facade_detection triggered',
+                'compute_quality triggered',
+                'segmentation triggered',
+                'compute_detail triggered',
+                'align_2d_3d triggered',
             ],
         )
+
+    def test_upload_button_opens_file_dialog_and_triggers_upload_chain(self):
+        selected_files = [
+            'C:/data/facade.ply',
+            'C:/data/facade-photo.png',
+        ]
+        output = io.StringIO()
+        with patch(
+            'ui.main_window.QFileDialog.getOpenFileNames',
+            return_value=(selected_files, '项目支持文件'),
+        ) as file_dialog:
+            with redirect_stdout(output):
+                self.window.header_buttons['btn_upload'].click()
+
+        file_dialog.assert_called_once_with(
+            self.window,
+            '选择点云或图像文件',
+            str(Path.home()),
+            UPLOAD_FILE_FILTER,
+        )
+        self.assertEqual(
+            self.window.button_service.selected_file_paths,
+            selected_files,
+        )
+        self.assertEqual(
+            self.window.button_service.extracted_file_paths,
+            selected_files,
+        )
+        self.assertEqual(self.window._last_upload_directory, 'C:\\data')
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            ['upload_files triggered', 'extract_files triggered'],
+        )
+
+    def test_canceling_upload_dialog_does_not_trigger_service(self):
+        output = io.StringIO()
+        with patch(
+            'ui.main_window.QFileDialog.getOpenFileNames',
+            return_value=([], ''),
+        ):
+            with redirect_stdout(output):
+                self.window.header_buttons['btn_upload'].click()
+
+        self.assertEqual(self.window.button_service.selected_file_paths, [])
+        self.assertEqual(self.window.button_service.extracted_file_paths, [])
+        self.assertEqual(output.getvalue(), '')
 
 
 if __name__ == '__main__':
