@@ -5,10 +5,15 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -16,7 +21,9 @@ from PySide6.QtWidgets import (
 )
 
 from .widgets.flow_layout import FlowLayout
-from services.button_service import ButtonService
+from services.file_service import FileService
+from services.pointcloud_service import PointCloudService
+from services.project_service import ProjectService
 from view3d.open3d_viewport import Open3DViewport
 
 
@@ -37,6 +44,9 @@ PAGE_BUTTON_NAMES = {
 PAGE_HEADER_ACTIONS = {
     'project_overview': (
         ('上传文件', 'btn_upload'),
+        ('打开项目', 'btn_open_project'),
+        ('选择项目', 'btn_select_project'),
+        ('新建项目', 'btn_new_project'),
     ),
     'project_operation': (
         ('重置视图', 'btn_reset_view'),
@@ -75,15 +85,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('PointCloud FacadeDetection')
         self.resize(1600, 900)
         self.viewport = Open3DViewport()
-        self.button_service = ButtonService()
+        self.file_service = FileService()
+        self.project_service = ProjectService()
+        self.pointcloud_service = PointCloudService(self.viewport)
+        self.current_project = None
         self.header_buttons = {}
+        self.page_title_labels = {}
+        self._sidebar_collapsed = {'left': False, 'right': False}
         self._last_upload_directory = str(Path.home())
         self._header_resize_pending = False
         self._setup_ui()
         self._connect_buttons()
+        self._refresh_project_list()
+        self._set_current_project(None)
 
     def _setup_ui(self):
-        # 第一个页面保留真实 Open3D 视口，其余页面先搭建可切换的空白框架。
+        # 页面按整页切换；三维视口只属于“项目操作”页面。
         self.setCentralWidget(self._create_page_stack())
 
         self.setDockNestingEnabled(False)
@@ -109,7 +126,7 @@ class MainWindow(QMainWindow):
         self.centralWidget().installEventFilter(self)
         self.header_dock = self._create_header()
         self.bottom_dock = self._create_bottom()
-        self._update_header_actions(0)
+        self.set_current_page(0)
 
         self.resizeDocks(
             [self.left_dock, self.right_dock],
@@ -128,20 +145,12 @@ class MainWindow(QMainWindow):
         self.page_widgets = []
 
         for page_title, page_key in PAGE_DEFINITIONS:
-            if page_key == 'project_operation':
-                page = self.viewport.get_widget()
+            if page_key == 'project_overview':
+                page = self._create_project_overview_page(page_title, page_key)
+            elif page_key == 'project_operation':
+                page = self._create_operation_page(page_title, page_key)
             else:
-                page = QWidget()
-                layout = QVBoxLayout(page)
-                layout.setContentsMargins(24, 24, 24, 24)
-
-                label = QLabel(page_title)
-                label.setObjectName(f'{page_key}PageTitle')
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                label.setStyleSheet(
-                    'color: #666666; font-size: 20px; font-weight: 600;'
-                )
-                layout.addWidget(label)
+                page = self._create_placeholder_page(page_title, page_key)
 
             page.setObjectName(f'{page_key}Page')
             stack.addWidget(page)
@@ -149,11 +158,77 @@ class MainWindow(QMainWindow):
 
         return stack
 
+    def _create_page_title(self, page_title, page_key):
+        label = QLabel(page_title)
+        label.setObjectName(f'{page_key}PageTitle')
+        label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        label.setStyleSheet(
+            'color: #2f3440; font-size: 20px; font-weight: 600; padding: 2px 0;'
+        )
+        self.page_title_labels[page_key] = label
+        return label
+
+    def _create_project_overview_page(self, page_title, page_key):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        layout.addWidget(self._create_page_title(page_title, page_key))
+
+        description = QLabel('历史项目')
+        description.setObjectName('projectListSectionTitle')
+        description.setStyleSheet(
+            'color: #565d69; font-size: 14px; font-weight: 600;'
+        )
+        layout.addWidget(description)
+
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName('projectListScrollArea')
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        self.project_list_container = QWidget()
+        self.project_list_container.setObjectName('projectListContainer')
+        self.project_list_layout = QVBoxLayout(self.project_list_container)
+        self.project_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.project_list_layout.setSpacing(10)
+        self.project_list_layout.addStretch(1)
+        scroll_area.setWidget(self.project_list_container)
+        layout.addWidget(scroll_area, 1)
+        return page
+
+    def _create_operation_page(self, page_title, page_key):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._create_page_title(page_title, page_key))
+        layout.addWidget(self.viewport.get_widget(), 1)
+        return page
+
+    def _create_placeholder_page(self, page_title, page_key):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.addWidget(self._create_page_title(page_title, page_key))
+
+        placeholder = QLabel('该模块将在本周末开始接入')
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet('color: #8a9099; font-size: 15px;')
+        layout.addWidget(placeholder, 1)
+        return page
+
     def _create_header(self):
         dock = QDockWidget('Header', self)
         dock.setObjectName('headerDock')
         dock.setAllowedAreas(Qt.DockWidgetArea.TopDockWidgetArea)
         dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+
+        title_bar = QWidget()
+        title_bar.setFixedHeight(0)
+        dock.setTitleBarWidget(title_bar)
 
         panel = QWidget()
         panel.setObjectName('headerPanel')
@@ -287,6 +362,11 @@ class MainWindow(QMainWindow):
                 background-color: #2f5f98;
                 border-color: #2f5f98;
             }
+            QPushButton:disabled {
+                color: #a4a8ae;
+                background-color: #e6e8eb;
+                border-color: #d3d6da;
+            }
             """
         )
         layout = QHBoxLayout(panel)
@@ -312,6 +392,16 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
         layout.addStretch(1)
 
+        self.current_project_label = QLabel('当前项目：未选择')
+        self.current_project_label.setObjectName('currentProjectLabel')
+        self.current_project_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.current_project_label.setStyleSheet(
+            'color: #5b626d; font-size: 13px; padding: 0 4px;'
+        )
+        layout.addWidget(self.current_project_label)
+
         dock.setWidget(panel)
         dock.setMinimumHeight(60)
         dock.setMaximumHeight(72)
@@ -321,8 +411,16 @@ class MainWindow(QMainWindow):
     def set_current_page(self, page_index):
         if not 0 <= page_index < len(PAGE_DEFINITIONS):
             return
+        page_key = PAGE_DEFINITIONS[page_index][1]
+        button = self.page_buttons.get(page_key)
+        if button is not None and not button.isEnabled():
+            return
+
         self.centralWidget().setCurrentIndex(page_index)
+        if button is not None:
+            button.setChecked(True)
         self._update_header_actions(page_index)
+        self._update_sidebar_visibility(page_key)
 
     def _update_header_actions(self, page_index):
         page_key = PAGE_DEFINITIONS[page_index][1]
@@ -333,38 +431,56 @@ class MainWindow(QMainWindow):
         for button_name, button in self.header_buttons.items():
             button.setVisible(button_name in visible_buttons)
 
+        self.header_dock.setVisible(bool(visible_buttons))
         self.header_layout.invalidate()
         self.header_panel.updateGeometry()
         self._schedule_header_resize()
 
     def _connect_buttons(self):
-        # 按钮对象名与 ButtonService 接口名一致，便于算法工程师直接接入业务。
-        for button_name, button in self.header_buttons.items():
-            if button_name == 'btn_upload':
-                button.clicked.connect(self._open_upload_file_dialog)
-            else:
-                button.clicked.connect(getattr(self.button_service, button_name))
+        overview_actions = {
+            'btn_upload': self._open_upload_file_dialog,
+            'btn_open_project': self._open_project_directory,
+            'btn_select_project': self._select_project,
+            'btn_new_project': self._create_project,
+        }
+        pointcloud_actions = {
+            'btn_reset_view': self.pointcloud_service.reset_view,
+            'btn_change_color': self.pointcloud_service.change_color,
+            'btn_denoise': self.pointcloud_service.denoise,
+            'btn_registration': self.pointcloud_service.registration,
+            'btn_facade_detection': self.pointcloud_service.facade_detection,
+            'btn_quality_inspection': self.pointcloud_service.quality_inspection,
+            'btn_box_segmentation': self.pointcloud_service.box_segmentation,
+            'btn_calculate_detail': self.pointcloud_service.calculate_detail,
+            'btn_align_2d_3d': self.pointcloud_service.align_2d_3d,
+        }
+        for button_name, callback in {**overview_actions, **pointcloud_actions}.items():
+            self.header_buttons[button_name].clicked.connect(callback)
 
         self.left_sidebar_button.clicked.connect(
             lambda: self._collapse_sidebar(
+                'left',
                 self.left_dock,
                 self.left_sidebar_expand_button,
             )
         )
         self.right_sidebar_button.clicked.connect(
             lambda: self._collapse_sidebar(
+                'right',
                 self.right_dock,
                 self.right_sidebar_expand_button,
             )
         )
         self.left_sidebar_expand_button.clicked.connect(
             lambda: self._expand_sidebar(
+                'left',
                 self.left_dock,
                 self.left_sidebar_expand_button,
             )
         )
         self.right_sidebar_expand_button.clicked.connect(
             lambda: self._expand_sidebar(
+                'right',
                 self.right_dock,
                 self.right_sidebar_expand_button,
             )
@@ -381,16 +497,202 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
-        self.button_service.btn_upload(file_paths)
+        uploaded_paths = self.file_service.upload_files(file_paths)
+        project = self.project_service.register_upload(
+            uploaded_paths,
+            current_project=self.current_project,
+        )
+        self._refresh_project_list()
+        self._activate_project(project)
 
-    def _collapse_sidebar(self, dock, expand_button):
+    def _open_project_directory(self):
+        directory_path = QFileDialog.getExistingDirectory(
+            self,
+            '打开项目文件夹',
+            self._last_upload_directory,
+        )
+        if not directory_path:
+            return
+
+        self._last_upload_directory = directory_path
+        project = self.project_service.open_project(directory_path)
+        self._refresh_project_list()
+        self._activate_project(project)
+
+    def _create_project(self):
+        name, accepted = QInputDialog.getText(
+            self,
+            '新建项目',
+            '项目名称：',
+        )
+        if not accepted or not name.strip():
+            return
+
+        directory_path = QFileDialog.getExistingDirectory(
+            self,
+            '选择项目文件夹',
+            self._last_upload_directory,
+        )
+        if not directory_path:
+            return
+
+        self._last_upload_directory = directory_path
+        project = self.project_service.create_project(name, directory_path)
+        self._refresh_project_list()
+        self._activate_project(project)
+
+    def _select_project(self):
+        projects = self.project_service.list_projects()
+        if not projects:
+            QMessageBox.information(self, '选择项目', '当前没有可选择的项目。')
+            return
+
+        labels = [
+            f'{project.name}  |  {project.directory_path}'
+            for project in projects
+        ]
+        selected_label, accepted = QInputDialog.getItem(
+            self,
+            '选择项目',
+            '项目：',
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+
+        selected_index = labels.index(selected_label)
+        self._activate_project(projects[selected_index])
+
+    def _refresh_project_list(self):
+        while self.project_list_layout.count() > 1:
+            item = self.project_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        projects = self.project_service.list_projects()
+        if not projects:
+            empty_label = QLabel('暂无项目，请通过顶部按钮上传文件或新建项目')
+            empty_label.setObjectName('emptyProjectLabel')
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setStyleSheet(
+                'color: #969ca5; font-size: 15px; padding: 48px 16px;'
+            )
+            self.project_list_layout.insertWidget(0, empty_label)
+            return
+
+        for project in projects:
+            card = QPushButton()
+            card.setObjectName('projectCard')
+            card.setText(
+                f'{project.name}\n'
+                f'路径：{project.directory_path}\n'
+                f'文件数量：{len(project.file_paths)}'
+            )
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            card.setMinimumHeight(88)
+            card.setStyleSheet(
+                """
+                QPushButton#projectCard {
+                    color: #303641;
+                    background-color: #ffffff;
+                    border: 1px solid #d5d9df;
+                    border-radius: 6px;
+                    padding: 12px 16px;
+                    text-align: left;
+                }
+                QPushButton#projectCard:hover {
+                    background-color: #f2f6fb;
+                    border-color: #7195c4;
+                }
+                """
+            )
+            card.clicked.connect(
+                lambda _checked=False, project_id=project.project_id:
+                self._open_project_card(project_id)
+            )
+            self.project_list_layout.insertWidget(
+                self.project_list_layout.count() - 1,
+                card,
+            )
+
+    def _open_project_card(self, project_id):
+        project = self.project_service.get_project(project_id)
+        if project is None:
+            return
+
+        if not Path(project.directory_path).exists():
+            choice = QMessageBox.question(
+                self,
+                '项目路径不存在',
+                '该项目文件夹已经不存在，是否从项目列表中移除？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if choice == QMessageBox.StandardButton.Yes:
+                self.project_service.remove_project(project_id)
+                if (
+                    self.current_project is not None
+                    and self.current_project.project_id == project_id
+                ):
+                    self._set_current_project(None)
+                self._refresh_project_list()
+            return
+
+        self._activate_project(project)
+
+    def _activate_project(self, project):
+        self._set_current_project(project)
+        operation_index = next(
+            index
+            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
+            if key == 'project_operation'
+        )
+        self.set_current_page(operation_index)
+
+    def _set_current_project(self, project):
+        self.current_project = project
+        has_project = project is not None
+
+        for page_key, button in self.page_buttons.items():
+            button.setEnabled(page_key == 'project_overview' or has_project)
+
+        project_name = project.name if has_project else ''
+        for page_title, page_key in PAGE_DEFINITIONS:
+            label_text = (
+                f'{page_title} — {project_name}'
+                if project_name
+                else page_title
+            )
+            self.page_title_labels[page_key].setText(label_text)
+
+        if has_project:
+            self.current_project_label.setText(f'当前项目：{project.name}')
+            self.current_project_label.setToolTip(project.directory_path)
+            self.setWindowTitle(
+                f'PointCloud FacadeDetection - {project.name}'
+            )
+        else:
+            self.current_project_label.setText('当前项目：未选择')
+            self.current_project_label.setToolTip('')
+            self.setWindowTitle('PointCloud FacadeDetection')
+            self.set_current_page(0)
+
+    def _collapse_sidebar(self, side, dock, expand_button):
+        self._sidebar_collapsed[side] = True
         dock.setProperty('expandedWidth', max(180, min(dock.width(), 260)))
         dock.hide()
         expand_button.show()
         expand_button.raise_()
         QTimer.singleShot(0, self._position_sidebar_expand_buttons)
 
-    def _expand_sidebar(self, dock, expand_button):
+    def _expand_sidebar(self, side, dock, expand_button):
+        self._sidebar_collapsed[side] = False
         expand_button.hide()
         dock.show()
         target_width = int(dock.property('expandedWidth') or 210)
@@ -402,6 +704,28 @@ class MainWindow(QMainWindow):
                 Qt.Orientation.Horizontal,
             ),
         )
+
+    def _update_sidebar_visibility(self, page_key):
+        if page_key != 'project_operation':
+            self.left_dock.hide()
+            self.right_dock.hide()
+            self.left_sidebar_expand_button.hide()
+            self.right_sidebar_expand_button.hide()
+            return
+
+        sidebars = (
+            ('left', self.left_dock, self.left_sidebar_expand_button),
+            ('right', self.right_dock, self.right_sidebar_expand_button),
+        )
+        for side, dock, expand_button in sidebars:
+            if self._sidebar_collapsed[side]:
+                dock.hide()
+                expand_button.show()
+                expand_button.raise_()
+            else:
+                expand_button.hide()
+                dock.show()
+        QTimer.singleShot(0, self._position_sidebar_expand_buttons)
 
     def _position_sidebar_expand_buttons(self):
         viewport = self.centralWidget()
