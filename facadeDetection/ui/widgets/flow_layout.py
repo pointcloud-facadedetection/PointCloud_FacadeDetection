@@ -48,7 +48,7 @@ class FlowLayout(QLayout):
 
     def minimumSize(self):
         size = QSize()
-        for item in self._items:
+        for item in self._visible_items():
             size = size.expandedTo(item.minimumSize())
 
         left, top, right, bottom = self.getContentsMargins()
@@ -61,7 +61,7 @@ class FlowLayout(QLayout):
         y = area.y()
         line_height = 0
 
-        for item in self._items:
+        for item in self._visible_items():
             item_size = item.sizeHint()
             if line_height and x + item_size.width() > area.right() + 1:
                 x = area.x()
@@ -75,3 +75,6 @@ class FlowLayout(QLayout):
             line_height = max(line_height, item_size.height())
 
         return y + line_height - rect.y() + bottom
+
+    def _visible_items(self):
+        return [item for item in self._items if not item.isEmpty()]

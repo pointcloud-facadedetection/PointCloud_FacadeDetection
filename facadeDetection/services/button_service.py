@@ -1,14 +1,50 @@
-"""主窗口 Header 按钮对应的 service。"""
+"""主窗口 Header 按钮对应的临时 service 接口。"""
 
 
 class ButtonService:
-    """接收 UI 按钮事件，并在控制台输出触发结果。"""
+    """接收 UI 按钮事件，当前仅验证接口触发链。"""
 
-    def upload_file(self):
-        print('upload_file被点击了', flush=True)
+    def __init__(self):
+        self.selected_file_paths = []
+        self.extracted_file_paths = []
 
-    def point_cloud_denoise(self):
-        print('point_cloud_denoise被点击了', flush=True)
+    @staticmethod
+    def _notify(action_name):
+        print(f'{action_name} triggered', flush=True)
+
+    def upload_files(self, file_paths):
+        self.selected_file_paths = list(file_paths)
+        self._notify('upload_files')
+        self.extract_files(self.selected_file_paths)
+
+    def extract_files(self, file_paths):
+        self.extracted_file_paths = list(file_paths)
+        self._notify('extract_files')
+
+    def reset(self):
+        self._notify('reset')
+
+    def change_colors(self):
+        self._notify('change_colors')
+
+    def denoise(self):
+        self._notify('denoise')
+
+    def registration(self):
+        self._notify('registration')
 
     def facade_detection(self):
-        print('facade_detection被点击了', flush=True)
+        self._notify('facade_detection')
+
+    def compute_quality(self):
+        self._notify('compute_quality')
+
+    def segmentation(self):
+        self._notify('segmentation')
+
+    def compute_detail(self):
+        self._notify('compute_detail')
+
+    def align_2d_3d(self):
+        # 设计文档暂称“2D_align_3D”，这里使用合法的 Python 方法名。
+        self._notify('align_2d_3d')
