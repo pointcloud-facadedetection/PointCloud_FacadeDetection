@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
+    QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -63,12 +65,6 @@ PAGE_HEADER_ACTIONS = {
     'report_export': (),
 }
 
-HEADER_ACTIONS = tuple(
-    action
-    for _page_title, page_key in PAGE_DEFINITIONS
-    for action in PAGE_HEADER_ACTIONS[page_key]
-)
-
 UPLOAD_FILE_FILTER = (
     '项目支持文件 '
     '(*.ply *.pcd *.xyz *.pts *.las *.laz *.e57 *.fls '
@@ -90,49 +86,27 @@ class MainWindow(QMainWindow):
         self.pointcloud_service = PointCloudService(self.viewport)
         self.current_project = None
         self.header_buttons = {}
+        self.page_header_layouts = {}
         self.page_title_labels = {}
         self._sidebar_collapsed = {'left': False, 'right': False}
         self._last_upload_directory = str(Path.home())
-        self._header_resize_pending = False
+        self._header_resize_pending = set()
         self._setup_ui()
         self._connect_buttons()
         self._refresh_project_list()
         self._set_current_project(None)
 
     def _setup_ui(self):
-        # 页面按整页切换；三维视口只属于“项目操作”页面。
+        # 每个页面自身包含 Header 和内容，切换时不再只替换中间视口。
         self.setCentralWidget(self._create_page_stack())
 
         self.setDockNestingEnabled(False)
-        self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.TopDockWidgetArea)
-        self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.TopDockWidgetArea)
         self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
 
-        (
-            self.left_dock,
-            self.left_sidebar_button,
-        ) = self._create_sidebar(
-            'Left Sidebar', 'leftDock', 'left', Qt.DockWidgetArea.LeftDockWidgetArea
-        )
-        (
-            self.right_dock,
-            self.right_sidebar_button,
-        ) = self._create_sidebar(
-            'Right Sidebar', 'rightDock', 'right', Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
-        self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
-        self.centralWidget().installEventFilter(self)
-        self.header_dock = self._create_header()
         self.bottom_dock = self._create_bottom()
         self.set_current_page(0)
 
-        self.resizeDocks(
-            [self.left_dock, self.right_dock],
-            [210, 210],
-            Qt.Orientation.Horizontal,
-        )
         self.resizeDocks(
             [self.bottom_dock],
             [80],
@@ -173,16 +147,22 @@ class MainWindow(QMainWindow):
     def _create_project_overview_page(self, page_title, page_key):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
-        layout.addWidget(self._create_page_title(page_title, page_key))
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._create_page_header(page_key))
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 20, 24, 20)
+        content_layout.setSpacing(14)
+        content_layout.addWidget(self._create_page_title(page_title, page_key))
 
         description = QLabel('历史项目')
         description.setObjectName('projectListSectionTitle')
         description.setStyleSheet(
             'color: #565d69; font-size: 14px; font-weight: 600;'
         )
-        layout.addWidget(description)
+        content_layout.addWidget(description)
 
         scroll_area = QScrollArea()
         scroll_area.setObjectName('projectListScrollArea')
@@ -196,69 +176,90 @@ class MainWindow(QMainWindow):
         self.project_list_layout.setSpacing(10)
         self.project_list_layout.addStretch(1)
         scroll_area.setWidget(self.project_list_container)
-        layout.addWidget(scroll_area, 1)
+        content_layout.addWidget(scroll_area, 1)
+        layout.addWidget(content, 1)
         return page
 
     def _create_operation_page(self, page_title, page_key):
         page = QWidget()
+        self.operation_page = page
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
-        layout.addWidget(self._create_page_title(page_title, page_key))
-        layout.addWidget(self.viewport.get_widget(), 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._create_page_header(page_key))
+
+        self.operation_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.operation_splitter.setObjectName('operationPageSplitter')
+        self.operation_splitter.setChildrenCollapsible(False)
+
+        (
+            self.left_dock,
+            self.left_sidebar_button,
+        ) = self._create_sidebar('Left Sidebar', 'leftDock', 'left')
+        (
+            self.right_dock,
+            self.right_sidebar_button,
+        ) = self._create_sidebar('Right Sidebar', 'rightDock', 'right')
+
+        viewport_panel = QWidget()
+        viewport_layout = QVBoxLayout(viewport_panel)
+        viewport_layout.setContentsMargins(12, 10, 12, 10)
+        viewport_layout.setSpacing(8)
+        viewport_layout.addWidget(self._create_page_title(page_title, page_key))
+        viewport_layout.addWidget(self.viewport.get_widget(), 1)
+
+        self.operation_splitter.addWidget(self.left_dock)
+        self.operation_splitter.addWidget(viewport_panel)
+        self.operation_splitter.addWidget(self.right_dock)
+        self.operation_splitter.setStretchFactor(0, 0)
+        self.operation_splitter.setStretchFactor(1, 1)
+        self.operation_splitter.setStretchFactor(2, 0)
+        self.operation_splitter.setSizes([210, 1000, 210])
+        self.operation_splitter.installEventFilter(self)
+        layout.addWidget(self.operation_splitter, 1)
+
+        self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
+        self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
         return page
 
     def _create_placeholder_page(self, page_title, page_key):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.addWidget(self._create_page_title(page_title, page_key))
-
-        placeholder = QLabel('该模块将在本周末开始接入')
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet('color: #8a9099; font-size: 15px;')
-        layout.addWidget(placeholder, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
         return page
 
-    def _create_header(self):
-        dock = QDockWidget('Header', self)
-        dock.setObjectName('headerDock')
-        dock.setAllowedAreas(Qt.DockWidgetArea.TopDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
-
-        title_bar = QWidget()
-        title_bar.setFixedHeight(0)
-        dock.setTitleBarWidget(title_bar)
-
+    def _create_page_header(self, page_key):
         panel = QWidget()
-        panel.setObjectName('headerPanel')
-        self.header_panel = panel
+        panel.setObjectName(f'{page_key}HeaderPanel')
+        panel.setMinimumHeight(54)
+        panel.setMaximumHeight(180)
         panel.installEventFilter(self)
-        self.header_layout = FlowLayout(
+        header_layout = FlowLayout(
             panel,
             margin=10,
             horizontal_spacing=8,
             vertical_spacing=8,
         )
+        self.page_header_layouts[panel] = header_layout
 
-        for label, button_name in HEADER_ACTIONS:
+        for label, button_name in PAGE_HEADER_ACTIONS[page_key]:
             button = QPushButton(label)
             button.setObjectName(button_name)
             button.setMinimumSize(120, 34)
             setattr(self, button_name, button)
             self.header_buttons[button_name] = button
-            self.header_layout.addWidget(button)
+            header_layout.addWidget(button)
 
-        dock.setWidget(panel)
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, dock)
-        QTimer.singleShot(0, self._resize_header_to_contents)
-        return dock
+        QTimer.singleShot(0, lambda: self._resize_page_header(panel))
+        return panel
 
-    def _create_sidebar(self, title, object_name, side, area):
-        dock = QDockWidget(title, self)
-        dock.setObjectName(object_name)
-        dock.setAllowedAreas(area)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+    def _create_sidebar(self, title, object_name, side):
+        sidebar = QFrame()
+        sidebar.setObjectName(object_name)
+        sidebar.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
 
         title_bar = QWidget()
         title_bar.setObjectName(f'{object_name}TitleBar')
@@ -285,20 +286,18 @@ class MainWindow(QMainWindow):
             alignment=Qt.AlignmentFlag.AlignVCenter,
         )
         title_layout.addStretch(1)
-        dock.setTitleBarWidget(title_bar)
+        sidebar_layout.addWidget(title_bar)
 
         panel = QWidget()
         panel.setObjectName(f'{object_name}Panel')
-        dock.setWidget(panel)
-        dock.setMinimumWidth(180)
-        dock.setMaximumWidth(260)
-        dock.setProperty('expandedWidth', 210)
-        self.addDockWidget(area, dock)
-        return dock, toggle_button
+        sidebar_layout.addWidget(panel, 1)
+        sidebar.setMinimumWidth(180)
+        sidebar.setMaximumWidth(260)
+        sidebar.setProperty('expandedWidth', 210)
+        return sidebar, toggle_button
 
     def _create_sidebar_expand_button(self, side):
-        button = QToolButton()
-        button.setParent(self)
+        button = QToolButton(self.operation_page)
         button.setObjectName(f'btn_expand_{side}_sidebar')
         button.setText('▶' if side == 'left' else '◀')
         label = 'Left Sidebar' if side == 'left' else 'Right Sidebar'
@@ -419,22 +418,8 @@ class MainWindow(QMainWindow):
         self.centralWidget().setCurrentIndex(page_index)
         if button is not None:
             button.setChecked(True)
-        self._update_header_actions(page_index)
-        self._update_sidebar_visibility(page_key)
-
-    def _update_header_actions(self, page_index):
-        page_key = PAGE_DEFINITIONS[page_index][1]
-        visible_buttons = {
-            button_name
-            for _label, button_name in PAGE_HEADER_ACTIONS[page_key]
-        }
-        for button_name, button in self.header_buttons.items():
-            button.setVisible(button_name in visible_buttons)
-
-        self.header_dock.setVisible(bool(visible_buttons))
-        self.header_layout.invalidate()
-        self.header_panel.updateGeometry()
-        self._schedule_header_resize()
+        if page_key == 'project_operation':
+            QTimer.singleShot(0, self._position_sidebar_expand_buttons)
 
     def _connect_buttons(self):
         overview_actions = {
@@ -584,6 +569,35 @@ class MainWindow(QMainWindow):
             return
 
         for project in projects:
+            project_row = QWidget()
+            project_row.setObjectName('projectRow')
+            project_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            project_row.setMinimumHeight(88)
+            project_row_layout = QHBoxLayout(project_row)
+            project_row_layout.setContentsMargins(0, 0, 6, 0)
+            project_row_layout.setSpacing(0)
+            project_row.setStyleSheet(
+                """
+                QWidget#projectRow {
+                    background-color: #ffffff;
+                    border: 1px solid #d5d9df;
+                    border-radius: 6px;
+                }
+                QPushButton#projectCard {
+                    color: #303641;
+                    background-color: transparent;
+                    border: none;
+                    padding: 12px 16px;
+                    text-align: left;
+                }
+                QToolButton#btn_delete_project {
+                    background-color: transparent;
+                    border: none;
+                    padding: 3px;
+                }
+                """
+            )
+
             card = QPushButton()
             card.setObjectName('projectCard')
             card.setText(
@@ -597,30 +611,61 @@ class MainWindow(QMainWindow):
                 QSizePolicy.Policy.Fixed,
             )
             card.setMinimumHeight(88)
-            card.setStyleSheet(
-                """
-                QPushButton#projectCard {
-                    color: #303641;
-                    background-color: #ffffff;
-                    border: 1px solid #d5d9df;
-                    border-radius: 6px;
-                    padding: 12px 16px;
-                    text-align: left;
-                }
-                QPushButton#projectCard:hover {
-                    background-color: #f2f6fb;
-                    border-color: #7195c4;
-                }
-                """
-            )
             card.clicked.connect(
                 lambda _checked=False, project_id=project.project_id:
                 self._open_project_card(project_id)
             )
+
+            delete_button = QToolButton()
+            delete_button.setObjectName('btn_delete_project')
+            delete_button.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+            )
+            delete_button.setToolTip('删除项目')
+            delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            delete_button.setAutoRaise(True)
+            delete_button.setFixedSize(28, 28)
+            delete_button.clicked.connect(
+                lambda _checked=False, project_id=project.project_id:
+                self._delete_project(project_id)
+            )
+
+            project_row_layout.addWidget(card, 1)
+            project_row_layout.addWidget(
+                delete_button,
+                0,
+                Qt.AlignmentFlag.AlignVCenter,
+            )
             self.project_list_layout.insertWidget(
                 self.project_list_layout.count() - 1,
-                card,
+                project_row,
             )
+
+    def _delete_project(self, project_id):
+        project = self.project_service.get_project(project_id)
+        if project is None:
+            return
+
+        choice = QMessageBox.question(
+            self,
+            '删除项目',
+            (
+                f'确定从项目列表中删除“{project.name}”吗？\n'
+                '此操作不会删除本地项目文件。'
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        self.project_service.remove_project(project_id)
+        if (
+            self.current_project is not None
+            and self.current_project.project_id == project_id
+        ):
+            self._set_current_project(None)
+        self._refresh_project_list()
 
     def _open_project_card(self, project_id):
         project = self.project_service.get_project(project_id)
@@ -669,7 +714,9 @@ class MainWindow(QMainWindow):
                 if project_name
                 else page_title
             )
-            self.page_title_labels[page_key].setText(label_text)
+            page_title_label = self.page_title_labels.get(page_key)
+            if page_title_label is not None:
+                page_title_label.setText(label_text)
 
         if has_project:
             self.current_project_label.setText(f'当前项目：{project.name}')
@@ -698,52 +745,37 @@ class MainWindow(QMainWindow):
         target_width = int(dock.property('expandedWidth') or 210)
         QTimer.singleShot(
             0,
-            lambda: self.resizeDocks(
-                [dock],
-                [target_width],
-                Qt.Orientation.Horizontal,
-            ),
+            lambda: self._restore_sidebar_width(side, target_width),
         )
 
-    def _update_sidebar_visibility(self, page_key):
-        if page_key != 'project_operation':
-            self.left_dock.hide()
-            self.right_dock.hide()
-            self.left_sidebar_expand_button.hide()
-            self.right_sidebar_expand_button.hide()
-            return
-
-        sidebars = (
-            ('left', self.left_dock, self.left_sidebar_expand_button),
-            ('right', self.right_dock, self.right_sidebar_expand_button),
-        )
-        for side, dock, expand_button in sidebars:
-            if self._sidebar_collapsed[side]:
-                dock.hide()
-                expand_button.show()
-                expand_button.raise_()
-            else:
-                expand_button.hide()
-                dock.show()
-        QTimer.singleShot(0, self._position_sidebar_expand_buttons)
+    def _restore_sidebar_width(self, side, target_width):
+        sizes = self.operation_splitter.sizes()
+        total_width = max(sum(sizes), self.operation_splitter.width())
+        side_index = 0 if side == 'left' else 2
+        other_index = 2 if side == 'left' else 0
+        sizes[side_index] = target_width
+        sizes[1] = max(1, total_width - target_width - sizes[other_index])
+        self.operation_splitter.setSizes(sizes)
 
     def _position_sidebar_expand_buttons(self):
-        viewport = self.centralWidget()
-        viewport_top_left = viewport.mapTo(self, QPoint(0, 0))
-        top = viewport_top_left.y() + 8
+        splitter_top_left = self.operation_splitter.mapTo(
+            self.operation_page,
+            QPoint(0, 0),
+        )
+        top = splitter_top_left.y() + 8
         margin = 8
 
-        if self.left_sidebar_expand_button.isVisible():
+        if not self.left_sidebar_expand_button.isHidden():
             self.left_sidebar_expand_button.move(
-                viewport_top_left.x() + margin,
+                splitter_top_left.x() + margin,
                 top,
             )
             self.left_sidebar_expand_button.raise_()
 
-        if self.right_sidebar_expand_button.isVisible():
+        if not self.right_sidebar_expand_button.isHidden():
             self.right_sidebar_expand_button.move(
-                viewport_top_left.x()
-                + viewport.width()
+                splitter_top_left.x()
+                + self.operation_splitter.width()
                 - self.right_sidebar_expand_button.width()
                 - margin,
                 top,
@@ -751,41 +783,42 @@ class MainWindow(QMainWindow):
             self.right_sidebar_expand_button.raise_()
 
     def eventFilter(self, watched, event):
-        if watched is self.header_panel and event.type() == QEvent.Type.Resize:
-            self._schedule_header_resize()
-        if watched is self.centralWidget() and event.type() in (
-            QEvent.Type.Resize,
-            QEvent.Type.Show,
-            QEvent.Type.Move,
+        if (
+            watched in self.page_header_layouts
+            and event.type() == QEvent.Type.Resize
+        ):
+            self._schedule_page_header_resize(watched)
+        if (
+            watched is getattr(self, 'operation_splitter', None)
+            and event.type() in (
+                QEvent.Type.Resize,
+                QEvent.Type.Show,
+                QEvent.Type.Move,
+            )
         ):
             QTimer.singleShot(0, self._position_sidebar_expand_buttons)
         return super().eventFilter(watched, event)
 
-    def _schedule_header_resize(self):
-        if self._header_resize_pending:
+    def _schedule_page_header_resize(self, panel):
+        if panel in self._header_resize_pending:
             return
-        self._header_resize_pending = True
-        QTimer.singleShot(0, self._resize_header_to_contents)
+        self._header_resize_pending.add(panel)
+        QTimer.singleShot(0, lambda: self._resize_page_header(panel))
 
-    def _resize_header_to_contents(self):
-        self._header_resize_pending = False
-        if not hasattr(self, 'header_dock') or self.header_panel.width() <= 0:
+    def _resize_page_header(self, panel):
+        self._header_resize_pending.discard(panel)
+        if panel.width() <= 0:
             return
 
-        content_height = self.header_layout.heightForWidth(self.header_panel.width())
-        title_height = max(self.header_dock.height() - self.header_panel.height(), 16)
-        target_height = max(70, min(content_height + title_height, 180))
+        header_layout = self.page_header_layouts[panel]
+        content_height = header_layout.heightForWidth(panel.width())
+        target_height = max(54, min(content_height, 180))
 
         if (
-            self.header_dock.minimumHeight() == target_height
-            and self.header_dock.maximumHeight() == target_height
+            panel.minimumHeight() == target_height
+            and panel.maximumHeight() == target_height
         ):
             return
 
-        self.header_dock.setMinimumHeight(target_height)
-        self.header_dock.setMaximumHeight(target_height)
-        self.resizeDocks(
-            [self.header_dock],
-            [target_height],
-            Qt.Orientation.Vertical,
-        )
+        panel.setMinimumHeight(target_height)
+        panel.setMaximumHeight(target_height)
