@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from qtwebview2 import QtWebView2Widget
 
 from .widgets.flow_layout import FlowLayout
 from services.file_service import FileService
@@ -62,7 +63,9 @@ PAGE_HEADER_ACTIONS = {
         ('二维-三维对齐', 'btn_align_2d_3d'),
     ),
     'inspection_review': (),
-    'report_export': (),
+    'report_export': (
+        ('打开 PDF', 'btn_open_report_pdf'),
+    ),
 }
 
 UPLOAD_FILE_FILTER = (
@@ -72,6 +75,11 @@ UPLOAD_FILE_FILTER = (
     '点云文件 (*.ply *.pcd *.xyz *.pts *.las *.laz *.e57 *.fls);;'
     '图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;'
     '所有文件 (*)'
+)
+
+REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
+DEMO_REPORT_PDF_URL = (
+    'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf'
 )
 
 
@@ -91,6 +99,7 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = {'left': False, 'right': False}
         self._last_upload_directory = str(Path.home())
         self._header_resize_pending = set()
+        self._current_report_pdf_name = Path(DEMO_REPORT_PDF_URL).name
         self._setup_ui()
         self._connect_buttons()
         self._refresh_project_list()
@@ -123,6 +132,8 @@ class MainWindow(QMainWindow):
                 page = self._create_project_overview_page(page_title, page_key)
             elif page_key == 'project_operation':
                 page = self._create_operation_page(page_title, page_key)
+            elif page_key == 'report_export':
+                page = self._create_report_export_page(page_title, page_key)
             else:
                 page = self._create_placeholder_page(page_title, page_key)
 
@@ -220,6 +231,48 @@ class MainWindow(QMainWindow):
 
         self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
         self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
+        return page
+
+    def _create_report_export_page(self, page_title, page_key):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._create_page_header(page_key))
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 20, 24, 20)
+        content_layout.setSpacing(12)
+        page_title_label = self._create_page_title(page_title, page_key)
+        page_title_label.setText(self._current_report_pdf_name)
+        content_layout.addWidget(page_title_label)
+
+        self.report_pdf_status_label = QLabel('正在加载示例 PDF…')
+        self.report_pdf_status_label.setObjectName('reportPdfStatusLabel')
+        self.report_pdf_status_label.setStyleSheet(
+            'color: #656c77; font-size: 13px;'
+        )
+        content_layout.addWidget(self.report_pdf_status_label)
+
+        # QtWebView2Widget 只嵌入系统 WebView2 内容区，不创建浏览器地址栏。
+        self.report_webview = QtWebView2Widget(
+            url=DEMO_REPORT_PDF_URL,
+            debug=False,
+            context_menus=False,
+            background_color='#f5f7fa',
+            parent=page,
+        )
+        self.report_webview.setObjectName('reportPdfWebView')
+        self.report_webview.bridge.initialization_done.connect(
+            self._on_report_webview_initialized
+        )
+        self.report_webview.bridge.domContentLoaded.connect(
+            self._on_report_pdf_loaded
+        )
+        content_layout.addWidget(self.report_webview, 1)
+
+        layout.addWidget(content, 1)
         return page
 
     def _create_placeholder_page(self, page_title, page_key):
@@ -420,6 +473,7 @@ class MainWindow(QMainWindow):
             button.setChecked(True)
         if page_key == 'project_operation':
             QTimer.singleShot(0, self._position_sidebar_expand_buttons)
+        self._update_window_title(page_key)
 
     def _connect_buttons(self):
         overview_actions = {
@@ -439,7 +493,15 @@ class MainWindow(QMainWindow):
             'btn_calculate_detail': self.pointcloud_service.calculate_detail,
             'btn_align_2d_3d': self.pointcloud_service.align_2d_3d,
         }
-        for button_name, callback in {**overview_actions, **pointcloud_actions}.items():
+        report_actions = {
+            'btn_open_report_pdf': self._open_report_pdf,
+        }
+        all_actions = {
+            **overview_actions,
+            **pointcloud_actions,
+            **report_actions,
+        }
+        for button_name, callback in all_actions.items():
             self.header_buttons[button_name].clicked.connect(callback)
 
         self.left_sidebar_button.clicked.connect(
@@ -549,6 +611,50 @@ class MainWindow(QMainWindow):
 
         selected_index = labels.index(selected_label)
         self._activate_project(projects[selected_index])
+
+    def _open_report_pdf(self):
+        pdf_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            '选择 PDF 报告',
+            self._last_upload_directory,
+            REPORT_PDF_FILTER,
+        )
+        if not pdf_path:
+            return
+
+        self._last_upload_directory = str(Path(pdf_path).parent)
+        self.show_report_pdf(pdf_path)
+
+    def show_report_pdf(self, pdf_path):
+        path = Path(pdf_path).expanduser().resolve()
+        if not path.is_file() or path.suffix.lower() != '.pdf':
+            QMessageBox.warning(
+                self,
+                '打开 PDF',
+                '请选择有效的 PDF 文件。',
+            )
+            return
+
+        self.report_pdf_status_label.setText(f'正在加载：{path.name}')
+        self._current_report_pdf_name = path.name
+        self.page_title_labels['report_export'].setText(path.name)
+        self._update_window_title('report_export')
+        self.report_webview.load_url(path.as_uri())
+
+    def _on_report_webview_initialized(self, success, error_message):
+        if success:
+            self.report_pdf_status_label.setText('WebView2 已就绪，正在显示 PDF')
+            return
+
+        self.report_pdf_status_label.setText('WebView2 初始化失败')
+        QMessageBox.warning(
+            self,
+            'WebView2 初始化失败',
+            error_message or '请检查 Microsoft Edge WebView2 Runtime。',
+        )
+
+    def _on_report_pdf_loaded(self):
+        self.report_pdf_status_label.setText('PDF 已加载')
 
     def _refresh_project_list(self):
         while self.project_list_layout.count() > 1:
@@ -709,11 +815,14 @@ class MainWindow(QMainWindow):
 
         project_name = project.name if has_project else ''
         for page_title, page_key in PAGE_DEFINITIONS:
-            label_text = (
-                f'{page_title} — {project_name}'
-                if project_name
-                else page_title
-            )
+            if page_key == 'report_export':
+                label_text = self._current_report_pdf_name
+            else:
+                label_text = (
+                    f'{page_title} — {project_name}'
+                    if project_name
+                    else page_title
+                )
             page_title_label = self.page_title_labels.get(page_key)
             if page_title_label is not None:
                 page_title_label.setText(label_text)
@@ -721,14 +830,28 @@ class MainWindow(QMainWindow):
         if has_project:
             self.current_project_label.setText(f'当前项目：{project.name}')
             self.current_project_label.setToolTip(project.directory_path)
-            self.setWindowTitle(
-                f'PointCloud FacadeDetection - {project.name}'
-            )
         else:
             self.current_project_label.setText('当前项目：未选择')
             self.current_project_label.setToolTip('')
-            self.setWindowTitle('PointCloud FacadeDetection')
             self.set_current_page(0)
+        self._update_window_title()
+
+    def _update_window_title(self, page_key=None):
+        if page_key is None:
+            page_index = self.centralWidget().currentIndex()
+            page_key = PAGE_DEFINITIONS[page_index][1]
+
+        if page_key == 'report_export':
+            suffix = self._current_report_pdf_name
+        elif self.current_project is not None:
+            suffix = self.current_project.name
+        else:
+            suffix = ''
+
+        title = 'PointCloud FacadeDetection'
+        if suffix:
+            title = f'{title} - {suffix}'
+        self.setWindowTitle(title)
 
     def _collapse_sidebar(self, side, dock, expand_button):
         self._sidebar_collapsed[side] = True
