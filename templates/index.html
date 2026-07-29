@@ -109,6 +109,226 @@
 
         input[type="file"] { display: none; }
 
+        .photo-view-panel {
+            position: absolute;
+            right: 22px;
+            bottom: 58px;
+            width: 480px;
+            max-height: min(58vh, 620px);
+            padding: 14px;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+            background: rgba(20, 22, 30, 0.92);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            z-index: 25;
+            display: none;
+            pointer-events: auto;
+        }
+        .photo-view-panel.show { display: block; }
+        .photo-view-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .photo-view-title button {
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+        .photo-view-body {
+            position: relative;
+            width: 100%;
+            min-height: 320px;
+            max-height: calc(min(58vh, 620px) - 80px);
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.08);
+            cursor: default;
+        }
+        .photo-view-body.annotate-ready {
+            cursor: crosshair;
+            box-shadow: inset 0 0 0 2px rgba(102, 126, 234, 0.55);
+        }
+        .photo-marker-layer,
+        .photo-reproj-layer {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+        }
+        .photo-annotate-tips {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(102, 126, 234, 0.35);
+            background: rgba(102, 126, 234, 0.08);
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.55;
+        }
+        .photo-annotate-tips ul {
+            margin: 0;
+            padding-left: 16px;
+        }
+        .photo-annotate-tips li { margin: 2px 0; }
+        .photo-annotate-tips .tip-warn { color: var(--warning); font-weight: 600; }
+        .photo-reproj-legend {
+            margin-top: 6px;
+            font-size: 10px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .photo-reproj-legend .reproj-good { color: #48bb78; }
+        .photo-reproj-legend .reproj-bad { color: #ff6b6b; }
+        .photo-match-marker {
+            position: absolute;
+            transform: translate(-50%, -50%);
+            min-width: 22px;
+            height: 22px;
+            padding: 0 6px;
+            border-radius: 11px;
+            background: rgba(255, 107, 107, 0.95);
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 22px;
+            text-align: center;
+            border: 2px solid #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+            pointer-events: none;
+        }
+        .photo-match-marker.match-pair {
+            min-width: 16px;
+            height: 16px;
+            padding: 0 3px;
+            border-radius: 8px;
+            font-size: 8px;
+            line-height: 16px;
+            border-width: 1px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        }
+        .photo-match-marker.draggable-vertex {
+            cursor: grab;
+            pointer-events: auto;
+            min-width: 22px;
+            height: 22px;
+            line-height: 22px;
+            font-size: 10px;
+            border-width: 2px;
+            box-shadow: 0 2px 8px rgba(255, 77, 79, 0.45);
+        }
+        .photo-match-marker.draggable-vertex:active {
+            cursor: grabbing;
+        }
+        .photo-view-img {
+            width: 100%;
+            height: 100%;
+            max-height: calc(min(58vh, 620px) - 80px);
+            object-fit: contain;
+            display: block;
+            user-select: none;
+        }
+        .photo-view-meta {
+            margin-top: 8px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            word-break: break-all;
+        }
+        .facade-grid-panel {
+            position: absolute;
+            right: 518px;
+            bottom: 58px;
+            width: 420px;
+            max-height: min(58vh, 620px);
+            padding: 14px;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+            background: rgba(248, 248, 250, 0.96);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            z-index: 25;
+            display: none;
+            pointer-events: auto;
+            color: #1f2430;
+        }
+        .facade-grid-panel.show { display: block; }
+        .facade-grid-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #1f2430;
+        }
+        .facade-grid-title button {
+            border: none;
+            background: transparent;
+            color: #667085;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+        .facade-grid-body {
+            position: relative;
+            width: 100%;
+            min-height: 320px;
+            height: calc(min(58vh, 620px) - 92px);
+            max-height: calc(min(58vh, 620px) - 92px);
+            border-radius: 8px;
+            overflow: hidden;
+            background: #eceff3;
+            border: 1px solid rgba(31, 36, 48, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .facade-grid-canvas {
+            display: block;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        .facade-grid-meta {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #667085;
+            line-height: 1.5;
+        }
+        .facade-heatmap-legend {
+            position: absolute;
+            left: 22px;
+            bottom: 58px;
+            width: 290px;
+            padding: 12px;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+            background: rgba(20, 22, 30, 0.92);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+            z-index: 24;
+            display: none;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .facade-heatmap-legend.show { display: block; }
+        .facade-heatmap-gradient {
+            height: 14px;
+            margin: 8px 0 5px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #0838ff 0%, #7a7a7a 50%, #ff1405 100%);
+        }
+        .facade-heatmap-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+        }
+
         .param-group { margin-bottom: 12px; }
         .param-group label {
             display: block;
@@ -764,6 +984,15 @@
                     <div class="param-value"><span>1</span><span class="value" id="min-area-value">5</span><span>50</span></div>
                 </div>
                 <button class="btn btn-primary" id="btn-detect-facades" disabled>🔍 检测建筑立面</button>
+                <button class="btn btn-secondary" id="btn-save-facade-detection" style="margin-top:6px;" disabled>💾 保存立面检测结果</button>
+                <button class="btn btn-secondary" id="btn-refresh-facade-results" style="margin-top:6px;">🔄 刷新结果列表</button>
+                <select id="facade-result-select" style="width:100%; margin-top:8px; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.25); color:var(--text-primary); font-size:12px;">
+                    <option value="">暂无已保存的立面检测结果</option>
+                </select>
+                <button class="btn btn-primary" id="btn-load-facade-detection" style="margin-top:8px;" disabled>📂 加载立面检测结果</button>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.5;">
+                    保存后可跳过耗时检测，直接加载结果以测试 2D-3D 匹配（需先加载同一点云）。
+                </div>
                 <div class="facade-list" id="facade-list" style="display:none;">
                 </div>
                 <button class="btn btn-secondary" id="btn-reset-facades" style="display:none; margin-top:8px;">↩️ 恢复原始显示</button>
@@ -821,10 +1050,46 @@
                 </div>
             </div>
 
-            <!-- 保存 -->
+            <!-- 保存 / 加载配准结果 -->
             <div class="sidebar-section">
-                <div class="section-title">💾 导出</div>
+                <div class="section-title">💾 配准结果</div>
                 <button class="btn btn-secondary" id="btn-save-reg" disabled>💾 保存配准结果</button>
+                <button class="btn btn-secondary" id="btn-refresh-reg-results" style="margin-top:6px;">🔄 刷新结果列表</button>
+                <select id="reg-result-select" style="width:100%; margin-top:8px; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.25); color:var(--text-primary); font-size:12px;">
+                    <option value="">暂无已保存的配准结果</option>
+                </select>
+                <button class="btn btn-primary" id="btn-load-reg" style="margin-top:8px;" disabled>📂 加载配准结果</button>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.5;">
+                    保存后会写入变换矩阵与合并点云；下次可直接加载，无需重新手动采点配准。
+                </div>
+            </div>
+
+            <!-- 2D 照片与点云匹配 -->
+            <div class="sidebar-section">
+                <div class="section-title">🖼️ 2D-3D 匹配</div>
+                <div id="photo-facade-prerequisite" style="margin-bottom:8px; font-size:11px; color:var(--warning); line-height:1.5;">
+                    上传 2D 照片前，请先对当前点云执行「检测建筑立面」
+                </div>
+                <button class="btn btn-primary" id="btn-upload-photo" disabled>📷 上传2D照片</button>
+                <button class="btn btn-secondary" id="btn-annotate-matches" style="margin-top:6px;" disabled>✏️ 进入标注模式</button>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" id="btn-undo-photo-match" disabled>↩️ 撤销点对</button>
+                    <button class="btn btn-danger" id="btn-exit-photo-annotate" disabled>🚪 退出标注</button>
+                </div>
+                <button class="btn btn-secondary" id="btn-photo-cloud-match" style="margin-top:6px;" disabled>📐 估算相机内外参数</button>
+                <button class="btn btn-secondary" id="btn-toggle-reprojection" style="margin-top:6px;" disabled>🔍 重投影检查</button>
+                <button class="btn btn-secondary" id="btn-annotate-facade-vertices-photo" style="margin-top:6px;" disabled>📍 标注照片检测区域顶点</button>
+                <button class="btn btn-secondary" id="btn-annotate-facade-vertices-cloud" style="margin-top:6px;" disabled>📍 标注点云检测区域顶点</button>
+                <div class="btn-row" id="facade-vertex-controls" style="margin-top:6px; display:none;">
+                    <button class="btn btn-secondary" id="btn-undo-facade-vertex" disabled>↩️ 撤销顶点</button>
+                    <button class="btn btn-danger" id="btn-exit-facade-vertex" disabled>🚪 退出标注</button>
+                </div>
+                <button class="btn btn-secondary" id="btn-highlight-photo-facade" style="margin-top:6px;" disabled>✨ 高亮立面</button>
+                <button class="btn btn-primary" id="btn-generate-photo-heatmap" style="margin-top:6px;" disabled>🌡️ 生成热力图</button>
+                <div style="margin-top:8px; font-size:11px; color:var(--text-secondary); line-height:1.5;" id="photo-match-status">
+                    尚未上传照片
+                </div>
+                <div class="photo-annotate-tips" id="photo-annotate-tips" style="display:none;"></div>
             </div>
         </div>
         <div class="status-bar" id="status-bar"><span>就绪</span></div>
@@ -862,6 +1127,43 @@
             <div class="hint-text" id="hint-text">鼠标左键旋转 | 右键平移 | 滚轮缩放</div>
         </div>
 
+        <div class="facade-grid-panel" id="facade-grid-panel">
+            <div class="facade-grid-title">
+                <span>立面网格热力图</span>
+                <button id="btn-close-facade-grid" title="关闭网格热力图">&times;</button>
+            </div>
+            <div class="facade-grid-body">
+                <canvas class="facade-grid-canvas" id="facade-grid-canvas"></canvas>
+            </div>
+            <div class="facade-grid-meta" id="facade-grid-meta"></div>
+        </div>
+
+        <div class="photo-view-panel" id="photo-view-panel">
+            <div class="photo-view-title">
+                <span>2D 照片视图</span>
+                <button id="btn-close-photo-view" title="关闭照片视图">&times;</button>
+            </div>
+            <div class="photo-view-body" id="photo-view-body">
+                <img class="photo-view-img" id="photo-view-img" alt="uploaded photo" />
+                <div class="photo-reproj-layer" id="photo-reproj-layer"></div>
+                <div class="photo-marker-layer" id="photo-marker-layer"></div>
+            </div>
+            <div class="photo-view-meta" id="photo-view-meta"></div>
+        </div>
+
+        <div class="facade-heatmap-legend" id="facade-heatmap-legend">
+            <div style="color:var(--text-primary);font-weight:700;" id="facade-heatmap-title">
+                立面网格热力图
+            </div>
+            <div class="facade-heatmap-gradient"></div>
+            <div class="facade-heatmap-labels">
+                <span id="facade-heatmap-negative">凹陷</span>
+                <span>平整墙面</span>
+                <span id="facade-heatmap-positive">凸起</span>
+            </div>
+            <div style="margin-top:7px;line-height:1.5;" id="facade-heatmap-meta"></div>
+        </div>
+
         <div class="progress-overlay" id="progress-overlay">
             <div class="progress-card">
                 <h3 id="progress-title">处理中...</h3>
@@ -870,6 +1172,30 @@
             </div>
         </div>
     </main>
+</div>
+
+<!-- 上传 2D 照片 Dialog -->
+<div class="dialog-overlay" id="photo-upload-dialog">
+    <div class="dialog-card">
+        <div class="dialog-header">
+            <h3>📷 上传 2D 照片</h3>
+            <button class="dialog-close" id="photo-upload-close">&times;</button>
+        </div>
+        <div class="dialog-body">
+            <div class="upload-zone" id="photo-drop-zone">
+                <div class="icon">🖼️</div>
+                <p>拖拽照片到此处，或点击从本地选择</p>
+                <p class="hint">支持 jpg / jpeg / png / bmp / webp</p>
+            </div>
+            <input type="file" id="photo-file-input" accept="image/jpeg,image/png,image/bmp,image/webp,.jpg,.jpeg,.png,.bmp,.webp" />
+            <div id="photo-upload-hint" style="margin-top:12px; font-size:12px; color:var(--text-secondary); line-height:1.6;">
+                上传后会在 3D 视口右下角显示照片视图，再进行匹配点标注与 2D-3D 匹配。
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-secondary" id="photo-upload-cancel" style="width:auto; padding:8px 20px;">取消</button>
+        </div>
+    </div>
 </div>
 
 <!-- 质量评估 Dialog -->
@@ -956,6 +1282,7 @@ const state = {
         facades: [],
         selectedFacadeId: null,
         originalColors: null,
+        detectionColors: null,
         sourceUUID: null,
     },
 
@@ -973,6 +1300,34 @@ const state = {
         items: [],
         labels: null,
         originalColors: null,
+    },
+
+    photo: {
+        id: null,
+        filename: null,
+        url: null,
+        annotateMode: false,
+        nextIsPhoto: true,
+        correspondences: [],
+        photoMarkers: [],
+        cloudMarkers: [],
+        matchResult: null,
+        heatmapGroup: null,
+        selectedFacadeId: null,
+        facadeVertices: [],
+        facadeVerticesCloud: [],
+        facadeVertexCloudMarkers: [],
+        facadeVertexMode: false,
+        facadeVertexSourceMode: null,
+        facadeVertexAnnotationSource: null,
+        facadeVerticesDraggable: false,
+        facadeVertexDrag: null,
+        facadeSnapFacadeId: null,
+        gridHeatmapResult: null,
+        regionFrameGroup: null,
+        regionCorners3d: null,
+        reprojectionCheck: null,
+        showReprojection: false,
     },
 
 };
@@ -1234,6 +1589,7 @@ function setActiveCloud(uuid, focus = false) {
 
     updateInfoPanel(state.activeCloud);
     updateButtonState(true);
+    updatePhotoMatchStatus();
 
     if (focus) focusOnCloud(uuid);
 }
@@ -1341,6 +1697,7 @@ function removeCloud(uuid) {
     cloud.mesh.material.dispose();
     state.pointClouds.delete(uuid);
     if (state.activeCloud?.uuid === uuid) {
+        clearPhotoFacadeHeatmap();
         state.activeCloud = null;
         updateButtonState(false);
         resetInfoPanel();
@@ -1373,6 +1730,7 @@ function clearAll() {
     updateSceneScale();
     updateButtonState(false);
     clearRegistration();
+    clearPhotoFacadeHeatmap();
     resetFacades();
     showStatus('已清空所有点云', 'success');
 }
@@ -1546,6 +1904,40 @@ function hideNormals() {
 
 
 // 立面检测功能
+async function applyFacadeDetectionResult(result) {
+    const uuid = result.uuid;
+    const cloud = state.pointClouds.get(uuid);
+    if (cloud) {
+        state.facade.originalColors = new Float32Array(cloud.geometry.attributes.color.array);
+    }
+
+    state.facade.detected = true;
+    state.facade.sourceUUID = uuid;
+    state.facade.facades = result.facades || [];
+    state.facade.selectedFacadeId = null;
+
+    await loadPointCloud(result, result.filename, uuid, {
+        preserveCamera: true,
+        preserveColor: false,
+    });
+    const updatedCloud = state.pointClouds.get(uuid);
+    if (updatedCloud) {
+        updatedCloud.facadeLabels = result.point_labels || null;
+        updatedCloud.facades = result.facades || [];
+        const detectionColors = new Float32Array(
+            updatedCloud.geometry.attributes.color.array
+        );
+        state.facade.detectionColors = detectionColors;
+        updatedCloud.detectionColors = detectionColors;
+    }
+
+    renderFacadeList(result.facades);
+    updateInfoPanel(state.pointClouds.get(uuid));
+    document.getElementById('btn-reset-facades').style.display = 'block';
+    document.getElementById('btn-save-facade-detection').disabled = !(result.facades && result.facades.length);
+    updatePhotoMatchStatus();
+}
+
 async function detectFacades() {
     if (!state.activeCloud) {
         showStatus('请先激活一个点云', 'warning');
@@ -1574,38 +1966,14 @@ async function detectFacades() {
         if (result.error) throw new Error(result.error);
 
         updateProgress(50);
-
-        // 保存原始颜色（用于重置）
-        const cloud = state.pointClouds.get(uuid);
-        state.facade.originalColors = new Float32Array(cloud.geometry.attributes.color.array);
-        state.facade.sourceUUID = uuid;
-
-        // 缓存立面信息
-        state.facade.detected = true;
-        state.facade.facades = result.facades || [];
-        state.facade.selectedFacadeId = null;
-
-        await loadPointCloud(result, result.filename, result.uuid, {
-            preserveCamera: true,
-            preserveColor: false
-        });
-        const updatedCloud = state.pointClouds.get(uuid);
-        if (updatedCloud) {
-            updatedCloud.facadeLabels = result.point_labels || null;
-            updatedCloud.facades = result.facades || [];
-        }
+        await applyFacadeDetectionResult(result);
         restoreCameraState();
-
-        renderFacadeList(result.facades);
 
         updateProgress(100);
         hideProgress();
 
-        const facadeCount = result.facade_count || 0;
+        const facadeCount = result.facade_count || (result.facades || []).length;
         showStatus(`检测到 ${facadeCount} 个平面`, 'success');
-        updateInfoPanel(state.pointClouds.get(uuid));
-
-        document.getElementById('btn-reset-facades').style.display = 'block';
 
     } catch (err) {
         hideProgress();
@@ -1871,6 +2239,7 @@ function resetFacades() {
     state.facade.facades = [];
     state.facade.selectedFacadeId = null;
     state.facade.originalColors = null;
+    state.facade.detectionColors = null;
     state.facade.sourceUUID = null;
     if (state.activeCloud) {
         state.activeCloud.facadeLabels = null;
@@ -1885,8 +2254,47 @@ function resetFacades() {
     if (state.activeCloud) {
         updateInfoPanel(state.activeCloud);
     }
+    updatePhotoMatchStatus();
 
     showStatus('已恢复原始显示', 'info');
+}
+
+/** 恢复立面检测着色，并清除照片高亮/热力图/3D 红框（保留立面检测缓存） */
+function restoreFacadeDetectionDisplay() {
+    if (!state.facade.detected || !state.activeCloud) {
+        return false;
+    }
+    const cloud = state.activeCloud;
+    const detectionColors = state.facade.detectionColors
+        || cloud.detectionColors;
+    if (detectionColors && cloud.geometry.attributes.color) {
+        const colors = cloud.geometry.attributes.color.array;
+        if (colors.length === detectionColors.length) {
+            colors.set(detectionColors);
+            cloud.geometry.attributes.color.needsUpdate = true;
+            cloud.data.colors = Array.from(detectionColors);
+        }
+    }
+    clearPhotoRegionFrame();
+    clearPhotoFacadeHeatmap();
+    state.photo.selectedFacadeId = null;
+    state.photo.regionCorners3d = null;
+    state.facade.selectedFacadeId = null;
+    document.querySelectorAll('.facade-item.active').forEach(el => el.classList.remove('active'));
+    return true;
+}
+
+/** 新一轮检测区域标注前：恢复立面检测默认显示，清除上一轮高亮/热力图/顶点 */
+function resetToFacadeDetectionDefaultForNewRound() {
+    restoreFacadeDetectionDisplay();
+    clearFacadeVertexAnnotationData();
+    document.getElementById('photo-marker-layer').innerHTML = '';
+    state.photo.photoMarkers = [];
+    state.photo.facadeVertexAnnotationSource = null;
+    state.photo.facadeVerticesDraggable = false;
+    state.photo.facadeVertexDrag = null;
+    document.getElementById('btn-highlight-photo-facade').disabled = true;
+    document.getElementById('btn-generate-photo-heatmap').disabled = true;
 }
 
 
@@ -2391,6 +2799,24 @@ function handleRegClick(event) {
 
 function handleSceneClick(event) {
     if (state.selection.mode) return;
+    if (state.photo.facadeVertexMode) {
+        if (state.photo.facadeVertexSourceMode === 'cloud') {
+            handleFacadeVertexCloudClick(event);
+        } else {
+            showStatus('请在右侧照片中标注检测区域顶点', 'warning');
+        }
+        return;
+    } else if (state.photo.annotateMode) {
+        if (!state.photo.nextIsPhoto) {
+            handlePhotoMatchCloudClick(event);
+            const photoBody = document.getElementById('photo-view-body');
+            photoBody.classList.toggle('annotate-ready', state.photo.nextIsPhoto);
+            state.renderer.domElement.style.cursor = state.photo.nextIsPhoto ? 'default' : 'crosshair';
+        } else {
+            showStatus('请先在右侧照片中选点', 'warning');
+        }
+        return;
+    }
     if (state.reg.mode) {
         handleRegClick(event);
         return;
@@ -2604,67 +3030,2028 @@ function clearRegistration() {
 }
 
 
-// 保存配准结果
-async function saveRegistered() {
+function hasFacadeDetectionReady() {
+    if (!state.activeCloud) return false;
+    const uuid = state.activeCloud.uuid;
+    if (
+        state.facade.detected
+        && state.facade.sourceUUID === uuid
+        && state.facade.facades.length > 0
+    ) {
+        return true;
+    }
+    return !!(state.activeCloud.facades && state.activeCloud.facades.length > 0);
+}
+
+
+function updatePhotoMatchStatus() {
+    const statusEl = document.getElementById('photo-match-status');
+    const facadeReady = hasFacadeDetectionReady();
+    const prerequisiteEl = document.getElementById('photo-facade-prerequisite');
+    prerequisiteEl.style.display = facadeReady ? 'none' : 'block';
+    document.getElementById('btn-upload-photo').disabled = !facadeReady;
+
+    if (!state.photo.id) {
+        if (!state.activeCloud) {
+            statusEl.textContent = '请先加载点云';
+        } else if (!facadeReady) {
+            statusEl.innerHTML =
+                '当前点云尚未执行立面检测<br>' +
+                '<span style="color:var(--warning);">请先在上方点击「检测建筑立面」</span>';
+        } else {
+            statusEl.textContent = '尚未上传照片，可以上传 2D 照片';
+        }
+        document.getElementById('btn-annotate-matches').disabled = true;
+        document.getElementById('btn-undo-photo-match').disabled = true;
+        document.getElementById('btn-exit-photo-annotate').disabled = true;
+        document.getElementById('btn-photo-cloud-match').disabled = true;
+        document.getElementById('btn-annotate-facade-vertices-photo').disabled = true;
+        document.getElementById('btn-annotate-facade-vertices-cloud').disabled = true;
+        document.getElementById('btn-undo-facade-vertex').disabled = true;
+        document.getElementById('btn-exit-facade-vertex').disabled = true;
+        document.getElementById('btn-highlight-photo-facade').disabled = true;
+        document.getElementById('facade-vertex-controls').style.display = 'none';
+        document.getElementById('btn-generate-photo-heatmap').disabled = true;
+        resetReprojectionCheck();
+        updatePhotoAnnotateTips();
+        return;
+    }
+
+    const completePairs = state.photo.correspondences.filter(p => p.cloud !== null).length;
+    const cloudName = state.activeCloud ? state.activeCloud.filename : '未加载点云';
+
+    if (state.photo.facadeVertexMode) {
+        const modeHint = state.photo.facadeVertexSourceMode === 'cloud'
+            ? '【请在 3D 点云中按顺时针标注 4 个顶点，照片上将显示投影】'
+            : '【请在右侧照片中按顺时针标注 4 个顶点】';
+        statusEl.innerHTML =
+            `相机内外参已估算完成<br><span style="color:#ff6b6b; font-weight:700;">` +
+            `${modeHint}（${state.photo.facadeVerticesCloud.length || state.photo.facadeVertices.length}/4）</span>`;
+    } else if (state.photo.annotateMode) {
+        const nextHint = state.photo.nextIsPhoto
+            ? '<span style="color:#ff6b6b; font-weight:700;">【下一步：在右侧照片中选点】</span>'
+            : '<span style="color:#48bb78; font-weight:700;">【下一步：在 3D 点云中选点】</span>';
+        statusEl.innerHTML =
+            `匹配点: <b style="color:var(--accent);">${completePairs}</b> 对 | 点云: ${cloudName}<br>${nextHint}`;
+    } else {
+        statusEl.innerHTML =
+            `已上传: ${state.photo.filename}<br>匹配点: ${completePairs} 对（至少 6 对后估计内参与位姿）`;
+    }
+
+    document.getElementById('btn-annotate-matches').disabled = false;
+    document.getElementById('btn-undo-photo-match').disabled =
+        !state.photo.annotateMode || state.photo.correspondences.length === 0;
+    document.getElementById('btn-exit-photo-annotate').disabled = !state.photo.annotateMode;
+    document.getElementById('btn-photo-cloud-match').disabled = completePairs < 6;
+    const vertexBtnsDisabled =
+        !state.photo.matchResult || state.photo.facadeVertexMode;
+    document.getElementById('btn-annotate-facade-vertices-photo').disabled = vertexBtnsDisabled;
+    document.getElementById('btn-annotate-facade-vertices-cloud').disabled = vertexBtnsDisabled;
+    document.getElementById('btn-highlight-photo-facade').disabled =
+        !state.photo.matchResult || state.photo.facadeVertices.length !== 4;
+    document.getElementById('btn-generate-photo-heatmap').disabled =
+        !state.photo.matchResult || state.photo.facadeVertices.length !== 4;
+
+    const vertexControls = document.getElementById('facade-vertex-controls');
+    vertexControls.style.display = state.photo.facadeVertexMode ? 'flex' : 'none';
+    document.getElementById('btn-undo-facade-vertex').disabled =
+        !state.photo.facadeVertexMode || (
+            state.photo.facadeVertexSourceMode === 'cloud'
+                ? state.photo.facadeVerticesCloud.length === 0
+                : state.photo.facadeVertices.length === 0
+        );
+    document.getElementById('btn-exit-facade-vertex').disabled = !state.photo.facadeVertexMode;
+
+    document.getElementById('btn-toggle-reprojection').disabled = !state.photo.reprojectionCheck;
+
+    updatePhotoAnnotateTips();
+}
+
+function openPhotoUploadDialog() {
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+    if (!hasFacadeDetectionReady()) {
+        showStatus('上传 2D 照片前，请先对当前点云执行「检测建筑立面」', 'warning');
+        return;
+    }
+    document.getElementById('photo-upload-dialog').classList.add('show');
+}
+
+function closePhotoUploadDialog() {
+    document.getElementById('photo-upload-dialog').classList.remove('show');
+    const input = document.getElementById('photo-file-input');
+    if (input) input.value = '';
+}
+
+function showPhotoPreview(photo) {
+    const panel = document.getElementById('photo-view-panel');
+    const img = document.getElementById('photo-view-img');
+    const meta = document.getElementById('photo-view-meta');
+    const nextSrc = `${API_BASE}${photo.url}`;
+    if (!img.src.endsWith(photo.url)) {
+        img.src = nextSrc;
+    }
+    meta.textContent = `${photo.filename}`;
+    panel.classList.add('show');
+}
+
+function ensurePhotoImageReady() {
+    const img = document.getElementById('photo-view-img');
+    if (!img) return Promise.resolve(false);
+    if (img.complete && img.naturalWidth > 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const done = () => resolve(img.naturalWidth > 0);
+        img.addEventListener('load', done, { once: true });
+        img.addEventListener('error', done, { once: true });
+    });
+}
+
+function hidePhotoPreview() {
+    document.getElementById('photo-view-panel').classList.remove('show');
+}
+
+function clearPhotoMatchMarkers() {
+    state.photo.photoMarkers.forEach(el => el.remove());
+    state.photo.photoMarkers = [];
+    state.photo.cloudMarkers.forEach(m => {
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+            if (m.material.map) m.material.map.dispose();
+            m.material.dispose();
+        }
+        state.scene.remove(m);
+    });
+    state.photo.cloudMarkers = [];
+    document.getElementById('photo-marker-layer').innerHTML = '';
+}
+
+function getPhotoImageLayout(img) {
+    const rect = img.getBoundingClientRect();
+    const naturalW = img.naturalWidth;
+    const naturalH = img.naturalHeight;
+    if (!naturalW || !naturalH || rect.width <= 0 || rect.height <= 0) return null;
+
+    const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+    const displayW = naturalW * scale;
+    const displayH = naturalH * scale;
+    const offsetX = (rect.width - displayW) / 2;
+    const offsetY = (rect.height - displayH) / 2;
+    return {
+        width: rect.width,
+        height: rect.height,
+        naturalW,
+        naturalH,
+        scale,
+        displayW,
+        displayH,
+        offsetX,
+        offsetY,
+    };
+}
+
+function pixelToPhotoDisplay(pixelX, pixelY, img) {
+    const layout = getPhotoImageLayout(img);
+    if (!layout) return null;
+    return {
+        displayX: layout.offsetX + pixelX * layout.scale,
+        displayY: layout.offsetY + pixelY * layout.scale,
+    };
+}
+
+function refreshCorrespondenceDisplayCoords() {
+    const img = document.getElementById('photo-view-img');
+    if (!img.naturalWidth) return;
+    state.photo.correspondences.forEach((pair) => {
+        if (!pair.photo || pair.photo.pixelX == null) return;
+        const display = pixelToPhotoDisplay(pair.photo.pixelX, pair.photo.pixelY, img);
+        if (!display) return;
+        pair.photo.displayX = display.displayX;
+        pair.photo.displayY = display.displayY;
+        const layout = getPhotoImageLayout(img);
+        if (layout) {
+            pair.photo.normX = (pair.photo.pixelX * layout.scale) / layout.displayW;
+            pair.photo.normY = (pair.photo.pixelY * layout.scale) / layout.displayH;
+        }
+    });
+}
+
+function refreshFacadeVertexDisplayCoords() {
+    const img = document.getElementById('photo-view-img');
+    if (!img.naturalWidth) return;
+    state.photo.facadeVertices.forEach((vertex) => {
+        if (vertex.pixelX == null) return;
+        const display = pixelToPhotoDisplay(vertex.pixelX, vertex.pixelY, img);
+        if (!display) return;
+        vertex.displayX = display.displayX;
+        vertex.displayY = display.displayY;
+        const layout = getPhotoImageLayout(img);
+        if (layout) {
+            vertex.normX = (vertex.pixelX * layout.scale) / layout.displayW;
+            vertex.normY = (vertex.pixelY * layout.scale) / layout.displayH;
+        }
+    });
+}
+
+function clearFacadeVertexAnnotationData() {
+    state.photo.facadeVertices = [];
+    state.photo.facadeVerticesCloud = [];
+    state.photo.facadeVertexAnnotationSource = null;
+    state.photo.facadeVerticesDraggable = false;
+    state.photo.facadeVertexDrag = null;
+    state.photo.facadeSnapFacadeId = null;
+    clearFacadeVertexCloudMarkers();
+}
+
+function clearFacadeVertexDataIfModeMismatch(sourceMode) {
+    const completedSource = state.photo.facadeVertexAnnotationSource;
+    if (completedSource && completedSource !== sourceMode) {
+        clearFacadeVertexAnnotationData();
+        return;
+    }
+    if (sourceMode === 'photo' && state.photo.facadeVerticesCloud.length > 0) {
+        clearFacadeVertexAnnotationData();
+        return;
+    }
+    if (
+        sourceMode === 'cloud'
+        && state.photo.facadeVertices.length > 0
+        && state.photo.facadeVerticesCloud.length === 0
+        && state.photo.facadeVertices.every(v => !v.fromCloud)
+    ) {
+        clearFacadeVertexAnnotationData();
+    }
+}
+
+async function restoreFacadeVertexAnnotationDisplay(sourceMode) {
+    await ensurePhotoImageReady();
+    refreshFacadeVertexDisplayCoords();
+
+    if (sourceMode === 'cloud' && state.photo.facadeVerticesCloud.length > 0) {
+        clearFacadeVertexCloudMarkers();
+        state.photo.facadeVerticesCloud.forEach((point, index) => {
+            addFacadeVertexCloudMarker(point, `V${index + 1}`);
+        });
+        try {
+            await syncCloudVerticesProjection();
+        } catch (err) {
+            redrawFacadeVertexOverlay();
+            showStatus(`恢复顶点投影失败: ${err.message}`, 'warning');
+        }
+    } else if (state.photo.facadeVertices.length > 0) {
+        redrawFacadeVertexOverlay();
+    }
+
+    const count = sourceMode === 'cloud'
+        ? state.photo.facadeVerticesCloud.length
+        : state.photo.facadeVertices.length;
+    if (count > 0) {
+        showStatus(`已恢复 ${count}/4 个检测区域顶点，可继续标注或撤销修改`, 'info');
+    }
+}
+
+async function restorePhotoMatchAnnotationDisplay() {
+    await ensurePhotoImageReady();
+    refreshCorrespondenceDisplayCoords();
+    redrawPhotoMatchMarkers();
+
+    const lastPair = state.photo.correspondences[state.photo.correspondences.length - 1];
+    state.photo.nextIsPhoto = !lastPair || lastPair.cloud !== null;
+
+    const completePairs = state.photo.correspondences.filter(p => p.cloud !== null).length;
+    if (completePairs > 0) {
+        showStatus(`已恢复 ${completePairs} 对匹配点标注，可继续添加或撤销修改`, 'info');
+    }
+}
+
+function getCorrespondenceSpreadFeedback() {
+    const pairs = state.photo.correspondences.filter(p => p.cloud !== null);
+    const tips = [
+        '选角点、窗框等易辨认特征；照片与 3D 须为同一物理点',
+        '请尽量分散选点：覆盖照片四角、上下左右与中间区域',
+        '仰拍场景务必在照片顶部和底部各标几对点（远距离对精度影响最大）',
+        '建议标注 8～12 对（至少 6 对）；3D 侧请放大旋转后精确点击',
+    ];
+
+    if (pairs.length >= 2) {
+        const xs = pairs.map(p => p.photo.normX);
+        const ys = pairs.map(p => p.photo.normY);
+        const spanX = Math.max(...xs) - Math.min(...xs);
+        const spanY = Math.max(...ys) - Math.min(...ys);
+        if (spanX < 0.35 || spanY < 0.35) {
+            tips.push('当前匹配点较集中，请补点到照片其他区域');
+        }
+    }
+    if (pairs.length >= 6 && pairs.length < 8) {
+        tips.push('已满足最低要求，建议再补 2～4 对以提高精度');
+    }
+    return tips;
+}
+
+function updatePhotoAnnotateTips() {
+    const tipsEl = document.getElementById('photo-annotate-tips');
+    const showTips = state.photo.annotateMode && !state.photo.facadeVertexMode && state.photo.id;
+    if (!showTips) {
+        tipsEl.style.display = 'none';
+        tipsEl.innerHTML = '';
+        return;
+    }
+
+    const tips = getCorrespondenceSpreadFeedback();
+    const warnClass = (text) =>
+        text.includes('较集中') || text.includes('建议再补')
+            ? ' class="tip-warn"'
+            : '';
+    tipsEl.innerHTML =
+        '<div style="font-weight:700;color:var(--accent);margin-bottom:4px;">标注提示</div>' +
+        `<ul>${tips.map(t => `<li${warnClass(t)}>${t}</li>`).join('')}</ul>`;
+    tipsEl.style.display = 'block';
+}
+
+function clearReprojectionOverlay() {
+    document.getElementById('photo-reproj-layer').innerHTML = '';
+    const legendEl = document.getElementById('photo-reproj-legend');
+    if (legendEl) legendEl.remove();
+}
+
+function buildReprojectionCheckData(pose, pairs) {
+    const projected = pose.projected_points || [];
+    const inlierSet = new Set(pose.inlier_indices || []);
+    return pairs.map((pair, index) => {
+        const manual = [pair.photo.pixelX, pair.photo.pixelY];
+        const reproj = projected[index] || [manual[0], manual[1]];
+        const err = Math.hypot(reproj[0] - manual[0], reproj[1] - manual[1]);
+        return {
+            index,
+            manual,
+            reproj,
+            errorPx: err,
+            isInlier: inlierSet.has(index),
+        };
+    });
+}
+
+function updateReprojectionLegend() {
+    const meta = document.getElementById('photo-view-meta');
+    let legendEl = document.getElementById('photo-reproj-legend');
+    if (!state.photo.showReprojection || !state.photo.reprojectionCheck) {
+        if (legendEl) legendEl.remove();
+        return;
+    }
+
+    const items = state.photo.reprojectionCheck;
+    const inliers = items.filter(item => item.isInlier);
+    const outliers = items.length - inliers.length;
+    const maxErr = Math.max(...items.map(item => item.errorPx));
+
+    if (!legendEl) {
+        legendEl = document.createElement('div');
+        legendEl.id = 'photo-reproj-legend';
+        legendEl.className = 'photo-reproj-legend';
+        meta.appendChild(legendEl);
+    }
+
+    legendEl.innerHTML =
+        '<span style="color:var(--text-primary);font-weight:700;">重投影检查：</span> ' +
+        '○ 手标注点 · ● 重投影点 · 线段为误差<br>' +
+        `<span class="reproj-good">内点 ${inliers.length}/${items.length}</span> · ` +
+        `最大误差 ${maxErr.toFixed(1)} px · ` +
+        (outliers > 0
+            ? `<span class="reproj-bad">外点 ${outliers} 个，建议检查或重新标注</span>`
+            : '<span class="reproj-good">全部点为内点</span>');
+}
+
+function renderReprojectionOverlay() {
+    clearReprojectionOverlay();
+    if (!state.photo.showReprojection || !state.photo.reprojectionCheck) return;
+
+    const img = document.getElementById('photo-view-img');
+    const layout = getPhotoImageLayout(img);
+    if (!layout) return;
+
+    const layer = document.getElementById('photo-reproj-layer');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    svg.style.position = 'absolute';
+    svg.style.inset = '0';
+
+    const fragments = [];
+    state.photo.reprojectionCheck.forEach(item => {
+        const manual = pixelToPhotoDisplay(item.manual[0], item.manual[1], img);
+        const reproj = pixelToPhotoDisplay(item.reproj[0], item.reproj[1], img);
+        if (!manual || !reproj) return;
+
+        const color = item.isInlier ? '#48bb78' : '#ff6b6b';
+        const mx = manual.displayX;
+        const my = manual.displayY;
+        const rx = reproj.displayX;
+        const ry = reproj.displayY;
+
+        fragments.push(
+            `<line x1="${mx}" y1="${my}" x2="${rx}" y2="${ry}" ` +
+            `stroke="${color}" stroke-width="2" stroke-opacity="0.85" />`,
+            `<circle cx="${mx}" cy="${my}" r="7" fill="rgba(255,255,255,0.15)" ` +
+            `stroke="${color}" stroke-width="2.5" />`,
+            `<circle cx="${rx}" cy="${ry}" r="4.5" fill="${color}" stroke="#fff" stroke-width="1.5" />`,
+            `<text x="${mx + 10}" y="${my - 10}" fill="#fff" font-size="11" font-weight="700" ` +
+            `stroke="#000" stroke-width="0.6" paint-order="stroke">` +
+            `#${item.index + 1} ${item.errorPx.toFixed(1)}px</text>`
+        );
+    });
+
+    svg.innerHTML = fragments.join('');
+    layer.appendChild(svg);
+    updateReprojectionLegend();
+}
+
+function setReprojectionVisible(visible) {
+    state.photo.showReprojection = visible;
+    const btn = document.getElementById('btn-toggle-reprojection');
+    btn.classList.toggle('active', visible);
+    btn.textContent = visible ? '🔍 隐藏重投影' : '🔍 重投影检查';
+    if (visible) {
+        showPhotoPreview(state.photo);
+        requestAnimationFrame(() => renderReprojectionOverlay());
+    } else {
+        clearReprojectionOverlay();
+        updateReprojectionLegend();
+    }
+}
+
+function toggleReprojectionCheck() {
+    if (!state.photo.reprojectionCheck) {
+        showStatus('请先完成相机内外参数估算', 'warning');
+        return;
+    }
+    setReprojectionVisible(!state.photo.showReprojection);
+}
+
+function resetReprojectionCheck() {
+    state.photo.reprojectionCheck = null;
+    state.photo.showReprojection = false;
+    clearReprojectionOverlay();
+    const btn = document.getElementById('btn-toggle-reprojection');
+    btn.classList.remove('active');
+    btn.textContent = '🔍 重投影检查';
+    btn.disabled = true;
+}
+
+function getPhotoClickNormalized(event, img) {
+    const rect = img.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    const clickY = event.clientY - rect.top;
+    const layout = getPhotoImageLayout(img);
+    if (!layout) return null;
+
+    const x = clickX - layout.offsetX;
+    const y = clickY - layout.offsetY;
+    if (x < 0 || y < 0 || x > layout.displayW || y > layout.displayH) return null;
+
+    return {
+        normX: x / layout.displayW,
+        normY: y / layout.displayH,
+        pixelX: x / layout.scale,
+        pixelY: y / layout.scale,
+        displayX: clickX,
+        displayY: clickY,
+    };
+}
+
+function addPhotoMatchMarker(displayX, displayY, label, isMatchPair = false, draggableOpts = null) {
+    const layer = document.getElementById('photo-marker-layer');
+    const marker = document.createElement('div');
+    marker.className = isMatchPair
+        ? 'photo-match-marker match-pair'
+        : 'photo-match-marker';
+    if (draggableOpts) {
+        marker.classList.add('draggable-vertex');
+        marker.dataset.vertexIndex = String(draggableOpts.vertexIndex);
+        marker.addEventListener('mousedown', onFacadeVertexDragStart);
+    }
+    marker.textContent = label;
+    marker.style.left = `${displayX}px`;
+    marker.style.top = `${displayY}px`;
+    layer.appendChild(marker);
+    state.photo.photoMarkers.push(marker);
+}
+
+function addPhotoCloudMarker(position, label, compact = false) {
+    const markerSize = Math.max(CONFIG.REG_MARKER_SIZE, state.sceneRange * 0.0005);
+    const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
+    const material = new THREE.MeshBasicMaterial({ color: 0x48bb78 });
+    const marker = new THREE.Mesh(geometry, material);
+    marker.position.copy(position);
+    state.scene.add(marker);
+    state.photo.cloudMarkers.push(marker);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = compact ? 160 : 256;
+    canvas.height = compact ? 80 : 128;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = compact ? 3 : 5;
+    ctx.strokeRect(compact ? 3 : 4, compact ? 3 : 4,
+        canvas.width - (compact ? 6 : 8), canvas.height - (compact ? 6 : 8));
+    ctx.fillStyle = 'white';
+    ctx.font = compact ? 'bold 32px Arial' : 'bold 58px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, canvas.width / 2, canvas.height / 2);
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.copy(position);
+    sprite.position.y += markerSize * (compact ? 3.2 : 4.5);
+    sprite.scale.set(
+        markerSize * (compact ? 8 : 14),
+        markerSize * (compact ? 4 : 7),
+        1
+    );
+    state.scene.add(sprite);
+    state.photo.cloudMarkers.push(sprite);
+}
+
+function redrawPhotoMatchMarkers() {
+    clearPhotoMatchMarkers();
+    state.photo.correspondences.forEach((pair, i) => {
+        if (pair.photo) {
+            addPhotoMatchMarker(pair.photo.displayX, pair.photo.displayY, `P${i + 1}`, true);
+        }
+        if (pair.cloud) {
+            addPhotoCloudMarker(pair.cloud, `3D${i + 1}`, true);
+        }
+    });
+}
+
+function handlePhotoAnnotateClick(event) {
+    if (state.photo.facadeVertexMode) {
+        if (state.photo.facadeVertexSourceMode === 'photo') {
+            handleFacadeVertexClick(event);
+        }
+        return;
+    }
+    if (!state.photo.annotateMode || !state.photo.nextIsPhoto) return;
+
+    const img = document.getElementById('photo-view-img');
+    const click = getPhotoClickNormalized(event, img);
+    if (!click) {
+        showStatus('请点击照片有效区域（不要点在空白边距上）', 'warning');
+        return;
+    }
+
+    const idx = state.photo.correspondences.length;
+    state.photo.correspondences.push({
+        photo: click,
+        cloud: null,
+        pairIdx: idx,
+    });
+    addPhotoMatchMarker(click.displayX, click.displayY, `P${idx + 1}`, true);
+    state.photo.nextIsPhoto = false;
+    updatePhotoMatchStatus();
+    showStatus(`照片点 P${idx + 1} 已采集，请在 3D 点云中点击对应位置`, 'success');
+}
+
+function handlePhotoMatchCloudClick(event) {
+    if (!state.photo.annotateMode || state.photo.nextIsPhoto) return;
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.mouse, state.camera);
+    state.raycaster.params.Points.threshold = Math.max(1.0, state.sceneRange * 0.001);
+    const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
+    if (intersects.length === 0) {
+        showStatus('未点击到点云，请精确点击特征点', 'warning');
+        return;
+    }
+
+    const point = intersects[0].point.clone();
+    const lastPair = state.photo.correspondences[state.photo.correspondences.length - 1];
+    if (!lastPair || lastPair.cloud !== null) {
+        showStatus('请先在照片中选点', 'warning');
+        return;
+    }
+
+    lastPair.cloud = point;
+    addPhotoCloudMarker(point, `3D${lastPair.pairIdx + 1}`, true);
+    state.photo.nextIsPhoto = true;
+    updatePhotoMatchStatus();
+    showStatus(`3D 点 3D${lastPair.pairIdx + 1} 已采集，配对完成！请继续在照片中选下一点`, 'success');
+}
+
+function togglePhotoAnnotateMode() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+
+    if (state.reg.mode) exitRegMode();
+
+    state.photo.annotateMode = !state.photo.annotateMode;
+    const btn = document.getElementById('btn-annotate-matches');
+    btn.classList.toggle('active', state.photo.annotateMode);
+    btn.textContent = state.photo.annotateMode ? '✏️ 标注模式中' : '✏️ 进入标注模式';
+
+    const photoBody = document.getElementById('photo-view-body');
+    photoBody.classList.toggle('annotate-ready', state.photo.annotateMode && state.photo.nextIsPhoto);
+
+    if (state.photo.annotateMode) {
+        if (state.photo.correspondences.length === 0) {
+            resetReprojectionCheck();
+        } else if (state.photo.reprojectionCheck) {
+            setReprojectionVisible(false);
+        }
+        showPhotoPreview(state.photo);
+        requestAnimationFrame(async () => {
+            await restorePhotoMatchAnnotationDisplay();
+            state.renderer.domElement.style.cursor = state.photo.nextIsPhoto ? 'default' : 'crosshair';
+            photoBody.classList.toggle('annotate-ready', state.photo.nextIsPhoto);
+        });
+        document.getElementById('hint-text').textContent =
+            '2D-3D 标注：先照片后 3D，尽量分散选点（四角+中间）';
+        if (state.photo.correspondences.length === 0) {
+            showStatus('已进入标注模式：请先在右侧照片中点击第一个匹配点', 'info');
+        }
+    } else {
+        exitPhotoAnnotateMode(false);
+    }
+    updatePhotoMatchStatus();
+}
+
+function exitPhotoAnnotateMode(showMsg = true) {
+    state.photo.annotateMode = false;
+    state.photo.facadeVertexMode = false;
+    document.getElementById('btn-annotate-matches').classList.remove('active');
+    document.getElementById('btn-annotate-matches').textContent = '✏️ 进入标注模式';
+    document.getElementById('photo-view-body').classList.remove('annotate-ready');
+    state.renderer.domElement.style.cursor = 'default';
+    document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+
+    clearPhotoMatchMarkers();
+    if (state.photo.facadeVertices.length > 0) {
+        refreshFacadeVertexDisplayCoords();
+        redrawFacadeVertexOverlay();
+    } else if (state.photo.reprojectionCheck && state.photo.matchResult) {
+        setReprojectionVisible(true);
+    }
+
+    updatePhotoMatchStatus();
+    if (showMsg) showStatus('已退出 2D-3D 标注模式', 'info');
+}
+
+function clearFacadeVertexCloudMarkers() {
+    state.photo.facadeVertexCloudMarkers.forEach(m => {
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+            if (m.material.map) m.material.map.dispose();
+            m.material.dispose();
+        }
+        state.scene.remove(m);
+    });
+    state.photo.facadeVertexCloudMarkers = [];
+}
+
+function addFacadeVertexCloudMarker(position, label) {
+    const markerSize = Math.max(CONFIG.REG_MARKER_SIZE, state.sceneRange * 0.0005);
+    const geometry = new THREE.SphereGeometry(markerSize, 16, 16);
+    const material = new THREE.MeshBasicMaterial({ color: 0xff4d4f });
+    const marker = new THREE.Mesh(geometry, material);
+    marker.position.copy(position);
+    state.scene.add(marker);
+    state.photo.facadeVertexCloudMarkers.push(marker);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 160;
+    canvas.height = 80;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(3, 3, canvas.width - 6, canvas.height - 6);
+    ctx.fillStyle = '#ff6b6b';
+    ctx.font = 'bold 32px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, canvas.width / 2, canvas.height / 2);
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.copy(position);
+    sprite.position.y += markerSize * 3.2;
+    sprite.scale.set(markerSize * 7, markerSize * 3.5, 1);
+    state.scene.add(sprite);
+    state.photo.facadeVertexCloudMarkers.push(sprite);
+}
+
+function buildPhotoVertexFromPixel(pixelX, pixelY, img, fromCloud = false) {
+    const layout = getPhotoImageLayout(img);
+    if (!layout) return null;
+    const display = pixelToPhotoDisplay(pixelX, pixelY, img);
+    if (!display) return null;
+    return {
+        pixelX,
+        pixelY,
+        displayX: display.displayX,
+        displayY: display.displayY,
+        normX: (pixelX - layout.offsetX) / layout.scale / layout.naturalW,
+        normY: (pixelY - layout.offsetY) / layout.scale / layout.naturalH,
+        fromCloud,
+    };
+}
+
+function getFacadeRegionPayloadExtras() {
+    if (
+        state.photo.facadeVertexAnnotationSource === 'cloud'
+        && state.photo.facadeVerticesCloud.length === 4
+    ) {
+        return {
+            corners_3d: state.photo.facadeVerticesCloud.map(point => point.toArray()),
+        };
+    }
+    return {};
+}
+
+async function syncCloudVerticesProjection() {
+    const img = document.getElementById('photo-view-img');
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    if (state.photo.facadeVerticesCloud.length === 0) {
+        state.photo.facadeVertices = [];
+        redrawFacadeVertexOverlay();
+        return;
+    }
+
+    const resp = await fetch(`${API_BASE}/project_world_points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            pose: state.photo.matchResult,
+            points: state.photo.facadeVerticesCloud.map(point => point.toArray()),
+        }),
+    });
+    const result = await resp.json();
+    if (result.error) throw new Error(result.error);
+
+    state.photo.facadeVertices = (result.image_points || []).map((pixel) =>
+        buildPhotoVertexFromPixel(pixel[0], pixel[1], img, true)
+    ).filter(Boolean);
+    redrawFacadeVertexOverlay();
+}
+
+function startFacadeVertexAnnotation(sourceMode, options = {}) {
+    const { freshRound = false } = options;
+    if (freshRound) {
+        clearFacadeVertexAnnotationData();
+    } else {
+        clearFacadeVertexDataIfModeMismatch(sourceMode);
+    }
+
+    state.photo.facadeVertexMode = true;
+    state.photo.facadeVertexSourceMode = sourceMode;
+    state.photo.facadeVertexDrag = null;
+    state.photo.facadeVerticesDraggable = false;
+    if (freshRound) {
+        document.getElementById('photo-marker-layer').innerHTML = '';
+        state.photo.photoMarkers = [];
+    }
+    clearPhotoFacadeHeatmap();
+    setReprojectionVisible(false);
+    clearPhotoRegionFrame();
+
+    showPhotoPreview(state.photo);
+    const photoBody = document.getElementById('photo-view-body');
+    if (sourceMode === 'photo') {
+        photoBody.classList.add('annotate-ready');
+        state.renderer.domElement.style.cursor = 'default';
+        document.getElementById('hint-text').textContent =
+            '请在照片中按顺时针方向依次标注 4 个检测区域顶点';
+        if (state.photo.facadeVertices.length === 0) {
+            showStatus('请在照片中按顺时针方向标注 4 个顶点', 'info');
+        }
+    } else {
+        photoBody.classList.remove('annotate-ready');
+        state.renderer.domElement.style.cursor = 'crosshair';
+        document.getElementById('hint-text').textContent =
+            '请在 3D 点云中按顺时针标注 4 个顶点，照片上将显示红色投影框';
+        if (freshRound) {
+            showStatus('已恢复立面检测默认显示，请重新标注 4 个 3D 顶点', 'info');
+        } else if (state.photo.facadeVerticesCloud.length === 0) {
+            showStatus('请在 3D 点云中按顺时针标注 4 个顶点', 'info');
+        }
+    }
+
+    if (freshRound) {
+        updatePhotoMatchStatus();
+        return;
+    }
+
+    requestAnimationFrame(async () => {
+        await restoreFacadeVertexAnnotationDisplay(sourceMode);
+        updatePhotoMatchStatus();
+    });
+}
+
+function exitFacadeVertexAnnotation(showMsg = true) {
+    state.photo.facadeVertexMode = false;
+    state.photo.facadeVertexSourceMode = null;
+    document.getElementById('photo-view-body').classList.remove('annotate-ready');
+    state.renderer.domElement.style.cursor = 'default';
+    document.getElementById('hint-text').textContent = '鼠标左键旋转 | 右键平移 | 滚轮缩放';
+
+    if (state.photo.facadeVertices.length > 0) {
+        const isCompletedCloud = state.photo.facadeVertexAnnotationSource === 'cloud'
+            && state.photo.facadeVertices.length === 4;
+        state.photo.facadeVerticesDraggable = isCompletedCloud;
+        refreshFacadeVertexDisplayCoords();
+        redrawFacadeVertexOverlay();
+    }
+
+    updatePhotoMatchStatus();
+    if (showMsg) showStatus('已退出检测区域顶点标注', 'info');
+}
+
+function redrawFacadeVertexOverlay() {
+    document.getElementById('photo-marker-layer').innerHTML = '';
+    state.photo.photoMarkers = [];
+    state.photo.facadeVertices.forEach((point, index) => {
+        addPhotoMatchMarker(
+            point.displayX,
+            point.displayY,
+            `V${index + 1}`,
+            false,
+            state.photo.facadeVerticesDraggable ? { vertexIndex: index } : null
+        );
+    });
+
+    if (state.photo.facadeVertices.length < 2) {
+        return;
+    }
+
+    const layer = document.getElementById('photo-marker-layer');
+    const points = state.photo.facadeVertices
+        .map(point => `${point.displayX},${point.displayY}`)
+        .join(' ');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${layer.clientWidth} ${layer.clientHeight}`);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    svg.style.position = 'absolute';
+    svg.style.inset = '0';
+    svg.dataset.role = 'facade-vertex-polygon';
+
+    if (state.photo.facadeVertices.length === 4) {
+        svg.innerHTML = `<polygon points="${points}" fill="rgba(255, 80, 80, 0.13)" ` +
+            'stroke="#ff4d4f" stroke-width="3" stroke-linejoin="round" />';
+    } else {
+        svg.innerHTML = `<polyline points="${points}" fill="none" ` +
+            'stroke="#ff4d4f" stroke-width="3" stroke-linejoin="round" />';
+    }
+    layer.appendChild(svg);
+
+    const isCloudProjection = state.photo.facadeVertexSourceMode === 'cloud'
+        || state.photo.facadeVertexAnnotationSource === 'cloud'
+        || (state.photo.facadeVertices.length > 0
+            && state.photo.facadeVertices.every(v => v.fromCloud));
+    if (isCloudProjection) {
+        const caption = document.createElement('div');
+        caption.style.position = 'absolute';
+        caption.style.left = '8px';
+        caption.style.bottom = '8px';
+        caption.style.padding = '4px 8px';
+        caption.style.borderRadius = '6px';
+        caption.style.background = 'rgba(0,0,0,0.55)';
+        caption.style.color = '#ffb3b3';
+        caption.style.fontSize = '10px';
+        caption.style.fontWeight = '700';
+        caption.textContent = state.photo.facadeVerticesDraggable
+            ? '点云顶点投影 · 可拖拽 V1–V4 微调后自动修正位姿'
+            : '点云顶点投影（红线连接）';
+        layer.appendChild(caption);
+    }
+}
+
+function updateFacadeVertexFromDisplay(vertexIndex, displayX, displayY, img) {
+    const layout = getPhotoImageLayout(img);
+    if (!layout) return false;
+
+    const x = displayX - layout.offsetX;
+    const y = displayY - layout.offsetY;
+    if (x < 0 || y < 0 || x > layout.displayW || y > layout.displayH) return false;
+
+    const vertex = state.photo.facadeVertices[vertexIndex];
+    if (!vertex) return false;
+
+    vertex.pixelX = x / layout.scale;
+    vertex.pixelY = y / layout.scale;
+    vertex.displayX = displayX;
+    vertex.displayY = displayY;
+    vertex.normX = x / layout.displayW;
+    vertex.normY = y / layout.displayH;
+    return true;
+}
+
+function updateFacadeVertexPolygonOnly() {
+    const layer = document.getElementById('photo-marker-layer');
+    const svg = layer.querySelector('svg[data-role="facade-vertex-polygon"]');
+    if (!svg || state.photo.facadeVertices.length < 2) return;
+
+    const points = state.photo.facadeVertices
+        .map(point => `${point.displayX},${point.displayY}`)
+        .join(' ');
+    if (state.photo.facadeVertices.length === 4) {
+        svg.innerHTML = `<polygon points="${points}" fill="rgba(255, 80, 80, 0.13)" ` +
+            'stroke="#ff4d4f" stroke-width="3" stroke-linejoin="round" />';
+    } else {
+        svg.innerHTML = `<polyline points="${points}" fill="none" ` +
+            'stroke="#ff4d4f" stroke-width="3" stroke-linejoin="round" />';
+    }
+}
+
+function onFacadeVertexDragStart(event) {
+    if (!state.photo.facadeVerticesDraggable) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const index = parseInt(event.currentTarget.dataset.vertexIndex, 10);
+    if (Number.isNaN(index)) return;
+    state.photo.facadeVertexDrag = { index, marker: event.currentTarget };
+    document.addEventListener('mousemove', onFacadeVertexDragMove);
+    document.addEventListener('mouseup', onFacadeVertexDragEnd);
+}
+
+function onFacadeVertexDragMove(event) {
+    const drag = state.photo.facadeVertexDrag;
+    if (!drag) return;
+
+    const img = document.getElementById('photo-view-img');
+    const rect = img.getBoundingClientRect();
+    const displayX = event.clientX - rect.left;
+    const displayY = event.clientY - rect.top;
+    if (!updateFacadeVertexFromDisplay(drag.index, displayX, displayY, img)) return;
+
+    drag.marker.style.left = `${displayX}px`;
+    drag.marker.style.top = `${displayY}px`;
+    updateFacadeVertexPolygonOnly();
+}
+
+async function onFacadeVertexDragEnd() {
+    document.removeEventListener('mousemove', onFacadeVertexDragMove);
+    document.removeEventListener('mouseup', onFacadeVertexDragEnd);
+    const drag = state.photo.facadeVertexDrag;
+    state.photo.facadeVertexDrag = null;
+    if (!drag) return;
+
+    redrawFacadeVertexOverlay();
+    try {
+        await refineCameraPoseFromFacadeVertices();
+    } catch (err) {
+        showStatus(`位姿微调失败: ${err.message}`, 'error');
+    }
+}
+
+async function refineCameraPoseFromFacadeVertices() {
+    if (!state.photo.matchResult) return;
+    if (state.photo.facadeVertices.length !== 4 || state.photo.facadeVerticesCloud.length !== 4) {
+        return;
+    }
+
+    const resp = await fetch(`${API_BASE}/refine_camera_pose_corners`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            pose: state.photo.matchResult,
+            points_3d: state.photo.facadeVerticesCloud.map(point => point.toArray()),
+            image_points: state.photo.facadeVertices.map(point => [
+                point.pixelX,
+                point.pixelY,
+            ]),
+        }),
+    });
+    const result = await resp.json();
+    if (result.error) throw new Error(result.error);
+
+    state.photo.matchResult = result.pose;
+    showStatus(
+        `2D 微调后位姿已更新，角点重投影 RMSE ${result.pose.reprojection_rmse_px.toFixed(2)} px`,
+        'success'
+    );
+}
+
+async function undoLastFacadeVertex() {
+    if (!state.photo.facadeVertexMode) {
+        showStatus('请先进入检测区域顶点标注模式', 'warning');
+        return;
+    }
+    const count = state.photo.facadeVertexSourceMode === 'cloud'
+        ? state.photo.facadeVerticesCloud.length
+        : state.photo.facadeVertices.length;
+    if (count === 0) {
+        showStatus('没有可撤销的顶点', 'warning');
+        return;
+    }
+
+    if (state.photo.facadeVertexSourceMode === 'cloud') {
+        state.photo.facadeVerticesCloud.pop();
+        clearFacadeVertexCloudMarkers();
+        state.photo.facadeVerticesCloud.forEach((point, index) => {
+            addFacadeVertexCloudMarker(point, `V${index + 1}`);
+        });
+        try {
+            await syncCloudVerticesProjection();
+        } catch (err) {
+            showStatus(`投影更新失败: ${err.message}`, 'error');
+        }
+    } else {
+        state.photo.facadeVertices.pop();
+        redrawFacadeVertexOverlay();
+    }
+
+    clearPhotoRegionFrame();
+    document.getElementById('btn-highlight-photo-facade').disabled = true;
+    document.getElementById('btn-generate-photo-heatmap').disabled = true;
+    updatePhotoMatchStatus();
+    const remaining = state.photo.facadeVertexSourceMode === 'cloud'
+        ? state.photo.facadeVerticesCloud.length
+        : state.photo.facadeVertices.length;
+    showStatus(`已撤销上一个顶点，当前 ${remaining}/4`, 'success');
+}
+
+function beginFacadeVertexAnnotationPhoto() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    if (!state.photo.matchResult) {
+        showStatus('请先点击“估算相机内外参数”', 'warning');
+        return;
+    }
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活点云', 'warning');
+        return;
+    }
+    if (state.photo.annotateMode) {
+        exitPhotoAnnotateMode(false);
+    }
+    startFacadeVertexAnnotation('photo');
+}
+
+function beginFacadeVertexAnnotationCloud() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    if (!state.photo.matchResult) {
+        showStatus('请先点击“估算相机内外参数”', 'warning');
+        return;
+    }
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活点云', 'warning');
+        return;
+    }
+    resetToFacadeDetectionDefaultForNewRound();
+    if (state.photo.annotateMode) {
+        exitPhotoAnnotateMode(false);
+    }
+    startFacadeVertexAnnotation('cloud', { freshRound: true });
+}
+
+function drawFacadeQuadrilateral() {
+    redrawFacadeVertexOverlay();
+}
+
+function finalizeFacadeVerticesIfReady() {
+    if (state.photo.facadeVertices.length !== 4) return;
+    const isCloud = state.photo.facadeVertexSourceMode === 'cloud';
+    state.photo.facadeVertexAnnotationSource = state.photo.facadeVertexSourceMode;
+    state.photo.facadeVerticesDraggable = isCloud;
+    exitFacadeVertexAnnotation(false);
+    redrawFacadeVertexOverlay();
+    document.getElementById('hint-text').textContent = isCloud
+        ? '可在照片上拖拽 V1–V4 微调投影，然后点击「高亮立面」确认 3D 框'
+        : '已标注四边形检测区域，请先点击「高亮立面」确认 3D 框';
+    document.getElementById('btn-highlight-photo-facade').disabled = false;
+    document.getElementById('btn-generate-photo-heatmap').disabled = false;
+    updatePhotoMatchStatus();
+    showStatus(
+        isCloud
+            ? '4 个 3D 顶点已投影到照片，可拖拽角点微调位姿后再高亮立面'
+            : '4 个顶点已标注完成，请先点击「高亮立面」确认检测区域',
+        'success'
+    );
+}
+
+function handleFacadeVertexClick(event) {
+    const img = document.getElementById('photo-view-img');
+    const click = getPhotoClickNormalized(event, img);
+    if (!click) {
+        showStatus('请点击照片有效区域内的顶点', 'warning');
+        return;
+    }
+    if (state.photo.facadeVertices.length === 4) return;
+    click.fromCloud = false;
+    state.photo.facadeVertices.push(click);
+    redrawFacadeVertexOverlay();
+    if (state.photo.facadeVertices.length === 4) {
+        finalizeFacadeVerticesIfReady();
+    } else {
+        updatePhotoMatchStatus();
+        showStatus(
+            `已标注第 ${state.photo.facadeVertices.length} 个顶点，请按顺时针方向继续标注`,
+            'info'
+        );
+    }
+}
+
+async function handleFacadeVertexCloudClick(event) {
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活点云', 'warning');
+        return;
+    }
+    if (state.photo.facadeVerticesCloud.length === 4) return;
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.mouse, state.camera);
+    state.raycaster.params.Points.threshold = Math.max(1.0, state.sceneRange * 0.001);
+    const intersects = state.raycaster.intersectObject(state.activeCloud.mesh);
+    if (intersects.length === 0) {
+        showStatus('未点击到点云，请精确点击立面角点', 'warning');
+        return;
+    }
+
+    const rawPoint = intersects[0].point.clone();
+    let point = rawPoint;
+    let snapInfo = '';
+
+    try {
+        const snapResp = await fetch(`${API_BASE}/snap_point_to_facade_plane`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid: state.activeCloud.uuid,
+                point: rawPoint.toArray(),
+                facade_id: state.photo.facadeSnapFacadeId,
+            }),
+        });
+        const snapResult = await snapResp.json();
+        if (snapResult.error) throw new Error(snapResult.error);
+
+        point = new THREE.Vector3(
+            snapResult.snapped_point_yup[0],
+            snapResult.snapped_point_yup[1],
+            snapResult.snapped_point_yup[2]
+        );
+        if (state.photo.facadeSnapFacadeId === null) {
+            state.photo.facadeSnapFacadeId = snapResult.facade_id;
+        }
+        const distMm = (snapResult.plane_distance_m * 1000).toFixed(0);
+        snapInfo = `（已吸附到立面 #${snapResult.facade_id + 1}，原距平面 ${distMm} mm）`;
+    } catch (err) {
+        showStatus(`平面吸附失败: ${err.message}`, 'error');
+        return;
+    }
+
+    const index = state.photo.facadeVerticesCloud.length;
+    state.photo.facadeVerticesCloud.push(point);
+    addFacadeVertexCloudMarker(point, `V${index + 1}`);
+
+    try {
+        await syncCloudVerticesProjection();
+    } catch (err) {
+        state.photo.facadeVerticesCloud.pop();
+        clearFacadeVertexCloudMarkers();
+        state.photo.facadeVerticesCloud.forEach((p, i) => addFacadeVertexCloudMarker(p, `V${i + 1}`));
+        showStatus(`投影失败: ${err.message}`, 'error');
+        return;
+    }
+
+    if (state.photo.facadeVertices.length === 4) {
+        finalizeFacadeVerticesIfReady();
+    } else {
+        updatePhotoMatchStatus();
+        showStatus(
+            `已标注第 ${state.photo.facadeVerticesCloud.length} 个 3D 顶点${snapInfo}，请继续按顺时针标注`,
+            'info'
+        );
+    }
+}
+
+function undoLastPhotoMatch() {
+    if (state.photo.correspondences.length === 0) {
+        showStatus('没有可撤销的匹配点', 'warning');
+        return;
+    }
+    state.photo.correspondences.pop();
+    state.photo.nextIsPhoto = true;
+    redrawPhotoMatchMarkers();
+    updatePhotoMatchStatus();
+    showStatus('已撤销最后一对匹配点', 'success');
+}
+
+function isSupportedPhotoFile(file) {
+    const name = (file.name || '').toLowerCase();
+    return /\.(jpe?g|png|bmp|webp)$/i.test(name) || (file.type || '').startsWith('image/');
+}
+
+async function uploadPhotoFile(file) {
+    if (!file || !isSupportedPhotoFile(file)) {
+        showStatus('请选择 jpg / png / bmp / webp 图片文件', 'warning');
+        return;
+    }
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活一个点云', 'warning');
+        return;
+    }
+    if (!hasFacadeDetectionReady()) {
+        showStatus('上传 2D 照片前，请先对当前点云执行「检测建筑立面」', 'warning');
+        return;
+    }
+
+    showProgress('上传 2D 照片...', 20);
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const resp = await fetch(`${API_BASE}/upload_photo`, {
+            method: 'POST',
+            body: formData,
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        state.photo.id = result.photo_id;
+        state.photo.filename = result.filename;
+        state.photo.url = result.url;
+        state.photo.annotateMode = false;
+        state.photo.nextIsPhoto = true;
+        state.photo.correspondences = [];
+        state.photo.matchResult = null;
+        state.photo.selectedFacadeId = null;
+        state.photo.facadeVertices = [];
+        state.photo.facadeVerticesCloud = [];
+        state.photo.facadeVertexMode = false;
+        state.photo.facadeVertexSourceMode = null;
+        state.photo.facadeVertexAnnotationSource = null;
+        clearFacadeVertexCloudMarkers();
+        clearPhotoMatchMarkers();
+        clearPhotoFacadeHeatmap();
+        resetReprojectionCheck();
+
+        showPhotoPreview(state.photo);
+        document.getElementById('btn-annotate-matches').disabled = false;
+        updatePhotoMatchStatus();
+        closePhotoUploadDialog();
+        updateProgress(100);
+        hideProgress();
+        showStatus(`照片上传成功: ${result.filename}`, 'success');
+    } catch (err) {
+        hideProgress();
+        showStatus(`照片上传失败: ${err.message}`, 'error');
+    }
+}
+
+function startAnnotateMatches() {
+    togglePhotoAnnotateMode();
+}
+
+function clearPhotoRegionFrame() {
+    if (state.photo.regionFrameGroup) {
+        state.photo.regionFrameGroup.traverse(obj => {
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) obj.material.dispose();
+        });
+        state.scene.remove(state.photo.regionFrameGroup);
+        state.photo.regionFrameGroup = null;
+    }
+    state.photo.regionCorners3d = null;
+}
+
+function renderPhotoRegionFrame(cornersZup) {
+    clearPhotoRegionFrame();
+    if (!cornersZup || cornersZup.length !== 4) return;
+
+    const yupPoints = cornersZup.map(corner => convertZupToYupSingle(corner));
+    const loopPoints = [...yupPoints, yupPoints[0].clone()];
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints(loopPoints);
+    const lineMaterial = new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: true,
+    });
+    const frameLine = new THREE.Line(lineGeometry, lineMaterial);
+
+    const group = new THREE.Group();
+    group.name = 'photo-region-frame';
+    group.add(frameLine);
+
+    const markerSize = Math.max(CONFIG.REG_MARKER_SIZE * 0.8, state.sceneRange * 0.00035);
+    yupPoints.forEach((point, index) => {
+        const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(markerSize, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        sphere.position.copy(point);
+        group.add(sphere);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 96;
+        canvas.height = 48;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(180, 0, 0, 0.92)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`V${index + 1}`, canvas.width / 2, canvas.height / 2);
+        const sprite = new THREE.Sprite(
+            new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+        );
+        sprite.position.copy(point);
+        sprite.position.y += markerSize * 2.8;
+        sprite.scale.set(markerSize * 5.5, markerSize * 2.8, 1);
+        group.add(sprite);
+    });
+
+    state.scene.add(group);
+    state.photo.regionFrameGroup = group;
+    state.photo.regionCorners3d = cornersZup;
+}
+
+function clearPhotoFacadeHeatmap() {
+    if (state.photo.heatmapGroup) {
+        state.photo.heatmapGroup.traverse(obj => {
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) obj.material.dispose();
+        });
+        state.scene.remove(state.photo.heatmapGroup);
+        state.photo.heatmapGroup = null;
+    }
+    document.getElementById('facade-heatmap-legend').classList.remove('show');
+    hideFacadeGridPanel();
+    clearPhotoRegionFrame();
+}
+
+function hideFacadeGridPanel() {
+    document.getElementById('facade-grid-panel').classList.remove('show');
+    state.photo.gridHeatmapResult = null;
+}
+
+function clearPhotoHeatmapDisplay() {
+    if (state.photo.heatmapGroup) {
+        state.photo.heatmapGroup.traverse(obj => {
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) obj.material.dispose();
+        });
+        state.scene.remove(state.photo.heatmapGroup);
+        state.photo.heatmapGroup = null;
+    }
+    document.getElementById('facade-heatmap-legend').classList.remove('show');
+    hideFacadeGridPanel();
+}
+
+function renderPhotoFacadeHeatmap3D(result) {
+    if (state.photo.heatmapGroup) {
+        state.photo.heatmapGroup.traverse(obj => {
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) obj.material.dispose();
+        });
+        state.scene.remove(state.photo.heatmapGroup);
+        state.photo.heatmapGroup = null;
+    }
+
+    const heatmap = result.heatmap;
+    const positions = convertZupToYup(new Float32Array(heatmap.vertices.flat()));
+    const colors = new Float32Array(heatmap.colors.flat());
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(heatmap.triangles);
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: true,
+        depthWrite: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+
+    const linePositions = convertZupToYup(
+        new Float32Array(heatmap.line_positions.flat())
+    );
+    const lineGeometry = new THREE.BufferGeometry();
+    lineGeometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(linePositions, 3)
+    );
+    const lines = new THREE.LineSegments(
+        lineGeometry,
+        new THREE.LineBasicMaterial({
+            color: 0x171717,
+            transparent: true,
+            opacity: 0.45,
+            depthTest: true,
+        })
+    );
+
+    const group = new THREE.Group();
+    group.name = 'photo-facade-grid-heatmap';
+    group.add(mesh);
+    group.add(lines);
+    state.scene.add(group);
+    state.photo.heatmapGroup = group;
+}
+
+function renderFacadeGridPanel(result) {
+    const grid2d = result.heatmap?.grid_2d;
+    if (!grid2d) {
+        throw new Error('缺少二维网格热力图数据');
+    }
+
+    const canvas = document.getElementById('facade-grid-canvas');
+    const body = canvas.parentElement;
+    const containerW = Math.max(body.clientWidth, 280);
+    const containerH = Math.max(body.clientHeight, 280);
+    const dpr = window.devicePixelRatio || 1;
+
+    const padL = 44;
+    const padR = 14;
+    const padT = 14;
+    const padB = 34;
+    const {
+        u_min: uMin,
+        u_max: uMax,
+        v_min: vMin,
+        v_max: vMax,
+        u_bins: uBins,
+        v_bins: vBins,
+        grid_size_m: gridSize,
+        cells,
+    } = grid2d;
+    const cellMap = new Map(cells.map(cell => [`${cell.i},${cell.j}`, cell]));
+    const uSpan = Math.max(uMax - uMin, 1e-6);
+    const vSpan = Math.max(vMax - vMin, 1e-6);
+
+    const maxPlotW = containerW - padL - padR;
+    const maxPlotH = containerH - padT - padB;
+    const scale = Math.min(maxPlotW / uSpan, maxPlotH / vSpan);
+    const plotW = uSpan * scale;
+    const plotH = vSpan * scale;
+    const plotLeft = padL + (maxPlotW - plotW) / 2;
+    const plotTop = padT + (maxPlotH - plotH) / 2;
+
+    const width = containerW;
+    const height = containerH;
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#eceff3';
+    ctx.fillRect(0, 0, width, height);
+
+    for (let j = 0; j < vBins; j++) {
+        for (let i = 0; i < uBins; i++) {
+            const u0 = uMin + i * gridSize;
+            const u1 = Math.min(u0 + gridSize, uMax);
+            const v0 = vMin + j * gridSize;
+            const v1 = Math.min(v0 + gridSize, vMax);
+            const x = plotLeft + (u0 - uMin) * scale;
+            const y = plotTop + plotH - (v1 - vMin) * scale;
+            const w = Math.max((u1 - u0) * scale, 1);
+            const h = Math.max((v1 - v0) * scale, 1);
+            const cell = cellMap.get(`${i},${j}`);
+            if (cell) {
+                const [r, g, b] = cell.color;
+                ctx.fillStyle =
+                    `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+            } else {
+                ctx.fillStyle = '#e8ebf0';
+            }
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = 'rgba(120, 130, 150, 0.35)';
+            ctx.lineWidth = 0.6;
+            ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+        }
+    }
+
+    ctx.strokeStyle = '#667085';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, plotTop);
+    ctx.lineTo(plotLeft, plotTop + plotH);
+    ctx.lineTo(plotLeft + plotW, plotTop + plotH);
+    ctx.stroke();
+
+    ctx.fillStyle = '#667085';
+    ctx.font = '10px Arial';
+    ctx.textAlign = 'center';
+    for (let step = 0; step <= 4; step++) {
+        const u = uMin + uSpan * step / 4;
+        const x = plotLeft + (u - uMin) * scale;
+        ctx.fillText(u.toFixed(1), x, plotTop + plotH + 16);
+    }
+    ctx.textAlign = 'right';
+    for (let step = 0; step <= 4; step++) {
+        const v = vMin + vSpan * step / 4;
+        const y = plotTop + plotH - (v - vMin) * scale;
+        ctx.fillText(v.toFixed(1), plotLeft - 6, y + 3);
+    }
+    ctx.textAlign = 'center';
+    ctx.fillText('水平 (m)', plotLeft + plotW / 2, height - 6);
+    ctx.save();
+    ctx.translate(12, plotTop + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('高度 (m)', 0, 0);
+    ctx.restore();
+
+    const limitMm = result.heatmap.deviation_limit_m * 1000;
+    document.getElementById('facade-grid-meta').textContent =
+        `立面 #${result.facade_id + 1} · ${cells.length} 个网格 · ` +
+        `尺寸 ${uSpan.toFixed(1)}×${vSpan.toFixed(1)} m · ` +
+        `比例 ${(uSpan / vSpan).toFixed(3)} · 偏差 ±${limitMm.toFixed(1)} mm`;
+    document.getElementById('facade-grid-panel').classList.add('show');
+    state.photo.gridHeatmapResult = result;
+}
+
+async function highlightPhotoFacadeRegion() {
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活点云', 'warning');
+        return;
+    }
+    if (!state.photo.matchResult || state.photo.facadeVertices.length !== 4) {
+        showStatus('请先完成相机内外参估算，并标注 4 个检测区域顶点', 'warning');
+        return;
+    }
+
+    showProgress('高亮检测区域...', 30);
+    try {
+        const resp = await fetch(`${API_BASE}/photo_highlight_region`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid: state.activeCloud.uuid,
+                pose: state.photo.matchResult,
+                image_quadrilateral: state.photo.facadeVertices.map(point => [
+                    point.pixelX,
+                    point.pixelY,
+                ]),
+                ...getFacadeRegionPayloadExtras(),
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        const cloud = state.pointClouds.get(state.activeCloud.uuid);
+        if (cloud && result.colors) {
+            const newColors = new Float32Array(result.colors);
+            const currentColors = cloud.geometry.attributes.color.array;
+            if (newColors.length === currentColors.length) {
+                currentColors.set(newColors);
+                cloud.geometry.attributes.color.needsUpdate = true;
+                cloud.data.colors = Array.from(newColors);
+            }
+        }
+
+        state.photo.selectedFacadeId = result.facade_id;
+        renderPhotoRegionFrame(result.corners_3d);
+        console.info('2D 顶点对应 3D 坐标 (Z-up)', result.corners_3d);
+        hideProgress();
+        showStatus(
+            `已高亮 3D 检测框内 ${Number(result.highlight_count).toLocaleString()} 点，` +
+            `红色框为照片四顶点对应 3D 坐标（详见终端 [INFO]）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`高亮失败: ${err.message}`, 'error');
+    }
+}
+
+function updateFacadeHeatmapLegend(result) {
+    const heatmap = result.heatmap;
+    const limitMm = heatmap.deviation_limit_m * 1000;
+    document.getElementById('facade-heatmap-title').textContent =
+        `立面网格热力图 #${result.facade_id + 1}`;
+    document.getElementById('facade-heatmap-negative').textContent =
+        `凹陷 −${limitMm.toFixed(1)} mm`;
+    document.getElementById('facade-heatmap-positive').textContent =
+        `凸起 +${limitMm.toFixed(1)} mm`;
+    document.getElementById('facade-heatmap-meta').textContent =
+        `面积 ${result.facade_area_m2.toFixed(1)} m² · ` +
+        `${heatmap.cell_count} 个网格 · 网格 ${heatmap.grid_size_m.toFixed(2)} m`;
+    document.getElementById('facade-heatmap-legend').classList.add('show');
+}
+
+async function requestPhotoFacadeHeatmap(
+    pose,
+    imageWidth,
+    imageHeight
+) {
+    if (!state.activeCloud) throw new Error('当前没有激活点云');
+    const response = await fetch(`${API_BASE}/photo_facade_heatmap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            uuid: state.activeCloud.uuid,
+            pose,
+            image_width: imageWidth,
+            image_height: imageHeight,
+            grid_size: 0.5,
+            image_quadrilateral: state.photo.facadeVertices.map(point => [
+                point.pixelX,
+                point.pixelY,
+            ]),
+            ...getFacadeRegionPayloadExtras(),
+        }),
+    });
+    const result = await response.json();
+    if (result.error) throw new Error(result.error);
+    return result;
+}
+
+async function generatePhotoFacadeHeatmap() {
+    if (!state.photo.matchResult || state.photo.facadeVertices.length !== 4) {
+        showStatus('请先完成 2D-3D 匹配，并在照片中标注 4 个立面顶点', 'warning');
+        return;
+    }
+    const img = document.getElementById('photo-view-img');
+    showProgress('生成立面热力图...', 20);
+    try {
+        clearPhotoHeatmapDisplay();
+        const result = await requestPhotoFacadeHeatmap(
+            state.photo.matchResult,
+            img.naturalWidth,
+            img.naturalHeight
+        );
+        updateProgress(45);
+        renderPhotoFacadeHeatmap3D(result);
+        updateFacadeHeatmapLegend(result);
+        updateProgress(75);
+        renderFacadeGridPanel(result);
+        if (result.corners_3d) {
+            renderPhotoRegionFrame(result.corners_3d);
+        }
+        state.photo.selectedFacadeId = result.facade_id;
+        updateProgress(100);
+        hideProgress();
+        showStatus(
+            `已生成 3D 热力图与网格视图（立面 #${result.facade_id + 1}）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`热力图生成失败: ${err.message}`, 'error');
+    }
+}
+
+async function runPhotoCloudMatch() {
+    if (!state.photo.id) {
+        showStatus('请先上传 2D 照片', 'warning');
+        return;
+    }
+    const completePairs = state.photo.correspondences.filter(p => p.cloud !== null);
+    if (completePairs.length < 6) {
+        showStatus(`估计相机内参至少需要 6 对匹配点，当前 ${completePairs.length} 对`, 'warning');
+        return;
+    }
+
+    const img = document.getElementById('photo-view-img');
+    if (!img.naturalWidth || !img.naturalHeight) {
+        showStatus('照片尚未加载完成', 'warning');
+        return;
+    }
+
+    showProgress('求解相机位姿...', 20);
+    try {
+        const resp = await fetch(`${API_BASE}/match_photo_pointcloud`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                photo_id: state.photo.id,
+                image_width: img.naturalWidth,
+                image_height: img.naturalHeight,
+                horizontal_fov_deg: 60.0,
+                reprojection_error_px: 20.0,
+                pairs: completePairs.map(pair => ({
+                    image_point: [pair.photo.pixelX, pair.photo.pixelY],
+                    cloud_point: pair.cloud.toArray(),
+                })),
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        const matchedPairs = completePairs.map(pair => ({
+            photo: { ...pair.photo },
+        }));
+        state.photo.matchResult = result.pose;
+        state.photo.selectedFacadeId = null;
+        state.photo.facadeVertices = [];
+        state.photo.reprojectionCheck = buildReprojectionCheckData(result.pose, matchedPairs);
+        clearPhotoMatchMarkers();
+        clearPhotoFacadeHeatmap();
+        exitPhotoAnnotateMode(false);
+        updateProgress(100);
+        hideProgress();
+
+        const pose = result.pose;
+        updatePhotoMatchStatus();
+        document.getElementById('photo-match-status').innerHTML +=
+            `<br><span style="color:var(--success);">相机内外参估算成功：` +
+            `${pose.inlier_count}/${pose.point_count} 个内点，` +
+            `重投影 RMSE ${pose.reprojection_rmse_px.toFixed(2)} px，` +
+            `焦距 fx=${pose.camera_matrix[0][0].toFixed(1)} px</span>` +
+            (pose.intrinsic_warning
+                ? `<br><span style="color:var(--warning);">${pose.intrinsic_warning}</span>`
+                : '') +
+            `<br><span style="color:var(--accent);">右侧照片已显示重投影检查，可点击「重投影检查」切换。</span>` +
+            `<br><span style="color:var(--accent);">确认无误后，请点击「标注照片检测区域顶点」。</span>`;
+        document.getElementById('btn-toggle-reprojection').disabled = false;
+        setReprojectionVisible(true);
+        showStatus('相机内外参估算成功，请查看重投影检查', 'success');
+        console.info('2D-3D 相机位姿', pose);
+    } catch (err) {
+        hideProgress();
+        showStatus(`相机内外参估算失败: ${err.message}`, 'error');
+    }
+}
+
+async function refreshFacadeResults(selectId = null) {
+    const select = document.getElementById('facade-result-select');
+    const loadBtn = document.getElementById('btn-load-facade-detection');
+    try {
+        const resp = await fetch(`${API_BASE}/list_facade_detections`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const results = data.results || [];
+        select.innerHTML = '';
+        if (results.length === 0) {
+            select.innerHTML = '<option value="">暂无已保存的立面检测结果</option>';
+            loadBtn.disabled = true;
+            return results;
+        }
+
+        results.forEach((item) => {
+            const opt = document.createElement('option');
+            opt.value = item.id;
+            const created = item.created_at ? ` | ${item.created_at}` : '';
+            const points = item.point_count ? ` | ${Number(item.point_count).toLocaleString()}点` : '';
+            const facades = item.facade_count ? ` | ${item.facade_count}立面` : '';
+            opt.textContent = `${item.source_filename || '?'}${facades}${points}${created}`;
+            select.appendChild(opt);
+        });
+
+        if (selectId) {
+            select.value = selectId;
+        }
+        loadBtn.disabled = !select.value;
+        return results;
+    } catch (err) {
+        select.innerHTML = '<option value="">加载列表失败</option>';
+        loadBtn.disabled = true;
+        showStatus(`读取立面检测结果列表失败: ${err.message}`, 'error');
+        return [];
+    }
+}
+
+async function saveFacadeDetectionResult() {
     if (!state.activeCloud) {
         showStatus('请先激活一个点云', 'warning');
         return;
     }
+    if (!hasFacadeDetectionReady()) {
+        showStatus('请先完成立面检测', 'warning');
+        return;
+    }
+
+    const { uuid } = state.activeCloud;
+    showProgress('保存立面检测结果...', 20);
+    try {
+        const resp = await fetch(`${API_BASE}/save_facade_detection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid,
+                voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
+                min_area: parseFloat(document.getElementById('min-area').value) || 5.0,
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        await refreshFacadeResults(result.result_id);
+        updateProgress(100);
+        hideProgress();
+        showStatus(
+            `立面检测结果已保存: ${result.result_id}（${result.facade_count} 个立面）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`保存立面检测结果失败: ${err.message}`, 'error');
+    }
+}
+
+async function loadFacadeDetectionResult() {
+    if (!state.activeCloud) {
+        showStatus('请先加载并激活对应点云', 'warning');
+        return;
+    }
+    const resultId = document.getElementById('facade-result-select').value;
+    if (!resultId) {
+        showStatus('请先选择一个立面检测结果', 'warning');
+        return;
+    }
+
+    showProgress('加载立面检测结果...', 20);
+    try {
+        saveCameraState();
+        const resp = await fetch(`${API_BASE}/load_facade_detection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                uuid: state.activeCloud.uuid,
+                result_id: resultId,
+            }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        updateProgress(70);
+        await applyFacadeDetectionResult(result);
+        restoreCameraState();
+
+        updateProgress(100);
+        hideProgress();
+        const facadeCount = result.facade_count || (result.facades || []).length;
+        showStatus(
+            `已加载立面检测结果（${facadeCount} 个立面，跳过重新检测）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`加载立面检测结果失败: ${err.message}`, 'error');
+    }
+}
+
+async function refreshRegistrationResults(selectId = null) {
+    const select = document.getElementById('reg-result-select');
+    const loadBtn = document.getElementById('btn-load-reg');
+    try {
+        const resp = await fetch(`${API_BASE}/list_registration_results`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const results = data.results || [];
+        select.innerHTML = '';
+        if (results.length === 0) {
+            select.innerHTML = '<option value="">暂无已保存的配准结果</option>';
+            loadBtn.disabled = true;
+            return results;
+        }
+
+        results.forEach((item) => {
+            const opt = document.createElement('option');
+            opt.value = item.id;
+            const created = item.created_at ? ` | ${item.created_at}` : '';
+            const points = item.point_count ? ` | ${Number(item.point_count).toLocaleString()}点` : '';
+            opt.textContent = `${item.source_filename || '?'} → ${item.target_filename || '?'}${points}${created}`;
+            select.appendChild(opt);
+        });
+
+        if (selectId) {
+            select.value = selectId;
+        }
+        loadBtn.disabled = !select.value;
+        return results;
+    } catch (err) {
+        select.innerHTML = '<option value="">加载列表失败</option>';
+        loadBtn.disabled = true;
+        showStatus(`读取配准结果列表失败: ${err.message}`, 'error');
+        return [];
+    }
+}
+
+// 保存配准结果（变换矩阵 JSON + 合并点云）
+async function saveRegistered() {
     if (!state.reg.sourceUUID || !state.reg.targetUUID) {
         showStatus('未找到配准关系，请先执行配准', 'warning');
         return;
     }
+    if (!state.reg.lastTransform) {
+        showStatus('请先完成粗配准或 ICP 精配准', 'warning');
+        return;
+    }
 
-    showProgress('合并并保存点云...', 0);
+    showProgress('保存配准结果...', 0);
     try {
-        const mergeResp = await fetch(`${API_BASE}/merge_clouds`, {
+        const resp = await fetch(`${API_BASE}/save_registration_result`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                uuid1: state.reg.sourceUUID,
-                uuid2: state.reg.targetUUID,
+                src_uuid: state.reg.sourceUUID,
+                tgt_uuid: state.reg.targetUUID,
+                transformation: state.reg.lastTransform,
+                voxel_size: parseFloat(document.getElementById('voxel-size').value) || 0.05,
+                also_save_download: true,
             }),
         });
-        const mergeResult = await mergeResp.json();
-        if (mergeResult.error) throw new Error(mergeResult.error);
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
 
-        updateProgress(40);
-
-        const filename = `merged_${Date.now()}.ply`;
-        const saveResp = await fetch(`${API_BASE}/save_registered`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                uuid: mergeResult.uuid,
-                filename: filename,
-            }),
-        });
-        const saveResult = await saveResp.json();
-        if (saveResult.error) throw new Error(saveResult.error);
-
-        updateProgress(70);
-
-        await loadPointCloud(mergeResult, mergeResult.filename, mergeResult.uuid, {
+        updateProgress(60);
+        await loadPointCloud(result, result.filename, result.uuid, {
             preserveCamera: true,
             preserveColor: false
         });
+        addFileToList(result.filename, result.uuid, result.positions.length / 3);
+        setActiveCloud(result.uuid, true);
 
-        addFileToList(mergeResult.filename, mergeResult.uuid, mergeResult.positions.length / 3);
-        setActiveCloud(mergeResult.uuid, true);
+        await refreshRegistrationResults(result.result_id);
 
         updateProgress(100);
         hideProgress();
+        showStatus(`配准结果已保存: ${result.result_id}（${result.point_count.toLocaleString()} 点）`, 'success');
 
-        showStatus(`融合点云已保存并加载，总点数: ${saveResult.points}`, 'success');
-
-        const a = document.createElement('a');
-        a.href = `${API_BASE}/download/${filename}`;
-        a.download = filename;
-        a.click();
-
+        if (result.download_filename) {
+            const a = document.createElement('a');
+            a.href = `${API_BASE}/download/${result.download_filename}`;
+            a.download = result.download_filename;
+            a.click();
+        }
     } catch (err) {
         hideProgress();
-        showStatus(`保存融合点云失败: ${err.message}`, 'error');
+        showStatus(`保存配准结果失败: ${err.message}`, 'error');
+    }
+}
+
+// 直接加载已保存的合并配准点云
+async function loadRegisteredResult() {
+    const resultId = document.getElementById('reg-result-select').value;
+    if (!resultId) {
+        showStatus('请先选择一个配准结果', 'warning');
+        return;
+    }
+
+    showProgress('加载配准结果...', 20);
+    try {
+        const resp = await fetch(`${API_BASE}/load_registration_result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ result_id: resultId }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+
+        updateProgress(70);
+        await loadPointCloud(result, result.filename, result.uuid, {
+            preserveCamera: false,
+            preserveColor: false
+        });
+        addFileToList(result.filename, result.uuid, result.positions.length / 3);
+        setActiveCloud(result.uuid, true);
+
+        if (result.transformation) {
+            state.reg.lastTransform = result.transformation;
+        }
+
+        updateProgress(100);
+        hideProgress();
+        showStatus(
+            `已加载配准结果 ${resultId}（${result.point_count.toLocaleString()} 点，${result.load_time_s || '?'}s）`,
+            'success'
+        );
+    } catch (err) {
+        hideProgress();
+        showStatus(`加载配准结果失败: ${err.message}`, 'error');
     }
 }
 
@@ -2749,6 +5136,12 @@ function bindEvents() {
         state.camera.aspect = container.clientWidth / container.clientHeight;
         state.camera.updateProjectionMatrix();
         state.renderer.setSize(container.clientWidth, container.clientHeight);
+        if (state.photo.gridHeatmapResult) {
+            renderFacadeGridPanel(state.photo.gridHeatmapResult);
+        }
+        if (state.photo.showReprojection) {
+            renderReprojectionOverlay();
+        }
     });
 
     // 上传
@@ -2765,6 +5158,73 @@ function bindEvents() {
     });
     fileInput.addEventListener('change', e => {
         if (e.target.files.length) uploadFiles(Array.from(e.target.files));
+    });
+
+    // 2D 照片上传
+    const photoDropZone = document.getElementById('photo-drop-zone');
+    const photoFileInput = document.getElementById('photo-file-input');
+    document.getElementById('btn-upload-photo').addEventListener('click', openPhotoUploadDialog);
+    document.getElementById('photo-upload-close').addEventListener('click', closePhotoUploadDialog);
+    document.getElementById('photo-upload-cancel').addEventListener('click', closePhotoUploadDialog);
+    document.getElementById('photo-upload-dialog').addEventListener('click', (e) => {
+        if (e.target === document.getElementById('photo-upload-dialog')) closePhotoUploadDialog();
+    });
+    document.getElementById('btn-close-photo-view').addEventListener('click', hidePhotoPreview);
+    document.getElementById('btn-annotate-matches').addEventListener('click', startAnnotateMatches);
+    document.getElementById('btn-undo-photo-match').addEventListener('click', undoLastPhotoMatch);
+    document.getElementById('btn-exit-photo-annotate').addEventListener('click', () => exitPhotoAnnotateMode());
+    document.getElementById('btn-photo-cloud-match').addEventListener('click', runPhotoCloudMatch);
+    document.getElementById('btn-toggle-reprojection').addEventListener('click', toggleReprojectionCheck);
+    document.getElementById('btn-annotate-facade-vertices-photo').addEventListener(
+        'click',
+        beginFacadeVertexAnnotationPhoto
+    );
+    document.getElementById('btn-annotate-facade-vertices-cloud').addEventListener(
+        'click',
+        beginFacadeVertexAnnotationCloud
+    );
+    document.getElementById('btn-highlight-photo-facade').addEventListener(
+        'click',
+        highlightPhotoFacadeRegion
+    );
+    document.getElementById('btn-undo-facade-vertex').addEventListener(
+        'click',
+        undoLastFacadeVertex
+    );
+    document.getElementById('btn-exit-facade-vertex').addEventListener(
+        'click',
+        () => exitFacadeVertexAnnotation()
+    );
+    document.getElementById('btn-close-facade-grid').addEventListener(
+        'click',
+        hideFacadeGridPanel
+    );
+    document.getElementById('btn-generate-photo-heatmap').addEventListener(
+        'click',
+        generatePhotoFacadeHeatmap
+    );
+    document.getElementById('photo-view-body').addEventListener('click', handlePhotoAnnotateClick);
+
+    photoDropZone.addEventListener('click', () => photoFileInput.click());
+    photoDropZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        photoDropZone.classList.add('dragover');
+    });
+    photoDropZone.addEventListener('dragleave', () => photoDropZone.classList.remove('dragover'));
+    photoDropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        photoDropZone.classList.remove('dragover');
+        const files = Array.from(e.dataTransfer.files).filter(isSupportedPhotoFile);
+        if (!files.length) {
+            showStatus('请拖入图片文件（jpg/png/bmp/webp）', 'warning');
+            return;
+        }
+        uploadPhotoFile(files[0]);
+    });
+    photoFileInput.addEventListener('change', e => {
+        if (e.target.files && e.target.files[0]) {
+            uploadPhotoFile(e.target.files[0]);
+        }
     });
 
     // 滑块
@@ -2791,6 +5251,12 @@ function bindEvents() {
     document.getElementById('btn-apply-color').addEventListener('click', applyColor);
     document.getElementById('btn-reset-color').addEventListener('click', resetColor);
     document.getElementById('btn-detect-facades').addEventListener('click', detectFacades);
+    document.getElementById('btn-save-facade-detection').addEventListener('click', saveFacadeDetectionResult);
+    document.getElementById('btn-refresh-facade-results').addEventListener('click', () => refreshFacadeResults());
+    document.getElementById('facade-result-select').addEventListener('change', (e) => {
+        document.getElementById('btn-load-facade-detection').disabled = !e.target.value;
+    });
+    document.getElementById('btn-load-facade-detection').addEventListener('click', loadFacadeDetectionResult);
     document.getElementById('btn-reset-facades').addEventListener('click', resetFacades);
     document.getElementById('btn-selection-mode').addEventListener('click', toggleSelectionMode);
     document.getElementById('btn-segment-selection').addEventListener('click', segmentSelection);
@@ -2855,6 +5321,14 @@ function bindEvents() {
     document.getElementById('btn-execute-reg').addEventListener('click', executeRegistration);
     document.getElementById('btn-icp-refine').addEventListener('click', icpRefine);
     document.getElementById('btn-save-reg').addEventListener('click', saveRegistered);
+    document.getElementById('btn-refresh-reg-results').addEventListener('click', () => refreshRegistrationResults());
+    document.getElementById('btn-load-reg').addEventListener('click', loadRegisteredResult);
+    document.getElementById('reg-result-select').addEventListener('change', (e) => {
+        document.getElementById('btn-load-reg').disabled = !e.target.value;
+    });
+    refreshRegistrationResults();
+    refreshFacadeResults();
+    updatePhotoMatchStatus();
 
     // Dialog 关闭
     document.getElementById('dialog-close').addEventListener('click', () => {
@@ -2881,9 +5355,15 @@ function bindEvents() {
             case 'a': document.getElementById('tb-axes').click(); break;
             case 'c': takeScreenshot(); break;
             case 'f': document.getElementById('tb-fullscreen').click(); break;
-            case 'z': if (state.reg.mode) undoLastCorrespondence(); break;
+            case 'z':
+                if (state.photo.facadeVertexMode) undoLastFacadeVertex();
+                else if (state.photo.annotateMode) undoLastPhotoMatch();
+                else if (state.reg.mode) undoLastCorrespondence();
+                break;
             case 'escape':
                 if (state.selection.mode) toggleSelectionMode();
+                if (state.photo.facadeVertexMode) exitFacadeVertexAnnotation();
+                if (state.photo.annotateMode) exitPhotoAnnotateMode();
                 if (state.reg.mode) exitRegMode();
                 if (document.getElementById('quality-dialog').classList.contains('show')) {
                     document.getElementById('quality-dialog').classList.remove('show');
