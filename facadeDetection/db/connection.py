@@ -33,14 +33,13 @@ class IndexProject(IndexBase):
     project_uuid = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, unique=True, index=True, nullable=False)
     name = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, nullable=False)
     root_dir = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, nullable=False)
-    thumbnail_path = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, nullable=True)
     created_at = __import__("sqlalchemy").Column(__import__("sqlalchemy").DateTime, default=datetime.now, nullable=False)
-    updated_at = __import__("sqlalchemy").Column(__import__("sqlalchemy").DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 
 Storage.ensure_base_dirs()
 _index_engine = create_engine(
-    f"sqlite:///{Storage.INDEX_DB_FILE}", future=True, echo=False, connect_args={"check_same_thread": False}
+    f"sqlite:///{Storage.INDEX_DB_FILE}", future=True, echo=False,
+    connect_args={"check_same_thread": False, "timeout": 5.0}, pool_pre_ping=True
 )
 event.listen(_index_engine, "connect", _apply_sqlite_pragmas)
 IndexSessionFactory = sessionmaker(bind=_index_engine, expire_on_commit=False, autoflush=False, future=True)
@@ -63,15 +62,14 @@ def index_session() -> Generator[Session, None, None]:
         s.close()
 
 
-def upsert_index_project(project_uuid: str, name: str, root_dir: str, thumbnail_path: str | None = None) -> None:
+def upsert_index_project(project_uuid: str, name: str, root_dir: str) -> None:
     with index_session() as s:
         row = s.execute(select(IndexProject).where(IndexProject.project_uuid == project_uuid)).scalar_one_or_none()
         if row:
             row.name = name
             row.root_dir = root_dir
-            row.thumbnail_path = thumbnail_path
         else:
-            s.add(IndexProject(project_uuid=project_uuid, name=name, root_dir=root_dir, thumbnail_path=thumbnail_path))
+            s.add(IndexProject(project_uuid=project_uuid, name=name, root_dir=root_dir))
         s.flush()
 
 
@@ -88,7 +86,8 @@ def get_project_engine(project_uuid: str):
     db_path = Storage.project_db_path(project_uuid)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
-        f"sqlite:///{db_path}", future=True, echo=False, connect_args={"check_same_thread": False}
+        f"sqlite:///{db_path}", future=True, echo=False,
+        connect_args={"check_same_thread": False, "timeout": 5.0}, pool_pre_ping=True
     )
     event.listen(engine, "connect", _apply_sqlite_pragmas)
     # Ensure schema exists

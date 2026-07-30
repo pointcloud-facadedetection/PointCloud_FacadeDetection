@@ -13,11 +13,25 @@ class Storage:
     - 每个项目的文件夹布局在 PROJECTS_ROOT 下
     """
 
-    BASE_DIR = Path("D:/ElevationDetect")
-    DATA_DIR = BASE_DIR / "data"
+    BASE_DIR = Path(__file__).resolve().parents[1]
+    # Storage root preferences (in order):
+    # 1) FACD_DATA_DIR env var
+    # 2) Project repository root (one level above this package)
+    # 3) Per-user LOCALAPPDATA fallback
+    _env_root = os.getenv("FACD_DATA_DIR")
+    if _env_root:
+        DATA_DIR = Path(_env_root)
+    else:
+        repo_root = BASE_DIR.parent  # d:/PointCloud_FacadeDetection
+        DATA_DIR = repo_root / "data"
+        if not DATA_DIR.exists():
+            if os.name == "nt":
+                DATA_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "PointCloudFacadeDetection"
+            else:
+                DATA_DIR = Path.home() / ".local" / "share" / "PointCloudFacadeDetection"
     # Global lightweight index database (projects list)
     INDEX_DB_FILE = DATA_DIR / "index.db"
-    PROJECTS_ROOT = BASE_DIR / "projects"
+    PROJECTS_ROOT = DATA_DIR / "projects"
 
     # Subfolders inside a project root
     RAW_DIRNAME = "raw"
