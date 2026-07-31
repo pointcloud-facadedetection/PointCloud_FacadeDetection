@@ -12,7 +12,7 @@ import msvcrt
 
 from config.storage import Storage
 from db.connection import project_session
-from models import FileAsset, Project
+from models import FileAsset, Project, ResultScene
 from models.enums import PersistPolicy
 
 
@@ -66,7 +66,11 @@ def gc_project(project_uuid: str, active_scene_id: Optional[int] = None, *, dry_
     with _gc_lock(proj_root), project_session(project_uuid) as s:
         if active_scene_id is None:
             proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()
-            active_scene_id = getattr(proj, "active_scene_id", None)
+            # Resolve active scene by is_active flag
+            active = s.execute(
+                select(ResultScene).where(ResultScene.project_id == proj.id, ResultScene.is_active == True)
+            ).scalar_one_or_none() if proj else None
+            active_scene_id = active.id if active else None
         q = s.execute(
             select(FileAsset).where(
                 (FileAsset.persist_policy == PersistPolicy.CACHE.value) | (FileAsset.persist_policy == PersistPolicy.PERSIST.value)
