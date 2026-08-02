@@ -19,7 +19,7 @@
 ```
 PointCloud_FacadeDetection/
 │
-├── facadeDetection/main.py         # VS Code 默认桌面端入口
+├── main.py                         # 应用入口（示意）
 │
 ├── config/                         # 【配置】
 │   └── settings.py                 # 全局常量（示意）
