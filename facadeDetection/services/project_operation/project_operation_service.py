@@ -1,8 +1,11 @@
-"""项目操作页面的点云功能入口。"""
+"""项目操作页面的点云业务入口。
+
+算法工程师可以在这些页面动作中接入具体算法，主窗口只负责按钮和展示。
+"""
 
 
-class PointCloudService:
-    """将 UI 按钮事件转交给视口或后续算法接口。"""
+class ProjectOperationService:
+    """将项目操作页的按钮事件转交给视口或后续算法实现。"""
 
     def __init__(self, viewport):
         self._viewport = viewport
@@ -23,6 +26,10 @@ class PointCloudService:
 
     def registration(self):
         self._notify('registration')
+
+    def select_detection_area(self):
+        self._notify('select_detection_area')
+        self._viewport.set_selection_enabled(True)
 
     def facade_detection(self):
         self._notify('facade_detection')

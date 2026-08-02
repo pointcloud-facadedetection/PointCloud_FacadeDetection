@@ -24,9 +24,10 @@ from PySide6.QtWidgets import (
 from qtwebview2 import QtWebView2Widget
 
 from .widgets.flow_layout import FlowLayout
-from services.file_service import FileService
-from services.pointcloud_service import PointCloudService
-from services.project_service import ProjectService
+from services.inspection_review import InspectionReviewService
+from services.project_operation import ProjectOperationService
+from services.project_overview import ProjectOverviewService
+from services.report_export import ReportExportService
 from view3d.open3d_viewport import Open3DViewport
 
 
@@ -56,6 +57,7 @@ PAGE_HEADER_ACTIONS = {
         ('改变颜色', 'btn_change_color'),
         ('点云去噪', 'btn_denoise'),
         ('点云配准', 'btn_registration'),
+        ('框选检测区域', 'btn_select_detection_area'),
         ('立面检测', 'btn_facade_detection'),
         ('质量检测', 'btn_quality_inspection'),
         ('框选分割', 'btn_box_segmentation'),
@@ -78,9 +80,7 @@ UPLOAD_FILE_FILTER = (
 )
 
 REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
-DEMO_REPORT_PDF_URL = (
-    'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf'
-)
+REPORT_EMPTY_TITLE = '请选择PDF上传'
 
 
 class MainWindow(QMainWindow):
@@ -89,9 +89,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('PointCloud FacadeDetection')
         self.resize(1600, 900)
         self.viewport = Open3DViewport()
-        self.file_service = FileService()
-        self.project_service = ProjectService()
-        self.pointcloud_service = PointCloudService(self.viewport)
+        self.project_overview_service = ProjectOverviewService()
+        self.project_operation_service = ProjectOperationService(self.viewport)
+        self.inspection_review_service = InspectionReviewService()
+        self.report_export_service = ReportExportService()
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
@@ -99,7 +100,8 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = {'left': False, 'right': False}
         self._last_upload_directory = str(Path.home())
         self._header_resize_pending = set()
-        self._current_report_pdf_name = Path(DEMO_REPORT_PDF_URL).name
+        self._current_report_pdf_name = None
+        self._report_webview_error = None
         self._setup_ui()
         self._connect_buttons()
         self._refresh_project_list()
@@ -206,11 +208,11 @@ class MainWindow(QMainWindow):
         (
             self.left_dock,
             self.left_sidebar_button,
-        ) = self._create_sidebar('Left Sidebar', 'leftDock', 'left')
+        ) = self._create_sidebar('leftDock', 'left')
         (
             self.right_dock,
             self.right_sidebar_button,
-        ) = self._create_sidebar('Right Sidebar', 'rightDock', 'right')
+        ) = self._create_sidebar('rightDock', 'right')
 
         viewport_panel = QWidget()
         viewport_layout = QVBoxLayout(viewport_panel)
@@ -245,10 +247,10 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(24, 20, 24, 20)
         content_layout.setSpacing(12)
         page_title_label = self._create_page_title(page_title, page_key)
-        page_title_label.setText(self._current_report_pdf_name)
+        page_title_label.setText(REPORT_EMPTY_TITLE)
         content_layout.addWidget(page_title_label)
 
-        self.report_pdf_status_label = QLabel('正在加载示例 PDF…')
+        self.report_pdf_status_label = QLabel('PDF未加载')
         self.report_pdf_status_label.setObjectName('reportPdfStatusLabel')
         self.report_pdf_status_label.setStyleSheet(
             'color: #656c77; font-size: 13px;'
@@ -257,7 +259,7 @@ class MainWindow(QMainWindow):
 
         # QtWebView2Widget 只嵌入系统 WebView2 内容区，不创建浏览器地址栏。
         self.report_webview = QtWebView2Widget(
-            url=DEMO_REPORT_PDF_URL,
+            url='about:blank',
             debug=False,
             context_menus=False,
             background_color='#f5f7fa',
@@ -306,7 +308,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._resize_page_header(panel))
         return panel
 
-    def _create_sidebar(self, title, object_name, side):
+    def _create_sidebar(self, object_name, side):
         sidebar = QFrame()
         sidebar.setObjectName(object_name)
         sidebar.setFrameShape(QFrame.Shape.NoFrame)
@@ -322,23 +324,22 @@ class MainWindow(QMainWindow):
         title_layout = QHBoxLayout(title_bar)
         title_layout.setContentsMargins(6, 4, 6, 4)
 
-        title_label = QLabel(title)
-        title_label.setObjectName(f'{object_name}TitleLabel')
-        title_layout.addWidget(title_label)
-
         toggle_button = QToolButton()
         toggle_button.setObjectName(f'btn_collapse_{side}_sidebar')
         toggle_button.setText('◀' if side == 'left' else '▶')
-        label = 'Left Sidebar' if side == 'left' else 'Right Sidebar'
-        toggle_button.setToolTip(f'Collapse {label}')
-        toggle_button.setAccessibleName(f'Collapse {label}')
+        label = '左侧栏' if side == 'left' else '右侧栏'
+        toggle_button.setToolTip(f'收起{label}')
+        toggle_button.setAccessibleName(f'收起{label}')
         toggle_button.setFixedSize(28, 28)
         toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if side == 'left':
+            title_layout.addStretch(1)
         title_layout.addWidget(
             toggle_button,
             alignment=Qt.AlignmentFlag.AlignVCenter,
         )
-        title_layout.addStretch(1)
+        if side == 'right':
+            title_layout.addStretch(1)
         sidebar_layout.addWidget(title_bar)
 
         panel = QWidget()
@@ -353,9 +354,9 @@ class MainWindow(QMainWindow):
         button = QToolButton(self.operation_page)
         button.setObjectName(f'btn_expand_{side}_sidebar')
         button.setText('▶' if side == 'left' else '◀')
-        label = 'Left Sidebar' if side == 'left' else 'Right Sidebar'
-        button.setToolTip(f'Expand {label}')
-        button.setAccessibleName(f'Expand {label}')
+        label = '左侧栏' if side == 'left' else '右侧栏'
+        button.setToolTip(f'展开{label}')
+        button.setAccessibleName(f'展开{label}')
         button.setFixedSize(30, 46)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
@@ -483,15 +484,26 @@ class MainWindow(QMainWindow):
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
-            'btn_reset_view': self.pointcloud_service.reset_view,
-            'btn_change_color': self.pointcloud_service.change_color,
-            'btn_denoise': self.pointcloud_service.denoise,
-            'btn_registration': self.pointcloud_service.registration,
-            'btn_facade_detection': self.pointcloud_service.facade_detection,
-            'btn_quality_inspection': self.pointcloud_service.quality_inspection,
-            'btn_box_segmentation': self.pointcloud_service.box_segmentation,
-            'btn_calculate_detail': self.pointcloud_service.calculate_detail,
-            'btn_align_2d_3d': self.pointcloud_service.align_2d_3d,
+            'btn_reset_view': self.project_operation_service.reset_view,
+            'btn_change_color': self.project_operation_service.change_color,
+            'btn_denoise': self.project_operation_service.denoise,
+            'btn_registration': self.project_operation_service.registration,
+            'btn_select_detection_area': (
+                self.project_operation_service.select_detection_area
+            ),
+            'btn_facade_detection': (
+                self.project_operation_service.facade_detection
+            ),
+            'btn_quality_inspection': (
+                self.project_operation_service.quality_inspection
+            ),
+            'btn_box_segmentation': (
+                self.project_operation_service.box_segmentation
+            ),
+            'btn_calculate_detail': (
+                self.project_operation_service.calculate_detail
+            ),
+            'btn_align_2d_3d': self.project_operation_service.align_2d_3d,
         }
         report_actions = {
             'btn_open_report_pdf': self._open_report_pdf,
@@ -544,8 +556,8 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
-        uploaded_paths = self.file_service.upload_files(file_paths)
-        project = self.project_service.register_upload(
+        uploaded_paths = self.project_overview_service.upload_files(file_paths)
+        project = self.project_overview_service.register_upload(
             uploaded_paths,
             current_project=self.current_project,
         )
@@ -562,7 +574,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = directory_path
-        project = self.project_service.open_project(directory_path)
+        project = self.project_overview_service.open_project(directory_path)
         self._refresh_project_list()
         self._activate_project(project)
 
@@ -584,12 +596,15 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = directory_path
-        project = self.project_service.create_project(name, directory_path)
+        project = self.project_overview_service.create_project(
+            name,
+            directory_path,
+        )
         self._refresh_project_list()
         self._activate_project(project)
 
     def _select_project(self):
-        projects = self.project_service.list_projects()
+        projects = self.project_overview_service.list_projects()
         if not projects:
             QMessageBox.information(self, '选择项目', '当前没有可选择的项目。')
             return
@@ -626,24 +641,31 @@ class MainWindow(QMainWindow):
         self.show_report_pdf(pdf_path)
 
     def show_report_pdf(self, pdf_path):
-        path = Path(pdf_path).expanduser().resolve()
-        if not path.is_file() or path.suffix.lower() != '.pdf':
+        try:
+            document = self.report_export_service.prepare_pdf(pdf_path)
+        except ValueError as exc:
             QMessageBox.warning(
                 self,
                 '打开 PDF',
-                '请选择有效的 PDF 文件。',
+                str(exc),
             )
             return
 
-        self.report_pdf_status_label.setText(f'正在加载：{path.name}')
-        self._current_report_pdf_name = path.name
-        self.page_title_labels['report_export'].setText(path.name)
+        self.report_pdf_status_label.setText(f'正在加载：{document.name}')
+        self._current_report_pdf_name = document.name
+        self.page_title_labels['report_export'].setText(document.name)
         self._update_window_title('report_export')
-        self.report_webview.load_url(path.as_uri())
+        self.report_webview.load_url(document.uri)
 
     def _on_report_webview_initialized(self, success, error_message):
         if success:
-            self.report_pdf_status_label.setText('WebView2 已就绪，正在显示 PDF')
+            if self._current_report_pdf_name is None:
+                self.report_pdf_status_label.setText('PDF未加载')
+            return
+
+        self._report_webview_error = error_message
+        if self._current_report_pdf_name is None:
+            self.report_pdf_status_label.setText('PDF未加载')
             return
 
         self.report_pdf_status_label.setText('WebView2 初始化失败')
@@ -654,7 +676,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_report_pdf_loaded(self):
-        self.report_pdf_status_label.setText('PDF 已加载')
+        if self._current_report_pdf_name is not None:
+            self.report_pdf_status_label.setText('PDF 已加载')
 
     def _refresh_project_list(self):
         while self.project_list_layout.count() > 1:
@@ -663,7 +686,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
 
-        projects = self.project_service.list_projects()
+        projects = self.project_overview_service.list_projects()
         if not projects:
             empty_label = QLabel('暂无项目，请通过顶部按钮上传文件或新建项目')
             empty_label.setObjectName('emptyProjectLabel')
@@ -748,7 +771,7 @@ class MainWindow(QMainWindow):
             )
 
     def _delete_project(self, project_id):
-        project = self.project_service.get_project(project_id)
+        project = self.project_overview_service.get_project(project_id)
         if project is None:
             return
 
@@ -765,7 +788,7 @@ class MainWindow(QMainWindow):
         if choice != QMessageBox.StandardButton.Yes:
             return
 
-        self.project_service.remove_project(project_id)
+        self.project_overview_service.remove_project(project_id)
         if (
             self.current_project is not None
             and self.current_project.project_id == project_id
@@ -774,7 +797,7 @@ class MainWindow(QMainWindow):
         self._refresh_project_list()
 
     def _open_project_card(self, project_id):
-        project = self.project_service.get_project(project_id)
+        project = self.project_overview_service.get_project(project_id)
         if project is None:
             return
 
@@ -786,7 +809,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if choice == QMessageBox.StandardButton.Yes:
-                self.project_service.remove_project(project_id)
+                self.project_overview_service.remove_project(project_id)
                 if (
                     self.current_project is not None
                     and self.current_project.project_id == project_id
@@ -816,7 +839,7 @@ class MainWindow(QMainWindow):
         project_name = project.name if has_project else ''
         for page_title, page_key in PAGE_DEFINITIONS:
             if page_key == 'report_export':
-                label_text = self._current_report_pdf_name
+                label_text = self._current_report_pdf_name or REPORT_EMPTY_TITLE
             else:
                 label_text = (
                     f'{page_title} — {project_name}'
@@ -842,7 +865,7 @@ class MainWindow(QMainWindow):
             page_key = PAGE_DEFINITIONS[page_index][1]
 
         if page_key == 'report_export':
-            suffix = self._current_report_pdf_name
+            suffix = self._current_report_pdf_name or ''
         elif self.current_project is not None:
             suffix = self.current_project.name
         else:
