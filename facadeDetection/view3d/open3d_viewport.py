@@ -1,14 +1,14 @@
-import sys
-import ctypes
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QAbstractNativeEventFilter, QCoreApplication, QPoint
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt
 from PySide6.QtGui import QImage, QWindow
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .base_viewport import BaseViewport
+
 from .camera import CameraController
 from .geometry_factory import (
-    make_bbox, make_normals, make_pair_lines, make_sphere,
+    make_bbox, make_grid_lines,
+    make_normals, make_pair_lines, make_sphere,
 )
 from .interaction import ViewportInteractor
 from .open3d_adapter import Open3DAdapter
@@ -30,163 +30,21 @@ class _ContainerEventBridge(QObject):
         self.interactor = interactor
 
     def eventFilter(self, watched, event):
-        try:
-            et = event.type()
-            if et == QEvent.MouseButtonPress:
-                return self.interactor.handle_mouse_press(event)
-            if et == QEvent.MouseMove:
-                return self.interactor.handle_mouse_move(event)
-            if et == QEvent.MouseButtonRelease:
-                return self.interactor.handle_mouse_release(event)
-            if et == QEvent.Wheel:
-                return self.interactor.handle_wheel(event)
-        except Exception:
-            pass
+        if event.type() == QEvent.MouseButtonPress:
+            return self.interactor.handle_mouse_press(event)
+        if event.type() == QEvent.MouseMove:
+            return self.interactor.handle_mouse_move(event)
+        if event.type() == QEvent.MouseButtonRelease:
+            return self.interactor.handle_mouse_release(event)
         return super().eventFilter(watched, event)
 
 
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-class _WinNativeMouseBridge(QAbstractNativeEventFilter):
-    WM_MOUSEMOVE = 0x0200
-    WM_LBUTTONDOWN = 0x0201
-    WM_LBUTTONUP = 0x0202
-    WM_RBUTTONDOWN = 0x0204
-    WM_RBUTTONUP = 0x0205
-    WM_MOUSEWHEEL = 0x020A
-    MK_LBUTTON = 0x0001
-    MK_RBUTTON = 0x0002
-
-    class MSG(ctypes.Structure):
-        _fields_ = [
-            ("hwnd", ctypes.c_void_p),
-            ("message", ctypes.c_uint),
-            ("wParam", ctypes.c_size_t),
-            ("lParam", ctypes.c_size_t),
-            ("time", ctypes.c_uint),
-            ("pt", POINT),
-        ]
-
-    def __init__(self, hwnd, interactor, dpr_provider=None):
-        super().__init__()
-        self._hwnd = int(hwnd)
-        self._interactor = interactor
-        self._dpr_provider = dpr_provider
-
-    def _dpr(self):
-        try:
-            if callable(self._dpr_provider):
-                dpr = float(self._dpr_provider())
-                return dpr if dpr else 1.0
-        except Exception:
-            pass
-        return 1.0
-
-    class _SimpleMouseEvent:
-        def __init__(self, x, y, button, buttons):
-            self._pos = QPoint(x, y)
-            self._button = button
-            self._buttons = buttons
-
-        def button(self):
-            return self._button
-
-        def buttons(self):
-            return self._buttons
-
-        def position(self):
-            class _P:
-                def __init__(self, p): self._p = p
-                def toPoint(self): return self._p
-            return _P(self._pos)
-
-        def pos(self):
-            return self._pos
-
-    class _SimpleWheelEvent:
-        def __init__(self, x, y, delta):
-            self._pos = QPoint(x, y)
-            self._delta = int(delta)
-
-        def angleDelta(self):
-            return QPoint(0, self._delta)
-
-        def pixelDelta(self):
-            return QPoint(0, 0)
-
-        def position(self):
-            class _P:
-                def __init__(self, p): self._p = p
-                def toPoint(self): return self._p
-            return _P(self._pos)
-
-        def pos(self):
-            return self._pos
-
-    def nativeEventFilter(self, eventType, message):
-        try:
-            et = eventType.decode() if isinstance(eventType, (bytes, bytearray)) else eventType
-            if et != "windows_generic_MSG":
-                return False, 0
-            try:
-                addr = int(message)
-            except Exception:
-                return False, 0
-
-            msg = ctypes.cast(addr, ctypes.POINTER(self.MSG)).contents
-            if int(msg.hwnd) != self._hwnd:
-                return False, 0
-
-            m = msg.message
-            x = msg.lParam & 0xFFFF
-            y = (msg.lParam >> 16) & 0xFFFF
-            if x & 0x8000: x = x - 0x10000
-            if y & 0x8000: y = y - 0x10000
-
-            dpr = self._dpr()
-            if dpr and dpr != 1.0:
-                x = int(x / dpr)
-                y = int(y / dpr)
-
-            buttons = Qt.NoButton
-            if (msg.wParam & self.MK_LBUTTON) != 0:
-                buttons |= Qt.LeftButton
-            if (msg.wParam & self.MK_RBUTTON) != 0:
-                buttons |= Qt.RightButton
-
-            if m == self.WM_LBUTTONDOWN:
-                ev = self._SimpleMouseEvent(x, y, Qt.LeftButton, Qt.LeftButton)
-                self._interactor.handle_mouse_press(ev)
-                return False, 0
-            if m == self.WM_LBUTTONUP:
-                ev = self._SimpleMouseEvent(x, y, Qt.LeftButton, Qt.NoButton)
-                self._interactor.handle_mouse_release(ev)
-                return False, 0
-            if m == self.WM_RBUTTONDOWN:
-                ev = self._SimpleMouseEvent(x, y, Qt.RightButton, Qt.RightButton)
-                self._interactor.handle_mouse_press(ev)
-                return False, 0
-            if m == self.WM_RBUTTONUP:
-                ev = self._SimpleMouseEvent(x, y, Qt.RightButton, Qt.NoButton)
-                self._interactor.handle_mouse_release(ev)
-                return False, 0
-            if m == self.WM_MOUSEMOVE:
-                ev = self._SimpleMouseEvent(x, y, Qt.NoButton, buttons)
-                self._interactor.handle_mouse_move(ev)
-                return False, 0
-            if m == self.WM_MOUSEWHEEL:
-                delta = ctypes.c_short((msg.wParam >> 16) & 0xFFFF).value
-                ev = self._SimpleWheelEvent(x, y, delta)
-                self._interactor.handle_wheel(ev)
-                return False, 0
-        except Exception:
-            pass
-        return False, 0
-
-
 class Open3DViewport(BaseViewport):
+    """
+    Open3D legacy Visualizer embedded in Qt.
+
+    """
+
     def __init__(self, parent=None):
         self._root = QWidget(parent)
         self._layout = QVBoxLayout(self._root)
@@ -203,11 +61,13 @@ class Open3DViewport(BaseViewport):
         self._fallback_label = None
         self._event_bridge = None
         self._render_paused = False
-        self._window_title = "PointCloud FacadeDetection"
+        self._updating_geometry = False
+        self._window_title = f"PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
         self._init_success = False
         self._grid_visible = True
+        self._default_elements_added = False
 
         self.native = self
         self.app = _Open3DAppProxy(self)
@@ -272,6 +132,7 @@ class Open3DViewport(BaseViewport):
 
     def _init_ui(self):
         layout = self._layout
+
         try:
             self._adapter.create_window(self._window_title, width=1280, height=960, visible=True)
             handle = self._window_finder.find(
@@ -291,26 +152,16 @@ class Open3DViewport(BaseViewport):
             self._qwindow.installEventFilter(self._event_bridge)
             layout.addWidget(self._container)
 
-            if sys.platform == "win32":
-                def _get_dpr():
-                    try:
-                        if hasattr(self._container, "devicePixelRatioF"):
-                            return self._container.devicePixelRatioF()
-                        if hasattr(self._container, "devicePixelRatio"):
-                            return self._container.devicePixelRatio()
-                    except Exception:
-                        pass
-                    return 1.0
-                self._native_mouse_bridge = _WinNativeMouseBridge(
-                    handle, self._interactor, dpr_provider=_get_dpr
-                )
-                app = QCoreApplication.instance()
-                if app is not None:
-                    app.installNativeEventFilter(self._native_mouse_bridge)
-
             self._camera.viewport_widget = self._container
             self._adapter.configure_render_options()
+
+            # 标记初始化成功后再添加场景元素
             self._init_success = True
+
+            # 添加默认场景元素：只保留网格
+            self._add_default_scene_elements()
+
+            # 设置初始相机视角
             self._setup_initial_camera()
 
         except Exception as exc:
@@ -325,22 +176,51 @@ class Open3DViewport(BaseViewport):
             self._adapter.destroy()
             self._init_success = False
 
+    def _add_default_scene_elements(self):
+        """添加默认场景元素：只保留网格。"""
+        if not self._init_success or self._adapter.vis is None:
+            print("[Open3DViewport] Cannot add default elements: init not ready")
+            return
+
+        if self._default_elements_added:
+            return
+
+        # 添加地面网格 (10x10, 步长1.0) - 使用更亮的颜色确保可见
+        grid = make_grid_lines(size=10.0, step=1.0, plane='xz', color=(0.6, 0.6, 0.65))
+        self._adapter.add_geometry("__grid_lines", grid, reset_bounding_box=True)
+
+        # 强制刷新一次，确保几何体被渲染
+        self._adapter.poll()
+
+        self._default_elements_added = True
+        print("[Open3DViewport] Default grid added successfully")
+
     def _setup_initial_camera(self):
+        """设置初始相机视角，看向原点，距离适中。"""
         try:
             ctr = self._adapter.get_view_control()
             if ctr is None:
+                print("[Open3DViewport] Camera control is None")
                 return
+
+            # 使用归一化的 front 向量
             front = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
             front = front / np.linalg.norm(front)
+
+            # 设置相机：从远处看向原点
             ctr.set_lookat(np.array([0.0, 0.0, 0.0], dtype=np.float64))
             ctr.set_front(front)
             ctr.set_up(np.array([0.0, 1.0, 0.0], dtype=np.float64))
+
+            # 使用 set_zoom 调整距离
             ctr.set_zoom(0.6)
-        except Exception:
-            pass
+
+            print("[Open3DViewport] Initial camera setup done")
+        except Exception as e:
+            print(f"[Open3DViewport] Camera setup failed: {e}")
 
     def process_events(self):
-        if not self._init_success or self._render_paused:
+        if not self._init_success or self._render_paused or self._updating_geometry:
             return
         try:
             self._adapter.poll()
@@ -392,6 +272,9 @@ class Open3DViewport(BaseViewport):
     def clear(self):
         self.clear_pick_markers()
         self._scene.clear()
+        # 清除后重新添加默认场景元素（只保留网格）
+        self._default_elements_added = False
+        self._add_default_scene_elements()
 
     def set_point_size(self, name, size):
         self._scene.set_point_size(name, size)
@@ -407,6 +290,7 @@ class Open3DViewport(BaseViewport):
             self._adapter.remove_geometry(bbox_name)
             self._scene.bbox_visible[name] = False
             return False
+
         self._adapter.add_geometry(bbox_name, make_bbox(min_bound, max_bound), reset_bounding_box=False)
         self._scene.bbox_visible[name] = True
         return True
@@ -417,12 +301,15 @@ class Open3DViewport(BaseViewport):
             self._adapter.remove_geometry(normal_name)
             self._scene.normal_names.remove(normal_name)
             return False
+
         data = self._scene.get_cloud_data(name)
         if data is None:
             return False
+
         lines = make_normals(data["pos"], normals, length=length, max_lines=max_lines)
         if lines is None:
             return False
+
         self._adapter.add_geometry(normal_name, lines, reset_bounding_box=False)
         self._scene.normal_names.add(normal_name)
         return True
@@ -431,6 +318,7 @@ class Open3DViewport(BaseViewport):
         if self._scene.point_data:
             self._camera.auto_range()
         else:
+            # 没有点云时，确保看向原点
             self._setup_initial_camera()
 
     def reset_view(self):
@@ -454,51 +342,28 @@ class Open3DViewport(BaseViewport):
     def set_pick_enabled(self, enabled, radius=14, cloud_name=None):
         self._interactor.set_pick_enabled(enabled, radius=radius, cloud_name=cloud_name)
 
-    def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
-        self.set_selection_enabled(False)
-        self.set_pick_enabled(True, radius=pick_radius, cloud_name=cloud_name)
-        if callback is not None:
-            self.point_pick_callback = callback
-
-    def exit_pick_mode(self):
-        self.set_pick_enabled(False)
-
     def update_pick_markers(self, src_points=None, tgt_points=None):
         self.clear_pick_markers()
+
         src = np.asarray(src_points if src_points is not None else [], dtype=np.float64).reshape(-1, 3)
         tgt = np.asarray(tgt_points if tgt_points is not None else [], dtype=np.float64).reshape(-1, 3)
-
-        r_src = self._marker_radius_for_points(src) if len(src) else None
-        r_tgt = self._marker_radius_for_points(tgt) if len(tgt) else None
+        radius = self._marker_radius()
 
         for i, point in enumerate(src):
             name = f"__pick_src_{i}"
-            try:
-                self._adapter.add_geometry(name, make_sphere(point, [1.0, 0.2, 0.2], r_src or 0.08), reset_bounding_box=False)
-                self._pick_markers.append(name)
-            except Exception:
-                pass
+            self._adapter.add_geometry(name, make_sphere(point, [1.0, 0.2, 0.2], radius), reset_bounding_box=False)
+            self._pick_markers.append(name)
 
         for i, point in enumerate(tgt):
             name = f"__pick_tgt_{i}"
-            try:
-                self._adapter.add_geometry(name, make_sphere(point, [0.2, 1.0, 0.2], r_tgt or 0.08), reset_bounding_box=False)
-                self._pick_markers.append(name)
-            except Exception:
-                pass
+            self._adapter.add_geometry(name, make_sphere(point, [0.2, 1.0, 0.2], radius), reset_bounding_box=False)
+            self._pick_markers.append(name)
 
         lines = make_pair_lines(src, tgt)
         if lines is not None:
             name = "__pick_pair_lines"
-            try:
-                self._adapter.add_geometry(name, lines, reset_bounding_box=False)
-                self._pick_lines.append(name)
-            except Exception:
-                pass
-        try:
-            self._adapter.poll()
-        except Exception:
-            pass
+            self._adapter.add_geometry(name, lines, reset_bounding_box=False)
+            self._pick_lines.append(name)
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
@@ -515,35 +380,13 @@ class Open3DViewport(BaseViewport):
         qimg = QImage(arr.data, width, height, arr.strides[0], QImage.Format_RGB888).copy()
         qimg.save(path)
 
-    def _marker_radius_for_points(self, pts: np.ndarray | None, pixel_radius: float = 6.0):
-        try:
-            if pts is None or len(pts) == 0:
-                return max(self._fallback_scene_scale() * 0.002, 0.05)
-            ctr = self._adapter.get_view_control()
-            if ctr is None:
-                return 0.08
-            params = ctr.convert_to_pinhole_camera_parameters()
-            fx = float(params.intrinsic.intrinsic_matrix[0, 0])
-            screen, valid = self._camera.project_points(pts)
-            if screen is None:
-                return 0.08
-            z = screen[:, 2][valid]
-            if len(z) == 0:
-                return 0.08
-            z_avg = float(np.median(z))
-            world_per_pixel = z_avg / max(fx, 1e-6)
-            r = world_per_pixel * float(pixel_radius)
-            return float(max(0.02, min(r, 0.5)))
-        except Exception:
-            return 0.08
-
-    def _fallback_scene_scale(self):
+    def _marker_radius(self):
         extents = []
         for data in self._scene.point_data.values():
             pos = data["pos"]
             if len(pos):
                 extents.append(np.max(pos, axis=0) - np.min(pos, axis=0))
         if not extents:
-            return 1.0
+            return 0.2
         max_dim = float(np.max(np.vstack(extents)))
-        return max_dim if max_dim > 0 else 1.0
+        return max(max_dim * 0.005, 0.05)
