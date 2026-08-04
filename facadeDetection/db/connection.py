@@ -1,155 +1,116 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
 import os
 from functools import lru_cache
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+from sqlalchemy import create_engine, event, select, Column, Integer, String, DateTime, UniqueConstraint
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-from config.settings import Config  
-from models import Base as GlobalBase  
+from config.storage import Storage
+from models import Base as GlobalBase
 
-# Global (shared) database at Config.BASE_DIR/data.db (per decision)
-DATABASE_URL = f"sqlite:///{Config.BASE_DIR}/data.db"
 
-# Global engine and session
-engine_global = create_engine(
-    DATABASE_URL,
+def _apply_sqlite_pragmas(dbapi_con, _con_record):
+    cur = dbapi_con.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
+    cur.execute("PRAGMA synchronous=NORMAL;")
+    cur.execute("PRAGMA foreign_keys=ON;")
+    cur.close()
+
+
+# ---------------- Global index DB (projects list) ----------------
+Storage.ensure_base_dirs()
+INDEX_DB_URL = f"sqlite:///{Storage.INDEX_DB_FILE}"
+engine_index = create_engine(
+    INDEX_DB_URL,
     future=True,
     echo=False,
-    connect_args={
-        "check_same_thread": False  # allow access from background threads
-    },
+    connect_args={"check_same_thread": False},
 )
-SessionGlobal = sessionmaker(bind=engine_global, expire_on_commit=False, autoflush=False)
+event.listen(engine_index, "connect", _apply_sqlite_pragmas)
+
+IndexBase = declarative_base()
 
 
-def _apply_sqlite_pragmas(dbapi_con, con_record):
-    # Ensure better concurrency and FK integrity
-    cursor = dbapi_con.cursor()
-    try:
-        cursor.execute("PRAGMA journal_mode=WAL;")
-    except Exception:
-        # Some SQLite builds may not allow changing journal mode per connection
-        pass
-    cursor.execute("PRAGMA synchronous=NORMAL;")
-    cursor.execute("PRAGMA foreign_keys=ON;")
-    cursor.close()
+class IndexProject(IndexBase):  # type: ignore
+    __tablename__ = "index_projects"
+    __table_args__ = (UniqueConstraint("project_uuid", name="uq_index_projects_uuid"),)
+
+    id = Column(Integer, primary_key=True)
+    project_uuid = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=False)
+    root_dir = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 
-# Apply PRAGMAs on connect for global DB
-event.listen(engine_global, "connect", _apply_sqlite_pragmas)
+def init_index_db() -> None:
+    IndexBase.metadata.create_all(engine_index)
 
 
-def init_global_schema():
-    """
-    Import models and create tables for the global DB.
-    Call this once at app start or lazily before first use.
-    """
-    # Import modules to register models with GlobalBase.metadata
-    import models.project  # noqa: F401
-    import models.pointcloud  # noqa: F401
-    import models.analysis  # noqa: F401
-    import models.registration  # noqa: F401
-    import models.files  # noqa: F401
-
-    GlobalBase.metadata.create_all(engine_global)
+IndexSession = sessionmaker(bind=engine_index, expire_on_commit=False, autoflush=False, future=True)
 
 
 @contextmanager
-def global_session():
-    """
-    Context-managed session for the global DB.
-    Commits on success; rolls back on exceptions.
-    """
-    session = SessionGlobal()
+def index_session():
+    init_index_db()
+    s = IndexSession()
     try:
-        yield session
-        session.commit()
+        yield s
+        s.commit()
     except Exception:
-        session.rollback()
+        s.rollback()
         raise
     finally:
-        session.close()
+        s.close()
 
 
-# Backward-compatible generator for frameworks expecting dependency style
-def get_db():
-    db = SessionGlobal()
-    try:
-        yield db
-    finally:
-        db.close()
+def upsert_index_project(project_uuid: str, name: str, root_dir: str) -> None:
+    init_index_db()
+    with index_session() as s:
+        row = s.execute(select(IndexProject).where(IndexProject.project_uuid == project_uuid)).scalar_one_or_none()
+        if row is None:
+            row = IndexProject(project_uuid=project_uuid, name=name, root_dir=root_dir)
+            s.add(row)
+        else:
+            row.name = name
+            row.root_dir = root_dir
 
 
-# -------- Per-project database support (optional isolation to reduce locks) --------
-
-def get_project_db_dir(project_id: int, directory_path: str | None = None) -> str:
-    """
-    Resolve per-project DB directory.
-    If directory_path is provided (stored on Project.directory_path), use it; otherwise default under UPLOAD_FOLDER.
-    """
-    base_dir = directory_path or os.path.join(Config.UPLOAD_FOLDER, str(project_id))
-    os.makedirs(base_dir, exist_ok=True)
-    return base_dir
+def list_index_projects() -> list[IndexProject]:  # type: ignore
+    init_index_db()
+    with index_session() as s:
+        return s.execute(select(IndexProject)).scalars().all()
 
 
-def get_project_db_path(project_id: int, directory_path: str | None = None) -> str:
-    """
-    Resolve per-project DB file path.
-    """
-    dir_path = get_project_db_dir(project_id, directory_path)
-    return os.path.join(dir_path, f"project_{project_id}.db")
+# ---------------- Per-project DB (by project UUID) ----------------
 
-
-@lru_cache(maxsize=128)
-def get_project_engine(project_id: int, directory_path: str | None = None):
-    """
-    Lazily create and cache a SQLAlchemy engine for a project's dedicated SQLite DB.
-    """
-    db_path = get_project_db_path(project_id, directory_path)
+@lru_cache(maxsize=256)
+def _project_engine(project_uuid: str):
+    db_path = Storage.project_db_path(project_uuid)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite:///{db_path}"
-    engine = create_engine(
-        url,
-        future=True,
-        echo=False,
-        connect_args={
-            "check_same_thread": False
-        },
-    )
-    # Apply PRAGMAs for the project DB as well
+    engine = create_engine(url, future=True, echo=False, connect_args={"check_same_thread": False})
     event.listen(engine, "connect", _apply_sqlite_pragmas)
+    # Ensure schema (import models)
+    GlobalBase.metadata.create_all(engine)
     return engine
 
-def ensure_project_schema(project_id: int, directory_path: str | None = None):
-    """
-    Ensure the per-project DB schema exists by importing project-scoped models and creating tables.
-    """
-    engine = get_project_engine(project_id, directory_path)
-    # Import project-scoped models
-    from models.project_models import ProjectBase  # type: ignore
-    # import models.project_models.facade  
-    # import models.project_models.quality  
-    ProjectBase.metadata.create_all(engine)
-    return engine
 
 @contextmanager
-def project_session(project_id: int, directory_path: str | None = None):
-    """
-    Context-managed session for a project's dedicated DB.
-    Ensures schema, commits on success; rolls back on failure.
-    """
-    engine = ensure_project_schema(project_id, directory_path)
-    SessionProject = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
-    session = SessionProject()
+def project_session(project_uuid: str):
+    engine = _project_engine(project_uuid)
+    SessionProject = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False, future=True)
+    s = SessionProject()
     try:
-        yield session
-        session.commit()
+        yield s
+        s.commit()
     except Exception:
-        session.rollback()
+        s.rollback()
         raise
     finally:
-        session.close()
-
-# ------------- Backward-compatible aliases for existing code -------------
-# Some modules expect 'engine' and 'SessionLocal'; expose aliases:
-engine = engine_global
-SessionLocal = SessionGlobal
+        s.close()

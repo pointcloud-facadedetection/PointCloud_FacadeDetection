@@ -12,8 +12,8 @@ from models import Base  # type: ignore
 
 def get_session_factory(db_path: str | None = None) -> Callable[[], object]:
     """
-    Create an SQLite engine and return a zero-arg factory that yields new Session objects.
-    Ensures metadata is created.
+    创建一个 SQLite 引擎，并返回一个零参数factory，该factory可生成新的 Session 对象。
+    确保metadata已创建。
     """
     if db_path is None:
         root = Path(__file__).resolve().parents[1]
