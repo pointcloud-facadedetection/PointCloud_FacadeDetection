@@ -74,4 +74,22 @@ class CameraController:
         screen[valid, 0] = uvw[valid, 0] / z[valid]
         screen[valid, 1] = uvw[valid, 1] / z[valid]
         screen[valid, 2] = z[valid]
+
+        # 对齐 Qt 事件坐标（DPI 缩放差异）
+        try:
+            dpr = 1.0
+            if hasattr(self.viewport_widget, "devicePixelRatioF"):
+                dpr = float(self.viewport_widget.devicePixelRatioF())
+            elif hasattr(self.viewport_widget, "devicePixelRatio"):
+                dpr = float(self.viewport_widget.devicePixelRatio())
+            elif hasattr(self.viewport_widget, "windowHandle") and self.viewport_widget.windowHandle() is not None:
+                wh = self.viewport_widget.windowHandle()
+                if hasattr(wh, "devicePixelRatio"):
+                    dpr = float(wh.devicePixelRatio())
+            if dpr and dpr != 1.0:
+                screen[:, 0] /= dpr
+                screen[:, 1] /= dpr
+        except Exception:
+            pass
+
         return screen, valid
