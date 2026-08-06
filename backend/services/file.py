@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import numpy as np
 import open3d as o3d
@@ -7,10 +8,54 @@ from ..core.cache import get_cache
 from ..config import Config
 
 
-def process_ply(filepath, voxel_size):
-    """加载PLY文件，下采样"""
+def _voxel_tag(voxel_size):
+    """将体素尺寸格式化为稳定文件名片段。"""
+    return f"{float(voxel_size):.6g}".replace('.', 'p')
+
+
+def _safe_filename(filename):
+    """生成可用于缓存路径的安全文件名。"""
+    base = os.path.basename(filename or 'cloud.ply')
+    base = re.sub(r'[^\w.\-]+', '_', base, flags=re.UNICODE)
+    return base or 'cloud.ply'
+
+
+def get_downsample_cache_path(original_filename, voxel_size, source_size):
+    """按原始文件名 + 文件大小 + 体素尺寸生成缓存路径。"""
+    name = _safe_filename(original_filename)
+    stem, _ = os.path.splitext(name)
+    tag = _voxel_tag(voxel_size)
+    return os.path.join(
+        Config.CACHE_FOLDER,
+        f"{stem}_s{int(source_size)}_v{tag}.ply"
+    )
+
+
+def process_ply(filepath, voxel_size, original_filename=None):
+    """加载PLY文件并下采样；同文件同体素优先读取落盘缓存。"""
     print(f"[INFO] 加载点云: {filepath}")
     start = time.time()
+
+    cache_name = original_filename or os.path.basename(filepath)
+    source_size = os.path.getsize(filepath)
+    cache_path = None
+
+    if float(voxel_size) > 0:
+        os.makedirs(Config.CACHE_FOLDER, exist_ok=True)
+        cache_path = get_downsample_cache_path(cache_name, voxel_size, source_size)
+        if os.path.isfile(cache_path):
+            print(f"[INFO] 命中下采样缓存: {cache_path}")
+            display_pcd = o3d.io.read_point_cloud(cache_path)
+            if len(display_pcd.points) == 0:
+                print("[WARN] 缓存点云为空，忽略并重新处理")
+            else:
+                if not display_pcd.has_colors():
+                    display_pcd.paint_uniform_color([0.7, 0.7, 0.7])
+                print(
+                    f"[INFO] 缓存加载: {len(display_pcd.points):,} 点, "
+                    f"耗时 {time.time() - start:.2f}s"
+                )
+                return display_pcd
 
     pcd = o3d.io.read_point_cloud(filepath)
     original_count = len(pcd.points)
@@ -32,6 +77,13 @@ def process_ply(filepath, voxel_size):
 
     if not display_pcd.has_colors():
         display_pcd.paint_uniform_color([0.7, 0.7, 0.7])
+
+    if cache_path is not None:
+        ok = o3d.io.write_point_cloud(cache_path, display_pcd)
+        if ok:
+            print(f"[INFO] 已写入下采样缓存: {cache_path}")
+        else:
+            print(f"[WARN] 写入下采样缓存失败: {cache_path}")
 
     return display_pcd
 
@@ -116,4 +168,3 @@ def get_bounding_box(uuid_name):
         'min': min_bound.tolist(),
         'max': max_bound.tolist()
     }
-
