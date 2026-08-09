@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import uuid as _uuid
 from datetime import datetime
 from typing import Optional
@@ -25,7 +26,49 @@ class ProjectRepo:
     def create_project(name: str, org_unit: str | None = None, address: str | None = None,
                        remarks: str | None = None) -> dict:
         project_uuid = str(_uuid.uuid4())
-        dirs = ensure_project_folders(project_uuid)
+        # New: create dirs by pinyin abbreviation of name and initialize pcfd index
+        try:
+            dirs = Storage.ensure_project_dirs_by_name(project_uuid, name)
+        except Exception:
+            # Fallback to legacy UUID-named root
+            dirs = ensure_project_folders(project_uuid)
+
+        # Initialize pcfd index json EARLY (before DB) so that resolve_project_root can find the pinyin folder
+        try:
+            from datetime import datetime
+            pcfd = {
+                "schema": 1,
+                "project": {
+                    "uuid": project_uuid,
+                    "name_cn": name,
+                    "pinyin_abbr": dirs.get("dirname") or "",
+                    "org_unit": org_unit,
+                    "address": address,
+                    "created_at": datetime.now().isoformat(timespec='seconds')
+                },
+                "paths": {
+                    "root_dir": str(dirs["root"]),
+                    "raw": Storage.RAW_DIRNAME + "/",
+                    "cache": Storage.CACHE_DIRNAME + "/",
+                    "results": Storage.RESULTS_DIRNAME + "/",
+                    "reports": Storage.REPORTS_DIRNAME + "/",
+                },
+                "assets": {
+                    "raw_pointclouds": [],
+                    "raw_images": [],
+                    "fls_folders": [],
+                    "generated_ply": [],
+                    "result_pdfs": []
+                }
+            }
+            Storage.save_pcfd_index(dirs["root"], pcfd)
+            # Prime in-memory uuid->root cache to avoid legacy UUID folder creation
+            try:
+                Storage._uuid_root_cache[project_uuid] = dirs["root"]  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Create per-project DB and seed Project + default scene
         with project_session(project_uuid) as s:
@@ -46,6 +89,8 @@ class ProjectRepo:
         # Update global index DB
         init_index_db()
         upsert_index_project(project_uuid, name, str(dirs["root"]))
+
+        # pcfd index already initialized before DB creation
 
         return {"project_uuid": project_uuid, "name": name, "root_dir": str(dirs["root"]) }
 
@@ -88,10 +133,17 @@ class ProjectRepo:
     def list_projects(limit: int | None = None) -> list[dict]:
         init_index_db()
         items = list_index_projects()
-        data = [
-            {"project_uuid": r.project_uuid, "name": r.name, "root_dir": r.root_dir}
-            for r in items
-        ]
+        data: list[dict] = []
+        for r in items:
+            # Prefer pcfd project name if present
+            name = r.name
+            try:
+                idx = Storage.load_pcfd_index(Path(r.root_dir))
+                pc = (idx or {}).get('project') or {}
+                name = str(pc.get('name_cn') or r.name)
+            except Exception:
+                pass
+            data.append({"project_uuid": r.project_uuid, "name": name, "root_dir": r.root_dir})
         return data[:limit] if limit else data
 
     @staticmethod
