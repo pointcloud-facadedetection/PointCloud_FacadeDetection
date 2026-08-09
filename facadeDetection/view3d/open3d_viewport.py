@@ -189,6 +189,8 @@ class _WinNativeMouseBridge(QAbstractNativeEventFilter):
 class Open3DViewport(BaseViewport):
     def __init__(self, parent=None):
         self._root = QWidget(parent)
+        self._root.setObjectName('open3dViewport')
+        self._root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._layout = QVBoxLayout(self._root)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
@@ -319,7 +321,7 @@ class Open3DViewport(BaseViewport):
             self._fallback_label = QLabel(error_msg)
             self._fallback_label.setAlignment(Qt.AlignCenter)
             self._fallback_label.setStyleSheet(
-                "background:#0a0a1a;color:#f56565;font-size:12px;padding:24px;"
+                "background:#111827;color:#fca5a5;font-size:12px;padding:24px;"
             )
             layout.addWidget(self._fallback_label)
             self._adapter.destroy()

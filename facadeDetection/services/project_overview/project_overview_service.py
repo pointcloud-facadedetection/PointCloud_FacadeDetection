@@ -84,6 +84,20 @@ class ProjectOverviewService:
     def remove_project(self, project_id):
         return self._projects.pop(project_id, None)
 
+    def rename_project(self, project_id, new_name):
+        """修改项目显示名称，并返回修改后的项目。"""
+        project = self.get_project(project_id)
+        if project is None:
+            raise ValueError('项目不存在或已被删除。')
+
+        normalized_name = (new_name or '').strip()
+        if not normalized_name:
+            raise ValueError('项目名称不能为空。')
+
+        # 这里只更新当前项目列表中的名称；不会重命名用户的本地目录。
+        project.name = normalized_name
+        return project
+
     def _upsert_project(self, name, directory_path):
         normalized_name = (name or '').strip() or '未命名项目'
         normalized_directory = str(
