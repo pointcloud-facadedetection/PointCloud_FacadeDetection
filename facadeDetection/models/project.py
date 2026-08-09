@@ -11,16 +11,18 @@ class Project(Base):
     __tablename__ = 'projects'
 
     id = Column(Integer, primary_key=True)
-    uuid = Column(String, unique=True, index=True, nullable=False)
+    # Stable UUID used across DAL APIs
+    uuid = Column(String, unique=True, nullable=False, index=True)
     name = Column(String, nullable=False)
     org_unit = Column(String, nullable=True)
     address = Column(String, nullable=True)
     remarks = Column(String, nullable=True)
-    root_dir = Column(String, nullable=False)
+    root_dir = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
-
-    # Soft delete + audit
+    # backward compatibility field
+    directory_path = Column(String, nullable=True)
+    # Soft delete + audit (optional)
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
 
