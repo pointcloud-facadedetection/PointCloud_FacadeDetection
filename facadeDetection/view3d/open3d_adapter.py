@@ -24,7 +24,8 @@ class Open3DAdapter:
         if self.vis is None:
             return
         opt = self.vis.get_render_option()
-        opt.background_color = np.array([0.12, 0.12, 0.18])
+        # Match the Corporate Clean viewport token (#111827).
+        opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
         opt.point_size = 2.0
         opt.show_coordinate_frame = True
 
