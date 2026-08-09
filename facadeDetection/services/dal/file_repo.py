@@ -104,3 +104,22 @@ class FileRepo:
             asset.is_deleted = True
             s.flush()
             return True
+
+    @staticmethod
+    def get_latest_raw_pointcloud(project_uuid: str) -> Optional[FileAsset]:
+        """Return the latest non-deleted raw point cloud asset for the active scene of the project."""
+        with project_session(project_uuid) as s:
+            proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()
+            if not proj:
+                return None
+            active = s.execute(select(ResultScene).where(ResultScene.project_id == proj.id, ResultScene.is_active == True)).scalar_one_or_none()
+            if active is None:
+                return None
+            # newest by id DESC
+            q = select(FileAsset).where(
+                FileAsset.project_id == proj.id,
+                FileAsset.scene_id == active.id,
+                FileAsset.is_deleted == False,
+                FileAsset.kind == FileKind.raw_pointcloud.value,
+            ).order_by(FileAsset.id.desc())
+            return s.execute(q).scalar_one_or_none()
