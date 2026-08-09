@@ -75,10 +75,26 @@ class FileService:
             pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
             name = asset.original_name if asset else src.name
             self.render_service.show_point_cloud(name=name, points=pts_ds, colors=cols_ds)
+            # Update pcfd index assets
+            try:
+                if project_uuid:
+                    # Prefer generated PLY list when file is in project cache, otherwise raw_pointclouds
+                    rel = os.path.relpath(str(load_path), start=str(Storage.resolve_project_root(project_uuid)))
+                    if not rel.startswith('..') and not os.path.isabs(rel):
+                        Storage.append_pcfd_asset_for_uuid(project_uuid, 'generated_ply', rel.replace('\\', '/'))
+                    else:
+                        Storage.append_pcfd_asset_for_uuid(project_uuid, 'raw_pointclouds', str(load_path))
+            except Exception:
+                pass
         elif kind == FileKind.raw_image:
             img = self._load_image(str(load_path))
             name = asset.original_name if asset else src.name
             self.render_service.show_image(name=name, image=img)
+            try:
+                if project_uuid:
+                    Storage.append_pcfd_asset_for_uuid(project_uuid, 'raw_images', str(load_path))
+            except Exception:
+                pass
         else:
             # Should not happen because we only support those two kinds
             raise RuntimeError(f"无法处理的文件类型: {kind}")
@@ -88,11 +104,10 @@ class FileService:
     # New: unified FLS import workflow (folder -> convert -> persist -> render)
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
         """
-        Import a FARO FLS directory by converting it to PLY via the subprocess-based
-        converter, then persist and render the produced PLY files through the
-        same upload_files pipeline for cohesion.
+        通过基于子进程的转换器将 FARO FLS 目录转换为 PLY 格式进行导入，随后通过
+        相同的 upload_files 管道保存并渲染生成的 PLY 文件，以确保一致性。
         """
-        print("[FLS] Import started", flush=True)
+        print("[FLS] 目录读取中...", flush=True)
         Storage.ensure_base_dirs()
         src = Path(dir_path).resolve()
         if not src.exists() or not src.is_dir():
@@ -123,21 +138,28 @@ class FileService:
             return {"success": False, "message": msg, "ply_paths": [], "output_dir": str(out_dir)}
 
         ply_paths: list[str] = []
-        if result.success:
-            for s in result.scans:
-                p = Path(s.ply_path)
+        # Primary: trust tool-reported scans when success is True
+        if getattr(result, 'success', False):
+            for s in getattr(result, 'scans', []) or []:
+                p = Path(getattr(s, 'ply_path', ''))
                 if p.exists():
                     ply_paths.append(str(p))
-            if not ply_paths and result.output_dir:
-                for p in Path(result.output_dir).rglob("*.ply"):
-                    ply_paths.append(str(p))
-        else:
-            print(f"[FLS] 转换未成功: {result.message}", flush=True)
+        # Always perform a filesystem scan as the authoritative check
+        search_dir = Path(getattr(result, 'output_dir', str(out_dir)) or out_dir)
+        if search_dir.exists():
+            for p in search_dir.rglob("*.ply"):
+                pp = str(p)
+                if pp not in ply_paths:
+                    ply_paths.append(pp)
+        # If we found PLY files, treat as success regardless of reported status
+        if not ply_paths:
+            msg = getattr(result, 'message', 'no PLY generated')
+            print(f"[FLS] 转换未成功: {msg}", flush=True)
             return {
                 "success": False,
-                "message": result.message,
+                "message": msg,
                 "ply_paths": [],
-                "output_dir": result.output_dir,
+                "output_dir": str(search_dir),
             }
 
         # Persist and render
@@ -149,24 +171,23 @@ class FileService:
                     file_path=p,
                     copy_into_project=False,
                 )
+                try:
+                    if project_uuid:
+                        Storage.append_pcfd_asset_for_uuid(project_uuid, 'fls_folders', str(src))
+                except Exception:
+                    pass
                 success_count += 1
             except Exception as e:
                 print(f"[FLS] 导入 PLY 失败: {p} -> {e}", flush=True)
 
-        try:
-            if hasattr(self.viewport, 'auto_range'):
-                self.viewport.auto_range()
-        except Exception:
-            pass
-
         print(
-            f"[FLS] Import finished: {success_count}/{len(ply_paths)} uploaded",
+            f"[FLS] 目录读取成功: {success_count}/{len(ply_paths)} uploaded",
             flush=True,
         )
         return {
             "success": success_count > 0,
-            "message": result.message,
-            "output_dir": result.output_dir,
+            "message": getattr(result, 'message', ''),
+            "output_dir": str(search_dir),
             "ply_paths": ply_paths,
             "uploaded": success_count,
         }

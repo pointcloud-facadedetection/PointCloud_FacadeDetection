@@ -1,5 +1,5 @@
-"""项目概览页面业务入口。"""
+"""项目概览页面业务入口（生产版导出）。"""
 
-from .project_overview_service import ProjectOverviewService, ProjectSummary
+from .project_overview_service import ProjectOverviewService, ProjectCard
 
-__all__ = ['ProjectOverviewService', 'ProjectSummary']
+__all__ = ['ProjectOverviewService', 'ProjectCard']
