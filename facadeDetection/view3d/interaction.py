@@ -1,12 +1,10 @@
 import numpy as np
 import time
 from PySide6.QtCore import QPoint, Qt
-
-from .lod import sample_step
+from config.settings import Config
 
 
 class ViewportInteractor:
-    SELECT_SAMPLE_POINTS = 2_000_000
     PICK_SAMPLE_POINTS = 1_000_000
 
     def __init__(self, adapter, camera, scene):
@@ -22,51 +20,98 @@ class ViewportInteractor:
         self.selection_cloud = None
         self.selection_callback = None
         self._selection_start = None
+        self._selection_current = None
+        self._completed_selection_rect = None   # 持久化已释放的 ROI 框
         self._pan_start = None
         self._click_start = None
         self._rotate_start = None
-        self._right_pan_scale = 0.05       # 基础灵敏度
-        self._left_rotate_scale = 1.0
-        self._wheel_scale = 1.1
-        self._panning = False
+        # Speed/scales from config
+        self._right_pan_scale = float(getattr(Config, 'PAN_BASE_SPEED', 0.06))
+        self._left_rotate_scale = float(getattr(Config, 'ROTATE_SPEED', 1.0))
+        self._wheel_scale = float(getattr(Config, 'ZOOM_WHEEL_SCALE', 1.6))  # 鼠标滚轮缩放倍率
         self.last_picked_point = None
         self._last_pick_key = None
         self._last_pick_ts = 0.0
-        self._cached_pan_scale = None      # 缓存 pan scale，避免 move 时重复计算
+        self._cached_pan_scale = None
+
+    # ------------------------------------------------------------------
+    # 选择模式状态管理
+    # ------------------------------------------------------------------
+    def set_pick_enabled(self, enabled: bool, radius: int | None = None, cloud_name: str | None = None):
+        self.pick_enabled = bool(enabled)
+        if radius is not None:
+            try:
+                self.pick_radius = int(radius)
+            except Exception:
+                pass
+        if cloud_name is not None:
+            self.pick_cloud = cloud_name
 
     def set_selection_enabled(self, enabled, cloud_name=None):
-        self.selection_enabled = bool(enabled)
-        self.selection_cloud = cloud_name
+        """
+        启用/禁用选择模式。
+
+        Args:
+            enabled: 是否启用选择模式
+            cloud_name: 目标点云名称
+        """
+        try:
+            self.selection_enabled = bool(enabled)
+            if enabled:
+                if cloud_name is not None:
+                    self.selection_cloud = cloud_name
+                # 启用框选时禁止点选，重置交互状态
+                self.pick_enabled = False
+                self._selection_start = None
+                self._selection_current = None
+                # 不清除 _completed_selection_rect，允许在退出后保留最后一次红框
+                self._pan_start = None
+                self._rotate_start = None
+                self._click_start = None
+            else:
+                # 退出框选时仅重置进行中的交互，不清除完成的红框（由上层决定何时 clear）
+                self._selection_start = None
+                self._selection_current = None
+                self._pan_start = None
+                self._rotate_start = None
+                self._click_start = None
+        except Exception:
+            # 兜底，避免异常导致模式切换失败
+            self.selection_enabled = bool(enabled)
+            if enabled and cloud_name is not None:
+                self.selection_cloud = cloud_name
+    def clear_selection_rect(self):
         self._selection_start = None
-        self._pan_start = None
-        self._click_start = None
-        self._rotate_start = None
+        self._selection_current = None
+        self._completed_selection_rect = None
 
-    def set_pick_enabled(self, enabled, radius=14, cloud_name=None):
-        self.pick_enabled = bool(enabled)
-        self.pick_radius = int(radius)
-        self.pick_cloud = cloud_name
-        self._click_start = None
+    def get_selection_rect(self):
+        if not self.selection_enabled and self._completed_selection_rect is None:
+            return None
+        if self.selection_enabled and self._selection_start is not None and self._selection_current is not None:
+            return self._selection_start, self._selection_current
+        if self._completed_selection_rect is not None:
+            return self._completed_selection_rect
+        return None
 
+    # ------------------------------------------------------------------
+    # 鼠标事件：选择模式下全部拦截，零漫游
+    # ------------------------------------------------------------------
     def handle_mouse_press(self, event):
         pos = self._event_pos(event)
 
-        # 左键矩形选择
-        if self.selection_enabled and event.button() == Qt.LeftButton:
-            self._selection_start = QPoint(pos)
+        # selection_enabled 模式由 Overlay 接管；当 input_locked 时直接吞事件
+        if getattr(self, 'input_locked', False):
             return True
 
-        # 左键旋转（非选择模式）
-        if event.button() == Qt.LeftButton and not self.selection_enabled:
+        if event.button() == Qt.LeftButton:
             self._rotate_start = QPoint(pos)
             if self.pick_enabled:
                 self._click_start = QPoint(pos)
             return True
 
-        # 右键平移
         if event.button() == Qt.RightButton:
             self._pan_start = QPoint(pos)
-            self._panning = True
             ctr = self.adapter.get_view_control()
             self._cached_pan_scale = self._compute_pan_scale(ctr) if ctr is not None else self._right_pan_scale
             return True
@@ -76,41 +121,73 @@ class ViewportInteractor:
     def handle_mouse_move(self, event):
         pos = self._event_pos(event)
 
-        # 右键拖拽平移：严格检查右键是否持续按下，杜绝状态标志导致的误触发
+        # ROI 硬锁时禁止相机交互
+        if getattr(self, 'input_locked', False):
+            return True
+
+        # 右键拖拽平移 —— 映射到相机局部坐标：camera_local_translate(forward, right, up)
         if self._pan_start is not None and (event.buttons() & Qt.RightButton):
             dx = pos.x() - self._pan_start.x()
             dy = pos.y() - self._pan_start.y()
             self._pan_start = QPoint(pos)
-
             ctr = self.adapter.get_view_control()
             if ctr is not None:
                 try:
-                    scale = self._cached_pan_scale if self._cached_pan_scale is not None else self._compute_pan_scale(ctr)
-                    # 推动模式：鼠标往哪拖，场景往哪走。
-                    # camera_local_translate 中 x+ 为相机右移(场景左移)，y+ 为相机上移(场景下移)。
-                    # 因此 dx 取反、dy 保持正值，实现鼠标与场景同向移动。
-                    ctr.camera_local_translate(-dx * scale, dy * scale, 0.0)
+                    # 优先使用 ViewControl.translate(像素位移)，方向随鼠标
+                    if hasattr(ctr, 'translate'):
+                        ctr.translate(int(-dx), int(dy))
+                    else:
+                        # 像素->世界：手工平移 lookat（右手坐标系）
+                        scale = self._cached_pan_scale if self._cached_pan_scale is not None else self._compute_pan_scale(ctr)
+                        try:
+                            import numpy as _np
+                            look = _np.asarray(ctr.get_lookat(), dtype=float)
+                            front = _np.asarray(ctr.get_front(), dtype=float)
+                            up = _np.asarray(ctr.get_up(), dtype=float)
+                            front = front / ( _np.linalg.norm(front) + 1e-12 )
+                            up = up - front * float(_np.dot(front, up))
+                            up = up / ( _np.linalg.norm(up) + 1e-12 )
+                            right = _np.cross(front, up)
+                            right = right / ( _np.linalg.norm(right) + 1e-12 )
+                            move = (-dx * scale) * right + (dy * scale) * up
+                            ctr.set_lookat(look + move)
+                            ctr.set_front(front)
+                            ctr.set_up(up)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             return True
 
-        # 左键拖拽旋转：严格检查左键是否持续按下
-        if self._rotate_start is not None and (event.buttons() & Qt.LeftButton) and not self.selection_enabled:
+        # 左键拖拽旋转
+        if self._rotate_start is not None and (event.buttons() & Qt.LeftButton):
             dx = pos.x() - self._rotate_start.x()
             dy = pos.y() - self._rotate_start.y()
             self._rotate_start = QPoint(pos)
-
             ctr = self.adapter.get_view_control()
             if ctr is not None:
                 try:
                     ctr.rotate(int(dx * self._left_rotate_scale), int(dy * self._left_rotate_scale))
                 except Exception:
+                    # Fallback：使用 translate 做少量平移模拟
                     try:
-                        ctr.camera_local_translate(
-                            -dx * self._right_pan_scale * 0.5,
-                            dy * self._right_pan_scale * 0.5,
-                            0.0,
-                        )
+                        if hasattr(ctr, 'translate'):
+                            ctr.translate(int(-dx * 0.5), int(dy * 0.5))
+                        else:
+                            scale = self._right_pan_scale * 0.5
+                            import numpy as _np
+                            look = _np.asarray(ctr.get_lookat(), dtype=float)
+                            front = _np.asarray(ctr.get_front(), dtype=float)
+                            up = _np.asarray(ctr.get_up(), dtype=float)
+                            front = front / ( _np.linalg.norm(front) + 1e-12 )
+                            up = up - front * float(_np.dot(front, up))
+                            up = up / ( _np.linalg.norm(up) + 1e-12 )
+                            right = _np.cross(front, up)
+                            right = right / ( _np.linalg.norm(right) + 1e-12 )
+                            move = (-dx * scale) * right + (dy * scale) * up
+                            ctr.set_lookat(look + move)
+                            ctr.set_front(front)
+                            ctr.set_up(up)
                     except Exception:
                         pass
             return True
@@ -120,32 +197,22 @@ class ViewportInteractor:
     def handle_mouse_release(self, event):
         pos = self._event_pos(event)
 
-        # 左键释放：矩形选择
-        if self.selection_enabled and self._selection_start is not None and event.button() == Qt.LeftButton:
-            start = self._selection_start
-            self._selection_start = None
-            self._click_start = None
-            self._rotate_start = None
-            indices = self.select_indices_in_rect(self.selection_cloud, start, pos)
-            if self.selection_callback:
-                self.selection_callback(indices)
+        # ROI 硬锁时吞掉释放事件
+        if getattr(self, 'input_locked', False):
             return True
 
         # 右键释放：结束平移
         if event.button() == Qt.RightButton:
             self._pan_start = None
-            self._panning = False
             self._cached_pan_scale = None
             return True
 
-        # 左键释放：拾取（在拾取模式下且基本无拖拽）
+        # 左键释放：拾取
         if event.button() == Qt.LeftButton:
             self._rotate_start = None
-
             if self.pick_enabled:
                 start = self._click_start
                 self._click_start = None
-
                 if start is not None:
                     moved = abs(pos.x() - start.x()) + abs(pos.y() - start.y())
                     if moved <= 4:
@@ -157,7 +224,6 @@ class ViewportInteractor:
                                 return True
                             self._last_pick_key = key
                             self._last_pick_ts = now
-
                             self.last_picked_point = np.asarray(picked["point"], dtype=float)
                             if self.point_pick_callback:
                                 try:
@@ -170,32 +236,74 @@ class ViewportInteractor:
         return False
 
     def select_indices_in_rect(self, cloud_name, start, end):
+        """
+        根据屏幕矩形选框，投影点云并返回框内点的全局索引。
+
+        Args:
+            cloud_name: 点云名称
+            start, end: 选框对角点（QPoint，逻辑像素坐标）
+
+        Returns:
+            np.ndarray: 框内点的全局索引数组
+        """
         name = cloud_name or self.scene.active_name
         data = self.scene.get_cloud_data(name)
         if data is None:
             return np.array([], dtype=np.int64)
 
-        pos = data["pos"]
-        if len(pos) == 0:
+        pos = data.get("pos")
+        if pos is None or len(pos) == 0:
             return np.array([], dtype=np.int64)
 
-        step = sample_step(len(pos), self.SELECT_SAMPLE_POINTS)
-        sampled = pos[::step]
-        projected = self.camera.project_points(sampled)
-        if projected is None:
+        x1, x2 = sorted([int(start.x()), int(end.x())])
+        y1, y2 = sorted([int(start.y()), int(end.y())])
+
+        # 最小矩形阈值：1x1 像素
+        if (x2 - x1) < 1 or (y2 - y1) < 1:
             return np.array([], dtype=np.int64)
 
-        screen, valid = projected
-        x1, x2 = sorted([start.x(), end.x()])
-        y1, y2 = sorted([start.y(), end.y()])
-        mask = (
-            valid
-            & (screen[:, 0] >= x1)
-            & (screen[:, 0] <= x2)
-            & (screen[:, 1] >= y1)
-            & (screen[:, 1] <= y2)
-        )
-        return np.nonzero(mask)[0].astype(np.int64) * step
+        # 分块投影并收集框内点
+        n = int(len(pos))
+        chunk = 1_000_000
+        hits: list[int] = []
+        base = 0
+        while base < n:
+            tail = min(n, base + chunk)
+            pts = pos[base:tail]
+            proj = self.camera.project_points(pts)
+            if proj is None:
+                base = tail
+                continue
+            screen, valid = proj
+            if screen is None or len(screen) == 0:
+                base = tail
+                continue
+            m = (
+                valid
+                & (screen[:, 0] >= x1)
+                & (screen[:, 0] <= x2)
+                & (screen[:, 1] >= y1)
+                & (screen[:, 1] <= y2)
+            )
+            if np.any(m):
+                local = np.nonzero(m)[0].astype(np.int64)
+                if len(local):
+                    hits.extend((base + local).tolist())
+            base = tail
+
+        if not hits:
+            return np.array([], dtype=np.int64)
+
+        idx = np.unique(np.asarray(hits, dtype=np.int64))
+
+        # 调试日志
+        try:
+            if getattr(Config, 'DEBUG_SELECTION', False):
+                print(f"[DEBUG] Selection: rect=({x1},{y1})-({x2},{y2}), "
+                      f"cloud={name}, total={n}, selected={len(idx)}", flush=True)
+        except Exception:
+            pass
+        return idx
 
     def pick_nearest_point(self, pos, cloud_name=None):
         best = None
@@ -214,7 +322,8 @@ class ViewportInteractor:
             if len(points) == 0:
                 continue
 
-            step = sample_step(len(points), self.PICK_SAMPLE_POINTS)
+            count = len(points)
+            step = max(1, (count + self.PICK_SAMPLE_POINTS - 1) // self.PICK_SAMPLE_POINTS)
             sampled = points[::step]
             projected = self.camera.project_points(sampled)
             if projected is None:
@@ -245,6 +354,8 @@ class ViewportInteractor:
         return best or best_any
 
     def handle_wheel(self, event):
+        if self.selection_enabled:
+            return True
         try:
             delta = 0
             if hasattr(event, "angleDelta"):
@@ -256,7 +367,7 @@ class ViewportInteractor:
             if delta == 0:
                 return False
 
-            steps = delta / 120.0
+            steps = round(delta / 120.0)
             factor = float(self._wheel_scale ** steps)
 
             ctr = self.adapter.get_view_control()
@@ -275,7 +386,7 @@ class ViewportInteractor:
                     ctr.set_zoom(new_z)
                 except Exception:
                     try:
-                        sign = -1.0 if delta > 0 else 1.0
+                        sign = -1.0 if steps > 0 else 1.0
                         ctr.camera_local_translate(0.0, 0.0, sign * 0.02)
                     except Exception:
                         pass
@@ -305,28 +416,19 @@ class ViewportInteractor:
         return w, h, dpr
 
     def _compute_pan_scale(self, ctr):
-        """根据相机 zoom 和场景尺度动态计算平移灵敏度。
-        zoom 越小（拉远/视野越大），scale 越大，确保平移视觉速度与旋转体验持平。
-        """
         _, _, dpr = self._viewport_metrics()
         try:
             z = float(ctr.get_zoom())
         except Exception:
             z = 0.6
 
-        # zoom 因子：拉远时放大平移量（以 zoom=0.6 为基准）
         zoom_factor = 0.6 / max(z, 0.02)
-
-        # 场景尺度因子：大场景需要更大的绝对平移量，但限制上限避免失控
         scene_scale = self._estimate_scene_scale()
         scene_factor = max(0.2, min(scene_scale / 10.0, 3.0))
-
-        # 综合计算；DPI 过高时适当降低灵敏度
         scale = self._right_pan_scale * zoom_factor * scene_factor / max(1.0, dpr)
         return float(scale)
 
     def _estimate_scene_scale(self):
-        """根据当前所有点云的空间范围估算场景尺度，用于自适应平移灵敏度。"""
         if not self.scene.point_data:
             return 1.0
         max_extent = 0.0

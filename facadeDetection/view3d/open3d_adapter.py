@@ -6,7 +6,6 @@ class Open3DAdapter:
     def __init__(self):
         self.vis = None
         self.geometries = {}
-        self._grid_lines = None
 
     def create_window(self, title, width=1280, height=960, visible=True):
         self.vis = o3d.visualization.Visualizer()
@@ -63,10 +62,6 @@ class Open3DAdapter:
             return
         self.vis.poll_events()
         self.vis.update_renderer()
-
-    def reset_view_point(self):
-        if self.vis is not None:
-            self.vis.reset_view_point(True)
 
     def get_view_control(self):
         if self.vis is None:
