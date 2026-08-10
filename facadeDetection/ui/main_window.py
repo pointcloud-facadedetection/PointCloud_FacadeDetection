@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QButtonGroup,
     QDockWidget,
     QFileDialog,
@@ -27,8 +31,13 @@ from .widgets.flow_layout import FlowLayout
 from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
+from services.viewport_render_service import ViewportRenderService
+from services.pointcloud_service import PointCloudService
+from services.facade_service import FacadeService
 from services.report_export import ReportExportService
+from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
+from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 
 
 PAGE_DEFINITIONS = (
@@ -47,13 +56,13 @@ PAGE_BUTTON_NAMES = {
 
 PAGE_HEADER_ACTIONS = {
     'project_overview': (
-        ('上传文件', 'btn_upload'),
+        ('导入FLS目录', 'btn_import_fls_dir'),
+        ('直接上传文件', 'btn_upload_files'),
         ('打开项目', 'btn_open_project'),
         ('选择项目', 'btn_select_project'),
         ('新建项目', 'btn_new_project'),
     ),
     'project_operation': (
-        ('重置视图', 'btn_reset_view'),
         ('改变颜色', 'btn_change_color'),
         ('点云去噪', 'btn_denoise'),
         ('点云配准', 'btn_registration'),
@@ -89,8 +98,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('PointCloud FacadeDetection')
         self.resize(1600, 900)
         self.viewport = Open3DViewport()
-        self.project_overview_service = ProjectOverviewService()
-        self.project_operation_service = ProjectOperationService(self.viewport)
+        # Unified render service for business modules
+        self.render_service = ViewportRenderService(self.viewport, db=None)
+        self.project_overview_service = ProjectOverviewService(self.viewport, self.render_service, db=None)
+        # Facade service uses viewport + render service
+        self.facade_service = FacadeService(self.viewport, db=None, render_service=self.render_service)
+        # Point cloud service for preprocess/denoise
+        self.pointcloud_service = PointCloudService(self.viewport, self.render_service)
+        # Pass facade service into operation scheduler for ROI detection
+        self.project_operation_service = ProjectOperationService(
+            self.viewport,
+            facade_service=self.facade_service,
+            pointcloud_service=self.pointcloud_service,
+        )
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
         self.current_project = None
@@ -98,12 +118,22 @@ class MainWindow(QMainWindow):
         self.page_header_layouts = {}
         self.page_title_labels = {}
         self._sidebar_collapsed = {'left': False, 'right': False}
-        self._last_upload_directory = str(Path.home())
+        # 默认定位到 data/projects，便于跨机迁移
+        try:
+            Storage.ensure_base_dirs()
+            self._last_upload_directory = str(Storage.PROJECTS_ROOT)
+        except Exception:
+            self._last_upload_directory = str(Path.home())
         self._header_resize_pending = set()
         self._current_report_pdf_name = None
         self._report_webview_error = None
         self._setup_ui()
         self._connect_buttons()
+        # Hook: display facade stats in the right dock when results ready
+        try:
+            self.project_operation_service.on_facade_results = self._show_facade_results
+        except Exception:
+            pass
         self._refresh_project_list()
         self._set_current_project(None)
 
@@ -213,6 +243,11 @@ class MainWindow(QMainWindow):
             self.right_dock,
             self.right_sidebar_button,
         ) = self._create_sidebar('rightDock', 'right')
+        # Prepare right panel layout for results
+        try:
+            self._init_right_panel_widgets()
+        except Exception:
+            pass
 
         viewport_panel = QWidget()
         viewport_layout = QVBoxLayout(viewport_panel)
@@ -234,6 +269,105 @@ class MainWindow(QMainWindow):
         self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
         self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
         return page
+
+    def _init_right_panel_widgets(self):
+        panel = self.right_dock.findChild(QWidget, 'rightDockPanel')
+        if panel is None:
+            return
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        title = QLabel('检测结果')
+        title.setStyleSheet('font-weight:600; color:#303641;')
+        lay.addWidget(title)
+        # summary label
+        self.lbl_facade_summary = QLabel('未检测')
+        self.lbl_facade_summary.setObjectName('lblFacadeSummary')
+        self.lbl_facade_summary.setStyleSheet('color:#5b626d;')
+        lay.addWidget(self.lbl_facade_summary)
+        # simple table-like text area for stats + clickable container
+        self.lbl_facade_table = QLabel('')
+        self.lbl_facade_table.setObjectName('lblFacadeTable')
+        self.lbl_facade_table.setStyleSheet('font-family: Consolas, monospace; color:#333;')
+        self.lbl_facade_table.setWordWrap(True)
+        lay.addWidget(self.lbl_facade_table, 0)
+
+        # clickable facade items
+        from PySide6.QtWidgets import QListWidget
+        self.list_facades = QListWidget()
+        self.list_facades.setObjectName('lstFacades')
+        lay.addWidget(self.list_facades, 1)
+        self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
+
+    def _show_facade_results(self, results: list[dict]):
+        count = len(results or [])
+        self.lbl_facade_summary.setText(f'检测立面数量：{count}')
+        if not results:
+            self.lbl_facade_table.setText('')
+            self.list_facades.clear()
+            return
+        lines = ["ID  类型   点数   面积(m²)  平整度STD(mm)  均值(mm)  最大偏差(mm)"]
+        for f in results[:50]:
+            pid = f.get('id', 0)
+            lab = str(f.get('type_label') or f.get('type') or '-')[:8]
+            pts = int(f.get('point_count') or 0)
+            area = float(f.get('area') or 0.0)
+            # Flatness values from algorithm are meters; display in millimeters
+            stdv = float(f.get('flatness', 0.0)) * 1000.0
+            mean = float(f.get('flatness_mean', 0.0)) * 1000.0
+            mx = float(f.get('flatness_max', 0.0)) * 1000.0
+            lines.append(f"{pid:>2}  {lab:<8}  {pts:>6}  {area:>8.2f}   {stdv:>8.4f}  {mean:>6.3f} {mx:>7.3f}")
+        self.lbl_facade_table.setText('\n'.join(lines))
+
+        # Populate clickable list with labels like "Facade #<id> (<type>)"
+        self.list_facades.clear()
+        for f in results:
+            from PySide6.QtWidgets import QListWidgetItem
+            pid = int(f.get('id', 0))
+            lab = str(f.get('type_label') or f.get('type') or '-')
+            item = QListWidgetItem(f"立面 #{pid}  ({lab})")
+            # store facade dict in item for retrieval
+            item.setData(Qt.ItemDataRole.UserRole, f)
+            self.list_facades.addItem(item)
+
+        # cache for dialog use
+        self._latest_facade_results = results
+
+    def _active_cloud_name(self) -> str | None:
+        try:
+            names = self.viewport.get_cloud_names()
+            return names[-1] if names else None
+        except Exception:
+            return None
+
+    def _on_facade_item_clicked(self, item):
+        f = item.data(Qt.ItemDataRole.UserRole)
+        if not f:
+            return
+        cloud = self._active_cloud_name()
+        if not cloud:
+            return
+        # compute quality
+        quality = self.facade_service.compute_quality(cloud, f)
+        if not quality:
+            QMessageBox.information(self, '质量评估', '该立面无法计算质量指标。')
+            return
+
+        def _show_effect():
+            try:
+                self.facade_service.apply_quality_colors(cloud, quality)
+            except Exception:
+                pass
+
+        def _restore():
+            try:
+                self.facade_service.restore_highlight(cloud, getattr(self, '_latest_facade_results', []) or [])
+            except Exception:
+                pass
+
+        label = f"#{int(f.get('id', 0))} ({str(f.get('type_label') or f.get('type') or '-')})"
+        dlg = FacadeQualityDialog(self, label, quality, on_show_colors=_show_effect, on_restore_colors=_restore)
+        dlg.exec()
 
     def _create_report_export_page(self, page_title, page_key):
         page = QWidget()
@@ -478,13 +612,13 @@ class MainWindow(QMainWindow):
 
     def _connect_buttons(self):
         overview_actions = {
-            'btn_upload': self._open_upload_file_dialog,
+            'btn_import_fls_dir': self._open_import_fls_directory,
+            'btn_upload_files': self._open_upload_file_dialog,
             'btn_open_project': self._open_project_directory,
             'btn_select_project': self._select_project,
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
-            'btn_reset_view': self.project_operation_service.reset_view,
             'btn_change_color': self.project_operation_service.change_color,
             'btn_denoise': self.project_operation_service.denoise,
             'btn_registration': self.project_operation_service.registration,
@@ -556,13 +690,23 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
-        uploaded_paths = self.project_overview_service.upload_files(file_paths)
-        project = self.project_overview_service.register_upload(
-            uploaded_paths,
-            current_project=self.current_project,
-        )
+        uploaded_paths = self.project_overview_service.upload_files(file_paths, getattr(self.current_project, 'project_id', None))
         self._refresh_project_list()
-        self._activate_project(project)
+        if self.current_project is not None:
+            self._activate_project(self.current_project)
+    def _open_import_fls_directory(self):
+        directory_path = QFileDialog.getExistingDirectory(
+            self,
+            '导入 FLS 目录',
+            self._last_upload_directory,
+        )
+        if not directory_path:
+            return
+        self._last_upload_directory = directory_path
+        self.project_overview_service.import_fls_directory(directory_path, getattr(self.current_project, 'project_id', None))
+        self._refresh_project_list()
+        if self.current_project is not None:
+            self._activate_project(self.current_project)
 
     def _open_project_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
@@ -579,27 +723,29 @@ class MainWindow(QMainWindow):
         self._activate_project(project)
 
     def _create_project(self):
-        name, accepted = QInputDialog.getText(
-            self,
-            '新建项目',
-            '项目名称：',
-        )
-        if not accepted or not name.strip():
+        from ui.dialogs.project_create_dialog import ProjectCreateDialog
+        dlg = ProjectCreateDialog(self)
+        result_code = dlg.exec()
+        try:
+            from PySide6.QtWidgets import QDialog
+            accepted_code = int(QDialog.DialogCode.Accepted)
+        except Exception:
+            accepted_code = 1
+        if result_code != accepted_code:
             return
-
-        directory_path = QFileDialog.getExistingDirectory(
-            self,
-            '选择项目文件夹',
-            self._last_upload_directory,
+        payload = dlg.values()
+        info = self.project_overview_service.create_project(
+            name=payload.get('name', ''),
+            org_unit=payload.get('org_unit'),
+            address=payload.get('address'),
+            remarks=payload.get('remarks'),
         )
-        if not directory_path:
-            return
-
-        self._last_upload_directory = directory_path
-        project = self.project_overview_service.create_project(
-            name,
-            directory_path,
-        )
+        # Activate the newly created project
+        project = type('PC', (object,), info)()
+        # Normalize to ProjectCard-like
+        project.project_id = info.get('project_uuid')
+        project.name = info.get('name')
+        project.directory_path = info.get('root_dir')
         self._refresh_project_list()
         self._activate_project(project)
 
@@ -731,8 +877,7 @@ class MainWindow(QMainWindow):
             card.setObjectName('projectCard')
             card.setText(
                 f'{project.name}\n'
-                f'路径：{project.directory_path}\n'
-                f'文件数量：{len(project.file_paths)}'
+                f'路径：{project.directory_path}'
             )
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setSizePolicy(
@@ -818,10 +963,20 @@ class MainWindow(QMainWindow):
                 self._refresh_project_list()
             return
 
+        # Ensure per-project DB is active and latest raw point cloud is loaded
+        try:
+            self.project_overview_service.activate_project(project.project_id)
+        except Exception:
+            pass
         self._activate_project(project)
 
     def _activate_project(self, project):
         self._set_current_project(project)
+        try:
+            # propagate active project UUID to operation scheduler for DAL persistence
+            self.project_operation_service.set_active_project_uuid(getattr(project, 'project_id', None))
+        except Exception:
+            pass
         operation_index = next(
             index
             for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
