@@ -21,20 +21,7 @@ def normalize_colors(colors, count):
 
     return colors
 
-
-def build_lod_indices(count, max_points):
-    if count <= max_points:
-        return None
-    step = int(math.ceil(count / max_points))
-    return np.arange(0, count, step, dtype=np.int64)
-
-
 def display_arrays(data):
-    idx = data.get("render_indices")
-    if idx is None:
-        return data["pos"], data["color"]
-    return data["pos"][idx], data["color"][idx]
+    return data["pos"], data["color"]
 
 
-def sample_step(count, max_points):
-    return max(1, int(math.ceil(count / max_points)))
