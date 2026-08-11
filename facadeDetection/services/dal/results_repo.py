@@ -5,10 +5,61 @@ from typing import Iterable, Optional
 from sqlalchemy import select
 
 from db.connection import project_session
-from models import Facade, Heatmap, QualityMetric, Project
+from models import Facade, Heatmap, QualityMetric, Project, ResultScene
 
 
 class ResultsRepo:
+    @staticmethod
+    def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> None:
+        """Persist a detection batch and its basic metrics in the active scene.
+
+        Keeping this transaction in the repository prevents the application
+        service from depending on SQLAlchemy session details.
+        """
+        with project_session(project_uuid) as s:
+            project = s.execute(
+                select(Project).where(Project.uuid == project_uuid)
+            ).scalar_one_or_none()
+            if project is None:
+                raise RuntimeError("项目不存在")
+            scene = s.execute(
+                select(ResultScene).where(
+                    ResultScene.project_id == project.id,
+                    ResultScene.is_active.is_(True),
+                )
+            ).scalar_one_or_none()
+            if scene is None:
+                scene = ResultScene(project_id=project.id, name="Scene 1", is_active=True)
+                s.add(scene)
+                s.flush()
+
+            for item in items:
+                facade = Facade(
+                    project_id=project.id,
+                    scene_id=scene.id,
+                    label=f"Facade {int(item.get('id', 0))}",
+                    plane_json={key: item.get(key) for key in (
+                        "plane_model", "normal", "center", "inlier_indices"
+                    )},
+                    bbox_json=item.get("bbox_2d"),
+                    area=float(item.get("area", 0.0)),
+                    orientation=item.get("type_label") or item.get("type"),
+                )
+                s.add(facade)
+                s.flush()
+                metrics = (
+                    ("flatness_std", float(item.get("flatness", 0.0)) * 1000.0, "mm"),
+                    ("flatness_mean", float(item.get("flatness_mean", 0.0)) * 1000.0, "mm"),
+                    ("flatness_max", float(item.get("flatness_max", 0.0)) * 1000.0, "mm"),
+                    ("verticality", float(item.get("verticality", 0.0)), "deg"),
+                    ("horizontality", float(item.get("horizontality", 0.0)), "deg"),
+                )
+                for name, value, unit in metrics:
+                    s.add(QualityMetric(
+                        facade_id=facade.id, metric_name=name, value=value, unit=unit
+                    ))
+            s.flush()
+
     @staticmethod
     def save_facades(project_uuid: str, scene_id: int, items: Iterable[dict]) -> list[Facade]:
         """items: dicts with keys label, plane_json, bbox_json, area, orientation"""
