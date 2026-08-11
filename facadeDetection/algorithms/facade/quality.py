@@ -38,7 +38,7 @@ def generate_quality_colors(point_quality_labels, total_points):
 
 
 def generate_sparse_defect_heatmap(signed_gap, flatness_limit, color_max=None,
-                                   cmap='turbo'):
+                                   cmap='turbo', candidate_mask=None):
     """只为超出平整度限值的点生成连续色带。
 
     返回局部点索引掩码、缺陷值和 RGB 颜色；合格点不进入颜色计算，
@@ -47,7 +47,15 @@ def generate_sparse_defect_heatmap(signed_gap, flatness_limit, color_max=None,
     values = np.asarray(signed_gap, dtype=np.float32).reshape(-1)
     limit = max(float(flatness_limit), 0.0)
     abs_values = np.abs(values)
-    mask = np.isfinite(abs_values) & (abs_values > limit)
+    # candidate_mask 由窗口判定产生。传入时，热力图不再自行按“全局点距”
+    # 重新判定，而是复用窗口的 warn/fail 覆盖范围。
+    if candidate_mask is None:
+        mask = np.isfinite(abs_values) & (abs_values > limit)
+    else:
+        candidate_mask = np.asarray(candidate_mask, dtype=bool).reshape(-1)
+        if len(candidate_mask) != len(values):
+            raise ValueError('candidate_mask length must match signed_gap')
+        mask = np.isfinite(abs_values) & candidate_mask
     defect_values = abs_values[mask]
     if defect_values.size == 0:
         return {'mask': mask, 'values': defect_values,
@@ -151,11 +159,8 @@ def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
             if np.dot(local_normal, interval_normal) < 0:
                 local_normal = -local_normal
 
-            # 质量标准：窗口内每个点到所属区间基准面的偏差。
-            # 使用最大绝对偏差，避免窗口平均值掩盖局部超限点。
-            point_signed_gaps = window_points @ interval_normal + interval_d
-            point_abs_gaps = np.abs(point_signed_gaps)
-            gap = float(np.max(point_abs_gaps))
+            # 核心指标：局部平面中心到区间基准平面的距离（原判定逻辑保持不变）
+            gap = float(np.abs(np.dot(interval_normal, window_center) + interval_d))
 
             # 【新增】判定质量等级
             if gap <= flatness_limit:
@@ -166,17 +171,22 @@ def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
             else:
                 quality_level = Config.QUALITY_FAIL
 
-            # 记录窗口结果
-            window_results.append({
+            # 记录窗口结果。只有异常窗口才计算局部逐点偏差，避免对大量
+            # 合格窗口重复执行点到平面的向量计算。
+            window_data = {
                 'u_range': [float(u_low), float(u_high)],
                 'v_range': [float(v_low), float(v_high)],
                 'quality_level': quality_level,
                 'gap': gap,
                 'point_indices': np.where(mask)[0].tolist(),  # 该窗口覆盖的局部点索引
-                'point_deviations': point_abs_gaps.astype(float).tolist(),
                 'window_center': [float(x) for x in window_center],
                 'point_count': count,
-            })
+            }
+            if quality_level != Config.QUALITY_PASS:
+                window_data['point_abs_gaps'] = np.abs(
+                    window_points @ interval_normal + interval_d
+                ).astype(np.float32).tolist()
+            window_results.append(window_data)
 
             if gap > worst_gap:
                 worst_gap = gap
@@ -270,8 +280,9 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
     grids = []
     # 【新增】点级质量标签，初始为-1（未评估）
     point_quality_labels = np.full(len(points), -1, dtype=int)
-    # 仅记录有效检测窗口覆盖到的点，作为热力图唯一数据源。
-    window_point_deviations = np.full(len(points), np.nan, dtype=np.float32)
+    # 仅由窗口质量决定热力图覆盖范围；数值仍是窗口点到区间基准面的偏差。
+    window_heatmap_mask = np.zeros(len(points), dtype=bool)
+    window_heatmap_values = np.full(len(points), np.nan, dtype=np.float32)
 
     for j in range(v_bins):
         v_low = v_min + j * interval_size_m
@@ -319,19 +330,21 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
         for wr in window_results:
             local_indices = wr['point_indices']  # 局部索引（在grid_points中的索引）
             quality_level = wr['quality_level']
-            deviations = wr.get('point_deviations', [])
-            for offset, local_idx in enumerate(local_indices):
+            point_abs_gaps = np.asarray(wr.get('point_abs_gaps', []), dtype=np.float32)
+            for local_idx in local_indices:
                 global_idx = grid_global_indices[local_idx]
-                if offset < len(deviations):
-                    window_point_deviations[global_idx] = max(
-                        float(window_point_deviations[global_idx]) if np.isfinite(window_point_deviations[global_idx]) else 0.0,
-                        float(deviations[offset]),
-                    )
                 if point_quality_labels[global_idx] == -1:
                     point_quality_labels[global_idx] = quality_level
                 else:
                     # 取更差的等级
                     point_quality_labels[global_idx] = max(point_quality_labels[global_idx], quality_level)
+                if quality_level != Config.QUALITY_PASS and local_idx < len(point_abs_gaps):
+                    window_heatmap_mask[global_idx] = True
+                    value = float(point_abs_gaps[local_idx])
+                    if not np.isfinite(window_heatmap_values[global_idx]):
+                        window_heatmap_values[global_idx] = value
+                    else:
+                        window_heatmap_values[global_idx] = max(window_heatmap_values[global_idx], value)
 
         # 合格率 >= 95% 视为整体合格
         compliance = compliance_rate >= 0.95
@@ -368,11 +381,11 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
                 g['compliance_rate'] * g['point_count'] for g in grids
             ) / total_points
 
-    # 热力图复用有效窗口判定结果，不再对整个立面用全局参考面重新判定。
+    # 热力图复用窗口判定结果，不再使用全局参考面重新筛选点。
     signed_gap = signed_plane_distance(points, facade_plane).astype(np.float32)
     heatmap = generate_sparse_defect_heatmap(
-        np.where(np.isfinite(window_point_deviations), window_point_deviations, 0.0),
-        flatness_limit,
+        window_heatmap_values, flatness_limit,
+        candidate_mask=window_heatmap_mask,
     )
     # 保留旧字段，兼容现有调用方；新调用方应优先使用稀疏字段。
     quality_colors = generate_quality_colors(point_quality_labels, len(points))
@@ -421,7 +434,6 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
         'heatmap_vmin': heatmap['vmin'],
         'heatmap_vmax': heatmap['vmax'],
         'heatmap_cmap': 'turbo',
-        'heatmap_source': 'valid_window_point_deviation_to_interval_reference_plane',
         'quality_stats': quality_stats,
     }
 
