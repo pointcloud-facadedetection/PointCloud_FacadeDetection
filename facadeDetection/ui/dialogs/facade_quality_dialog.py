@@ -62,7 +62,7 @@ class FacadeQualityDialog(QDialog):
         pts = int(overall.get('point_count') or 0)
         profile = self._quality.get('profile_snapshot') or {}
         standard = f"标准：{profile.get('standard_name', '未指定')} {profile.get('version', '')}"
-        meta = QLabel(f"{standard}\n垂直度角度: {vdeg:.3f}°    最差窗口点偏差: {gap:.2f} mm    合格率: {rate:.1f}%    点数: {pts}")
+        meta = QLabel(f"{standard}\n垂直度角度: {vdeg:.3f}°    最差窗口峰谷差: {gap:.2f} mm    合格率: {rate:.1f}%    点数: {pts}")
         meta.setObjectName('qualityMeta')
         layout.addWidget(meta)
 
@@ -72,7 +72,7 @@ class FacadeQualityDialog(QDialog):
 
         table = QTableWidget(0, 6, self)
         table.setObjectName('tblQualityGrids')
-        table.setHorizontalHeaderLabels(["区间ID", "点数", "最大点偏差(mm)", "合格率(%)", "窗口总数", "合格窗口"])
+        table.setHorizontalHeaderLabels(["区间ID", "点数", "窗口峰谷差(mm)", "合格率(%)", "窗口总数", "合格窗口"])
         grids = self._quality.get('grids') or []
         table.setRowCount(len(grids))
         for r, g in enumerate(grids):
