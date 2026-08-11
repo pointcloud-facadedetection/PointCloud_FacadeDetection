@@ -28,7 +28,20 @@ class FacadeQualityDialog(QDialog):
                  on_restore_colors: Optional[Callable[[], None]] = None):
         super().__init__(parent)
         self.setWindowTitle(f"立面质量评估 - {facade_label}")
-        self.resize(760, 520)
+        self.resize(900, 600)
+        self.setStyleSheet("""
+            QDialog { background: #f3f5f8; }
+            QLabel#qualityHeader { color: #1f4f7a; font-size: 18px; font-weight: 700; }
+            QLabel#qualityMeta { background: white; border: 1px solid #dce2e8;
+                border-radius: 6px; padding: 12px; color: #46515d; }
+            QTableWidget { background: white; border: 1px solid #dce2e8;
+                gridline-color: #edf0f3; }
+            QHeaderView::section { background: #eaf0f6; padding: 7px; border: 0;
+                color: #29445d; font-weight: 600; }
+            QPushButton { min-height: 32px; padding: 0 14px; border-radius: 4px;
+                border: 1px solid #b8c7d6; background: white; }
+            QPushButton:hover { background: #eaf3fb; border-color: #3975a8; }
+        """)
         self._quality = quality_result or {}
         self._on_show_colors = on_show_colors
         self._on_restore_colors = on_restore_colors
@@ -38,7 +51,8 @@ class FacadeQualityDialog(QDialog):
         layout.setSpacing(8)
 
         overall = self._quality.get('overall') or {}
-        title = QLabel("总体指标")
+        title = QLabel("质量评估结果")
+        title.setObjectName('qualityHeader')
         title.setStyleSheet('font-weight:600; color:#303641;')
         layout.addWidget(title)
 
@@ -46,17 +60,19 @@ class FacadeQualityDialog(QDialog):
         gap = float(overall.get('gap') or 0.0) * 1000.0  # m -> mm (if provided as meters)
         rate = float(overall.get('compliance_rate') or 0.0) * 100.0
         pts = int(overall.get('point_count') or 0)
-        meta = QLabel(f"垂直度: {vdeg:.3f}°    最差局部间隙: {gap:.2f} mm    合格率: {rate:.1f}%    点数: {pts}")
-        meta.setStyleSheet('color:#525a66;')
+        profile = self._quality.get('profile_snapshot') or {}
+        standard = f"标准：{profile.get('standard_name', '未指定')} {profile.get('version', '')}"
+        meta = QLabel(f"{standard}\n垂直度角度: {vdeg:.3f}°    最差窗口点偏差: {gap:.2f} mm    合格率: {rate:.1f}%    点数: {pts}")
+        meta.setObjectName('qualityMeta')
         layout.addWidget(meta)
 
-        table_title = QLabel("区间汇总（20m）")
+        table_title = QLabel("区间汇总")
         table_title.setStyleSheet('font-weight:600; color:#303641;')
         layout.addWidget(table_title)
 
         table = QTableWidget(0, 6, self)
         table.setObjectName('tblQualityGrids')
-        table.setHorizontalHeaderLabels(["区间ID", "点数", "gap(mm)", "合格率(%)", "窗口总数", "合格窗口"])
+        table.setHorizontalHeaderLabels(["区间ID", "点数", "最大点偏差(mm)", "合格率(%)", "窗口总数", "合格窗口"])
         grids = self._quality.get('grids') or []
         table.setRowCount(len(grids))
         for r, g in enumerate(grids):
