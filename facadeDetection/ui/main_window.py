@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QComboBox,
     QButtonGroup,
     QDockWidget,
     QFileDialog,
@@ -38,6 +39,7 @@ from services.report_export import ReportExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
+from services.inspection_profile import InspectionProfileService
 
 
 PAGE_DEFINITIONS = (
@@ -76,6 +78,7 @@ PAGE_HEADER_ACTIONS = {
     'inspection_review': (),
     'report_export': (
         ('打开 PDF', 'btn_open_report_pdf'),
+        ('导出质量报告', 'btn_export_quality_report'),
     ),
 }
 
@@ -127,6 +130,7 @@ class MainWindow(QMainWindow):
         self._header_resize_pending = set()
         self._current_report_pdf_name = None
         self._report_webview_error = None
+        self._quality_reports = []
         self._setup_ui()
         self._connect_buttons()
         # Hook: display facade stats in the right dock when results ready
@@ -254,6 +258,28 @@ class MainWindow(QMainWindow):
         viewport_layout.setContentsMargins(12, 10, 12, 10)
         viewport_layout.setSpacing(8)
         viewport_layout.addWidget(self._create_page_title(page_title, page_key))
+        config_bar = QFrame()
+        config_bar.setObjectName('inspectionConfigBar')
+        config_layout = QHBoxLayout(config_bar)
+        config_layout.setContentsMargins(10, 6, 10, 6)
+        config_layout.addWidget(QLabel('墙面标准'))
+        self.standard_combo = QComboBox()
+        for profile in InspectionProfileService.all():
+            self.standard_combo.addItem(
+                f'{profile.standard_name} · {profile.version}', profile.standard_id)
+        config_layout.addWidget(self.standard_combo)
+        self.standard_summary = QLabel()
+        self.standard_summary.setObjectName('standardSummary')
+        config_layout.addWidget(self.standard_summary, 1)
+        config_layout.addWidget(QLabel('区间'))
+        self.interval_combo = QComboBox()
+        for value in (3.0, 5.0, 10.0, 20.0):
+            self.interval_combo.addItem(f'{value:g}m', value)
+        self.interval_combo.setCurrentIndex(3)
+        config_layout.addWidget(self.interval_combo)
+        viewport_layout.addWidget(config_bar)
+        self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
+        self._on_standard_changed(0)
         viewport_layout.addWidget(self.viewport.get_widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
@@ -269,6 +295,15 @@ class MainWindow(QMainWindow):
         self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
         self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
         return page
+
+    def _on_standard_changed(self, _index):
+        profile = InspectionProfileService.get(self.standard_combo.currentData())
+        if profile is None:
+            return
+        self._inspection_profile = profile
+        self.standard_summary.setText(
+            f'平整度 ≤ {profile.flatness_limit_mm:g} mm  | '
+            f'垂直度 ≤ {profile.verticality_limit_mm:g} mm  | ')
 
     def _init_right_panel_widgets(self):
         panel = self.right_dock.findChild(QWidget, 'rightDockPanel')
@@ -306,17 +341,13 @@ class MainWindow(QMainWindow):
             self.lbl_facade_table.setText('')
             self.list_facades.clear()
             return
-        lines = ["ID  类型   点数   面积(m²)  平整度STD(mm)  均值(mm)  最大偏差(mm)"]
+        lines = ["ID  类型       点数     面积(m²) "]
         for f in results[:50]:
             pid = f.get('id', 0)
             lab = str(f.get('type_label') or f.get('type') or '-')[:8]
             pts = int(f.get('point_count') or 0)
             area = float(f.get('area') or 0.0)
-            # Flatness values from algorithm are meters; display in millimeters
-            stdv = float(f.get('flatness', 0.0)) * 1000.0
-            mean = float(f.get('flatness_mean', 0.0)) * 1000.0
-            mx = float(f.get('flatness_max', 0.0)) * 1000.0
-            lines.append(f"{pid:>2}  {lab:<8}  {pts:>6}  {area:>8.2f}   {stdv:>8.4f}  {mean:>6.3f} {mx:>7.3f}")
+            lines.append(f"{pid:>2}  {lab:<8}  {pts:>6}  {area:>8.2f} ")
         self.lbl_facade_table.setText('\n'.join(lines))
 
         # Populate clickable list with labels like "Facade #<id> (<type>)"
@@ -347,11 +378,26 @@ class MainWindow(QMainWindow):
         cloud = self._active_cloud_name()
         if not cloud:
             return
-        # compute quality
-        quality = self.facade_service.compute_quality(cloud, f)
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            QMessageBox.warning(self, '质量评估', '请先选择项目。')
+            return
+        try:
+            results_dir = Storage.ensure_project_dirs(project_uuid)['results']
+        except Exception as exc:
+            QMessageBox.critical(self, '结果目录', f'无法创建项目 results 目录：{exc}')
+            return
+        quality = self.facade_service.compute_quality(
+            cloud, f, profile=getattr(self, '_inspection_profile', None),
+            grid_size=float(self.interval_combo.currentData()),
+            results_dir=results_dir)
         if not quality:
             QMessageBox.information(self, '质量评估', '该立面无法计算质量指标。')
             return
+        self._quality_reports = [r for r in self._quality_reports
+                                 if (r.get('facade') or {}).get('id') != f.get('id')]
+        self._quality_reports.append({'facade': f, 'quality': quality,
+                                      'artifacts': quality.get('artifacts', {})})
 
         def _show_effect():
             try:
@@ -368,6 +414,10 @@ class MainWindow(QMainWindow):
         label = f"#{int(f.get('id', 0))} ({str(f.get('type_label') or f.get('type') or '-')})"
         dlg = FacadeQualityDialog(self, label, quality, on_show_colors=_show_effect, on_restore_colors=_restore)
         dlg.exec()
+
+    def _export_quality_report(self):
+        """Compatibility placeholder; PDF generation is intentionally disabled."""
+        QMessageBox.information(self, '导出报告', 'PDF 报告导出功能暂未启用。')
 
     def _create_report_export_page(self, page_title, page_key):
         page = QWidget()
@@ -391,21 +441,10 @@ class MainWindow(QMainWindow):
         )
         content_layout.addWidget(self.report_pdf_status_label)
 
-        # QtWebView2Widget 只嵌入系统 WebView2 内容区，不创建浏览器地址栏。
-        self.report_webview = QtWebView2Widget(
-            url='about:blank',
-            debug=False,
-            context_menus=False,
-            background_color='#f5f7fa',
-            parent=page,
-        )
+        self.report_webview = QtWebView2Widget(url='about:blank', debug=False,
+                                              context_menus=False,
+                                              background_color='#f5f7fa', parent=page)
         self.report_webview.setObjectName('reportPdfWebView')
-        self.report_webview.bridge.initialization_done.connect(
-            self._on_report_webview_initialized
-        )
-        self.report_webview.bridge.domContentLoaded.connect(
-            self._on_report_pdf_loaded
-        )
         content_layout.addWidget(self.report_webview, 1)
 
         layout.addWidget(content, 1)
@@ -641,6 +680,7 @@ class MainWindow(QMainWindow):
         }
         report_actions = {
             'btn_open_report_pdf': self._open_report_pdf,
+            'btn_export_quality_report': self._export_quality_report,
         }
         all_actions = {
             **overview_actions,
@@ -754,7 +794,6 @@ class MainWindow(QMainWindow):
         if not projects:
             QMessageBox.information(self, '选择项目', '当前没有可选择的项目。')
             return
-
         labels = [
             f'{project.name}  |  {project.directory_path}'
             for project in projects
