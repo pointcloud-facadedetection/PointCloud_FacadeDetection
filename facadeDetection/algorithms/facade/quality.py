@@ -37,6 +37,36 @@ def generate_quality_colors(point_quality_labels, total_points):
     return colors
 
 
+def generate_sparse_defect_heatmap(signed_gap, flatness_limit, color_max=None,
+                                   cmap='turbo'):
+    """只为超出平整度限值的点生成连续色带。
+
+    返回局部点索引掩码、缺陷值和 RGB 颜色；合格点不进入颜色计算，
+    从而可以在上层保留点云原色。gap 单位为米。
+    """
+    values = np.asarray(signed_gap, dtype=np.float32).reshape(-1)
+    limit = max(float(flatness_limit), 0.0)
+    abs_values = np.abs(values)
+    mask = np.isfinite(abs_values) & (abs_values > limit)
+    defect_values = abs_values[mask]
+    if defect_values.size == 0:
+        return {'mask': mask, 'values': defect_values,
+                'colors': np.empty((0, 3), dtype=np.float32),
+                'vmin': limit, 'vmax': limit}
+    vmax = float(color_max) if color_max is not None else float(np.percentile(defect_values, 98.0))
+    vmax = max(vmax, limit * 1.05)
+    denom = max(vmax - limit, 1e-12)
+    t = np.clip((defect_values - limit) / denom, 0.0, 1.0)
+    # 与渲染服务保持一致的轻量 turbo 近似，避免质量算法依赖 matplotlib。
+    colors = np.column_stack((
+        np.clip(1.5 * t, 0.0, 1.0),
+        np.clip(1.5 - np.abs(2.0 * t - 1.0) * 1.5, 0.0, 1.0),
+        np.clip(1.2 * (1.0 - t), 0.0, 1.0),
+    )).astype(np.float32)
+    return {'mask': mask, 'values': defect_values, 'colors': colors,
+            'vmin': limit, 'vmax': vmax}
+
+
 def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
                                window_size=2.0, step_size=0.05, min_points=30,
                                max_windows=None,
@@ -121,8 +151,11 @@ def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
             if np.dot(local_normal, interval_normal) < 0:
                 local_normal = -local_normal
 
-            # 核心指标：局部平面中心到区间基准平面的距离
-            gap = float(np.abs(np.dot(interval_normal, window_center) + interval_d))
+            # 质量标准：窗口内每个点到所属区间基准面的偏差。
+            # 使用最大绝对偏差，避免窗口平均值掩盖局部超限点。
+            point_signed_gaps = window_points @ interval_normal + interval_d
+            point_abs_gaps = np.abs(point_signed_gaps)
+            gap = float(np.max(point_abs_gaps))
 
             # 【新增】判定质量等级
             if gap <= flatness_limit:
@@ -140,6 +173,7 @@ def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
                 'quality_level': quality_level,
                 'gap': gap,
                 'point_indices': np.where(mask)[0].tolist(),  # 该窗口覆盖的局部点索引
+                'point_deviations': point_abs_gaps.astype(float).tolist(),
                 'window_center': [float(x) for x in window_center],
                 'point_count': count,
             })
@@ -208,6 +242,9 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
     垂直度仅保留夹角；平整度采用每 20m 区间内 2m x 2m 模拟靠尺滑动窗口的严格最大间隙。
     生成每个点的检测颜色映射，支持定位不合格/警告区域
     """
+    # grid_size is the legacy name; it is an aggregation interval, not the
+    # 2m inspection window.  The latter remains ruler_size/ruler_step.
+    interval_size_m = float(grid_size)
     points = np.asarray(pcd.points)
     if len(points) == 0:
         return _empty_quality_result(grid_size, flatness_limit, verticality_limit_mm)
@@ -228,15 +265,17 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
     local_v = np.dot(points - center, v_axis)
     u_min, u_max = float(np.min(local_u)), float(np.max(local_u))
     v_min, v_max = float(np.min(local_v)), float(np.max(local_v))
-    v_bins = max(1, int(np.ceil((v_max - v_min) / grid_size)))
+    v_bins = max(1, int(np.ceil((v_max - v_min) / interval_size_m)))
 
     grids = []
     # 【新增】点级质量标签，初始为-1（未评估）
     point_quality_labels = np.full(len(points), -1, dtype=int)
+    # 仅记录有效检测窗口覆盖到的点，作为热力图唯一数据源。
+    window_point_deviations = np.full(len(points), np.nan, dtype=np.float32)
 
     for j in range(v_bins):
-        v_low = v_min + j * grid_size
-        v_high = v_min + (j + 1) * grid_size
+        v_low = v_min + j * interval_size_m
+        v_high = v_min + (j + 1) * interval_size_m
         if j == v_bins - 1:
             v_high = v_max + 1e-9
 
@@ -280,8 +319,14 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
         for wr in window_results:
             local_indices = wr['point_indices']  # 局部索引（在grid_points中的索引）
             quality_level = wr['quality_level']
-            for local_idx in local_indices:
+            deviations = wr.get('point_deviations', [])
+            for offset, local_idx in enumerate(local_indices):
                 global_idx = grid_global_indices[local_idx]
+                if offset < len(deviations):
+                    window_point_deviations[global_idx] = max(
+                        float(window_point_deviations[global_idx]) if np.isfinite(window_point_deviations[global_idx]) else 0.0,
+                        float(deviations[offset]),
+                    )
                 if point_quality_labels[global_idx] == -1:
                     point_quality_labels[global_idx] = quality_level
                 else:
@@ -323,7 +368,13 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
                 g['compliance_rate'] * g['point_count'] for g in grids
             ) / total_points
 
-    # 【新增】生成质量颜色数组
+    # 热力图复用有效窗口判定结果，不再对整个立面用全局参考面重新判定。
+    signed_gap = signed_plane_distance(points, facade_plane).astype(np.float32)
+    heatmap = generate_sparse_defect_heatmap(
+        np.where(np.isfinite(window_point_deviations), window_point_deviations, 0.0),
+        flatness_limit,
+    )
+    # 保留旧字段，兼容现有调用方；新调用方应优先使用稀疏字段。
     quality_colors = generate_quality_colors(point_quality_labels, len(points))
 
     # 【新增】统计各质量等级的点数
@@ -347,7 +398,10 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
             'compliance_rate': float(overall_compliance_rate),
         },
         'grids': grids,
-        'grid_size': grid_size,
+        'grid_size': interval_size_m,
+        'interval_size_m': interval_size_m,
+        'window_size_m': float(ruler_size),
+        'step_size_m': float(ruler_step),
         'ruler_size': ruler_size,
         'ruler_step': ruler_step,
         'flatness_limit': flatness_limit,
@@ -356,7 +410,18 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
         'flatness_metric': 'local plane center deviation from interval baseline plane in 2m x 2m sliding windows (unlimited windows)',
         # 点级质量信息
         'point_quality_labels': point_quality_labels.tolist(),
-        'quality_colors': quality_colors.tolist(),
+        # Do not paint compliant/unassessed points; renderers should use the
+        # sparse defect fields below and preserve the original RGB.
+        'quality_colors': [],
+        'signed_gap': signed_gap.tolist(),
+        'abs_gap': np.abs(signed_gap).tolist(),
+        'defect_local_indices': np.flatnonzero(heatmap['mask']).tolist(),
+        'defect_values': heatmap['values'].tolist(),
+        'defect_colors': heatmap['colors'].tolist(),
+        'heatmap_vmin': heatmap['vmin'],
+        'heatmap_vmax': heatmap['vmax'],
+        'heatmap_cmap': 'turbo',
+        'heatmap_source': 'valid_window_point_deviation_to_interval_reference_plane',
         'quality_stats': quality_stats,
     }
 
@@ -374,6 +439,9 @@ def _empty_quality_result(grid_size, flatness_limit, verticality_limit_mm):
         },
         'grids': [],
         'grid_size': grid_size,
+        'interval_size_m': grid_size,
+        'window_size_m': 2.0,
+        'step_size_m': 0.05,
         'ruler_size': 2.0,
         'flatness_limit': flatness_limit,
         'verticality_limit_mm': verticality_limit_mm,
