@@ -5,6 +5,7 @@ import numpy as np
 import open3d as o3d
 
 from ..core.cache import get_cache
+from ..core.geometry_utils import adaptive_outlier_mask
 from ..config import Config
 
 
@@ -114,7 +115,16 @@ def denoise_cloud(uuid_name, voxel_size, method='radius', **kwargs):
     std_ratio = float(kwargs.get('std_ratio', 2.0))
 
     if method == 'radius':
+        # 注意：固定半径滤波对单站扫描的远处稀疏区会成片误删，远场建议用 adaptive
         clean_pcd, _ = pcd.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
+    elif method == 'adaptive':
+        # 距离分壳自适应滤波：远处稀疏但正常的表面点不会被当成离群点
+        keep = adaptive_outlier_mask(
+            pcd,
+            scan_origin=kwargs.get('scan_origin'),
+            std_ratio=float(kwargs.get('std_ratio', 2.5)),
+        )
+        clean_pcd = pcd.select_by_index(np.where(keep)[0].tolist())
     else:
         clean_pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
 
@@ -137,9 +147,10 @@ def compute_normals(uuid_name, voxel_size):
     if voxel_size > 0:
         pcd_work = pcd_work.voxel_down_sample(voxel_size)
 
-    radius = max(float(voxel_size) * 4.0, 0.2)
+    # 大半径 + 邻居数封顶：远处稀疏区自动扩大搜索范围（与 geometry_utils.ensure_normals 一致）
+    radius = max(float(voxel_size) * 4.0, 2.0)
     pcd_work.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30)
     )
     try:
         pcd_work.orient_normals_consistent_tangent_plane(30)

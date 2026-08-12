@@ -18,6 +18,9 @@ class Config:
     FACADE_MAX_ITERATIONS = 40
     FACADE_NORMAL_ANGLE_DEG = 18.0
     FACADE_MIN_POINTS_RATIO = 0.003
+    # 后处理共面合并（与桌面版 config/settings.py 一致）
+    FACADE_MERGE_ANGLE_DEG = 8.0
+    FACADE_MERGE_D_THRESH = 0.08
 
     # 颜色配置
     SEGMENT_COLORS = [

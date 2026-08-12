@@ -57,8 +57,13 @@ def denoise(pcd: o3d.geometry.PointCloud,
         radius: 搜索半径，默认 voxel_size * 2
         min_neighbors: 半径内最少点数阈值(半径滤波)，默认10
         nb_neighbors: 统计滤波邻域点数，默认20
-        std_ratio: 统计滤波标准差倍数，默认2.0
+        std_ratio: 统计滤波标准差倍数，默认2.0（adaptive 默认2.5）
+        scan_origin: 扫描仪位置(adaptive)，默认坐标原点
+        n_shells: 距离分壳数(adaptive)，默认24
     :return: 去噪后点云对象
+
+    注意：radius/statistical 隐含"密度均匀"假设，对单站扫描的远处稀疏区
+    会成片误删正常表面点；单站数据建议用 adaptive（距离分壳自适应）。
     """
     # 校验点云合法性
     if not isinstance(pcd, o3d.geometry.PointCloud):
@@ -80,7 +85,17 @@ def denoise(pcd: o3d.geometry.PointCloud,
     elif method == "statistical":
         # 统计离群点去除
         clean_pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    elif method == "adaptive":
+        # 距离分壳自适应滤波：远处稀疏但正常的表面点不会被当成离群点
+        from algorithms.geometry import adaptive_outlier_mask
+        keep = adaptive_outlier_mask(
+            pcd,
+            scan_origin=kwargs.get("scan_origin"),
+            std_ratio=float(kwargs.get("std_ratio", 2.5)),
+            n_shells=int(kwargs.get("n_shells", 24)),
+        )
+        clean_pcd = pcd.select_by_index(np.where(keep)[0].tolist())
     else:
-        raise ValueError(f"unsupported denoise method: {method}, only support [radius, statistical]")
+        raise ValueError(f"unsupported denoise method: {method}, only support [radius, statistical, adaptive]")
 
     return clean_pcd
