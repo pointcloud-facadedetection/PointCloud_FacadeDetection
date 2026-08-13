@@ -179,7 +179,8 @@ def detect_facades(pcd, voxel_size=0.05,
         7. 二次生长 → 用最终平面在全局吸收遗漏点
         8. 最终精修 → 完整点集上统一IRLS
     """
-    pcd_work = ensure_normals(copy.deepcopy(pcd), voxel_size)
+    # ensure_normals 在需要时自行复制；这里不再提前 deepcopy，才能复用输入法向。
+    pcd_work = ensure_normals(pcd, voxel_size)
     points = np.asarray(pcd_work.points)
     normals = np.asarray(pcd_work.normals)
     total_points = len(points)
@@ -225,7 +226,9 @@ def detect_facades(pcd, voxel_size=0.05,
             pass
     if roi_indices is not None:
         m = np.zeros(total_points, dtype=bool)
-        m[np.asarray(roi_indices, dtype=int)] = True
+        valid_roi = np.asarray(roi_indices, dtype=int)
+        valid_roi = valid_roi[(valid_roi >= 0) & (valid_roi < total_points)]
+        m[valid_roi] = True
         active_mask &= m
 
     # ROI统计滤波（仅ROI模式）
@@ -260,7 +263,7 @@ def detect_facades(pcd, voxel_size=0.05,
     # ==================== Step 2: 垂直筛选 + 3D连通域 + 拟合 ====================
     facades = []
     facade_id = 0
-    consumed_global = set()  # 已被占用的全局索引
+    consumed_global = np.zeros(total_points, dtype=bool)  # 已被占用的全局索引
 
     for cl_mask in clusters:
         cl_count = int(np.sum(cl_mask))
@@ -296,7 +299,7 @@ def detect_facades(pcd, voxel_size=0.05,
             comp_global = active_idx[comp_local]  # 映射回原始点云索引
 
             # 检查是否已被其他立面占用（避免重叠）
-            overlap = len(set(comp_global.tolist()) & consumed_global)
+            overlap = int(np.count_nonzero(consumed_global[comp_global]))
             if overlap > len(comp_global) * 0.7:
                 continue
 
@@ -377,7 +380,7 @@ def detect_facades(pcd, voxel_size=0.05,
 
             facades.append(info)
             facade_id += 1
-            consumed_global.update(inlier_global.tolist())
+            consumed_global[inlier_global] = True
 
     # ==================== Step 6: 智能合并（同一立面被洞口切开）====================
     if enable_merge and len(facades) > 1:
@@ -399,8 +402,7 @@ def detect_facades(pcd, voxel_size=0.05,
             nvec = nvec / (np.linalg.norm(nvec) + 1e-12)
             d = float(facade['plane_model'][3])
 
-            remaining_mask = np.ones(total_points, dtype=bool)
-            remaining_mask[list(consumed_global)] = False
+            remaining_mask = ~consumed_global.copy()
             
             # 【新增】若存在roi_bounds，限制生长范围
             if roi_bounds is not None:
@@ -414,19 +416,22 @@ def detect_facades(pcd, voxel_size=0.05,
             elif is_roi and roi_indices is not None:
                 # 仅有indices时，保守生长：只允许吸收indices内的点
                 m = np.zeros(total_points, dtype=bool)
-                m[np.asarray(roi_indices, dtype=int)] = True
+                valid_roi = np.asarray(roi_indices, dtype=int)
+                valid_roi = valid_roi[(valid_roi >= 0) & (valid_roi < total_points)]
+                m[valid_roi] = True
                 remaining_mask &= m
 
+            # 法向点积随当前平面变化；保持原有距离和法向阈值语义。
             all_dists = np.abs(points @ nvec + d)
             normal_agree = np.abs(normals @ nvec) >= np.cos(np.deg2rad(5.0))
             grow_mask = (all_dists <= max_plane_dist * 2.0) & normal_agree & remaining_mask
 
-            original_idx = set(facade.get('measurement_indices', facade.get('inlier_indices', [])))
-            support_idx = set(facade.get('support_indices', original_idx))
+            original_idx = np.asarray(facade.get('measurement_indices', facade.get('inlier_indices', [])), dtype=int)
+            support_idx = np.asarray(facade.get('support_indices', original_idx), dtype=int)
             grow_idx = np.where(grow_mask)[0]
             # 生长点只作为支撑范围；最终核心层重新从深度主峰提取
-            support_combined = np.array(list(support_idx.union(set(grow_idx.tolist()))), dtype=int)
-            combined = np.array(list(original_idx), dtype=int)
+            support_combined = np.unique(np.concatenate((support_idx, grow_idx)))
+            combined = original_idx
 
             if len(support_combined) < min_cluster_points:
                 continue
@@ -470,7 +475,7 @@ def detect_facades(pcd, voxel_size=0.05,
                                      core_dist=max_plane_dist * 0.6)
             if info['type'] == 'vertical_facade' and info['area'] >= max(min_facade_area, float(getattr(Config, 'MIN_FACADE_AREA', 10.0))):
                 grown.append(info)
-                consumed_global.update(info['inlier_indices'])
+                consumed_global[np.asarray(info['inlier_indices'], dtype=int)] = True
 
         facades = grown
 

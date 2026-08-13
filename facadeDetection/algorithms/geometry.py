@@ -311,6 +311,16 @@ def ensure_normals(pcd, voxel_size=0.05, inplace=False):
     """ 估计并规范化点云法向量 """
     if len(pcd.points) == 0:
         return pcd
+    # 已有与点数一致的有限法向时直接复用，避免 Windows 下重复 KD-tree
+    # 估计；法向不足或非法时才走原有估计流程。
+    if pcd.has_normals() and len(pcd.normals) == len(pcd.points):
+        existing = np.asarray(pcd.normals)
+        if existing.ndim == 2 and existing.shape == (len(pcd.points), 3) and np.all(np.isfinite(existing)):
+            norms = np.linalg.norm(existing, axis=1)
+            if np.all(norms > 1e-8):
+                pcd_work = pcd if inplace else copy.deepcopy(pcd)
+                pcd_work.normals = o3d.utility.Vector3dVector(existing / norms[:, None])
+                return pcd_work
     # 避免无条件 deepcopy
     pcd_work = pcd if inplace else copy.deepcopy(pcd)
     radius = max(float(voxel_size) * 4.0, 0.2)
