@@ -56,21 +56,30 @@ def generate_sparse_defect_heatmap(signed_gap, flatness_limit, color_max=None,
         if len(candidate_mask) != len(values):
             raise ValueError('candidate_mask length must match signed_gap')
         mask = np.isfinite(abs_values) & candidate_mask
-    defect_values = abs_values[mask]
+    # Keep the signed value for visualization.  The mask and threshold remain
+    # based on magnitude, so this does not alter quality judgement.
+    defect_values = values[mask]
     if defect_values.size == 0:
         return {'mask': mask, 'values': defect_values,
                 'colors': np.empty((0, 3), dtype=np.float32),
                 'vmin': limit, 'vmax': limit}
-    vmax = float(color_max) if color_max is not None else float(np.percentile(defect_values, 98.0))
+    vmax = float(color_max) if color_max is not None else float(np.percentile(np.abs(defect_values), 98.0))
     vmax = max(vmax, limit * 1.05)
     denom = max(vmax - limit, 1e-12)
-    t = np.clip((defect_values - limit) / denom, 0.0, 1.0)
-    # 与渲染服务保持一致的轻量 turbo 近似，避免质量算法依赖 matplotlib。
-    colors = np.column_stack((
-        np.clip(1.5 * t, 0.0, 1.0),
-        np.clip(1.5 - np.abs(2.0 * t - 1.0) * 1.5, 0.0, 1.0),
-        np.clip(1.2 * (1.0 - t), 0.0, 1.0),
-    )).astype(np.float32)
+    t = np.clip((np.abs(defect_values) - limit) / denom, 0.0, 1.0)
+    # Display-only diverging map.  The detection mask and values are unchanged:
+    # blue means recessed (negative signed distance), red protruding (positive),
+    # and the threshold boundary is deliberately pale so small defects remain
+    # visible without letting a few outliers dominate the whole facade.
+    # sqrt increases contrast near the tolerance while retaining monotonicity.
+    q = np.sqrt(np.clip(t, 0.0, 1.0))
+    blue = np.array([0.04, 0.32, 0.95], dtype=np.float32)
+    red = np.array([0.95, 0.06, 0.03], dtype=np.float32)
+    neutral = np.array([0.20, 0.20, 0.24], dtype=np.float32)
+    colors = np.tile(neutral, (len(q), 1))
+    neg = defect_values < 0
+    colors[neg] = neutral * (1.0 - q[neg, None]) + blue * q[neg, None]
+    colors[~neg] = neutral * (1.0 - q[~neg, None]) + red * q[~neg, None]
     return {'mask': mask, 'values': defect_values, 'colors': colors,
             'vmin': limit, 'vmax': vmax}
 
@@ -183,9 +192,9 @@ def sliding_window_flatness_2d(points, center, u_axis, v_axis, reference_plane,
                 'point_count': count,
             }
             if quality_level != Config.QUALITY_PASS:
-                window_data['point_abs_gaps'] = np.abs(
-                    window_points @ interval_normal + interval_d
-                ).astype(np.float32).tolist()
+                point_signed = (window_points @ interval_normal + interval_d).astype(np.float32)
+                window_data['point_abs_gaps'] = np.abs(point_signed).tolist()
+                window_data['point_signed_gaps'] = point_signed.tolist()
             window_results.append(window_data)
 
             if gap > worst_gap:
@@ -282,7 +291,10 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
     point_quality_labels = np.full(len(points), -1, dtype=int)
     # 仅由窗口质量决定热力图覆盖范围；数值仍是窗口点到区间基准面的偏差。
     window_heatmap_mask = np.zeros(len(points), dtype=bool)
-    window_heatmap_values = np.full(len(points), np.nan, dtype=np.float32)
+    # 用 -inf 作为“尚未收到异常窗口值”的哨兵。np.maximum.at 对 NaN
+    # 不会产生有效最大值，之前会导致 defect_values 全为空，UI 无热力图。
+    window_heatmap_values = np.full(len(points), -np.inf, dtype=np.float32)
+    window_heatmap_signed = np.full(len(points), np.nan, dtype=np.float32)
 
     for j in range(v_bins):
         v_low = v_min + j * interval_size_m
@@ -331,20 +343,22 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
             local_indices = wr['point_indices']  # 局部索引（在grid_points中的索引）
             quality_level = wr['quality_level']
             point_abs_gaps = np.asarray(wr.get('point_abs_gaps', []), dtype=np.float32)
-            for local_idx in local_indices:
-                global_idx = grid_global_indices[local_idx]
-                if point_quality_labels[global_idx] == -1:
-                    point_quality_labels[global_idx] = quality_level
-                else:
-                    # 取更差的等级
-                    point_quality_labels[global_idx] = max(point_quality_labels[global_idx], quality_level)
-                if quality_level != Config.QUALITY_PASS and local_idx < len(point_abs_gaps):
-                    window_heatmap_mask[global_idx] = True
-                    value = float(point_abs_gaps[local_idx])
-                    if not np.isfinite(window_heatmap_values[global_idx]):
-                        window_heatmap_values[global_idx] = value
-                    else:
-                        window_heatmap_values[global_idx] = max(window_heatmap_values[global_idx], value)
+            point_signed_gaps = np.asarray(wr.get('point_signed_gaps', []), dtype=np.float32)
+            local_indices = np.asarray(local_indices, dtype=int)
+            valid = (local_indices >= 0) & (local_indices < len(grid_global_indices))
+            local_indices = local_indices[valid]
+            global_indices = grid_global_indices[local_indices]
+            point_quality_labels[global_indices] = np.maximum(
+                point_quality_labels[global_indices], quality_level)
+            if quality_level != Config.QUALITY_PASS and len(point_abs_gaps):
+                gap_valid = local_indices < len(point_abs_gaps)
+                global_indices = global_indices[gap_valid]
+                values = point_abs_gaps[local_indices[gap_valid]]
+                finite = np.isfinite(values)
+                window_heatmap_mask[global_indices[finite]] = True
+                np.maximum.at(window_heatmap_values, global_indices[finite], values[finite])
+                if len(point_signed_gaps) == len(wr['point_indices']):
+                    window_heatmap_signed[global_indices[finite]] = point_signed_gaps[local_indices[gap_valid]][finite]
 
         # 合格率 >= 95% 视为整体合格
         compliance = compliance_rate >= 0.95
@@ -384,7 +398,7 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
     # 热力图复用窗口判定结果，不再使用全局参考面重新筛选点。
     signed_gap = signed_plane_distance(points, facade_plane).astype(np.float32)
     heatmap = generate_sparse_defect_heatmap(
-        window_heatmap_values, flatness_limit,
+        window_heatmap_signed, flatness_limit,
         candidate_mask=window_heatmap_mask,
     )
     # 保留旧字段，兼容现有调用方；新调用方应优先使用稀疏字段。
@@ -433,7 +447,7 @@ def compute_facade_quality(facade_info, pcd, grid_size=20.0,
         'defect_colors': heatmap['colors'].tolist(),
         'heatmap_vmin': heatmap['vmin'],
         'heatmap_vmax': heatmap['vmax'],
-        'heatmap_cmap': 'turbo',
+        'heatmap_cmap': 'diverging_blue_white_red',
         'quality_stats': quality_stats,
     }
 

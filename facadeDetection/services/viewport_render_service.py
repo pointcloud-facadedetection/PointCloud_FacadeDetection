@@ -194,6 +194,34 @@ class ViewportRenderService:
             print(f"set_global_point_color failed: {e}", flush=True)
 
     # ---- 热力图渲染 ----
+    def colorize_by_rgb(self, cloud_name: str, indices: np.ndarray, colors_rgb: np.ndarray,
+                        base_color=(0.18, 0.20, 0.24)) -> None:
+        """按算法已生成的 RGB 颜色着色，避免再次做标量归一化/色带计算。"""
+        try:
+            data = self.viewport.get_cloud_data(cloud_name)
+            if data is None or data.get('pos') is None or len(data['pos']) == 0:
+                return
+            n = len(data['pos'])
+            idx = np.asarray(indices, dtype=int).reshape(-1)
+            rgb = np.asarray(colors_rgb, dtype=np.float32).reshape(-1, 3)
+            if len(idx) != len(rgb):
+                return
+            valid = (idx >= 0) & (idx < n)
+            if not np.any(valid):
+                return
+            original = data.get('color')
+            # Keep RGB only when it is sufficiently dark; bright source RGB
+            # makes defect colors unreadable in the 3D view.
+            if original is not None and np.asarray(original).shape == (n, 3):
+                source = np.asarray(original, dtype=np.float32)
+                colors = np.clip(source * 0.35, 0.0, 0.42)
+            else:
+                colors = np.tile(np.asarray(base_color, dtype=np.float32), (n, 1))
+            colors[idx[valid]] = np.clip(rgb[valid] * 1.15, 0.0, 1.0)
+            self.viewport.update_cloud_color(cloud_name, colors)
+        except Exception as e:
+            print(f"colorize_by_rgb failed: {e}", flush=True)
+
     def colorize_by_scalar(self, cloud_name: str, indices: np.ndarray, values: np.ndarray,
                             vmin: float | None = None, vmax: float | None = None,
                             base_color=(0.75, 0.75, 0.75), cmap: str = 'turbo') -> None:
@@ -238,6 +266,20 @@ class ViewportRenderService:
     @staticmethod
     def _colormap(t: np.ndarray, cmap: str = 'turbo') -> np.ndarray:
         t = np.asarray(t, dtype=np.float32).reshape(-1)
+        if cmap in ('diverging', 'diverging_blue_white_red', 'signed'):
+            # Signed deviation: -1=recessed (blue), 0=reference (white),
+            # +1=protruding (red).  This is deliberately symmetric.
+            t = np.clip(t, 0.0, 1.0)
+            blue = np.array([0.05, 0.35, 0.95], dtype=np.float32)
+            white = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+            red = np.array([0.95, 0.08, 0.04], dtype=np.float32)
+            arr = np.empty((len(t), 3), dtype=np.float32)
+            left = t <= 0.5
+            q = (t[left] * 2.0)[:, None]
+            arr[left] = blue + (white - blue) * q
+            q = ((t[~left] - 0.5) * 2.0)[:, None]
+            arr[~left] = white + (red - white) * q
+            return np.clip(arr, 0.0, 1.0)
         if cmap == 'turbo':
             # Lightweight Turbo approximation
             r = 0.135 - 0.157*t + 2.776*t**2 - 2.443*t**3

@@ -57,6 +57,7 @@ class FacadeService:
 
     def detect_on_roi(self, cloud_name: str, roi_indices: list[int] | None = None, 
                       roi_bounds: tuple | None = None,  # 新增参数
+                      roi_box: dict | None = None,
                       project_uuid: Optional[str] = None,
                       min_facade_area: float | None = None) -> list[dict]:
         """对 ROI 子集运行检测。当提供 project_uuid 时，保存结果."""
@@ -64,42 +65,64 @@ class FacadeService:
         if pcd is None:
             return []
         import open3d as o3d
-        pos = pcd["pos"]
+        pos = np.asarray(pcd["pos"], dtype=float).reshape(-1, 3)
         col = pcd.get("color")
         if min_facade_area is None:
             min_facade_area = 5.0
+        if roi_box is not None:
+            center = np.asarray(roi_box['center'], dtype=float)
+            axes = np.asarray(roi_box['axes'], dtype=float).reshape(3, 3)
+            half = np.asarray(roi_box['half_extent'], dtype=float)
+            # roi_box['axes'] 按列保存 OBB 的世界坐标轴，行向量投影需使用转置。
+            local = (pos - center) @ axes.T
+            crop_mask = np.all(np.abs(local) <= half + 1e-9, axis=1)
+        elif roi_bounds is not None:
+            bmin = np.asarray(roi_bounds[0], dtype=float)
+            bmax = np.asarray(roi_bounds[1], dtype=float)
+            crop_mask = np.all((pos >= bmin) & (pos <= bmax), axis=1)
+        elif roi_indices is not None and len(roi_indices):
+            crop_mask = np.zeros(len(pos), dtype=bool)
+            valid = np.asarray(roi_indices, dtype=int)
+            crop_mask[valid[(valid >= 0) & (valid < len(pos))]] = True
+        else:
+            crop_mask = np.ones(len(pos), dtype=bool)
+        global_indices = np.flatnonzero(crop_mask).astype(np.int64)
+        if len(global_indices) == 0:
+            return []
+        roi_pos = pos[global_indices]
+        roi_col = np.asarray(col)[global_indices] if col is not None and len(col) == len(pos) else None
         geo = o3d.geometry.PointCloud()
-        geo.points = o3d.utility.Vector3dVector(pos.astype(float))
-        if col is not None:
-            geo.colors = o3d.utility.Vector3dVector(col.astype(float))
+        geo.points = o3d.utility.Vector3dVector(roi_pos)
+        if roi_col is not None:
+            geo.colors = o3d.utility.Vector3dVector(roi_col.astype(float))
 
         try:
             vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
         except Exception:
             vsize = 0.05
         
-        # 同时传入 roi_bounds 和 roi_indices，并允许在bounds内生长
-        roi_bounds_param = None
-        if roi_bounds is not None:
-            roi_bounds_param = roi_bounds
-        elif roi_indices is not None and len(roi_indices) > 0:
-            # 若未传入bounds但传了indices，从indices计算bounds作为安全边界
-            pts = pos[np.asarray(roi_indices, dtype=int)]
-            bmin = np.min(pts, axis=0)
-            bmax = np.max(pts, axis=0)
-            # 小扩展确保边界完整
-            margin = 0.5
-            roi_bounds_param = (bmin - margin, bmax + margin)
+        has_roi = roi_box is not None or roi_bounds is not None or (
+            roi_indices is not None and len(roi_indices) > 0
+        )
 
         result = detect_facades(
             geo,
             voxel_size=vsize,
             min_facade_area=float(getattr(Config, 'MIN_FACADE_AREA', min_facade_area or 10.0)),
-            roi_indices=roi_indices if roi_indices else None,
-            roi_bounds=roi_bounds_param,  # 新增
+            roi_indices=(np.arange(len(roi_pos), dtype=np.int64) if has_roi else None),
+            roi_bounds=None,
             enable_grow=True,  # 【修复】改为True，让算法在bounds内补全立面
         )
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
+
+        # Detection indices are local to geo; downstream rendering/quality uses cloud-global indices.
+        index_fields = ('inlier_indices', 'core_indices', 'measurement_indices', 'support_indices')
+        for facade in facades:
+            for key in index_fields:
+                local = np.asarray(facade.get(key) or [], dtype=np.int64)
+                local = local[(local >= 0) & (local < len(global_indices))]
+                facade[key] = global_indices[local].astype(int).tolist()
+            facade['__index_space'] = 'cloud_global'
 
         if project_uuid:
             self._persist_results(project_uuid, facades)
@@ -120,8 +143,13 @@ class FacadeService:
 
     # ---------------- 渲染质量热力贴图 ----------------
     def render_flatness_heatmap(self, cloud_name: str, facades: list[dict], vmin: float | None = None,
-                                vmax: float | None = None) -> None:
-        """计算每个立面内各点的绝对平面距离，并以热力图形式呈现。"""
+                                vmax: float | None = None, quality_results=None) -> None:
+        """渲染质量算法产生的稀疏缺陷热力图。
+
+        ``quality_results`` 是 compute_quality 的结果（或按 facade id
+        建立的结果映射）。传入时严格复用 quality.py 的 defect_* 字段，
+        不再重新计算点到平面的距离；旧调用仍保留兼容回退路径。
+        """
         try:
             if self._render is None:
                 return
@@ -129,8 +157,38 @@ class FacadeService:
             if data is None:
                 return
             import numpy as np
-            n_total = len(data.get('pos') or [])
+            positions = data.get('pos')
+            n_total = len(positions) if positions is not None else 0
             if n_total == 0:
+                return
+            # 主路径：质量算法是热力图的唯一数据源。
+            if quality_results is not None:
+                results = quality_results if isinstance(quality_results, dict) else {}
+                if not any(k in results for k in ('defect_local_indices', 'defect_colors')):
+                    results = {r.get('facade_id', r.get('id')): r for r in quality_results}
+                all_indices, all_colors = [], []
+                for f in facades or []:
+                    r = results.get(f.get('id')) if isinstance(results, dict) else None
+                    if r is None and isinstance(quality_results, dict) and len(facades) == 1:
+                        r = quality_results
+                    if not r:
+                        continue
+                    global_idx = np.asarray(r.get('__global_indices') or [], dtype=int)
+                    local_idx = np.asarray(r.get('defect_local_indices') or [], dtype=int)
+                    colors = np.asarray(r.get('defect_colors') or [], dtype=float).reshape(-1, 3)
+                    valid_local = ((local_idx >= 0) &
+                                   (local_idx < len(global_idx)) &
+                                   (np.arange(len(local_idx)) < len(colors)))
+                    if np.any(valid_local):
+                        gi = global_idx[local_idx[valid_local]]
+                        valid_global = (gi >= 0) & (gi < n_total)
+                        if np.any(valid_global):
+                            all_indices.append(gi[valid_global])
+                            all_colors.append(colors[np.flatnonzero(valid_local)[valid_global]])
+                if all_indices:
+                    idx_cat = np.concatenate(all_indices)
+                    col_cat = np.concatenate(all_colors)
+                    self._render.colorize_by_rgb(cloud_name, idx_cat, col_cat)
                 return
             all_indices = []
             all_values = []
@@ -328,7 +386,7 @@ class FacadeService:
         """对立面子集应用逐点质量颜色，其余点保留为base_color."""
         try:
             if self._render is None:
-                pass
+                return
             data = self._viewport.get_cloud_data(cloud_name)
             if data is None:
                 return
@@ -344,11 +402,17 @@ class FacadeService:
             idx = np.asarray(quality_result.get('__global_indices') or [], dtype=int).reshape(-1)
             local = np.asarray(quality_result.get('defect_local_indices') or [], dtype=int).reshape(-1)
             qcols = np.asarray(quality_result.get('defect_colors') or [], dtype=np.float32).reshape(-1, 3)
-            valid = (local >= 0) & (local < len(idx))
-            gi = idx[local[valid]] if len(local) == len(qcols) else np.empty(0, dtype=int)
-            valid_g = (gi >= 0) & (gi < n)
-            if len(gi) == len(qcols[valid]) :
-                colors[gi[valid_g]] = qcols[valid][valid_g]
+            # defect_local_indices 与 defect_colors 是同一稀疏结果的平行数组；
+            count = min(len(local), len(qcols))
+            if count:
+                local = local[:count]
+                qcols = qcols[:count]
+                valid = (local >= 0) & (local < len(idx))
+                gi = np.empty(count, dtype=int)
+                gi[valid] = idx[local[valid]]
+                valid &= (gi >= 0) & (gi < n)
+                if np.any(valid):
+                    colors[gi[valid]] = np.clip(qcols[valid], 0.0, 1.0)
             self._viewport.update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f'立面检测(FacadeService: apply_quality_colors)操作失败: {e}', flush=True)
