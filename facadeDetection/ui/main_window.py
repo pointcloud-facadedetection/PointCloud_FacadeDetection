@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDockWidget,
@@ -36,6 +37,13 @@ PAGE_DEFINITIONS = (
     ('检测复核', 'inspection_review'),
     ('报告预览/导出', 'report_export'),
 )
+
+PAGE_INDEXES = {
+    'project_overview': '01',
+    'project_operation': '02',
+    'inspection_review': '03',
+    'report_export': '04',
+}
 
 PAGE_BUTTON_NAMES = {
     'project_overview': 'btn_overview',
@@ -179,6 +187,142 @@ class ElidedLabel(QLabel):
         QLabel.setText(self, visible_text)
 
 
+class TechnicalCanvas(QWidget):
+    """绘制与点云/工程场景相关的轻量空状态，不依赖额外图片资源。"""
+
+    def __init__(self, variant='facade', message='', parent=None):
+        super().__init__(parent)
+        self.variant = variant
+        self.message = message
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.setMinimumHeight(220)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor('#FBFCFE'))
+
+        canvas = self.rect().adjusted(24, 24, -24, -24)
+        self._draw_grid(painter, canvas)
+        if self.variant == 'document':
+            self._draw_document(painter, canvas)
+        else:
+            self._draw_facade(painter, canvas)
+        painter.end()
+
+    def _draw_grid(self, painter, rect):
+        painter.setPen(QPen(QColor('#EDF2F7'), 1))
+        step = 32
+        for x in range(rect.left(), rect.right() + 1, step):
+            painter.drawLine(x, rect.top(), x, rect.bottom())
+        for y in range(rect.top(), rect.bottom() + 1, step):
+            painter.drawLine(rect.left(), y, rect.right(), y)
+
+    def _draw_facade(self, painter, rect):
+        width = min(440, max(220, int(rect.width() * 0.42)))
+        height = min(248, max(150, int(rect.height() * 0.48)))
+        center = rect.center()
+        x = center.x() - width / 2
+        y = center.y() - height / 2 - (18 if self.message else 0)
+        facade = QRectF(x, y, width, height)
+
+        painter.setPen(QPen(QColor('#B9C7DA'), 1.4))
+        painter.drawRect(facade)
+        depth = min(28, width * 0.08)
+        painter.drawLine(
+            facade.topRight(),
+            facade.topRight() + QPointF(depth, -16),
+        )
+        painter.drawLine(
+            facade.bottomRight(),
+            facade.bottomRight() + QPointF(depth, -16),
+        )
+        painter.drawLine(
+            facade.topRight() + QPointF(depth, -16),
+            facade.bottomRight() + QPointF(depth, -16),
+        )
+
+        columns, rows = 7, 5
+        painter.setPen(QPen(QColor('#D6DFEB'), 1))
+        for column in range(1, columns):
+            px = facade.left() + facade.width() * column / columns
+            painter.drawLine(int(px), int(facade.top()), int(px), int(facade.bottom()))
+        for row in range(1, rows):
+            py = facade.top() + facade.height() * row / rows
+            painter.drawLine(int(facade.left()), int(py), int(facade.right()), int(py))
+
+        # 在立面网格交点绘制确定性的点云采样，避免伪造业务检测结果。
+        point_color = QColor('#3B82F6')
+        point_color.setAlpha(145 if self.variant == 'heatmap' else 105)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(point_color)
+        for row in range(rows + 1):
+            for column in range(columns + 1):
+                px = facade.left() + facade.width() * column / columns
+                py = facade.top() + facade.height() * row / rows
+                jitter_x = ((row * 7 + column * 3) % 5) - 2
+                jitter_y = ((row * 5 + column * 11) % 5) - 2
+                radius = 2 if (row + column) % 3 else 2.6
+                painter.drawEllipse(
+                    QRectF(
+                        px + jitter_x - radius,
+                        py + jitter_y - radius,
+                        radius * 2,
+                        radius * 2,
+                    )
+                )
+
+        if self.message:
+            text_font = QFont(self.font())
+            text_font.setPixelSize(16)
+            text_font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(text_font)
+            painter.setPen(QColor('#334155'))
+            text_rect = QRectF(
+                facade.left(),
+                facade.bottom() + 22,
+                facade.width(),
+                28,
+            )
+            painter.drawText(
+                text_rect,
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                self.message,
+            )
+
+    def _draw_document(self, painter, rect):
+        width = min(240, max(150, int(rect.width() * 0.22)))
+        height = min(300, max(190, int(rect.height() * 0.54)))
+        x = rect.center().x() - width / 2
+        y = rect.center().y() - height / 2
+        page = QRectF(x, y, width, height)
+
+        painter.setBrush(QColor('#FFFFFF'))
+        painter.setPen(QPen(QColor('#B9C7DA'), 1.4))
+        painter.drawRoundedRect(page, 8, 8)
+        painter.setPen(QPen(QColor('#D6DFEB'), 2))
+        line_left = int(page.left() + 28)
+        line_right = int(page.right() - 28)
+        for offset, ratio in ((48, 1.0), (78, 0.72), (108, 0.88), (154, 1.0)):
+            painter.drawLine(
+                line_left,
+                int(page.top() + offset),
+                int(line_left + (line_right - line_left) * ratio),
+                int(page.top() + offset),
+            )
+        painter.setPen(QPen(QColor('#3B82F6'), 3))
+        painter.drawLine(
+            line_left,
+            int(page.top() + 24),
+            int(page.left() + width * 0.48),
+            int(page.top() + 24),
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -239,16 +383,16 @@ class MainWindow(QMainWindow):
         header = QWidget()
         header.setObjectName('applicationHeader')
         header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        header.setFixedHeight(64)
+        header.setFixedHeight(68)
 
         layout = QHBoxLayout(header)
         layout.setContentsMargins(24, 12, 24, 12)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         brand_mark = QLabel('P3D')
         brand_mark.setObjectName('applicationBrandMark')
         brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_mark.setFixedSize(40, 40)
+        brand_mark.setFixedSize(44, 44)
         layout.addWidget(brand_mark)
 
         brand_title = QLabel('点云外立面智能检测平台')
@@ -314,17 +458,22 @@ class MainWindow(QMainWindow):
         content.setProperty('uiRole', 'contentArea')
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(24, 16, 24, 16)
-        content_layout.setSpacing(16)
+        content_layout.setContentsMargins(24, 18, 24, 16)
+        content_layout.setSpacing(14)
 
         heading_row = QWidget()
         heading_row.setProperty('uiRole', 'pageHeadingRow')
         heading_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # 固定标题行高度，避免报告页内部导航把工作区整体向下挤动。
-        heading_row.setFixedHeight(40)
+        heading_row.setFixedHeight(44)
         heading_layout = QHBoxLayout(heading_row)
         heading_layout.setContentsMargins(0, 0, 0, 0)
-        heading_layout.setSpacing(16)
+        heading_layout.setSpacing(12)
+        page_index = QLabel(PAGE_INDEXES[page_key])
+        page_index.setProperty('uiRole', 'pageIndex')
+        page_index.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_index.setFixedSize(36, 36)
+        heading_layout.addWidget(page_index)
         heading_layout.addWidget(self._create_page_title(page_title, page_key))
         heading_layout.addStretch(1)
 
@@ -358,6 +507,50 @@ class MainWindow(QMainWindow):
             page_title,
             page_key,
         )
+
+        # 概览顶部使用连续数据带，而不是多张独立卡片，建立稳定视觉重心。
+        summary_bar = QFrame()
+        summary_bar.setObjectName('overviewSummaryBar')
+        summary_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        summary_bar.setFixedHeight(88)
+        summary_layout = QHBoxLayout(summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(0)
+
+        self.metric_project_count_label = QLabel('0')
+        self.metric_project_count_label.setProperty('uiRole', 'summaryMetricValue')
+        self.metric_file_count_label = QLabel('0')
+        self.metric_file_count_label.setProperty('uiRole', 'summaryMetricValue')
+        self.metric_current_project_label = ElidedLabel('未选择')
+        self.metric_current_project_label.setProperty('uiRole', 'summaryTextValue')
+        self.metric_current_project_label.setMinimumWidth(160)
+        self.metric_current_project_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        metric_items = (
+            ('项目总数', self.metric_project_count_label, 1),
+            ('数据文件', self.metric_file_count_label, 1),
+            ('当前项目', self.metric_current_project_label, 2),
+        )
+        for item_index, (title, value_label, stretch) in enumerate(metric_items):
+            segment = QWidget()
+            segment.setProperty('uiRole', 'metricSegment')
+            segment_layout = QVBoxLayout(segment)
+            segment_layout.setContentsMargins(24, 12, 24, 12)
+            segment_layout.setSpacing(2)
+            segment_layout.addWidget(value_label)
+            title_label = QLabel(title)
+            title_label.setProperty('uiRole', 'metricTitle')
+            segment_layout.addWidget(title_label)
+            summary_layout.addWidget(segment, stretch)
+            if item_index < len(metric_items) - 1:
+                divider = QFrame()
+                divider.setProperty('uiRole', 'metricDivider')
+                divider.setFrameShape(QFrame.Shape.VLine)
+                summary_layout.addWidget(divider)
+        body_layout.addWidget(summary_bar)
 
         # 概览与其他页面共用同一工作区；内部只用分栏，不再套第二层卡片。
         overview_columns = QWidget()
@@ -408,11 +601,17 @@ class MainWindow(QMainWindow):
         workspace_panel.setObjectName('currentWorkspacePanel')
         workspace_panel.setProperty('uiRole', 'workspaceAside')
         workspace_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        workspace_panel.setMinimumWidth(288)
-        workspace_panel.setMaximumWidth(352)
+        workspace_panel.setMinimumWidth(304)
+        workspace_panel.setMaximumWidth(384)
         workspace_layout = QVBoxLayout(workspace_panel)
         workspace_layout.setContentsMargins(24, 20, 24, 24)
         workspace_layout.setSpacing(8)
+
+        workspace_accent = QFrame()
+        workspace_accent.setProperty('uiRole', 'accentLine')
+        workspace_accent.setFixedSize(36, 3)
+        workspace_layout.addWidget(workspace_accent)
+        workspace_layout.addSpacing(8)
 
         workspace_title = QLabel('当前工作区')
         workspace_title.setProperty('uiRole', 'sectionTitle')
@@ -435,36 +634,6 @@ class MainWindow(QMainWindow):
         workspace_layout.addWidget(self.overview_workspace_name_label)
         workspace_layout.addWidget(self.overview_workspace_path_label)
         workspace_layout.addWidget(self.overview_workspace_file_label)
-        workspace_layout.addSpacing(16)
-
-        workspace_divider = QFrame()
-        workspace_divider.setObjectName('workspaceSummaryDivider')
-        workspace_divider.setFrameShape(QFrame.Shape.HLine)
-        workspace_layout.addWidget(workspace_divider)
-
-        project_count_title = QLabel('项目总数')
-        project_count_title.setProperty('uiRole', 'metricTitle')
-        self.metric_project_count_label = QLabel('0')
-        self.metric_project_count_label.setProperty('uiRole', 'summaryMetricValue')
-        file_count_title = QLabel('数据文件')
-        file_count_title.setProperty('uiRole', 'metricTitle')
-        self.metric_file_count_label = QLabel('0')
-        self.metric_file_count_label.setProperty('uiRole', 'summaryMetricValue')
-
-        summary_metrics = QHBoxLayout()
-        summary_metrics.setContentsMargins(0, 4, 0, 0)
-        summary_metrics.setSpacing(24)
-        for title_label, value_label in (
-            (project_count_title, self.metric_project_count_label),
-            (file_count_title, self.metric_file_count_label),
-        ):
-            metric_column = QVBoxLayout()
-            metric_column.setContentsMargins(0, 0, 0, 0)
-            metric_column.setSpacing(3)
-            metric_column.addWidget(title_label)
-            metric_column.addWidget(value_label)
-            summary_metrics.addLayout(metric_column, 1)
-        workspace_layout.addLayout(summary_metrics)
         workspace_layout.addStretch(1)
         columns_layout.addWidget(workspace_panel)
 
@@ -574,14 +743,8 @@ class MainWindow(QMainWindow):
         self.report_preview_state_stack = QStackedWidget()
         self.report_preview_state_stack.setObjectName('reportPreviewStateStack')
 
-        report_empty_state = QWidget()
+        report_empty_state = TechnicalCanvas('document')
         report_empty_state.setObjectName('reportEmptyState')
-        report_empty_state.setAttribute(
-            Qt.WidgetAttribute.WA_StyledBackground,
-            True,
-        )
-        report_empty_layout = QVBoxLayout(report_empty_state)
-        report_empty_layout.setContentsMargins(0, 0, 0, 0)
         self.report_preview_state_stack.addWidget(report_empty_state)
 
         report_document_page = QWidget()
@@ -616,9 +779,8 @@ class MainWindow(QMainWindow):
         heatmap_layout.setContentsMargins(0, 0, 0, 0)
 
         # 保留稳定的控件接口，后续算法视口可以直接替换此占位控件。
-        heatmap_placeholder = QLabel('')
+        heatmap_placeholder = TechnicalCanvas('heatmap')
         heatmap_placeholder.setObjectName('heatmapPlaceholder')
-        heatmap_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         heatmap_layout.addWidget(heatmap_placeholder, 1)
 
         self.report_navigation_stack.addWidget(report_preview_page)
@@ -659,10 +821,13 @@ class MainWindow(QMainWindow):
         return panel
 
     def _create_placeholder_page(self, page_title, page_key):
-        page, _body_layout, _heading_layout = self._create_page_shell(
+        page, body_layout, _heading_layout = self._create_page_shell(
             page_title,
             page_key,
         )
+        review_canvas = TechnicalCanvas('review')
+        review_canvas.setObjectName('reviewTechnicalCanvas')
+        body_layout.addWidget(review_canvas, 1)
         return page
 
     def _create_page_header(self, page_key):
@@ -790,15 +955,21 @@ class MainWindow(QMainWindow):
         panel.setObjectName('bottomDockPanel')
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(panel)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 8, 24, 8)
+        layout.setSpacing(0)
 
         navigation_panel = QWidget()
         navigation_panel.setObjectName('bottomNavigation')
         navigation_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        navigation_panel.setMinimumWidth(720)
+        navigation_panel.setMaximumWidth(1040)
+        navigation_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         navigation_layout = QHBoxLayout(navigation_panel)
-        navigation_layout.setContentsMargins(0, 0, 0, 0)
-        navigation_layout.setSpacing(0)
+        navigation_layout.setContentsMargins(4, 4, 4, 4)
+        navigation_layout.setSpacing(4)
 
         self.page_button_group = QButtonGroup(self)
         self.page_button_group.setExclusive(True)
@@ -819,11 +990,13 @@ class MainWindow(QMainWindow):
             self.page_button_group.addButton(button, index)
             self.page_buttons[page_key] = button
             navigation_layout.addWidget(button, 1)
-        layout.addWidget(navigation_panel, 1)
+        layout.addStretch(1)
+        layout.addWidget(navigation_panel, 4)
+        layout.addStretch(1)
 
         dock.setWidget(panel)
-        dock.setMinimumHeight(64)
-        dock.setMaximumHeight(64)
+        dock.setMinimumHeight(68)
+        dock.setMaximumHeight(68)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         return dock
 
@@ -1096,12 +1269,16 @@ class MainWindow(QMainWindow):
         self.metric_project_count_label.setText(str(len(project_list)))
         self.metric_file_count_label.setText(str(file_count))
         if self.current_project is None:
+            self.metric_current_project_label.setText('未选择')
+            self.metric_current_project_label.setToolTip('')
             self.overview_workspace_name_label.setText('未选择项目')
             self.overview_workspace_path_label.setText('选择项目后显示本地目录')
             self.overview_workspace_path_label.setToolTip('')
             self.overview_workspace_file_label.setText('0 个数据文件')
             return
 
+        self.metric_current_project_label.setText(self.current_project.name)
+        self.metric_current_project_label.setToolTip(self.current_project.name)
         self.overview_workspace_name_label.setText(self.current_project.name)
         self.overview_workspace_name_label.setToolTip(self.current_project.name)
         self.overview_workspace_path_label.setText(
@@ -1119,17 +1296,21 @@ class MainWindow(QMainWindow):
             item = self.project_list_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # 先隐藏再延迟销毁，避免空状态切换到项目列表时短暂残留。
+                widget.hide()
                 widget.deleteLater()
 
         projects = self.project_overview_service.list_projects()
         self._update_overview_metrics(projects)
         if not projects:
-            empty_label = QLabel('暂无项目')
-            empty_label.setObjectName('emptyProjectLabel')
-            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.project_list_layout.insertWidget(0, empty_label)
+            empty_state = TechnicalCanvas('facade', '暂无项目')
+            empty_state.setObjectName('projectEmptyState')
+            self.project_list_layout.insertWidget(0, empty_state, 1)
+            self.project_list_layout.setStretch(1, 0)
             return
 
+        # 恢复列表底部弹性空间，项目行保持紧凑高度并从上向下排列。
+        self.project_list_layout.setStretch(0, 1)
         for project in projects:
             project_row = QWidget()
             project_row.setObjectName('projectRow')
@@ -1139,6 +1320,12 @@ class MainWindow(QMainWindow):
             project_row_layout = QHBoxLayout(project_row)
             project_row_layout.setContentsMargins(18, 12, 14, 12)
             project_row_layout.setSpacing(12)
+
+            project_marker = QLabel((project.name or 'P')[:1].upper())
+            project_marker.setObjectName('projectMarkerLabel')
+            project_marker.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            project_marker.setFixedSize(36, 36)
+            project_row_layout.addWidget(project_marker)
 
             project_info = QWidget()
             project_info.setObjectName('projectInfo')

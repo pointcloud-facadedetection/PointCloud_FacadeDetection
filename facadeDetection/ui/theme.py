@@ -16,9 +16,9 @@ COLORS = {
     "primary_hover": "#1D4ED8",
     "accent": "#3B82F6",
     "accent_soft": "#EFF6FF",
-    "background": "#F8FAFC",
+    "background": "#EEF2F7",
     "surface": "#FFFFFF",
-    "surface_muted": "#F1F5F9",
+    "surface_muted": "#F5F7FB",
     "text": "#0F172A",
     "text_secondary": "#334155",
     "text_muted": "#64748B",
@@ -38,37 +38,37 @@ QWidget#applicationShell,
 QStackedWidget#pageStack,
 QWidget[pageRole="workspace"],
 QWidget[uiRole="contentArea"] {
-    background-color: #F8FAFC;
+    background-color: #EEF2F7;
 }
 
 QWidget#applicationHeader {
-    background-color: #FFFFFF;
+    background-color: #0B1220;
     border: none;
-    border-bottom: 1px solid #E2E8F0;
+    border-bottom: 1px solid #243044;
 }
 
 QLabel#applicationBrandMark {
     color: #FFFFFF;
-    background-color: #1E40AF;
-    border: 1px solid #1E40AF;
-    border-radius: 8px;
+    background-color: #2F6BFF;
+    border: 1px solid #4B7DFF;
+    border-radius: 10px;
     font-size: 14px;
     font-weight: 700;
 }
 
 QLabel#applicationBrandTitle {
-    color: #0F172A;
+    color: #F8FAFC;
     background-color: transparent;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 17px;
+    font-weight: 600;
 }
 
 QLabel#currentProjectLabel {
-    color: #334155;
-    background-color: #F8FAFC;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
-    padding: 5px 10px;
+    color: #DCE6F5;
+    background-color: #111C2E;
+    border: 1px solid #2B3A52;
+    border-radius: 8px;
+    padding: 6px 12px;
     font-size: 12px;
     font-weight: 500;
 }
@@ -80,11 +80,20 @@ QWidget[uiRole="pageHeadingRow"] {
 
 QLabel[uiRole="pageTitle"] {
     min-height: 32px;
-    color: #0F172A;
+    color: #111827;
     background-color: transparent;
     border: none;
     padding: 0;
-    font-size: 24px;
+    font-size: 23px;
+    font-weight: 700;
+}
+
+QLabel[uiRole="pageIndex"] {
+    color: #1E40AF;
+    background-color: #E7EEFF;
+    border: 1px solid #C9D8FF;
+    border-radius: 9px;
+    font-size: 12px;
     font-weight: 700;
 }
 
@@ -104,24 +113,24 @@ QLabel[uiRole="supportingText"] {
 
 QFrame[uiRole="workspaceSurface"] {
     background-color: #FFFFFF;
-    border: 1px solid #DCE3EC;
-    border-radius: 8px;
+    border: 1px solid #D5DEEA;
+    border-radius: 12px;
 }
 
 QWidget[uiRole="workspaceBody"],
 QWidget#overviewColumns {
     background-color: #FFFFFF;
     border: none;
-    border-bottom-left-radius: 7px;
-    border-bottom-right-radius: 7px;
+    border-bottom-left-radius: 11px;
+    border-bottom-right-radius: 11px;
 }
 
 QWidget[uiRole="pageHeader"] {
-    background-color: #F8FAFC;
+    background-color: #F6F8FB;
     border: none;
-    border-bottom: 1px solid #E2E8F0;
-    border-top-left-radius: 7px;
-    border-top-right-radius: 7px;
+    border-bottom: 1px solid #DDE5EF;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
 }
 
 QFrame[uiRole="commandGroup"] {
@@ -147,18 +156,18 @@ QLabel[uiRole="commandGroupLabel"] {
 QPushButton {
     min-height: 20px;
     padding: 7px 14px;
-    color: #334155;
+    color: #27364A;
     background-color: #FFFFFF;
-    border: 1px solid #CBD5E1;
-    border-radius: 6px;
+    border: 1px solid #C8D3E1;
+    border-radius: 7px;
     font-size: 14px;
     font-weight: 500;
 }
 
 QPushButton:hover {
     color: #1E40AF;
-    background-color: #F8FAFC;
-    border-color: #93C5FD;
+    background-color: #F2F6FF;
+    border-color: #8EABF6;
 }
 
 QPushButton:pressed {
@@ -185,14 +194,14 @@ QPushButton[uiRole="headerAction"] {
 QPushButton[buttonRole="primary"],
 QPushButton[buttonRole="primary"]:checked {
     color: #FFFFFF;
-    background-color: #1E40AF;
-    border-color: #1E40AF;
+    background-color: #2457D6;
+    border-color: #2457D6;
 }
 
 QPushButton[buttonRole="primary"]:hover {
     color: #FFFFFF;
-    background-color: #1D4ED8;
-    border-color: #1D4ED8;
+    background-color: #1E48B8;
+    border-color: #1E48B8;
 }
 
 QPushButton[buttonRole="primary"]:pressed {
@@ -231,37 +240,36 @@ QPushButton[buttonRole="danger"]:disabled {
     border-color: #E2E8F0;
 }
 
-/* Global pages use a flat top indicator; no tab-shaped blue cards. */
+/* Global navigation is a compact command dock instead of four full-screen tabs. */
 QPushButton[uiRole="navigationItem"][navigationLevel="main"] {
     min-width: 96px;
-    min-height: 46px;
+    min-height: 42px;
     padding: 0 18px;
     color: #475569;
     background-color: transparent;
-    border: none;
-    border-top: 2px solid transparent;
-    border-radius: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
     font-size: 14px;
     font-weight: 500;
 }
 
 QPushButton[uiRole="navigationItem"][navigationLevel="main"]:hover {
     color: #1E40AF;
-    background-color: #F8FAFC;
-    border-top-color: #BFDBFE;
+    background-color: #F2F6FF;
+    border-color: #D5E0FF;
 }
 
 QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked {
-    color: #1E40AF;
-    background-color: #FFFFFF;
-    border-top-color: #1E40AF;
+    color: #FFFFFF;
+    background-color: #1E40AF;
+    border-color: #1E40AF;
     font-weight: 600;
 }
 
 QPushButton[uiRole="navigationItem"][navigationLevel="main"]:disabled {
     color: #94A3B8;
     background-color: transparent;
-    border-top-color: transparent;
+    border-color: transparent;
 }
 
 /* Report sub-pages use the same flat navigation language at a smaller scale. */
@@ -297,15 +305,38 @@ QDockWidget#bottomDock {
 
 QWidget#bottomDockPanel,
 QWidget#bottomNavigation {
-    background-color: #FFFFFF;
     border: none;
 }
 
 QWidget#bottomDockPanel {
-    border-top: 1px solid #E2E8F0;
+    background-color: #E9EEF5;
+    border-top: 1px solid #D2DBE7;
+}
+
+QWidget#bottomNavigation {
+    background-color: #FFFFFF;
+    border: 1px solid #D4DDE9;
+    border-radius: 11px;
 }
 
 /* Overview: a flat project list and one muted summary rail. */
+QFrame#overviewSummaryBar {
+    background-color: #F8FAFD;
+    border: none;
+    border-bottom: 1px solid #DDE5EF;
+}
+
+QWidget[uiRole="metricSegment"] {
+    background-color: transparent;
+    border: none;
+}
+
+QFrame[uiRole="metricDivider"] {
+    color: #DDE5EF;
+    background-color: #DDE5EF;
+    border: none;
+}
+
 QFrame[uiRole="workspaceSection"] {
     background-color: #FFFFFF;
     border: none;
@@ -320,9 +351,15 @@ QWidget#projectActivityHeader {
 }
 
 QFrame[uiRole="workspaceAside"] {
-    background-color: #F8FAFC;
+    background-color: #F5F8FC;
     border: none;
     border-radius: 0;
+}
+
+QFrame[uiRole="accentLine"] {
+    background-color: #2F6BFF;
+    border: none;
+    border-radius: 1px;
 }
 
 QLabel#overviewWorkspaceNameLabel {
@@ -342,16 +379,17 @@ QLabel[uiRole="metricTitle"] {
 }
 
 QLabel[uiRole="summaryMetricValue"] {
-    color: #0F172A;
+    color: #111827;
     background-color: transparent;
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 700;
 }
 
-QFrame#workspaceSummaryDivider {
-    color: #E2E8F0;
-    background-color: #E2E8F0;
-    border: none;
+QLabel[uiRole="summaryTextValue"] {
+    color: #1E3A8A;
+    background-color: transparent;
+    font-size: 16px;
+    font-weight: 600;
 }
 
 QScrollArea#projectListScrollArea,
@@ -369,8 +407,8 @@ QWidget#projectRow {
 }
 
 QWidget#projectRow:hover {
-    background-color: #F8FAFC;
-    border-bottom-color: #CBD5E1;
+    background-color: #F4F7FC;
+    border-bottom-color: #BFCBDC;
 }
 
 QWidget#projectInfo,
@@ -384,6 +422,15 @@ QLabel#projectNameLabel {
     background-color: transparent;
     font-size: 15px;
     font-weight: 600;
+}
+
+QLabel#projectMarkerLabel {
+    color: #1E40AF;
+    background-color: #E7EEFF;
+    border: 1px solid #C9D8FF;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 700;
 }
 
 QLabel#projectPathLabel,
@@ -401,13 +448,12 @@ QWidget#projectActionPanel QPushButton {
     font-size: 13px;
 }
 
-QLabel#emptyProjectLabel {
-    min-height: 120px;
-    color: #64748B;
-    background-color: transparent;
+QWidget#projectEmptyState,
+QWidget#reviewTechnicalCanvas,
+QWidget#reportEmptyState,
+QWidget#heatmapPlaceholder {
+    background-color: #FBFCFE;
     border: none;
-    font-size: 14px;
-    padding: 24px 16px;
 }
 
 /* Operation workspace keeps the three-panel engineering layout. */
@@ -421,7 +467,7 @@ QSplitter#operationPageSplitter::handle {
 }
 
 QFrame[uiRole="sidebar"] {
-    background-color: #FFFFFF;
+    background-color: #F7F9FC;
     border: none;
     border-radius: 0;
 }
@@ -435,13 +481,13 @@ QFrame#rightDock {
 }
 
 QWidget[uiRole="sidebarTitleBar"] {
-    background-color: #F1F5F9;
+    background-color: #E9EEF5;
     border: none;
     border-bottom: 1px solid #E2E8F0;
 }
 
 QWidget[uiRole="sidebarBody"] {
-    background-color: #FFFFFF;
+    background-color: #F7F9FC;
     border: none;
 }
 
@@ -482,18 +528,18 @@ QWidget#viewportPanel {
 }
 
 QLabel#viewportStateLabel {
-    color: #475569;
-    background-color: #F1F5F9;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
+    color: #34445A;
+    background-color: #EEF2F7;
+    border: 1px solid #D5DEEA;
+    border-radius: 7px;
     padding: 4px 8px;
     font-size: 12px;
 }
 
 QWidget#open3dViewport {
     background-color: #111827;
-    border: 1px solid #CBD5E1;
-    border-radius: 6px;
+    border: 1px solid #B7C4D5;
+    border-radius: 10px;
 }
 
 /* Report workspace: stable page title, flat sub-navigation and one viewer. */
@@ -530,18 +576,10 @@ QWidget#reportDocumentPage {
     border: none;
 }
 
-QWidget#reportEmptyState,
-QLabel#heatmapPlaceholder {
-    color: #64748B;
-    background-color: #F8FAFC;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
-}
-
 QWidget#reportPdfWebView {
     background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-radius: 6px;
+    border: 1px solid #D5DEEA;
+    border-radius: 8px;
 }
 
 QLineEdit,
@@ -649,11 +687,12 @@ def apply_application_theme(app: QApplication) -> None:
         for family in QFontDatabase.families()
     }
     requested_families = (
-        "Segoe UI Variable Text",
-        "Segoe UI Variable",
-        "Microsoft YaHei UI",
         "DengXian",
         "等线",
+        "Microsoft YaHei UI",
+        "Bahnschrift",
+        "Segoe UI Variable Text",
+        "Segoe UI Variable",
         "Segoe UI",
     )
     font_families = [
