@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 import open3d as o3d
 
-from algorithms.facade.adaptive_facade_detection import detect_facades_adaptive
+from algorithms.facade.facade_detection import detect_facades_adaptive
 from config.settings import Config
 from services.dal.results_repo import ResultsRepo
 from services.facade.facade_index_service import FacadeIndexService
