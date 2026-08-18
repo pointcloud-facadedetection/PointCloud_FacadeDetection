@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable, Optional
+import numpy as np
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -12,9 +13,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QWidget,
+    QComboBox,
 )
-
-
 class FacadeQualityDialog(QDialog):
     """
     立面质量评估对话框：
@@ -56,13 +56,20 @@ class FacadeQualityDialog(QDialog):
         title.setStyleSheet('font-weight:600; color:#303641;')
         layout.addWidget(title)
 
-        vdeg = float(overall.get('verticality') or 0.0)
-        gap = float(overall.get('gap') or 0.0) * 1000.0  # m -> mm (if provided as meters)
-        rate = float(overall.get('compliance_rate') or 0.0) * 100.0
+        gap = float(overall.get('flatness_max_gap_mm', 0.0) or 0.0)
+        vangle = float(overall.get('verticality_max_angle_deg', 0.0) or 0.0)
+        vgap = float(overall.get('verticality_max_deviation_mm', 0.0) or 0.0)
+        flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
+        vert_rate = float(overall.get('verticality_pass_rate', 0.0) or 0.0) * 100.0
         pts = int(overall.get('point_count') or 0)
         profile = self._quality.get('profile_snapshot') or {}
         standard = f"标准：{profile.get('standard_name', '未指定')} {profile.get('version', '')}"
-        meta = QLabel(f"{standard}\n垂直度角度: {vdeg:.3f}°    最差窗口峰谷差: {gap:.2f} mm    合格率: {rate:.1f}%    点数: {pts}")
+        meta = QLabel(
+            f"{standard}\n"
+            f"平整度最大间隙: {gap:.2f} mm    垂直度最大偏差角: {vangle:.3f}°    "
+            f"垂直度2m最大偏差: {vgap:.2f} mm    平整度合格率: {flat_rate:.1f}%    "
+            f"垂直度合格率: {vert_rate:.1f}%    点数: {pts}"
+        )
         meta.setObjectName('qualityMeta')
         layout.addWidget(meta)
 
@@ -70,32 +77,33 @@ class FacadeQualityDialog(QDialog):
         table_title.setStyleSheet('font-weight:600; color:#303641;')
         layout.addWidget(table_title)
 
-        table = QTableWidget(0, 6, self)
+        interval_size = float(self._quality.get('interval_size_m', 0.0))
+        z_min = float(self._quality.get('z_min_m', 0.0) or 0.0)
+        z_max = float(self._quality.get('z_max_m', 0.0) or 0.0)
+        interval_count = int(self._quality.get('interval_count', 0) or 0)
+        layout.addWidget(QLabel(
+            f"区间：{interval_size:g}m，共{interval_count}个）"
+        ))
+        self._table = table = QTableWidget(0, 8, self)
         table.setObjectName('tblQualityGrids')
-        table.setHorizontalHeaderLabels(["区间ID", "点数", "窗口峰谷差(mm)", "合格率(%)", "窗口总数", "合格窗口"])
-        grids = self._quality.get('grids') or []
-        table.setRowCount(len(grids))
-        for r, g in enumerate(grids):
-            def seti(c, val):
-                item = QTableWidgetItem(val)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                table.setItem(r, c, item)
-            gid = int(g.get('grid_id') or r)
-            seti(0, str(gid))
-            seti(1, str(int(g.get('point_count') or 0)))
-            # gap provided in meters from algorithm; display in millimeters
-            seti(2, f"{float(g.get('gap') or 0.0) * 1000.0:.2f}")
-            seti(3, f"{float(g.get('compliance_rate') or 0.0) * 100.0:.1f}")
-            seti(4, str(int(g.get('total_windows') or 0)))
-            seti(5, str(int(g.get('compliant_windows') or 0)))
+        table.setHorizontalHeaderLabels([
+            "区间", "点数", "窗口数", "平整度最大间隙(mm)",
+            "平整度合格率(%)", "垂直度最大偏差角(°)",
+            "垂直度最大偏差(mm)", "垂直度合格率(%)"
+        ])
+        self._refresh_intervals()
         table.resizeColumnsToContents()
         layout.addWidget(table, 1)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
+        self._mode_combo = QComboBox(self)
+        self._mode_combo.addItem('平整度效果', 'flatness')
+        self._mode_combo.addItem('垂直度效果', 'verticality')
         btn_show = QPushButton("显示检测效果")
         btn_restore = QPushButton("恢复原始颜色")
         btn_close = QPushButton("关闭")
+        btn_row.addWidget(self._mode_combo)
         btn_row.addWidget(btn_show)
         btn_row.addWidget(btn_restore)
         btn_row.addWidget(btn_close)
@@ -103,10 +111,31 @@ class FacadeQualityDialog(QDialog):
 
         btn_close.clicked.connect(self.close)
         if callable(self._on_show_colors):
-            btn_show.clicked.connect(self._on_show_colors)
+            btn_show.clicked.connect(lambda: self._on_show_colors(self._mode_combo.currentData() or 'flatness'))
         else:
             btn_show.setEnabled(False)
         if callable(self._on_restore_colors):
             btn_restore.clicked.connect(self._on_restore_colors)
         else:
             btn_restore.setEnabled(False)
+
+    def _refresh_intervals(self):
+        intervals = self._quality.get('intervals') or []
+        self._table.setRowCount(len(intervals))
+        for r, item in enumerate(intervals):
+            vals = [
+                str(item.get('label') or (
+                    f"{float(item.get('z_min_m', 0.0)):.2f}–"
+                    f"{float(item.get('z_max_m', 0.0)):.2f}m"
+                )),
+                str(item.get('point_count', 0)),
+                str(item.get('window_count', 0)),
+                f"{float(item.get('flatness_max_gap_mm', 0)):.2f}",
+                f"{float(item.get('flatness_pass_rate', 0))*100:.1f}",
+                f"{float(item.get('verticality_max_angle_deg', 0)):.3f}",
+                f"{float(item.get('verticality_max_deviation_mm_2m', 0)):.2f}",
+                f"{float(item.get('verticality_pass_rate', 0))*100:.1f}",
+            ]
+            for c, value in enumerate(vals):
+                self._table.setItem(r, c, QTableWidgetItem(value))
+        self._table.resizeColumnsToContents()

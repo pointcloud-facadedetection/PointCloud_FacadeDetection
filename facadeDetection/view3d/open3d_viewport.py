@@ -1,5 +1,5 @@
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint, Slot, Signal
 from PySide6.QtGui import QImage, QWindow, QPainter, QPen, QColor
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -86,6 +86,11 @@ class _QWindowEventBridge(QObject):
         return False
 
 
+class _RenderQueue(QObject):
+    color = Signal(str, object)
+    points = Signal(str, object, object)
+
+
 class Open3DViewport(BaseViewport):
     def __init__(self, parent=None):
         self._root = QWidget(parent)
@@ -121,12 +126,23 @@ class Open3DViewport(BaseViewport):
         self._scene_view_initialized = False
 
         self.native = self
+        self._render_queue = _RenderQueue(self._root)
+        self._render_queue.color.connect(self.update_cloud_color, Qt.QueuedConnection)
+        self._render_queue.points.connect(self.update_cloud_points, Qt.QueuedConnection)
 
         self._init_ui()
 
         self._timer = QTimer(self._root)
         self._timer.timeout.connect(self.process_events)
         self._timer.start(16)
+
+    def queue_update_cloud_color(self, name, colors):
+        """Thread-safe color update; Open3D is touched only by the Qt GUI thread."""
+        self._render_queue.color.emit(name, colors)
+
+    def queue_update_cloud_points(self, name, positions, colors=None):
+        """Thread-safe geometry replacement for worker completion callbacks."""
+        self._render_queue.points.emit(name, positions, colors)
 
     @property
     def _clouds(self):
