@@ -11,14 +11,14 @@ class InspectionProfile:
     flatness_limit_mm: float
     verticality_limit_mm: float
     interval_size_m: float = 20.0
-    window_size_m: float = 2.0
+    window_size_m: float = 0.05
     step_size_m: float = 0.05
     measure_height_m: float = 2.0
     min_points: int = 30
     pass_rate: float = 0.95
     warn_ratio: float = 1.0
     fail_ratio: float = 2.0
-    algorithm_version: str = "facade-quality-v1"
+    algorithm_version: str = "facade-quality"
 
     def snapshot(self) -> dict:
         return asdict(self)
