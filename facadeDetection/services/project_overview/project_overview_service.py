@@ -151,10 +151,19 @@ class ProjectOverviewService:
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
         normalized = [str(Path(p).expanduser().resolve()) for p in file_paths if p]
+        # 将同名 PLY/.dist 组合成一个上传任务；.dist 不是独立点云资产。
+        dist_by_stem = {
+            Path(p).stem.lower(): p for p in normalized
+            if Path(p).suffix.lower() == '.dist'
+        }
+        pointclouds = [p for p in normalized if Path(p).suffix.lower() != '.dist']
         uploaded: list[str] = []
-        for p in normalized:
+        for p in pointclouds:
             try:
-                svc.upload_files(project_uuid=project_uuid, file_path=p, copy_into_project=False)
+                dist_path = dist_by_stem.get(Path(p).stem.lower())
+                svc.upload_files(project_uuid=project_uuid, file_path=p,
+                                 distance_path=dist_path,
+                                 copy_into_project=False)
                 uploaded.append(p)
             except Exception as e:
                 print(f"上传失败: {p} -> {e}", flush=True)

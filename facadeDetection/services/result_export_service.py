@@ -9,6 +9,11 @@ from algorithms.facade.projection import rasterize_facade
 
 
 class ResultExportService:
+    @staticmethod
+    def _array(value, dtype=float):
+        """Accept both legacy lists and the memory-safe ndarray payloads."""
+        return np.asarray([] if value is None else value, dtype=dtype)
+
     def start_run(self, results_dir, project_name='', interval_size_m=20.0):
         """创建一次新的检测运行目录，并返回目录路径与初始清单。"""
         run = Path(results_dir) / f'run_{uuid.uuid4().hex[:12]}'
@@ -34,6 +39,7 @@ class ResultExportService:
                       pixel_size=0.01):
         """
         导出单个立面的投影图、缺陷热力图及叠加合成图。
+        修正版：使用有符号距离区分凹陷/凸起，轻量高斯平滑替代过度膨胀。
         """
         root = None
         try:
@@ -52,240 +58,70 @@ class ResultExportService:
             root.mkdir(parents=True, exist_ok=True)
 
             # ── 1. 提取立面局部点云 ──
-            indices = np.asarray(
-                quality.get('__global_indices') or [], dtype=int)
+            indices = self._array(quality.get('__global_indices'), dtype=np.int64).reshape(-1)
             pts = np.asarray(points, dtype=float)
+            if pts.ndim != 2 or pts.shape[1] != 3:
+                raise ValueError(f'points 必须为 N×3，实际形状: {pts.shape}')
+            colors_arr = None
+            if colors is not None:
+                candidate = np.asarray(colors, dtype=float)
+                if candidate.ndim == 2 and candidate.shape == (len(pts), 3):
+                    colors_arr = candidate
+                else:
+                    print(f'export_facade: 忽略非法 colors 形状 {candidate.shape}', flush=True)
 
-            if len(indices) == 0:
-                # 若未提供全局索引，则视输入 points 已为局部点云
-                pts_local = pts
-                rgb = np.asarray(
-                    colors, dtype=float) if colors is not None else None
-            else:
+            local_raw = quality.get('__points_index_space') == 'facade_local_raw'
+            if local_raw:
+                if len(indices) not in (0, len(pts)):
+                    raise ValueError('facade_local_raw 的 raw 全局索引必须与局部点集等长')
+                pts_local, rgb = pts, colors_arr
+            elif len(indices):
+                if np.any(indices < 0) or np.any(indices >= len(pts)):
+                    raise ValueError(
+                        f'__global_indices 越界: range=[0,{len(pts)-1}], '
+                        f'min={indices.min()}, max={indices.max()}')
                 pts_local = pts[indices]
-                rgb = np.asarray(colors, dtype=float)[
-                    indices] if colors is not None else None
+                rgb = colors_arr[indices] if colors_arr is not None else None
+            else:
+                pts_local = pts
+                rgb = colors_arr
 
             if len(pts_local) == 0:
-                raise ValueError(
-                    f'立面 {facade_id} 没有有效点，无法导出')
+                raise ValueError(f'立面 {facade_id} 没有有效点，无法导出')
 
-            # ── 2. 获取有符号距离（局部索引空间）──
-            signed = np.asarray(
-                quality.get('signed_gap') or [], dtype=float)
-            if len(signed) != len(pts_local):
-                raise ValueError(
-                    f'signed_gap 长度 ({len(signed)}) 与局部点云 '
-                    f'({len(pts_local)}) 不匹配，必须使用立面局部索引空间')
+            windows = quality.get('windows') or {}
+            if isinstance(windows, dict):
+                summary = {
+                    'facade_id': int(facade_id),
+                    'point_count': int(len(pts_local)),
+                    'interval_size_m': float(quality['interval_size_m']),
+                    'thresholds': quality.get('thresholds', {}),
+                    'overall': quality.get('overall', {}),
+                    'intervals': quality.get('intervals', [])
+                }
+                json_path = root / f'facade_{int(facade_id):03d}_quality.json'
+                json_path.write_text(
+                    json.dumps(summary, ensure_ascii=False, indent=2, default=lambda x: x.tolist()),
+                    encoding='utf-8')
+                arrays = {k: np.asarray(v) for k, v in windows.items()}
+                npz_path = root / f'facade_{int(facade_id):03d}_windows.npz'
+                np.savez_compressed(npz_path, **arrays)
+                heatmap_path = self._export_window_heatmap(
+                    root, facade_id, pts_local, windows, plane_model, pixel_size, quality)
+                legend_path = self._create_heatmap_legend(
+                    root, quality.get('thresholds', {}).get('flatness_limit_mm', 4.0),
+                    float(overall.get('flatness_max_gap_mm', 4.0)))
+                return {
+                    'root': str(root),
+                    'json': str(json_path),
+                    'windows': str(npz_path),
+                    'heatmap': str(heatmap_path),
+                    'legend': str(legend_path)
+                }
 
-            # ── 3. 获取稀疏缺陷信息 ──
-            defect_local = np.asarray(
-                quality.get('defect_local_indices') or [], dtype=int)
-            defect_values = np.asarray(
-                quality.get('defect_values') or [], dtype=float)
-            defect_colors = np.asarray(
-                quality.get('defect_colors') or [], dtype=float)
-
-            if len(defect_local) != len(defect_values) or \
-               len(defect_values) != len(defect_colors):
-                raise ValueError(
-                    '缺陷索引、数值与颜色长度必须相等')
-            if len(defect_local) and (
-                    np.any(defect_local < 0) or
-                    np.any(defect_local >= len(pts_local))):
-                raise ValueError(
-                    'defect_local_indices 超出立面局部索引范围')
-
-            full_values = np.full(len(pts_local), np.nan, dtype=float)
-            full_colors = np.zeros((len(pts_local), 3), dtype=float)
-            if len(defect_local):
-                full_values[defect_local] = defect_values
-                full_colors[defect_local] = defect_colors
-
-            # ── 4. 栅格化投影 ──
-            flatness_limit = quality.get('flatness_limit') or 0.004
-            raster = rasterize_facade(
-                pts_local,
-                rgb,
-                plane_model,
-                signed,
-                flatness_limit,
-                pixel_size,
-                defect_values=full_values,
-                defect_colors=full_colors,
-                vmin=quality.get('heatmap_vmin'),
-                vmax=quality.get('heatmap_vmax'))
-
-            # ── 5. 诊断底图：压暗灰度 + 空洞填充 ──
-            base_rgb = raster['base_rgb'].astype(np.float32)
-            # 保留原始彩色立面作为独立文件
-            original_base = cv2.cvtColor(
-                raster['base_rgb'], cv2.COLOR_RGB2BGR)
-
-            gray = cv2.cvtColor(
-                base_rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            base_display = np.dstack(
-                [gray, gray, gray]).astype(np.float32) * 0.28
-            base_display = np.clip(
-                base_display + 4.0, 0, 255).astype(np.uint8)
-
-            # 填充无点区域（count==0）为暗灰，避免纯黑背景
-            count = raster['count']
-            empty_mask = (count == 0)
-            if np.any(empty_mask):
-                base_display[empty_mask] = [30, 30, 34]
-
-            base = cv2.cvtColor(base_display, cv2.COLOR_RGB2BGR)
-
-            # ── 6. 自适应形态学放大 ──
-            target_diameter_m = 0.20
-            kernel_px = max(
-                5,
-                int(np.ceil(
-                    target_diameter_m / max(float(pixel_size), 1e-4))))
-            if kernel_px % 2 == 0:
-                kernel_px += 1
-            kernel_px = min(kernel_px, 41)  # 上限 41，防止过度模糊
-
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (kernel_px, kernel_px))
-
-            overlay_rgba = np.asarray(
-                raster['overlay_rgba'], dtype=np.uint8).copy()
-
-            # 先对 Alpha 做 CLOSE 填补空洞
-            mask = (overlay_rgba[:, :, 3] > 0).astype(np.uint8) * 255
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-            # 再对 RGBA 整体做 DILATE，使颜色与 Alpha 同步扩散
-            dilate_iters = max(1, min(4, int(12 // kernel_px) + 1))
-            overlay_rgba = cv2.dilate(
-                overlay_rgba, kernel, iterations=dilate_iters)
-
-            # 将 CLOSE 后的 mask 也合并到 alpha（确保空洞被填补）
-            overlay_rgba[:, :, 3] = np.maximum(overlay_rgba[:, :, 3], mask)
-
-            # 填充 dilate 后新增像素的 RGB（从最近原始缺陷点复制颜色）
-            old_alpha = (raster['overlay_rgba'][:, :, 3] > 0).astype(np.uint8)
-            new_pixels = (overlay_rgba[:, :, 3] > 0) & (old_alpha == 0)
-            if np.any(new_pixels):
-                nearest_mask = old_alpha
-                _, labels = cv2.distanceTransformWithLabels(
-                    (1 - nearest_mask) * 255, cv2.DIST_L2, 3,
-                    labelType=cv2.DIST_LABEL_PIXEL)
-                source = np.argwhere(nearest_mask > 0)
-                if len(source):
-                    label = labels[new_pixels] - 1
-                    valid = (label >= 0) & (label < len(source))
-                    yy, xx = np.where(new_pixels)
-                    overlay_rgba[yy[valid], xx[valid], :3] = raster['overlay_rgba'][
-                        source[label[valid], 0], source[label[valid], 1], :3]
-
-            # ── 7. 预乘 Alpha 高斯模糊：光晕连续性 ──
-            blur_sigma = max(2.0, kernel_px / 2.0)
-            blur_k = max(5, int(np.ceil(blur_sigma * 6)))
-            if blur_k % 2 == 0:
-                blur_k += 1
-            blur_k = min(blur_k, 81)
-
-            rgb_f = overlay_rgba[:, :, :3].astype(np.float32)
-            alpha_f = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
-
-            # 预乘：避免透明区域颜色泄漏
-            premul = rgb_f * alpha_f
-            premul_blur = cv2.GaussianBlur(
-                premul, (blur_k, blur_k), blur_sigma)
-            alpha_blur = cv2.GaussianBlur(
-                alpha_f, (blur_k, blur_k), blur_sigma)
-
-            # 数值稳定性：限制最小 alpha，防止除零产生噪点
-            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
-            rgb_blur = premul_blur / alpha_blur
-
-            overlay_rgba[:, :, :3] = np.clip(
-                rgb_blur, 0, 255).astype(np.uint8)
-            overlay_rgba[:, :, 3] = np.clip(
-                alpha_blur[:, :, 0] * 255, 0, 255).astype(np.uint8)
-
-            # ── 8. 颜色增强：极端对比度与饱和度 ──
-            heat_rgb = overlay_rgba[:, :, :3].astype(np.float32) / 255.0
-            # 对比度 2.0×
-            heat_rgb = np.clip((heat_rgb - 0.5) * 2.0 + 0.5, 0, 1)
-            # 饱和度 1.8×
-            mean = np.mean(heat_rgb, axis=2, keepdims=True)
-            heat_rgb = np.clip(
-                mean + (heat_rgb - mean) * 1.8, 0, 1)
-            overlay_rgba[:, :, :3] = (heat_rgb * 255).astype(np.uint8)
-
-            # ── 9. 合成：以压暗底图为基底 ──
-            composite = cv2.cvtColor(
-                base_display, cv2.COLOR_RGB2RGBA)
-
-            visible = overlay_rgba[:, :, 3] > 0
-            alpha = (overlay_rgba[:, :, 3:4].astype(
-                np.float32) / 255.0) * 0.96
-            alpha_flat = alpha[:, :, 0][visible, None]
-            composite[visible, :3] = (
-                composite[visible, :3] * (1.0 - alpha_flat) +
-                overlay_rgba[visible, :3] * alpha_flat
-            ).astype(np.uint8)
-            composite[visible, 3] = 255
-
-            # ── 10. 写入文件并验证 ──
-            ok1 = cv2.imwrite(
-                str(root / 'defect_heatmap_rgba.png'),
-                cv2.cvtColor(overlay_rgba, cv2.COLOR_RGBA2BGRA))
-            ok2 = cv2.imwrite(
-                str(root / 'defect_overlay.png'),
-                cv2.cvtColor(composite, cv2.COLOR_RGBA2BGRA))
-
-            if not all([ok1, ok2]):
-                failed = [n for n, o in zip(
-                    ['defect_heatmap_rgba', 'defect_overlay'],
-                    [ok1, ok2]) if not o]
-                raise RuntimeError(f'图像写入失败: {failed}')
-
-            # 保存栅格元数据（点数、缺陷掩码、UV 坐标）
-            np.savez_compressed(
-                root / 'heatmap_grid.npz',
-                count=raster['count'],
-                defect_mask=raster['defect_mask'],
-                uv=raster['uv'])
-
-            # 构建质量元数据
-            meta = {
-                'facade_id': int(facade_id),
-                'pixel_size': float(raster['pixel_size']),
-                'vmin': float(raster['vmin']),
-                'vmax': float(raster['vmax']),
-                'cmap': 'diverging_blue_white_red',
-                'polarity': 'signed: negative=recessed, positive=protruding',
-                'flatness_limit': float(flatness_limit),
-                'plane_model': [float(x) for x in plane_model],
-            }
-            meta['interval_size_m'] = quality.get(
-                'interval_size_m', quality.get('grid_size', 20.0))
-            meta['window_size_m'] = quality.get(
-                'window_size_m', quality.get('ruler_size', 2.0))
-            meta['step_size_m'] = quality.get(
-                'step_size_m', quality.get('ruler_step', 0.05))
-
-            (root / 'quality.json').write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                encoding='utf-8')
-
-            return {
-                'directory': str(root),
-                **{k: str(root / f) for k, f in {
-                    'heatmap': 'defect_heatmap_rgba.png',
-                    'overlay': 'defect_overlay.png',
-                    'grid': 'heatmap_grid.npz',
-                    'json': 'quality.json'
-                }.items()}
-            }
+            raise ValueError('质量结果必须包含 windows 数组契约')
 
         except Exception as e:
-            # 全链路异常捕获：确保错误被记录，不会静默失败
             err_msg = (
                 f"=== export_facade 异常 ===\n"
                 f"立面 ID: {facade_id}\n"
@@ -295,11 +131,140 @@ class ResultExportService:
                 f"堆栈:\n{traceback.format_exc()}"
             )
             print(err_msg, flush=True)
-            # 若目录已创建，将错误日志写入磁盘以便排查
             if root is not None:
                 try:
-                    (root / 'export_error.log').write_text(
-                        err_msg, encoding='utf-8')
+                    (root / 'export_error.log').write_text(err_msg, encoding='utf-8')
                 except Exception:
                     pass
-            raise  # 继续向上抛，让调用方感知失败
+            raise
+
+    def _export_window_heatmap(self, root, facade_id, pts_local, windows, plane_model, pixel_size, quality):
+        """
+        把窗口结果投影成 PNG；使用有符号距离区分凹陷/凸起，轻量高斯平滑。
+        """
+        centers = np.asarray(windows.get('center_xyz', []), dtype=float).reshape(-1, 3)
+        flat = np.asarray(windows.get('flatness_gap_mm', []), dtype=float).reshape(-1)
+        signed_flat = np.asarray(windows.get('flatness_signed_gap_mm', []), dtype=float).reshape(-1)
+
+        if len(centers) != len(flat) or not len(centers):
+            raise ValueError('质量结果没有有效窗口，无法导出热力图')
+
+        limit_m = float(quality.get('thresholds', {}).get('flatness_limit_mm', 4.0)) / 1000.0
+        values_m = signed_flat / 1000.0  # 使用有符号值（单位：m）
+
+        # ── 颜色映射：区分凹陷/凸起 ──
+        abs_values_m = np.abs(values_m)
+        t = np.clip((abs_values_m - limit_m) / max(limit_m, 1e-9), 0.0, 1.0)
+
+        colors = np.zeros((len(values_m), 3), dtype=float)
+        is_recessed = values_m < 0
+
+        # 凸起（正值）：黄色(0.5,0.8,0.2) → 红色(1.0,0.0,0.0)
+        protrude_mask = ~is_recessed
+        colors[protrude_mask, 0] = np.clip(0.5 + 0.5 * t[protrude_mask], 0, 1)   # R
+        colors[protrude_mask, 1] = np.clip(0.8 - 0.8 * t[protrude_mask], 0, 1)   # G
+        colors[protrude_mask, 2] = np.clip(0.2 - 0.2 * t[protrude_mask], 0, 1)   # B
+
+        # 凹陷（负值）：蓝色(0.2,0.5,0.8) → 青色(0.0,0.8,1.0)
+        colors[is_recessed, 0] = np.clip(0.2 - 0.2 * t[is_recessed], 0, 1)       # R
+        colors[is_recessed, 1] = np.clip(0.5 + 0.3 * t[is_recessed], 0, 1)       # G
+        colors[is_recessed, 2] = np.clip(0.8 + 0.2 * t[is_recessed], 0, 1)       # B
+
+        base = np.full((len(centers), 3), 0.75, dtype=float)
+
+        # 使用 rasterize_facade 进行栅格化，传入有符号值
+        raster = rasterize_facade(
+            centers, base, plane_model, values_m, limit_m,
+            pixel_size=pixel_size, defect_values=values_m,
+            defect_colors=colors, vmin=limit_m
+        )
+
+        # ── 轻量高斯平滑（替代过度膨胀）──
+        overlay = raster['overlay_rgba'].copy()
+        alpha = overlay[:, :, 3].astype(np.float32) / 255.0
+
+        if np.any(alpha > 0):
+            rgb = overlay[:, :, :3].astype(np.float32)
+            # 预乘 alpha 避免透明区域颜色泄漏
+            premul = rgb * alpha[:, :, None]
+            # 轻量平滑：3x3 核，sigma=1.0，保持边界清晰
+            premul_blur = cv2.GaussianBlur(premul, (3, 3), 1.0)
+            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
+            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
+            rgb_smooth = premul_blur / alpha_blur[:, :, None]
+            overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
+            overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
+
+        # ── 合成底图 + 热力图 ──
+        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)
+        base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
+
+        visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
+        composite = (
+            base_rgb.astype(np.float32) * (1.0 - visible[:, :, :1]) +
+            overlay[:, :, :3].astype(np.float32) * visible[:, :, :1]
+        ).astype(np.uint8)
+
+        # ── 保存 ──
+        heatmap_path = Path(root) / f'facade_{int(facade_id):03d}_defect_heatmap.png'
+        overlay_path = Path(root) / 'defect_overlay.png'
+
+        if not cv2.imwrite(str(heatmap_path), overlay_bgr):
+            raise RuntimeError('热力图 PNG 写入失败')
+        if not cv2.imwrite(str(overlay_path), composite):
+            raise RuntimeError('合成图 PNG 写入失败')
+
+        return heatmap_path
+
+    def _create_heatmap_legend(self, root, limit_mm, max_mm):
+        """创建热力图颜色图例 PNG。"""
+        h, w = 80, 500
+        legend = np.ones((h, w, 3), dtype=np.uint8) * 245
+
+        # 渐变条
+        bar_h = 28
+        bar_y = 16
+        bar_x_start = 60
+        bar_width = w - 120
+        n_segments = bar_width
+
+        for i in range(n_segments):
+            t = i / max(n_segments - 1, 1)
+            # 左半：凹陷（蓝→青）
+            if t < 0.5:
+                tt = t * 2
+                r = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
+                g = int(np.clip((0.5 + 0.3 * tt) * 255, 0, 255))
+                b = int(np.clip((0.8 + 0.2 * tt) * 255, 0, 255))
+            # 右半：凸起（黄→红）
+            else:
+                tt = (t - 0.5) * 2
+                r = int(np.clip((0.5 + 0.5 * tt) * 255, 0, 255))
+                g = int(np.clip((0.8 - 0.8 * tt) * 255, 0, 255))
+                b = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
+
+            legend[bar_y:bar_y + bar_h, bar_x_start + i] = [b, g, r]  # BGR
+
+        # 标注文字
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.45
+        color = (60, 60, 60)
+        thickness = 1
+
+        # 左侧：凹陷标注
+        cv2.putText(legend, f"凹陷", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"-{max_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+
+        # 中间：合格阈值
+        mid_x = w // 2 - 30
+        cv2.putText(legend, f"合格", (mid_x, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"<{limit_mm:.1f}mm", (mid_x - 10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+
+        # 右侧：凸起标注
+        cv2.putText(legend, f"凸起", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"+{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+
+        # 保存
+        legend_path = Path(root) / 'heatmap_legend.png'
+        cv2.imwrite(str(legend_path), legend)
+        return legend_path
