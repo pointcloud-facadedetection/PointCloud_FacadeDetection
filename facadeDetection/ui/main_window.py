@@ -1,13 +1,9 @@
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
-from pathlib import Path
-
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, QThreadPool
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
-    QButtonGroup,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -34,12 +30,13 @@ from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
 from services.pointcloud_service import PointCloudService
-from services.facade_service import FacadeService
+from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
+from utils.workers import QualityWorker
 
 
 PAGE_DEFINITIONS = (
@@ -85,8 +82,8 @@ PAGE_HEADER_ACTIONS = {
 UPLOAD_FILE_FILTER = (
     '项目支持文件 '
     '(*.ply *.pcd *.xyz *.pts *.las *.laz *.e57 *.fls '
-    '*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;'
-    '点云文件 (*.ply *.pcd *.xyz *.pts *.las *.laz *.e57 *.fls);;'
+    '*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.dist);;'
+    '鐐逛簯鏂囦欢 (*.ply *.pcd *.xyz *.pts *.las *.laz *.e57 *.fls *.dist);;'
     '图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;'
     '所有文件 (*)'
 )
@@ -105,14 +102,18 @@ class MainWindow(QMainWindow):
         self.render_service = ViewportRenderService(self.viewport, db=None)
         self.project_overview_service = ProjectOverviewService(self.viewport, self.render_service, db=None)
         # Facade service uses viewport + render service
-        self.facade_service = FacadeService(self.viewport, db=None, render_service=self.render_service)
-        # Point cloud service for preprocess/denoise
         self.pointcloud_service = PointCloudService(self.viewport, self.render_service)
+        self.facade_service = FacadeService(
+            self.viewport, db=None, render_service=self.render_service,
+            pointcloud_service=self.pointcloud_service)
+        self.facade_service.set_pointcloud_service(self.pointcloud_service)
+        self.render_service.pointcloud_service = self.pointcloud_service
         # Pass facade service into operation scheduler for ROI detection
         self.project_operation_service = ProjectOperationService(
             self.viewport,
             facade_service=self.facade_service,
             pointcloud_service=self.pointcloud_service,
+            render_service=self.render_service,
         )
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
@@ -131,6 +132,12 @@ class MainWindow(QMainWindow):
         self._current_report_pdf_name = None
         self._report_webview_error = None
         self._quality_reports = []
+        self._quality_result_cache = {}
+        # Quality jobs may hold a large raw-point working set.  The global Qt
+        # pool can otherwise start several facade jobs simultaneously and
+        # exhaust Windows commit memory while CPUs remain underutilised.
+        self._quality_pool = QThreadPool(self)
+        self._quality_pool.setMaxThreadCount(1)
         self._setup_ui()
         self._connect_buttons()
         # Hook: display facade stats in the right dock when results ready
@@ -301,6 +308,11 @@ class MainWindow(QMainWindow):
         if profile is None:
             return
         self._inspection_profile = profile
+        interval_index = self.interval_combo.findData(float(profile.interval_size_m))
+        if interval_index >= 0:
+            self.interval_combo.blockSignals(True)
+            self.interval_combo.setCurrentIndex(interval_index)
+            self.interval_combo.blockSignals(False)
         self.standard_summary.setText(
             f'平整度 ≤ {profile.flatness_limit_mm:g} mm  | '
             f'垂直度 ≤ {profile.verticality_limit_mm:g} mm  | ')
@@ -335,6 +347,7 @@ class MainWindow(QMainWindow):
         self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
 
     def _show_facade_results(self, results: list[dict]):
+        self._quality_result_cache.clear()
         count = len(results or [])
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
         if not results:
@@ -371,6 +384,47 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+    def _quality_cache_key(self, cloud, facade, profile, grid_size):
+        facade_id = int((facade or {}).get('id', 0))
+        standard_id = getattr(profile, 'standard_id', None)
+        flatness_limit_mm = getattr(profile, 'flatness_limit_mm', None)
+        verticality_limit_mm = getattr(profile, 'verticality_limit_mm', None)
+        window_size_m = getattr(profile, 'window_size_m', None)
+        step_size_m = getattr(profile, 'step_size_m', None)
+        measure_height_m = getattr(profile, 'measure_height_m', None)
+        domain = facade.get('measurement_indices') or facade.get('voxel_ids') or []
+        return (
+            str(cloud or ''), facade_id, standard_id,
+            float(grid_size), flatness_limit_mm, verticality_limit_mm,
+            window_size_m, step_size_m, measure_height_m,
+            len(domain), hash(tuple(domain[:32])),
+        )
+
+    def _show_quality_dialog(self, cloud, facade, quality):
+        def _show_effect(mode='flatness'):
+            try:
+                display_quality = dict(quality)
+                display_quality['heatmap_mode'] = mode
+                self.render_service.apply_quality_colors(
+                    cloud, display_quality,
+                    index_service=self.facade_service._index_service)
+            except Exception:
+                pass
+
+        def _restore():
+            try:
+                results = getattr(self.project_operation_service,
+                                  '_last_facade_results', None)
+                self.render_service.restore_highlight(cloud, results or [])
+            except Exception:
+                pass
+
+        label = f"#{int(facade.get('id', 0))} ({str(facade.get('type_label') or facade.get('type') or '-')})"
+        dlg = FacadeQualityDialog(self, label, quality, 
+                                  on_show_colors=_show_effect, 
+                                  on_restore_colors=_restore)
+        dlg.exec()
+
     def _on_facade_item_clicked(self, item):
         f = item.data(Qt.ItemDataRole.UserRole)
         if not f:
@@ -387,33 +441,52 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, '结果目录', f'无法创建项目 results 目录：{exc}')
             return
-        quality = self.facade_service.compute_quality(
-            cloud, f, profile=getattr(self, '_inspection_profile', None),
-            grid_size=float(self.interval_combo.currentData()),
-            results_dir=results_dir)
+        # Snapshot all UI-owned values before submitting. The worker must not
+        # access widgets or the Open3D viewport while running.
+        profile = getattr(self, '_inspection_profile', None)
+        grid_size = float(self.interval_combo.currentData())
+        cache_key = self._quality_cache_key(cloud, f, profile, grid_size)
+        cached_quality = self._quality_result_cache.get(cache_key)
+        if cached_quality:
+            self.statusBar().showMessage('已命中质量结果缓存', 3000)
+            self._show_quality_dialog(cloud, f, cached_quality)
+            return
+        kwargs = {'profile': profile,
+                  'grid_size': grid_size,
+                  'results_dir': results_dir}
+        self._quality_request_token = getattr(self, '_quality_request_token', 0) + 1
+        token = self._quality_request_token
+        self._quality_request_cache_key = cache_key
+        self.statusBar().showMessage('正在计算质量指标...')
+        worker = QualityWorker(self.facade_service, cloud, dict(f), kwargs)
+        worker.signals.finished.connect(
+            lambda facade, quality: self._on_quality_finished(token, cloud, facade, quality))
+        worker.signals.failed.connect(
+            lambda facade, error: self._on_quality_failed(token, error))
+        self._quality_pool.start(worker)
+        return
+
+    def _on_quality_failed(self, token, error):
+        if token != getattr(self, '_quality_request_token', -1):
+            return
+        self.statusBar().showMessage('质量计算失败')
+        QMessageBox.warning(self, '质量评估', f'质量计算失败：{error}')
+
+    def _on_quality_finished(self, token, cloud, f, quality):
+        if token != getattr(self, '_quality_request_token', -1):
+            return
+        self.statusBar().clearMessage()
         if not quality:
             QMessageBox.information(self, '质量评估', '该立面无法计算质量指标。')
             return
+        cache_key = getattr(self, '_quality_request_cache_key', None)
+        if cache_key is not None:
+            self._quality_result_cache[cache_key] = quality
         self._quality_reports = [r for r in self._quality_reports
                                  if (r.get('facade') or {}).get('id') != f.get('id')]
         self._quality_reports.append({'facade': f, 'quality': quality,
                                       'artifacts': quality.get('artifacts', {})})
-
-        def _show_effect():
-            try:
-                self.facade_service.apply_quality_colors(cloud, quality)
-            except Exception:
-                pass
-
-        def _restore():
-            try:
-                self.facade_service.restore_highlight(cloud, getattr(self, '_latest_facade_results', []) or [])
-            except Exception:
-                pass
-
-        label = f"#{int(f.get('id', 0))} ({str(f.get('type_label') or f.get('type') or '-')})"
-        dlg = FacadeQualityDialog(self, label, quality, on_show_colors=_show_effect, on_restore_colors=_restore)
-        dlg.exec()
+        self._show_quality_dialog(cloud, f, quality)
 
     def _export_quality_report(self):
         """Compatibility placeholder; PDF generation is intentionally disabled."""
