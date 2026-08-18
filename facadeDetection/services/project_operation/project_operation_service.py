@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Optional
 import numpy as np
 from PySide6.QtWidgets import QColorDialog, QMessageBox
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 from config.storage import Storage
 import json
 
@@ -9,10 +10,11 @@ import json
 class ProjectOperationService:
     """将项目操作页的按钮事件转交给视口或后续算法实现。"""
 
-    def __init__(self, viewport, facade_service=None, pointcloud_service=None):
+    def __init__(self, viewport, facade_service=None, pointcloud_service=None, render_service=None):
         self._viewport = viewport
         self._facade_service = facade_service
         self._pointcloud_service = pointcloud_service
+        self._render_service = render_service
         self._last_roi_indices: Optional[list[int]] = None
         self.on_facade_results = None
         self._project_uuid: Optional[str] = None
@@ -30,14 +32,9 @@ class ProjectOperationService:
                     data = json.load(f)
                 col = data.get('scene_color')
                 if col and hasattr(self._viewport, 'update_cloud_color') and hasattr(self._viewport, 'get_cloud_names'):
-                    if hasattr(self, '_render_global_color'):
-                        # use service helper if available
-                        try:
-                            from services.viewport_render_service import ViewportRenderService  # noqa
-                            if hasattr(self._pointcloud_service, 'render_service'):
-                                self._pointcloud_service.render_service.set_global_point_color(tuple(col))
-                        except Exception:
-                            self._apply_global_color_direct(tuple(col))
+                    render = self._get_render_service()
+                    if render is not None:
+                        render.set_global_point_color(tuple(col))
                     else:
                         self._apply_global_color_direct(tuple(col))
         except Exception:
@@ -57,7 +54,12 @@ class ProjectOperationService:
                     continue
                 n = len(pos)
                 colors = np.tile(np.asarray(color, dtype=float).reshape(1, 3), (n, 1))
-                self._viewport.update_cloud_color(name, colors)
+                # Patch: 优先使用队列更新方法，避免主线程阻塞
+                queue = getattr(self._viewport, 'queue_update_cloud_color', None)
+                if callable(queue):
+                    queue(name, colors)
+                else:
+                    self._viewport.update_cloud_color(name, colors)
         except Exception:
             pass
 
@@ -79,11 +81,9 @@ class ProjectOperationService:
             color = (qcol.redF(), qcol.greenF(), qcol.blueF())
             # 首选通过渲染服务应用（若可用）
             try:
-                from services.viewport_render_service import ViewportRenderService  # noqa
-                if hasattr(self, '_pointcloud_service') and self._pointcloud_service is not None and hasattr(self._pointcloud_service, 'render_service'):
-                    self._pointcloud_service.render_service.set_global_point_color(color)
-                elif hasattr(self, '_facade_service') and self._facade_service is not None and hasattr(self._facade_service, '_render') and self._facade_service._render is not None:
-                    self._facade_service._render.set_global_point_color(color)
+                render = self._get_render_service()
+                if render is not None:
+                    render.set_global_point_color(color)
                 else:
                     self._apply_global_color_direct(color)
             except Exception:
@@ -115,11 +115,54 @@ class ProjectOperationService:
             if self._pointcloud_service is None:
                 print('PointCloudService 未注入，跳过去噪。', flush=True)
                 return
-            stats = self._pointcloud_service.denoise(method='radius')
-            if stats is not None:
-                print(f"去噪完成: {stats}", flush=True)
+            if getattr(self, '_denoise_thread', None) is not None:
+                return
+            service = self._pointcloud_service
+            class Worker(QObject):
+                finished = Signal(object)
+                failed = Signal(str)
+                @Slot()
+                def run(self):
+                    try:
+                        self.finished.emit(service.denoise(method='adaptive', update_viewport=False))
+                    except Exception as exc:
+                        self.failed.emit(str(exc))
+            self._denoise_thread = QThread()
+            self._denoise_worker = Worker()
+            self._denoise_worker.moveToThread(self._denoise_thread)
+            self._denoise_thread.started.connect(self._denoise_worker.run)
+            self._denoise_worker.finished.connect(self._on_denoise_finished)
+            self._denoise_worker.failed.connect(self._on_denoise_failed)
+            self._denoise_worker.finished.connect(self._denoise_thread.quit)
+            self._denoise_worker.failed.connect(self._denoise_thread.quit)
+            self._denoise_thread.finished.connect(self._clear_denoise_worker)
+            self._denoise_thread.start()
         except Exception as e:
             print(f"去噪失败: {e}", flush=True)
+
+    @Slot(object)
+    def _on_denoise_finished(self, stats):
+        if stats:
+            data = self._viewport.get_cloud_data(stats['name'])
+            if data is not None:
+                # Patch: 优先使用队列更新点云数据方法
+                if hasattr(self._viewport, "queue_update_cloud_points"):
+                    self._viewport.queue_update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
+                elif hasattr(self._viewport, "update_cloud_points"):
+                    self._viewport.update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
+            stats.pop('proxy_points', None); stats.pop('proxy_colors', None)
+            print(f"去噪完成: {stats}", flush=True)
+
+    @Slot(str)
+    def _on_denoise_failed(self, message):
+        print(f"去噪失败: {message}", flush=True)
+
+    @Slot()
+    def _clear_denoise_worker(self):
+        self._denoise_worker.deleteLater()
+        self._denoise_thread.deleteLater()
+        self._denoise_worker = None
+        self._denoise_thread = None
 
     def registration(self):
         self._notify('registration')
@@ -128,16 +171,10 @@ class ProjectOperationService:
     # ROI 视觉辅助：统一清除与渲染
     # ------------------------------------------------------------------
     def _clear_roi_visuals(self):
-        """清除 2D 白框与 3D 包围盒，并重置 ROI 索引记录。"""
+        """清除 ROI 视觉辅助。"""
         try:
             if hasattr(self._viewport, 'clear_roi_visuals'):
                 self._viewport.clear_roi_visuals()
-            else:
-                # 兼容降级：直接操作 adapter
-                if hasattr(self._viewport, '_adapter'):
-                    self._viewport._adapter.remove_geometry("__roi_selection_bbox")
-                if hasattr(self._viewport, '_interactor'):
-                    self._viewport._interactor.clear_selection_rect()
         except Exception as e:
             print(f"清除 ROI 视觉失败: {e}", flush=True)
         self._last_roi_indices = None
@@ -164,13 +201,6 @@ class ProjectOperationService:
             max_b += margin
             if hasattr(self._viewport, 'show_roi_bbox'):
                 self._viewport.show_roi_bbox(min_b, max_b, color=(1.0, 1.0, 1.0))
-            else:
-                # 兼容降级
-                from view3d.geometry_factory import make_bbox
-                self._viewport._adapter.remove_geometry("__roi_selection_bbox")
-                self._viewport._adapter.add_geometry("__roi_selection_bbox", make_bbox(min_b, max_b, color=(1.0, 1.0, 1.0)), reset_bounding_box=False)
-                if hasattr(self._viewport, '_overlay'):
-                    self._viewport._overlay.update()
         except Exception as e:
             print(f"渲染 ROI 包围盒失败: {e}", flush=True)
 
@@ -194,8 +224,9 @@ class ProjectOperationService:
             pass
         try:
             # 通过渲染服务清除立面选中高亮（若存在）
-            if self._facade_service is not None and getattr(self._facade_service, '_render', None) is not None:
-                self._facade_service._render.clear_selected_facade(cloud)
+            render = self._get_render_service()
+            if render is not None:
+                render.clear_selected_facade(cloud)
         except Exception:
             pass
         # 进入 ROI 框选模式
@@ -235,8 +266,8 @@ class ProjectOperationService:
             if not cloud or not isinstance(indices, (list, tuple, np.ndarray)) or len(indices) == 0:
                 try:
                     QMessageBox.information(
-                        None, 
-                        '框选检测区域', 
+                        None,
+                        '框选检测区域',
                         '未选中有效区域。提示：请确保在视口中拖拽框选建筑立面区域!'
                     )
                 except Exception:
@@ -289,8 +320,8 @@ class ProjectOperationService:
 
     def _get_render_service(self):
         """获取渲染服务实例的统一入口。"""
-        if self._facade_service is not None and getattr(self._facade_service, '_render', None) is not None:
-            return self._facade_service._render
+        if self._render_service is not None:
+            return self._render_service
         if hasattr(self._pointcloud_service, 'render_service'):
             return self._pointcloud_service.render_service
         return None
@@ -350,15 +381,11 @@ class ProjectOperationService:
             print('无活动点云。', flush=True)
             return
         cloud_name = names[-1]
-        roi = self._last_roi_indices if self._last_roi_indices else None
-        roi_bounds = getattr(self, '_last_roi_bounds', None)
         try:
-            results = self._facade_service.detect_on_roi(
-                cloud_name=cloud_name,
-                roi_indices=roi,
-                roi_bounds=roi_bounds,
-                project_uuid=self._project_uuid,
-            )
+            # “建筑外立面检测”必须是完整场景检测。框选只负责选择建筑，
+            # 不能把选择框作为算法裁剪边界，否则墙体会被框边截断。
+            results = self._facade_service.detect(
+                cloud_name=cloud_name, project_uuid=self._project_uuid)
             self._last_facade_results = results
             if callable(self.on_facade_results):
                 try:
@@ -368,6 +395,13 @@ class ProjectOperationService:
             # 启用点击选择：在视口中点击立面点，高亮对应立面
             try:
                 self._enable_facade_click_select(cloud_name, results or [])
+            except Exception:
+                pass
+            # 渲染立面高亮
+            try:
+                render = self._get_render_service()
+                if render is not None:
+                    render.highlight_facades(cloud_name, results or [])
             except Exception:
                 pass
         except Exception as e:
@@ -389,7 +423,11 @@ class ProjectOperationService:
             if not self._last_facade_results:
                 print('尚无检测结果用于热力着色', flush=True)
                 return
-            self._facade_service.render_flatness_heatmap(cloud_name, self._last_facade_results)
+            render = self._get_render_service()
+            if render is not None:
+                render.render_flatness_heatmap(
+                    cloud_name, self._last_facade_results,
+                    index_service=getattr(self._facade_service, '_index_service', None))
         except Exception as e:
             print(f'质量检测渲染失败: {e}', flush=True)
 

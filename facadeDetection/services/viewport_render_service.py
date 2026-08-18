@@ -4,6 +4,8 @@ from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
 from config.settings import Config
+from utils.array_utils import as_array
+from utils.logging_utils import trace
 
 
 class ViewportRenderService:
@@ -135,7 +137,7 @@ class ViewportRenderService:
                 if len(idx):
                     colors[idx] = col
 
-            self.viewport.update_cloud_color(cloud_name, colors)
+            self._update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
 
@@ -189,7 +191,7 @@ class ViewportRenderService:
                     continue
                 n = len(pos)
                 col = np.tile(np.asarray(color, dtype=np.float32).reshape(1, 3), (n, 1))
-                self.viewport.update_cloud_color(name, col)
+                self._update_cloud_color(name, col)
         except Exception as e:
             print(f"set_global_point_color failed: {e}", flush=True)
 
@@ -218,7 +220,7 @@ class ViewportRenderService:
             else:
                 colors = np.tile(np.asarray(base_color, dtype=np.float32), (n, 1))
             colors[idx[valid]] = np.clip(rgb[valid] * 1.15, 0.0, 1.0)
-            self.viewport.update_cloud_color(cloud_name, colors)
+            self._update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f"colorize_by_rgb failed: {e}", flush=True)
 
@@ -259,9 +261,16 @@ class ViewportRenderService:
             t = np.clip((val - vmin) / (vmax - vmin), 0.0, 1.0)
             colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
             colors[idx] = self._colormap(t, cmap)
-            self.viewport.update_cloud_color(cloud_name, colors)
+            self._update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f"colorize_by_scalar failed: {e}", flush=True)
+
+    def _update_cloud_color(self, cloud_name: str, colors: np.ndarray) -> None:
+        queue = getattr(self.viewport, 'queue_update_cloud_color', None)
+        if callable(queue):
+            queue(cloud_name, colors)
+        else:
+            self.viewport.update_cloud_color(cloud_name, colors)
 
     @staticmethod
     def _colormap(t: np.ndarray, cmap: str = 'turbo') -> np.ndarray:
@@ -607,5 +616,240 @@ class ViewportRenderService:
         try:
             if hasattr(self.viewport, 'show_roi_bbox'):
                 self.viewport.show_roi_bbox(min_bound, max_bound, color=color)
+        except Exception:
+            pass
+
+    # ---- 从原 FacadeService 迁移的 UI 渲染方法 ----
+
+    def render_flatness_heatmap(self, cloud_name: str, facades: list[dict],
+                                vmin: float | None = None,
+                                vmax: float | None = None,
+                                quality_results=None,
+                                index_service=None) -> None:
+        """渲染平整度热力图。"""
+        try:
+            data = self.viewport.get_cloud_data(cloud_name)
+            if data is None:
+                return
+            positions = data.get('pos')
+            n_total = len(positions) if positions is not None else 0
+            if n_total == 0:
+                return
+
+            if quality_results is not None:
+                results = quality_results if isinstance(quality_results, dict) else {}
+                if not any(k in results for k in ('defect_local_indices', 'defect_colors')):
+                    results = {r.get('facade_id', r.get('id')): r for r in quality_results}
+
+                all_indices, all_colors = [], []
+                for f in facades or []:
+                    r = results.get(f.get('id')) if isinstance(results, dict) else None
+                    if r is None and isinstance(quality_results, dict) and len(facades) == 1:
+                        r = quality_results
+                    if not r:
+                        continue
+
+                    global_idx = as_array(r.get('__global_indices'), dtype=np.int32)
+                    local_idx = as_array(r.get('defect_local_indices'), dtype=np.int32)
+                    colors = as_array(r.get('defect_colors'), dtype=np.float32).reshape(-1, 3)
+
+                    valid_local = ((local_idx >= 0) &
+                                   (local_idx < len(global_idx)) &
+                                   (np.arange(len(local_idx)) < len(colors)))
+                    if np.any(valid_local):
+                        gi = global_idx[local_idx[valid_local]]
+                        if index_service is not None:
+                            proxy_ids = index_service.map_raw_to_proxy(cloud_name, gi)
+                            displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
+                            if len(displayed) == n_total:
+                                lookup = {int(v): i for i, v in enumerate(displayed)}
+                                gi = np.asarray([lookup.get(int(p), -1) for p in proxy_ids], dtype=np.int64)
+                            else:
+                                gi = proxy_ids
+
+                        valid_global = (gi >= 0) & (gi < n_total)
+                        if np.any(valid_global):
+                            all_indices.append(gi[valid_global])
+                            all_colors.append(colors[np.flatnonzero(valid_local)[valid_global]])
+
+                if all_indices:
+                    idx_cat = np.concatenate(all_indices)
+                    col_cat = np.concatenate(all_colors)
+                    self.colorize_by_rgb(cloud_name, idx_cat, col_cat)
+                return
+
+            # Fallback: 基于平面距离着色
+            all_indices, all_values = [], []
+            for f in facades or []:
+                idx = np.asarray(f.get('inlier_indices', []) or [], dtype=int)
+                idx = idx[(idx >= 0) & (idx < n_total)]
+                if len(idx) == 0:
+                    continue
+                model = np.asarray(f.get('plane_model') or [], dtype=float)
+                if model.shape[0] != 4:
+                    continue
+                pts = np.asarray(data['pos'])[idx]
+                n = model[:3]
+                n = n / (np.linalg.norm(n) + 1e-12)
+                d = float(model[3])
+                dist = np.abs(pts @ n + d)
+                all_indices.append(idx)
+                all_values.append(dist.astype(float))
+
+            if not all_indices:
+                return
+            idx_cat = np.concatenate(all_indices, axis=0)
+            val_cat = np.concatenate(all_values, axis=0)
+            self.colorize_by_scalar(cloud_name, idx_cat, val_cat,
+                                    vmin=vmin, vmax=vmax, cmap='turbo')
+
+        except Exception as e:
+            print(f'ViewportRenderService: 渲染质量热力贴图失败: {e}', flush=True)
+
+    def apply_quality_colors(self, cloud_name: str, quality_result: dict,
+                             base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
+                             index_service=None) -> None:
+        """将质量结果应用到点云颜色。"""
+        try:
+            if not isinstance(quality_result, dict):
+                raise TypeError(f'quality_result must be dict, got {type(quality_result).__name__}')
+            data = self.viewport.get_cloud_data(cloud_name)
+            if data is None:
+                return
+            pos = data.get('pos')
+            if pos is None or len(pos) == 0:
+                return
+            n = len(pos)
+
+            colors = np.tile(np.asarray((0.06, 0.08, 0.11), dtype=np.float32).reshape(1, 3), (n, 1))
+            mode = quality_result.get('heatmap_mode', 'flatness')
+            windows = quality_result.get('windows')
+
+            if not isinstance(windows, dict):
+                raise ValueError('质量结果缺少 windows 数组')
+
+            if index_service is None:
+                return
+            dataset = index_service._get_dataset(cloud_name)
+            if dataset is None:
+                return
+
+            centers = np.asarray(windows.get('center_xyz', []), dtype=np.float32).reshape(-1, 3)
+            values_key = {
+                'verticality': 'verticality_angle_deg',
+                'recessed': 'flatness_signed_gap_mm',
+                'protruding': 'flatness_signed_gap_mm',
+            }.get(mode, 'flatness_gap_mm')
+            values = np.asarray(windows.get(values_key, []), dtype=np.float32).reshape(-1)
+
+            if len(centers) != len(values):
+                return
+            valid = np.isfinite(centers).all(axis=1) & np.isfinite(values)
+            if not np.any(valid):
+                return
+
+            domain_raw = np.asarray(quality_result.get('__global_indices', []), dtype=np.int64)
+            if len(domain_raw) == 0:
+                return
+
+            domain_proxy = index_service.map_raw_to_proxy(cloud_name, domain_raw)
+
+            from algorithms.geometry import plane_axes, classify_plane
+            plane = np.asarray((quality_result.get('overall') or {}).get('plane_model') or [], dtype=float)
+            if plane.size != 4:
+                return
+            plane = plane / (np.linalg.norm(plane[:3]) + 1e-12)
+            facade_type, _type_label, _v, _h = classify_plane(plane[:3])
+            u_axis = np.asarray(quality_result.get('projection_u_axis', []), dtype=float)
+            v_axis = np.asarray(quality_result.get('projection_v_axis', []), dtype=float)
+            if u_axis.size != 3 or v_axis.size != 3:
+                u_axis, v_axis = plane_axes(plane[:3], facade_type)
+
+            valid_centers = valid
+            centers = centers[valid_centers]
+            values = values[valid_centers]
+            origin = np.asarray(quality_result.get('projection_origin',
+                                                    np.mean(centers, axis=0)),
+                               dtype=np.float64).reshape(3)
+
+            valid_proxy = (domain_proxy >= 0)
+            if not np.any(valid_proxy):
+                return
+            domain_proxy = domain_proxy[valid_proxy]
+            domain_points = dataset.index.proxy_points[domain_proxy]
+            du = (domain_points - origin) @ u_axis
+            dv = (domain_points - origin) @ v_axis
+            cu = (centers - origin) @ u_axis
+            cv = (centers - origin) @ v_axis
+            step = max(float((quality_result.get('step_size_m') or
+                              quality_result.get('window_size_m') or 0.05)), 1e-6)
+
+            u_min = float(quality_result.get('projection_u_min_m', du.min()))
+            v_min = float(quality_result.get('projection_v_min_m', dv.min()))
+            dkey = np.column_stack((np.floor((du - u_min) / step),
+                                    np.floor((dv - v_min) / step))).astype(np.int64)
+            saved_u = np.asarray(windows.get('cell_u', []), dtype=np.int64).reshape(-1)
+            saved_v = np.asarray(windows.get('cell_v', []), dtype=np.int64).reshape(-1)
+            ckey = np.column_stack((saved_u, saved_v)) if len(saved_u) == len(values) and len(saved_v) == len(values) else np.column_stack((np.floor((cu - u_min) / step),
+                                    np.floor((cv - v_min) / step))).astype(np.int64)
+
+            cell_values = {tuple(k): float(v) for k, v in zip(ckey.tolist(), values.tolist())}
+            mask = np.asarray([tuple(k) in cell_values for k in dkey], dtype=bool)
+            proxy_ids = domain_proxy[mask]
+            vals = np.asarray([cell_values[tuple(k)] for k in dkey if tuple(k) in cell_values], dtype=np.float32)
+
+            best = {int(pid): float(value) for pid, value in zip(proxy_ids.tolist(), vals.tolist())}
+            displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
+            lookup = {int(v): i for i, v in enumerate(displayed)} if len(displayed) == n else None
+            rows = np.asarray([lookup.get(pid, pid) if lookup else pid for pid in best], dtype=np.int64)
+            values_arr = np.asarray([best[int(pid)] for pid in best], dtype=np.float32)
+
+            valid_rows = (rows >= 0) & (rows < n)
+            if not np.any(valid_rows):
+                return
+
+            finite = values_arr[valid_rows]
+            limit = float((quality_result.get('thresholds') or {}).get('flatness_limit_mm', 1.0))
+            if mode == 'verticality':
+                limit = float((quality_result.get('thresholds') or {}).get('verticality_limit_deg', limit))
+
+            if mode in ('flatness', 'verticality'):
+                scale = max(limit * 2.0, 1e-6)
+                t = np.clip(np.abs(finite) / scale, 0, 1)
+                colors[rows[valid_rows]] = np.stack([t, 0.55 + 0.35 * (1 - t), 0.08 * (1 - t)], axis=1)
+            elif mode == 'recessed':
+                negative = np.abs(finite[finite < 0])
+                scale = max(float(np.percentile(negative, 98)) if len(negative) else limit, 1e-6)
+                t = np.clip(np.abs(finite) / scale, 0, 1)
+                colors[rows[valid_rows]] = np.stack([
+                    np.clip(0.2 - 0.2 * t, 0, 1),
+                    np.clip(0.5 + 0.3 * t, 0, 1),
+                    np.clip(0.8 + 0.2 * t, 0, 1)
+                ], axis=1)
+            elif mode == 'protruding':
+                positive = np.abs(finite[finite > 0])
+                scale = max(float(np.percentile(positive, 98)) if len(positive) else limit, 1e-6)
+                t = np.clip(np.abs(finite) / scale, 0, 1)
+                colors[rows[valid_rows]] = np.stack([
+                    np.clip(0.5 + 0.5 * t, 0, 1),
+                    np.clip(0.8 - 0.8 * t, 0, 1),
+                    np.clip(0.2 - 0.2 * t, 0, 1)
+                ], axis=1)
+
+            trace('quality.heatmap', mode=mode,
+                   windows=len(values), raw=len(domain_raw),
+                   proxy=len(domain_proxy), voxels=len(best),
+                   displayed=int(np.sum(valid_rows)),
+                   step=f'{step:.4f}',
+                   interval_origin=quality_result.get('interval_origin_m', 0.0))
+
+            self._update_cloud_color(cloud_name, colors)
+
+        except Exception as e:
+            print(f'立面质量着色失败: {e}', flush=True)
+
+    def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
+        try:
+            self.highlight_facades(cloud_name, facades)
         except Exception:
             pass

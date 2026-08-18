@@ -8,6 +8,7 @@ from typing import Optional, Tuple, Union
 import open3d as o3d
 
 import numpy as np
+import time
 
 from algorithms.preprocess import voxel_downsample
 from models import FileAsset
@@ -17,6 +18,8 @@ from config.storage import Storage
 
 # Reuse the existing converter implementation as the official reference
 from utils.convert_fls2ply import convert_fls_to_ply, EXE_PATH as DEFAULT_FLS_EXE
+from utils.dist_reader import read_dist
+from algorithms.geometry import adaptive_outlier_indices, stratified_downsample
 
 
 class FileService:
@@ -33,6 +36,7 @@ class FileService:
         self.viewport = viewport
         self.db = db          # session factory (callable) – kept for compatibility
         self.render_service = render_service
+        self.pointcloud_service = getattr(render_service, "pointcloud_service", None)
 
     # Public API
     def upload_files(
@@ -41,7 +45,9 @@ class FileService:
         file_path: str,
         *,
         voxel_size: float = 0.05,
-        copy_into_project: bool = False
+        copy_into_project: bool = False,
+        dataset_metadata: Optional[dict] = None,
+        distance_path: Optional[str] = None,
     ) -> Optional[FileAsset]:
         """
         上传一个文件（点云或图片）并进行渲染。
@@ -71,10 +77,79 @@ class FileService:
         # 3. Load and render the data (use asset path if persisted, otherwise original)
         load_path = Path(asset.path) if asset else src
         if kind == FileKind.raw_pointcloud:
+            started = time.perf_counter()
+            print(f"[PCFD] load.begin path={load_path}", flush=True)
             pts, cols = self._load_point_cloud(str(load_path))
-            pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
+            print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+            # 直接上传 PLY + 同名 .dist 时，预处理发生在 register_dataset 之前。
+            # 未提供 .dist 的普通 PLY 继续走旧路径，保证历史导入行为不变。
+            dist_file = Path(distance_path).resolve() if distance_path else load_path.with_suffix('.dist')
+            dist_exists = dist_file.exists()
+            print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
+            if dist_exists and self.pointcloud_service is not None:
+                dist = read_dist(dist_file, pts, dataset_metadata or {})
+                print(
+                    f"[PCFD] load.dist loaded source={dist.source} "
+                    f"points={len(pts)} origins={len(dist.scan_origins)} "
+                    f"warnings={dist.warnings}", flush=True)
+                # 加载阶段仅执行距离分层下采样，不执行自适应去噪；
+                # 去噪由用户手动点击按钮触发。
+                elevations = None
+                if len(dist.scan_origins):
+                    from algorithms.geometry import estimate_elevation_angles
+                    elevations = estimate_elevation_angles(pts, dist.scan_origins)
+                proc_pts, proc_cols, source_ids, proc_ranges = stratified_downsample(
+                    pts, cols,
+                    dist.ranges_m, source_ids=np.arange(len(pts), dtype=np.int32),
+                    scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
+                    elevations=elevations)
+                source_id = (dataset_metadata or {}).get(
+                    'source_id', f"{project_uuid or 'local'}:source:{load_path.stem}")
+                metadata = dict(dataset_metadata or {})
+                metadata.update({
+                    'pipeline_version': 'range-adaptive-v2',
+                    'source_id': source_id,
+                    'source_raw_count': int(len(pts)),
+                    'source_raw_ids': source_ids.tolist(),
+                    'ranges': proc_ranges.tolist(),
+                    'scan_origins': dist.scan_origins.tolist(),
+                    'distance_source': dist.source,
+                    'distance_warnings': dist.warnings,
+                    'preprocess': {
+                        'input_count': int(len(pts)),
+                        'output_count': int(len(proc_pts)),
+                        'shells': [[8., .10], [16., .08], [28., .06],
+                                   [45., .05], [70., .045], [100., .04]],
+                    },
+                    'adaptive_detection': {
+                        'enabled': True, 'range_coeff': .0012,
+                        'normal_relax_deg_per_m': .15,
+                        'normal_angle_max_deg': 15., 'irls_iters': 2,
+                    },
+                })
+                self.pointcloud_service.register_source_asset(
+                    source_id, pts, cols,
+                    {'ply_path': str(load_path), 'dist_path': str(dist_file)})
+                dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
+                dataset = self.pointcloud_service.register_dataset(
+                    dataset_id, proc_pts, proc_cols, metadata=metadata)
+                pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
+                print(f"[PCFD] load.range_adaptive dist={dist_file.name} source={len(pts)} processed={len(proc_pts)} proxy={len(pts_ds)}", flush=True)
+            elif self.pointcloud_service is not None:
+                dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
+                dataset = self.pointcloud_service.register_dataset(dataset_id, pts, cols, metadata=dataset_metadata)
+                pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
+                print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+            else:
+                pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
             name = asset.original_name if asset else src.name
             self.render_service.show_point_cloud(name=name, points=pts_ds, colors=cols_ds)
+            print(f"[PCFD] load.render_done displayed={len(pts_ds)} seconds={time.perf_counter()-started:.2f}", flush=True)
+            data = self.viewport.get_cloud_data(name) if hasattr(self.viewport, "get_cloud_data") else None
+            if data is not None and self.pointcloud_service is not None:
+                data["dataset_id"] = dataset_id
+                data["domain"] = "proxy"
+                data["index_space"] = "proxy"
             # Update pcfd index assets
             try:
                 if project_uuid:
@@ -164,13 +239,66 @@ class FileService:
 
         # Persist and render
         success_count = 0
+        imported_metadata = []
         for p in ply_paths:
             try:
-                self.upload_files(
-                    project_uuid=project_uuid,
-                    file_path=p,
-                    copy_into_project=False,
-                )
+                source_pts, source_cols = self._load_point_cloud(p)
+                scan_meta = next((s for s in getattr(result, 'scans', [])
+                                  if str(getattr(s, 'ply_path', '')) == str(Path(p).resolve())), None)
+                dist_path = Path(p).with_suffix('.dist')
+                dist_exists = dist_path.exists()
+                print(f"[FLS] load.dist status={('found' if dist_exists else 'not_found')} path={dist_path}", flush=True)
+                dist = read_dist(dist_path if dist_exists else None, source_pts, scan_meta)
+                print(
+                    f"[FLS] load.dist loaded source={dist.source} "
+                    f"points={len(source_pts)} origins={len(dist.scan_origins)} "
+                    f"warnings={dist.warnings}", flush=True)
+                # FLS 加载阶段同样仅做距离分层下采样，不自动去噪。
+                elevations = None
+                if len(dist.scan_origins):
+                    from algorithms.geometry import estimate_elevation_angles
+                    elevations = estimate_elevation_angles(source_pts, dist.scan_origins)
+                proc_pts, proc_cols, source_ids, proc_ranges = stratified_downsample(
+                    source_pts, source_cols,
+                    dist.ranges_m, source_ids=np.arange(len(source_pts), dtype=np.int32),
+                    scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
+                    elevations=elevations)
+                source_id = f"{project_uuid or 'local'}:source:{Path(p).stem}"
+                metadata = {
+                    'pipeline_version': 'range-adaptive-v2',
+                    'source_id': source_id,
+                    'source_raw_count': int(len(source_pts)),
+                    'source_raw_ids': source_ids.tolist(),
+                    'ranges': proc_ranges.tolist(),
+                    'scan_origins': dist.scan_origins.tolist(),
+                    'distance_source': dist.source,
+                    'distance_warnings': dist.warnings,
+                    'preprocess': {'input_count': int(len(source_pts)),
+                                   'output_count': int(len(proc_pts)),
+                                   'shells': [[8., .10], [16., .08], [28., .06],
+                                              [45., .05], [70., .045], [100., .04]]},
+                    'adaptive_detection': {'enabled': True, 'range_coeff': .0012,
+                                           'normal_relax_deg_per_m': .15,
+                                           'normal_angle_max_deg': 15., 'irls_iters': 2},
+                }
+                if self.pointcloud_service is not None:
+                    self.pointcloud_service.register_source_asset(
+                        source_id, source_pts, source_cols,
+                        {'ply_path': str(Path(p).resolve()), 'dist_path': str(dist_path)})
+                dataset_id = f"{project_uuid or 'local'}:{Path(p).name}"
+                # 预处理结果是唯一进入 register_dataset 的点云；源 PLY 仅作为
+                # source asset 保存，避免先注册一次源点云再覆盖 dataset。
+                if self.pointcloud_service is not None:
+                    self.pointcloud_service.register_dataset(dataset_id, proc_pts, proc_cols, metadata=metadata)
+                    dataset = self.pointcloud_service.get_dataset(dataset_id)
+                    self.render_service.show_point_cloud(name=Path(p).name,
+                                                         points=dataset.proxy_points,
+                                                         colors=dataset.proxy_colors)
+                else:
+                    proc_pts, proc_cols = voxel_downsample(proc_pts, proc_cols, voxel_size=0.05)
+                    self.render_service.show_point_cloud(name=Path(p).name,
+                                                         points=proc_pts, colors=proc_cols)
+                imported_metadata.append(metadata)
                 try:
                     if project_uuid:
                         Storage.append_pcfd_asset_for_uuid(project_uuid, 'fls_folders', str(src))
@@ -190,6 +318,7 @@ class FileService:
             "output_dir": str(search_dir),
             "ply_paths": ply_paths,
             "uploaded": success_count,
+            "metadata": imported_metadata,
         }
 
     # ------------------ Helpers ------------------
@@ -207,10 +336,10 @@ class FileService:
 
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         pcd = o3d.io.read_point_cloud(path)
-        pts = np.asarray(pcd.points, dtype=np.float64)
+        pts = np.ascontiguousarray(np.asarray(pcd.points, dtype=np.float32))
         cols = None
         if pcd.has_colors():
-            cols = np.asarray(pcd.colors, dtype=np.float64)
+            cols = np.ascontiguousarray(np.asarray(pcd.colors, dtype=np.float32))
         return pts, cols
 
     def _load_image(self, path: str) -> np.ndarray:
