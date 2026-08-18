@@ -1,9 +1,190 @@
+from typing import List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 import copy
 import cv2
 from collections import deque
 
+
+# ==================== 距离自适应几何工具（原 range_adaptive.py）====================
+
+def estimate_point_ranges(points, scan_origin=None):
+    """计算每个点到最近测站的距离。"""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    origins = np.zeros((1, 3), dtype=float) if scan_origin is None else np.asarray(scan_origin, dtype=float).reshape(-1, 3)
+    if not len(pts):
+        return np.empty(0, dtype=np.float32)
+    return np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1)
+
+
+def estimate_elevation_angles(points, scan_origin=None):
+    """计算每个点相对测站的高度角（elevation），用于高度方向密度补偿。"""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    origins = np.zeros((1, 3), dtype=float) if scan_origin is None else np.asarray(scan_origin, dtype=float).reshape(-1, 3)
+    if not len(pts):
+        return np.empty(0, dtype=np.float32)
+    ranges = np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1)
+    delta = pts[:, None, :] - origins[None, :, :]
+    nearest = np.argmin(np.linalg.norm(delta, axis=2), axis=1)
+    dz = pts[:, 2] - origins[nearest, 2]
+    horizontal = np.sqrt(np.maximum(ranges ** 2 - dz ** 2, 0.0))
+    elevation = np.degrees(np.arctan2(dz, horizontal + 1e-9))
+    return elevation.astype(np.float32)
+
+
+def elevation_scale_factor(elevation, low_scale=1.0, high_scale=0.55, threshold_deg=40.0):
+    """高度角越大（高处），扫描线越稀疏，体素应缩小。"""
+    elevation = np.asarray(elevation, dtype=float)
+    t = np.clip((np.abs(elevation) - threshold_deg) / max(90.0 - threshold_deg, 1e-6), 0.0, 1.0)
+    return low_scale + (high_scale - low_scale) * t
+
+
+def adaptive_plane_tolerance(ranges, base_tol, range_coeff=.0012, max_tol=None):
+    """根据距离自适应调整平面容差。"""
+    tol = float(base_tol) + float(range_coeff) * np.asarray(ranges, dtype=float)
+    return np.minimum(tol, max_tol) if max_tol is not None else tol
+
+
+def fit_plane_weighted(points, weights=None, irls_iters=0):
+    """加权/鲁棒 IRLS 平面拟合。"""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    if len(pts) < 3:
+        return np.array([0., 0., 1., 0.])
+    w = np.ones(len(pts)) if weights is None else np.maximum(np.asarray(weights, dtype=float), 1e-12)
+    model = None
+    for iteration in range(max(1, int(irls_iters) + 1)):
+        center = np.sum(pts * w[:, None], axis=0) / np.sum(w)
+        _, _, vh = np.linalg.svd((pts - center) * np.sqrt(w[:, None]), full_matrices=False)
+        n = vh[-1] / (np.linalg.norm(vh[-1]) + 1e-12)
+        d = -float(n @ center)
+        model = np.r_[n, d]
+        if iteration >= int(irls_iters):
+            break
+        residual = np.abs(pts @ n + d)
+        scale = 1.4826 * float(np.median(residual)) + 1e-9
+        k = 1.345 * scale
+        w = (np.ones(len(pts)) if weights is None else np.maximum(np.asarray(weights, dtype=float), 1e-12)) * np.where(residual <= k, 1., k / np.maximum(residual, 1e-12))
+    return model
+
+
+def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=24):
+    """按距离分壳统计滤波，保留非离群点索引。"""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    ranges = np.asarray(ranges, dtype=float).reshape(-1)
+    n = len(pts)
+    if n < 2:
+        return np.arange(n, dtype=np.int32)
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(pts)
+    nn = np.asarray(cloud.compute_nearest_neighbor_distance())
+    keep = np.ones(n, dtype=bool)
+    edges = np.quantile(ranges, np.linspace(0, 1, max(1, int(n_shells)) + 1))
+    for i in range(len(edges) - 1):
+        mask = (ranges >= edges[i]) & ((ranges <= edges[i + 1]) if i == len(edges)-2 else (ranges < edges[i+1]))
+        if mask.sum() < 30:
+            continue
+        d = nn[mask]
+        med = float(np.median(d)); mad = 1.4826 * float(np.median(np.abs(d-med)))
+        threshold = med + std_ratio * max(mad, .15 * med, 1e-6)
+        keep[np.where(mask)[0][d > threshold]] = False
+    return np.flatnonzero(keep).astype(np.int32)
+
+
+def stratified_downsample(points, colors, ranges, source_ids=None,
+                          shells=((8., .10), (16., .08), (28., .06),
+                                  (45., .05), (70., .045), (100., .04)),
+                          min_range=.5, crop_range=120.,
+                          elevations=None, scan_origin=None,
+                          min_voxel=0.02, max_voxel=0.20,
+                          elevation_low_scale=1.0, elevation_high_scale=0.55,
+                          elevation_threshold_deg=40.0):
+    """按距离层选体素代表点，并返回代表点对应的源行号。"""
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    rng = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    if len(pts) != len(rng):
+        raise ValueError("points/ranges 长度不一致")
+    src = np.arange(len(pts), dtype=np.int32) if source_ids is None else np.asarray(source_ids, dtype=np.int32).reshape(-1)
+    if len(src) != len(pts):
+        raise ValueError("points/source_ids 长度不一致")
+    col = None if colors is None else np.asarray(colors, dtype=np.float32).reshape(-1, 3)
+
+    if elevations is None and scan_origin is not None:
+        elevations = estimate_elevation_angles(pts, scan_origin)
+    elev = np.asarray(elevations, dtype=np.float32).reshape(-1) if elevations is not None else np.zeros(len(pts), dtype=np.float32)
+    if len(elev) != len(pts):
+        raise ValueError("points/elevations 长度不一致")
+
+    selected_p, selected_c, selected_s, selected_r = [], [], [], []
+    lo = float(min_range)
+    bounds = list(shells) + [(float("inf"), None)]
+    for hi, base_voxel in bounds:
+        mask = (rng >= lo) & (rng < min(float(hi), crop_range + 1e-9)) & (rng <= crop_range)
+        ids = np.flatnonzero(mask)
+        if len(ids):
+            if base_voxel:
+                scale = elevation_scale_factor(
+                    elev[ids], elevation_low_scale, elevation_high_scale, elevation_threshold_deg)
+                per_voxel = np.clip(base_voxel * scale, min_voxel, max_voxel)
+                keys = np.floor(pts[ids] / per_voxel[:, None]).astype(np.int64)
+                _, first = np.unique(keys, axis=0, return_index=True)
+                ids = ids[np.sort(first)]
+            selected_p.append(pts[ids]); selected_s.append(src[ids]); selected_r.append(rng[ids])
+            if col is not None:
+                selected_c.append(col[ids])
+        lo = float(hi)
+        if lo >= crop_range:
+            break
+    if not selected_p:
+        empty = np.empty((0, 3), np.float32)
+        return empty, (empty.copy() if col is not None else None), np.empty(0, np.int32), np.empty(0, np.float32)
+    return np.vstack(selected_p), (np.vstack(selected_c) if col is not None else None), np.concatenate(selected_s), np.concatenate(selected_r)
+
+
+# ==================== 立面检测重构版新增工具 ====================
+
+def deduplicate_clusters(clusters: List[np.ndarray]) -> List[np.ndarray]:
+    """
+    基于集合包含关系去重：若 cluster A 被 B 严格包含，则丢弃 A。
+    用于多尺度 3D 连通域结果融合。
+    """
+    if not clusters:
+        return []
+    sets = [set(c.tolist()) for c in clusters]
+    n = len(clusters)
+    discarded = [False] * n
+    for i in range(n):
+        if discarded[i]:
+            continue
+        si = sets[i]
+        for j in range(i + 1, n):
+            if discarded[j]:
+                continue
+            sj = sets[j]
+            if si.issubset(sj) and len(si) < len(sj) * 0.95:
+                discarded[i] = True
+                break
+            elif sj.issubset(si) and len(sj) < len(si) * 0.95:
+                discarded[j] = True
+    return [clusters[i] for i in range(n) if not discarded[i]]
+
+
+def filter_clusters_by_planarity(clusters: List[np.ndarray], points: np.ndarray,
+                                 min_ratio: float = 0.15) -> List[np.ndarray]:
+    """
+    用 PCA 特征值过滤非平面簇（树木/植被）。
+    保留 λ₃/λ₁ < min_ratio 的簇。
+    """
+    valid = []
+    for c in clusters:
+        pts = points[c]
+        if len(pts) < 10:
+            continue
+        centered = pts - np.mean(pts, axis=0)
+        _, s, _ = np.linalg.svd(centered, full_matrices=False)
+        s = np.sort(s)[::-1]
+        if s[0] > 1e-6 and (s[2] / s[0] < min_ratio):
+            valid.append(c)
+    return valid
 
 def fit_plane_svd(points):
     """最小二乘 SVD 拟合平面"""
