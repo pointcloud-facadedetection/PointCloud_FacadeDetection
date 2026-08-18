@@ -7,33 +7,49 @@ class Config:
     DEFAULT_VOXEL_SIZE = 0.05
 
     QUALITY_GRID_SIZE = 20.0
-    RULER_SIZE = 2.0
+    RULER_SIZE = 0.05
     RULER_STEP = 0.05
 
     DETECT_DIST_TOL_MM = 20.0
     # Minimum effective facade area in square meters
-    MIN_FACADE_AREA = 10.0
-    
-    FACADE_MAX_ITERATIONS = 40
-    FACADE_NORMAL_ANGLE_DEG = 10.0
-    FACADE_MIN_POINTS_RATIO = 0.003
-    # 距离容差：给种子迭代和精修留足容错空间
-    FACADE_SIGNED_DIST_TOLERANCE = 2.5      
-    # Plane merging and fallback
-    FACADE_MERGE_ANGLE_DEG = 8.0
-    FACADE_MERGE_D_THRESH = 0.08
-    FACADE_RANSAC_MIN_INLIERS_RATIO = 0.002
-    FACADE_RANSAC_MAX_PLANES = 3
+    MIN_FACADE_AREA = 5.0
 
-    # --- New detection tuning knobs ---
-    # 垂直立面阈值：|nz| <= VERTICAL_NZ_THR 视为“近似垂直面”
-    VERTICAL_NZ_THR = 0.20
-    # IRLS 迭代次数（用于平面精修）
-    FACADE_IRLS_ITERS = 3
-    # UV 连通域桥接的半径（cells）。用于跨越门窗等小缝隙，形成大连通片
-    UV_CLOSE_RADIUS_CELLS = 1
-    # 平面邻域容差上限（米），用于 ROI 平面优先路径的逐步放宽
-    MAX_PLANE_TOL_M = 0.5
+    # 垂直立面法向 Z 分量阈值（|nz| < 此值视为垂直候选）
+    VERTICAL_NZ_THR: float = 0.30
+
+    # 法向一致性阈值：邻域内法向夹角标准差上限（度）
+    # 墙面法向一致（低方差），树木法向杂乱（高方差）
+    NORMAL_VARIANCE_DEG: float = 15.0
+
+    # 聚类参数
+    CLUSTER_ANGLE_DEG: float = 5.0          # 法向聚类角度阈值
+    CLUSTER_MIN_POINTS: int = 120           # 最小聚类点数
+    FACADE_SPHERE_GRID_RES: float = 5.0
+    FACADE_NORMAL_ANGLE_DEG: float = 8.0
+
+    # 平面拟合参数
+    RANSAC_ITERATIONS: int = 50            # RANSAC 迭代次数
+    RANSAC_THRESHOLD_RATIO: float = 1.5     # 阈值 = voxel_size * ratio
+
+    # 立面合并参数
+    MERGE_ANGLE_DEG: float = 5.0            # 合并法向夹角阈值
+    MERGE_D_THRESH_M: float = 0.10          # 合并平面距离阈值
+    MERGE_UV_DIST_M: float = 3.0            # 合并 UV BBox 距离阈值
+    FACADE_MERGE_UV_DIST_M: float = 5.0
+
+    # 生长参数
+    GROW_NORMAL_TOL_DEG: float = 8.0        # 生长法向一致性容忍
+    GROW_DIST_MULT: float = 2.0             # 生长距离倍数（相对 max_plane_dist）
+
+    # 测量网格参数
+    MEASUREMENT_GRID_M: float = 0.10        # 测量网格单元大小
+    MEASUREMENT_MIN_CELL_PTS: int = 2       # 最小单元点数
+
+    # 质量域采用检测残差和体素误差共同确定深度范围。
+    FACADE_QUALITY_DEPTH_MULT: float = 3.0
+    FACADE_QUALITY_DEPTH_MIN_M: float = 0.02
+    FACADE_QUALITY_DEPTH_MAX_M: float = 0.50
+
 
     # --- Viewport interaction & camera settings ---
     # Use orthographic projection by forcing a very small FoV in Open3D (<=5 deg)
@@ -55,9 +71,6 @@ class Config:
     SELECT_BORDER_RGBA = (255, 0, 0, 240)  # red opaque border
     SELECT_FILL_RGBA = (255, 0, 0, 25)     # light red fill
     SELECT_BORDER_WIDTH = 2
-
-    # --- Selection behavior ---
-    # 深度切片相关配置已废弃，框选阶段不做深度过滤；最近立面偏好在服务层通过投影深度实现。
 
     SEGMENT_COLORS = [
         [1.00, 0.20, 0.20],
