@@ -26,6 +26,31 @@ class Config:
     CLUSTER_MIN_POINTS: int = 120           # 最小聚类点数
     FACADE_SPHERE_GRID_RES: float = 5.0
     FACADE_NORMAL_ANGLE_DEG: float = 8.0
+    FACADE_DETECT_METHOD = 'hybrid'
+    # 是否启用粗层快速版图提取（大数据集建议开启）
+    FACADE_ENABLE_COARSE_LAYER: bool = True
+    
+    # 粗层体素倍数（相对 base voxel_size，默认 4x = 20cm）
+    FACADE_COARSE_VOXEL_MULT: float = 4.0
+    
+    # 建筑外窗洞口最小跨越宽度（米），用于自适应孔洞闭合
+    FACADE_MIN_OPENING_M: float = 0.5
+    
+    # UV 网格闭合半径上限（防止网格过密时爆炸）
+    FACADE_UV_CLOSE_MAX_CELLS: int = 12
+    
+    # 粗层 signed 距离容差倍数（相对 base）
+    FACADE_COARSE_SIGNED_MULT: float = 2.0
+    
+    # 细层 signed 距离容差（默认 1.0，与原有逻辑一致）
+    FACADE_SIGNED_DIST_TOL: float = 1.0
+    
+    # Hough 参数调优（覆盖原有默认值）
+    HOUGH_MAX_VOTE_POINTS: int = 100000      # 从 30万降至 10万
+    HOUGH_MAX_DIRECTION_PEAKS: int = 6        # 从 8 降至 6
+    HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4  # 从 16 降至 4
+    HOUGH_MAX_CANDIDATES: int = 16           # 从 64 降至 16
+    HOUGH_RHO_MIN_PROMINENCE: float = 0.08   # 从 0.20 放宽至 0.08
 
     # 平面拟合参数
     RANSAC_ITERATIONS: int = 50            # RANSAC 迭代次数
@@ -81,6 +106,16 @@ class Config:
         [1.00, 0.50, 0.10],
         [0.10, 0.90, 0.90],
         [0.95, 0.95, 0.95],
+    ]
+
+    # 立面实例颜色：按检测结果 id 循环使用，保证相邻立面易于区分。
+    FACADE_INSTANCE_COLORS = [
+        [0.95, 0.25, 0.20], [0.15, 0.55, 0.95],
+        [0.15, 0.75, 0.35], [0.95, 0.65, 0.10],
+        [0.70, 0.30, 0.90], [0.05, 0.75, 0.75],
+        [0.95, 0.35, 0.65], [0.55, 0.75, 0.15],
+        [0.10, 0.90, 0.90], [0.95, 0.95, 0.95],
+        [1.00, 0.50, 0.10], [0.70, 0.85, 0.35],
     ]
 
     FACADE_TYPE_COLORS = {

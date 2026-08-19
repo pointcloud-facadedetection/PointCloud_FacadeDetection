@@ -49,9 +49,9 @@ class PointCloudScene:
             return
         positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
         data = self.point_data[name]
-        if colors is None:
-            colors = data["color"] if len(data["color"]) == len(positions) else None
         data["pos"] = positions
+        if colors is None:
+            colors = data.get("color")
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=False)

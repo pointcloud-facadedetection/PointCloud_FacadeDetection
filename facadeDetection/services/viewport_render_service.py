@@ -86,7 +86,7 @@ class ViewportRenderService:
         """
         立面着色策略（统一颜色规则 + 选中高亮）：
         - 非立面点使用基础色 base_color。
-        - 所有垂直立面统一使用 Config.FACADE_TYPE_COLORS['vertical_facade']。
+        - 每个立面实例按 ID 使用不同颜色；类型颜色作为无配置时的回退。
         - 所有水平面统一使用 Config.FACADE_TYPE_COLORS['horizontal']。
         - 其它（如倾斜面）统一使用 Config.FACADE_TYPE_COLORS['inclined']（若存在）。
         - 当存在选中的立面 self._selected_facade_id 时，该立面的点使用 Config.HIGHLIGHT_COLOR。
@@ -109,7 +109,8 @@ class ViewportRenderService:
             except Exception:
                 pass
 
-            for f in facades or []:
+            instance_colors = getattr(Config, 'FACADE_INSTANCE_COLORS', [])
+            for order, f in enumerate(facades or []):
                 ftype = str(f.get('type') or f.get('type_label') or '').lower()
                 col = None
                 if 'vertical' in ftype:
@@ -118,6 +119,15 @@ class ViewportRenderService:
                     col = self._facade_colors.get('horizontal')
                 else:
                     col = self._facade_colors.get('inclined') or self._facade_colors.get('vertical_facade')
+
+                # 实例色优先于类型色，使相邻立面即使同属 vertical_facade
+                # 也能在视口中被清晰区分；选择高亮仍具有最高优先级。
+                if instance_colors:
+                    try:
+                        color_index = int(f.get('id', order)) % len(instance_colors)
+                    except Exception:
+                        color_index = order % len(instance_colors)
+                    col = instance_colors[color_index]
 
                 # Apply highlight if selected
                 try:
