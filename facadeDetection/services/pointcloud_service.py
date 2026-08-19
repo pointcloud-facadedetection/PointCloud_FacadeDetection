@@ -155,6 +155,7 @@ class PointCloudService:
             new_cols = None
 
         raw_ids = None
+        raw_count = 0
         dataset = self.datasets.get(dataset_id) if dataset_id else None
         if dataset is not None and len(new_pts):
             proxy_ids = np.asarray(data.get("proxy_ids", []), dtype=np.int32)
@@ -172,10 +173,15 @@ class PointCloudService:
                 "name": name, "method": method, "voxel_size": float(voxel_size),
                 "points_before": int(len(pts)), "points_after": int(len(new_pts)),
                 "dataset_id": dataset_id, "raw_ids": raw_ids,
-                "raw_count": dataset.index.raw_count_for_voxels(self.decisions[dataset_id].voxel_ids) if dataset_id in self.decisions else 0,
+                "raw_count": int(raw_count),
                 "proxy_points": new_pts, "proxy_colors": new_cols,
             }
             return stats
+        # 先同步轻量元数据；scene 的 geometry 更新在 Qt 队列中执行。
+        if dataset is not None and len(new_pts):
+            data["proxy_ids"] = proxy_ids
+            data["domain"] = "proxy"
+            data["index_space"] = "proxy"
         if hasattr(vp, "queue_update_cloud_points"):
             vp.queue_update_cloud_points(name, new_pts, new_cols)
         elif hasattr(vp, "update_cloud_points"):
@@ -192,10 +198,11 @@ class PointCloudService:
             "points_after": int(len(new_pts)),
             "dataset_id": dataset_id,
             "raw_ids": raw_ids,
+            "raw_count": int(raw_count),
         }
         print(
             f"PointCloudService: 去噪完成: {name}, 点数 {stats['points_before']} -> {stats['points_after']} ({method}), "
-            f"raw子集点数={0 if raw_ids is None else len(raw_ids)}",
+            f"raw子集点数={raw_count}",
             flush=True,
         )
         return stats
