@@ -1,19 +1,11 @@
 import numpy as np
 import open3d as o3d
 from typing import Optional, Tuple
+
 def voxel_downsample(points: np.ndarray,
                      colors: Optional[np.ndarray] = None,
                      voxel_size: float = 0.05) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """
-    Use Open3D native interface to implement voxel grid downsampling.
-    - points: (N,3) float array
-    - colors: optional (N,3) float array in range [0,1]
-    - voxel_size: positive float
-
-    Returns (points_ds, colors_ds)
-    """
     pts = np.asarray(points, dtype=np.float64)
-    # 空数组兜底
     if pts.size == 0:
         empty_pts = pts.reshape(0, 3)
         if colors is not None:
@@ -21,27 +13,20 @@ def voxel_downsample(points: np.ndarray,
             return empty_pts, empty_col
         return empty_pts, None
 
-    # 入参合法性校验
     if pts.ndim != 2 or pts.shape[1] != 3:
         raise ValueError("points must be (N,3)")
     if voxel_size <= 0:
         raise ValueError("voxel_size must be > 0")
 
-    # 构建Open3D点云对象
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
-
-    # 挂载颜色信息
     if colors is not None:
         col = np.asarray(colors, dtype=np.float64)
         if col.shape != pts.shape:
             raise ValueError("colors must have same shape as points")
         pcd.colors = o3d.utility.Vector3dVector(col)
 
-    # Open3D原生体素下采样
     pcd_down = pcd.voxel_down_sample(voxel_size=voxel_size)
-
-    # 转回numpy数组输出
     pts_ds = np.asarray(pcd_down.points, dtype=np.float64)
     if colors is not None:
         cols_ds = np.asarray(pcd_down.colors, dtype=np.float64)
@@ -49,9 +34,9 @@ def voxel_downsample(points: np.ndarray,
     return pts_ds, None
 
 def denoise(pcd: o3d.geometry.PointCloud,
-                  voxel_size: float,
-                  method: str = 'radius',
-                  **kwargs) -> o3d.geometry.PointCloud:
+            voxel_size: float,
+            method: str = 'radius',
+            **kwargs) -> o3d.geometry.PointCloud:
     """
     :param kwargs: 自定义滤波参数
         radius: 搜索半径，默认 voxel_size * 2
@@ -65,7 +50,6 @@ def denoise(pcd: o3d.geometry.PointCloud,
     注意：radius/statistical 隐含"密度均匀"假设，对单站扫描的远处稀疏区
     会成片误删正常表面点；单站数据建议用 adaptive（距离分壳自适应）。
     """
-    # 校验点云合法性
     if not isinstance(pcd, o3d.geometry.PointCloud):
         raise TypeError("pcd must be open3d.geometry.PointCloud instance")
     original_num = len(pcd.points)
@@ -98,10 +82,10 @@ def denoise(pcd: o3d.geometry.PointCloud,
             pts,
             np.asarray(ranges, dtype=np.float64).reshape(-1),
             std_ratio=float(kwargs.get("std_ratio", 2.5)),
-            n_shells=int(kwargs.get("n_shells", 24)),
+            n_shells=int(kwargs.get("n_shells", 8)),
         )
         clean_pcd = pcd.select_by_index(np.where(keep)[0].tolist())
     else:
-        raise ValueError(f"unsupported denoise method: {method}, only support [radius, statistical, adaptive]")
+        raise ValueError(f"unsupported denoise method: {method}")
 
     return clean_pcd
