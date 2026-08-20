@@ -24,6 +24,8 @@ class ProjectCreateDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("创建项目")
         self.setModal(True)
+        # 给真实工程中的长名称、单位和地址留出足够输入空间。
+        self.setMinimumSize(560, 360)
         self._build_ui()
 
     def _build_ui(self):
@@ -62,7 +64,7 @@ class ProjectCreateDialog(QDialog):
         self.btns.rejected.connect(self.reject)
         lay.addWidget(self.btns)
 
-        self.resize(420, 280)
+        self.resize(640, 420)
         self.edt_name.setFocus()
 
     def _on_accept(self):
