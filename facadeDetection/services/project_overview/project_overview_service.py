@@ -1,118 +1,201 @@
-"""项目概览页面的业务入口。
+from __future__ import annotations
 
-UI 只调用本页面 Service；后续文件解析和数据库持久化可以在这里接入，
-无需修改主窗口中的按钮和项目卡片代码。
-"""
-
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
+from typing import Optional
+
+from services.dal.project_repo import ProjectRepo
+from services.file_service import FileService
+from services.dal.file_repo import FileRepo
+from services.viewport_render_service import ViewportRenderService
 
 
 @dataclass
-class ProjectSummary:
-    """项目列表卡片需要的最小数据。"""
-
+class ProjectCard:
+    """供 UI 卡片渲染的最小数据。"""
     project_id: str
     name: str
     directory_path: str
-    file_paths: list[str] = field(default_factory=list)
 
 
 class ProjectOverviewService:
-    """处理项目概览页的文件选择和项目列表业务。"""
+    """项目概览页调度器：供 MainWindow 直接调用。"""
 
-    def __init__(self):
-        self.selected_file_paths = []
-        self.extracted_file_paths = []
-        self._projects = {}
+    def __init__(self, viewport=None, render_service: ViewportRenderService | None = None, db=None):
+        self.viewport = viewport
+        self.render_service = render_service
+        self.db = db
+        self._file_service: Optional[FileService] = None
 
-    def upload_files(self, file_paths):
-        normalized_paths = [
-            str(Path(file_path).expanduser().resolve())
-            for file_path in file_paths
-            if file_path
-        ]
-        self.selected_file_paths = normalized_paths
-        print('upload_files triggered', flush=True)
-        return self.extract_files(normalized_paths)
+    # -------------- 项目管理 --------------
+    def list_projects(self) -> list[ProjectCard]:
+        items = ProjectRepo.list_projects()
+        return [ProjectCard(project_id=i["project_uuid"], name=i["name"], directory_path=i["root_dir"]) for i in items]
 
-    def extract_files(self, file_paths):
-        self.extracted_file_paths = list(file_paths)
-        print('extract_files triggered', flush=True)
-        return list(self.extracted_file_paths)
+    def create_project(self, name: str, org_unit: str | None = None, address: str | None = None, remarks: str | None = None) -> dict:
+        return ProjectRepo.create_project(name=name, org_unit=org_unit, address=address, remarks=remarks)
 
-    def list_projects(self):
-        return list(self._projects.values())
-
-    def get_project(self, project_id):
-        return self._projects.get(project_id)
-
-    def create_project(self, name, directory_path):
-        return self._upsert_project(name=name, directory_path=directory_path)
-
-    def open_project(self, directory_path):
+    def open_project(self, directory_path: str) -> ProjectCard:
         path = Path(directory_path).expanduser().resolve()
-        return self._upsert_project(
-            name=path.name or '未命名项目',
-            directory_path=str(path),
+        if self.viewport is not None and hasattr(self.viewport, 'clear'):
+            self.viewport.clear()
+        # 如果该文件夹中存在 pcfd 索引，则采用该索引并将其更新或插入到索引数据库中，然后加载资源
+        try:
+            from config.storage import Storage
+            from db.connection import upsert_index_project
+            idx = Storage.load_pcfd_index(path)
+            if idx is None:
+                idx = Storage.load_pcfd_index(path)
+            if idx is not None:
+                proj = (idx.get('project') or {})
+                puid = str(proj.get('uuid') or '')
+                pname = str(proj.get('name_cn') or path.name or '未命名项目')
+                if puid:
+                    # 确保索引行存在
+                    upsert_index_project(puid, pname, str(path))
+                    # 激活项目（确保采用按项目划分的数据库架构）
+                    ProjectRepo.load_and_activate(puid)
+                    # 尝试通过 PCFD 资源或 DAL 加载最新的点云数据
+                    try:
+                        assets = idx.get('assets') or {}
+                        cand = None
+                        # 在项目中优先使用 generated_ply
+                        gp = assets.get('generated_ply') or []
+                        if gp:
+                            cand = Path(path) / gp[-1]
+                        else:
+                            raws = assets.get('raw_pointclouds') or []
+                            if raws:
+                                cand = Path(raws[-1])
+                        if cand is not None and self.render_service is not None:
+                            svc = self._ensure_file_service()
+                            svc.upload_files(project_uuid=puid, file_path=str(cand), copy_into_project=False)
+                    except Exception:
+                        # fallback to DAL helper
+                        try:
+                            asset = FileRepo.get_latest_raw_pointcloud(puid)
+                            if asset is not None and self.render_service is not None:
+                                svc = self._ensure_file_service()
+                                svc.upload_files(project_uuid=puid, file_path=asset.path, copy_into_project=False)
+                        except Exception:
+                            pass
+                    return ProjectCard(project_id=puid, name=pname, directory_path=str(path))
+        except Exception:
+            pass
+        # 尝试匹配已登记项目
+        for p in self.list_projects():
+            if Path(p.directory_path).resolve() == path:
+                # 激活场景（若需要）
+                ProjectRepo.load_and_activate(p.project_id)
+                # 尝试加载最新原始点云到视口
+                try:
+                    asset = FileRepo.get_latest_raw_pointcloud(p.project_id)
+                    if asset is not None and self.render_service is not None:
+                        # 直接读取并渲染（保持与 upload_files 一致的体验）
+                        svc = self._ensure_file_service()
+                        svc.upload_files(project_uuid=p.project_id, file_path=asset.path, copy_into_project=False)
+                except Exception:
+                    pass
+                return p
+        # 未登记则创建新项目（名称取目录名）
+        info = ProjectRepo.create_project(name=path.name or "未命名项目")
+        pc = ProjectCard(
+            project_id=info["project_uuid"],
+            name=info["name"],
+            directory_path=info["root_dir"],
         )
+        # 新登记项目：若目录中存在 PLY 文件，录入并渲染
+        try:
+            ply_candidates = list(path.glob("*.ply"))
+            if ply_candidates:
+                svc = self._ensure_file_service()
+                svc.upload_files(project_uuid=pc.project_id, file_path=str(ply_candidates[0]), copy_into_project=False)
+        except Exception:
+            pass
+        return pc
 
-    def register_upload(self, file_paths, current_project=None):
-        normalized_paths = [
-            str(Path(path).expanduser().resolve())
-            for path in file_paths
-        ]
-        if not normalized_paths:
-            raise ValueError('至少需要选择一个文件。')
+    def activate_project(self, project_id: str) -> None:
+        # 项目切换必须先清空旧场景，否则 add_cloud() 会认为已有点云，
+        # 不会建立新项目默认视角，Open3D 还可能沿用旧 bounding box。
+        if self.viewport is not None and hasattr(self.viewport, 'clear'):
+            self.viewport.clear()
+        try:
+            ProjectRepo.load_and_activate(project_id)
+        except Exception:
+            return
+        try:
+            asset = FileRepo.get_latest_raw_pointcloud(project_id)
+            if asset is not None and self.render_service is not None:
+                svc = self._ensure_file_service()
+                # 请勿将原始文件复制到项目缓存中；原始文件的绝对路径已保存在数据库中
+                svc.upload_files(project_uuid=project_id, file_path=asset.path, copy_into_project=False)
+        except Exception:
+            pass
 
-        if current_project is None:
-            first_path = Path(normalized_paths[0])
-            project = self._upsert_project(
-                name=first_path.stem or '未命名项目',
-                directory_path=str(first_path.parent),
-            )
-        else:
-            project = current_project
+    def remove_project(self, project_id: str) -> bool:
+        return ProjectRepo.delete_project(project_id, hard=False)
 
-        project.file_paths = list(
-            dict.fromkeys(project.file_paths + normalized_paths)
-        )
-        self._projects[project.project_id] = project
-        return project
+    def get_project(self, project_id: str) -> Optional[ProjectCard]:
+        for p in self.list_projects():
+            if p.project_id == project_id:
+                return p
+        return None
 
-    def remove_project(self, project_id):
-        return self._projects.pop(project_id, None)
+    # -------------- 文件导入 --------------
+    def _ensure_file_service(self):
+        if self._file_service is None:
+            if self.viewport is None or self.render_service is None:
+                raise RuntimeError("文件依赖未就绪：视口缺失。")
+            self._file_service = FileService(self.viewport, self.db, self.render_service)
+        return self._file_service
 
     def rename_project(self, project_id, new_name):
-        """修改项目显示名称，并返回修改后的项目。"""
-        project = self.get_project(project_id)
-        if project is None:
-            raise ValueError('项目不存在或已被删除。')
-
+        """持久化修改项目名称，并同步项目索引文件。"""
         normalized_name = (new_name or '').strip()
         if not normalized_name:
             raise ValueError('项目名称不能为空。')
 
-        # 这里只更新当前项目列表中的名称；不会重命名用户的本地目录。
-        project.name = normalized_name
-        return project
+        info = ProjectRepo.update_project(project_id, name=normalized_name)
+        if info is None:
+            raise ValueError('项目不存在或已被删除。')
 
-    def _upsert_project(self, name, directory_path):
-        normalized_name = (name or '').strip() or '未命名项目'
-        normalized_directory = str(
-            Path(directory_path).expanduser().resolve()
+        # list_projects() 优先读取 pcfd 索引中的名称，因此需要同步更新。
+        try:
+            from config.storage import Storage
+
+            root = Path(info['root_dir'])
+            index_data = Storage.load_pcfd_index(root) or {}
+            project_data = index_data.setdefault('project', {})
+            project_data['name_cn'] = normalized_name
+            Storage.save_pcfd_index(root, index_data)
+        except Exception:
+            # 数据库与全局索引已经更新；旧项目缺少 pcfd 时仍可继续使用。
+            pass
+
+        return ProjectCard(
+            project_id=info['project_uuid'],
+            name=info['name'],
+            directory_path=info['root_dir'],
         )
 
-        for project in self._projects.values():
-            if project.directory_path == normalized_directory:
-                project.name = normalized_name
-                return project
+    def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:
+        svc = self._ensure_file_service()
+        # 这是项目首次载入入口；避免旧项目 geometry 影响 Open3D 初始 fit。
+        if self.viewport is not None and hasattr(self.viewport, 'clear'):
+            self.viewport.clear()
+        normalized = [str(Path(p).expanduser().resolve()) for p in file_paths if p]
+        uploaded: list[str] = []
+        for p in normalized:
+            try:
+                svc.upload_files(project_uuid=project_uuid, file_path=p, copy_into_project=False)
+                uploaded.append(p)
+            except Exception as e:
+                print(f"上传失败: {p} -> {e}", flush=True)
+        return uploaded
 
-        project = ProjectSummary(
-            project_id=str(uuid4()),
-            name=normalized_name,
-            directory_path=normalized_directory,
-        )
-        self._projects[project.project_id] = project
-        return project
+    def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
+        svc = self._ensure_file_service()
+        if self.viewport is not None and hasattr(self.viewport, 'clear'):
+            self.viewport.clear()
+        res = svc.import_fls_directory(dir_path, project_uuid)
+        return res

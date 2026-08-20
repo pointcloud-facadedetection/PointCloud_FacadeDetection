@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
 from functools import lru_cache
 from datetime import datetime
-from typing import Generator
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy import create_engine, event, select, Column, Integer, String, DateTime, UniqueConstraint
+from sqlalchemy.orm import sessionmaker, declarative_base
 
 from config.storage import Storage
-from models import Base 
+from models import Base as GlobalBase
 
 
-def _apply_sqlite_pragmas(dbapi_con, con_record):
+def _apply_sqlite_pragmas(dbapi_con, _con_record):
     cur = dbapi_con.cursor()
     try:
         cur.execute("PRAGMA journal_mode=WAL;")
@@ -22,36 +22,43 @@ def _apply_sqlite_pragmas(dbapi_con, con_record):
     cur.close()
 
 
-# -------------------- Global index database (lightweight) --------------------
+# ---------------- Global index DB (projects list) ----------------
+Storage.ensure_base_dirs()
+INDEX_DB_URL = f"sqlite:///{Storage.INDEX_DB_FILE}"
+engine_index = create_engine(
+    INDEX_DB_URL,
+    future=True,
+    echo=False,
+    connect_args={"check_same_thread": False},
+)
+event.listen(engine_index, "connect", _apply_sqlite_pragmas)
 
 IndexBase = declarative_base()
 
 
-class IndexProject(IndexBase):
-    __tablename__ = "projects"
-    id = __import__("sqlalchemy").Column(__import__("sqlalchemy").Integer, primary_key=True)
-    project_uuid = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, unique=True, index=True, nullable=False)
-    name = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, nullable=False)
-    root_dir = __import__("sqlalchemy").Column(__import__("sqlalchemy").String, nullable=False)
-    created_at = __import__("sqlalchemy").Column(__import__("sqlalchemy").DateTime, default=datetime.now, nullable=False)
+class IndexProject(IndexBase):  # type: ignore
+    __tablename__ = "index_projects"
+    __table_args__ = (UniqueConstraint("project_uuid", name="uq_index_projects_uuid"),)
 
-
-Storage.ensure_base_dirs()
-_index_engine = create_engine(
-    f"sqlite:///{Storage.INDEX_DB_FILE}", future=True, echo=False,
-    connect_args={"check_same_thread": False, "timeout": 5.0}, pool_pre_ping=True
-)
-event.listen(_index_engine, "connect", _apply_sqlite_pragmas)
-IndexSessionFactory = sessionmaker(bind=_index_engine, expire_on_commit=False, autoflush=False, future=True)
+    id = Column(Integer, primary_key=True)
+    project_uuid = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=False)
+    root_dir = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
 
 def init_index_db() -> None:
-    IndexBase.metadata.create_all(_index_engine)
+    IndexBase.metadata.create_all(engine_index)
+
+
+IndexSession = sessionmaker(bind=engine_index, expire_on_commit=False, autoflush=False, future=True)
 
 
 @contextmanager
-def index_session() -> Generator[Session, None, None]:
-    s: Session = IndexSessionFactory()
+def index_session():
+    init_index_db()
+    s = IndexSession()
     try:
         yield s
         s.commit()
@@ -63,43 +70,42 @@ def index_session() -> Generator[Session, None, None]:
 
 
 def upsert_index_project(project_uuid: str, name: str, root_dir: str) -> None:
+    init_index_db()
     with index_session() as s:
         row = s.execute(select(IndexProject).where(IndexProject.project_uuid == project_uuid)).scalar_one_or_none()
-        if row:
+        if row is None:
+            row = IndexProject(project_uuid=project_uuid, name=name, root_dir=root_dir)
+            s.add(row)
+        else:
             row.name = name
             row.root_dir = root_dir
-        else:
-            s.add(IndexProject(project_uuid=project_uuid, name=name, root_dir=root_dir))
-        s.flush()
 
 
-def list_index_projects() -> list[IndexProject]:
+def list_index_projects() -> list[IndexProject]:  # type: ignore
+    init_index_db()
     with index_session() as s:
-        return s.execute(select(IndexProject).order_by(IndexProject.created_at.desc())).scalars().all()
+        return s.execute(select(IndexProject)).scalars().all()
 
 
-# -------------------- Per-project database --------------------
+# ---------------- Per-project DB (by project UUID) ----------------
 
 @lru_cache(maxsize=256)
-def get_project_engine(project_uuid: str):
-    Storage.ensure_base_dirs()
+def _project_engine(project_uuid: str):
     db_path = Storage.project_db_path(project_uuid)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(
-        f"sqlite:///{db_path}", future=True, echo=False,
-        connect_args={"check_same_thread": False, "timeout": 5.0}, pool_pre_ping=True
-    )
+    url = f"sqlite:///{db_path}"
+    engine = create_engine(url, future=True, echo=False, connect_args={"check_same_thread": False})
     event.listen(engine, "connect", _apply_sqlite_pragmas)
-    # Ensure schema exists
-    Base.metadata.create_all(engine)
+    # Ensure schema (import models)
+    GlobalBase.metadata.create_all(engine)
     return engine
 
 
 @contextmanager
-def project_session(project_uuid: str) -> Generator[Session, None, None]:
-    engine = get_project_engine(project_uuid)
+def project_session(project_uuid: str):
+    engine = _project_engine(project_uuid)
     SessionProject = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False, future=True)
-    s: Session = SessionProject()
+    s = SessionProject()
     try:
         yield s
         s.commit()

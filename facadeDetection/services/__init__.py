@@ -2,7 +2,7 @@
 
 from .inspection_review import InspectionReviewService
 from .project_operation import ProjectOperationService
-from .project_overview import ProjectOverviewService, ProjectSummary
+from .project_overview import ProjectOverviewService
 from .report_export import PdfDocument, ReportExportService
 
 __all__ = [
@@ -10,6 +10,5 @@ __all__ = [
     'PdfDocument',
     'ProjectOperationService',
     'ProjectOverviewService',
-    'ProjectSummary',
     'ReportExportService',
 ]
