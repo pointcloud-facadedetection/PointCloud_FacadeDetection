@@ -9,6 +9,7 @@ log = logging.getLogger("facadeDetection.pointcloud_index")
 
 VOXEL_SIZE_M = 0.05
 
+
 @dataclass
 class RawPointStore:
     points: np.ndarray
@@ -26,6 +27,7 @@ class RawPointStore:
             raise ValueError("colors length must match points")
         return cls(p, c)
 
+
 @dataclass
 class DecisionSet:
     dataset_id: str
@@ -38,13 +40,12 @@ class DecisionSet:
     def voxel_count(self) -> int:
         return int(len(self.voxel_ids))
 
+
 @dataclass
 class PointCloudDataset:
     dataset_id: str
     raw: RawPointStore
     index: "VoxelCascadeIndex"
-    # 预处理参数和 processed-raw -> FLS source-raw 的映射不属于索引核心，
-    # 作为旁路元数据保存，避免改变 VoxelCascadeIndex 的三级语义。
     metadata: dict | None = None
 
     @property
@@ -55,12 +56,28 @@ class PointCloudDataset:
     def proxy_colors(self) -> np.ndarray | None:
         return self.index.proxy_colors
 
+    @property
+    def proxy_store(self) -> RawPointStore:
+        return self.raw
+
+
 class VoxelCascadeIndex:
-    """CSR 反向索引：voxel -> raw ids，proxy 行号与 voxel 行号一致。"""
+    """CSR 反向索引：voxel → raw ids，proxy 行号与 voxel 行号一致。
+
+    架构融合后：
+    - 距离分层数据：proxy 即 stratified_proxy_build 输出，1:1 映射到 source。
+      不再进行二次体素化，CSR 直接记录 proxy→source 映射。
+    - 标准体素数据：走传统体素化路径，proxy 为体素重心，voxel→raw 为聚合映射。
+    """
     voxel_size = VOXEL_SIZE_M
 
     def __init__(self, voxel_keys, voxel_offsets, raw_order, proxy_points,
-                 proxy_colors=None, origin=None, voxel_size=None):
+                 proxy_colors=None, origin=None, voxel_size=None,
+                 source_points=None,
+                 source_colors=None,
+                 source_raw_offsets=None,
+                 source_raw_indices=None,
+                 is_stratified=False):
         self.voxel_keys = np.ascontiguousarray(voxel_keys, dtype=np.int32).reshape(-1, 3)
         self.voxel_offsets = np.ascontiguousarray(voxel_offsets, dtype=np.int64).reshape(-1)
         self.raw_order = np.ascontiguousarray(raw_order, dtype=np.int32).reshape(-1)
@@ -69,62 +86,119 @@ class VoxelCascadeIndex:
         self.origin = np.asarray(origin, dtype=np.float32).reshape(3)
         self.voxel_size = float(voxel_size or VOXEL_SIZE_M)
         self._raw_to_voxel = None
+        self._is_stratified = bool(is_stratified)
+
+        # === Source 映射 (CSR 格式唯一) ===
+        self.source_points = None if source_points is None else np.asarray(source_points, dtype=np.float32)
+        self.source_colors = None if source_colors is None else np.asarray(source_colors, dtype=np.float32)
+        self.source_raw_offsets = source_raw_offsets
+        self.source_raw_indices = source_raw_indices
+
+        if self.source_raw_offsets is not None:
+            self.source_raw_offsets = np.ascontiguousarray(self.source_raw_offsets, dtype=np.int64).reshape(-1)
+            self.source_raw_indices = np.ascontiguousarray(self.source_raw_indices, dtype=np.int32).reshape(-1)
+            if len(self.source_raw_offsets) != len(self.proxy_points) + 1:
+                raise ValueError("source CSR offsets must match proxy rows")
+            if (np.any(np.diff(self.source_raw_offsets) < 0) or
+                    self.source_raw_offsets[-1] != len(self.source_raw_indices)):
+                raise ValueError("invalid source CSR")
+            if self.source_points is not None and len(self.source_raw_indices):
+                if np.any(self.source_raw_indices < 0) or np.any(self.source_raw_indices >= len(self.source_points)):
+                    raise ValueError("source CSR index out of bounds")
+
         if len(self.voxel_offsets) != len(self.voxel_keys) + 1:
             raise ValueError("invalid CSR offsets")
 
     @classmethod
-    def build(cls, raw: RawPointStore, origin=None, voxel_size=None) -> "VoxelCascadeIndex":
+    def build(cls, raw: RawPointStore, origin=None, voxel_size=None,
+              source_points=None, source_colors=None,
+              source_raw_offsets=None, source_raw_indices=None):
+        """构建索引。
+
+        融合路径：source_raw_offsets 存在时，raw.points 已经是 stratified proxy，
+        每个点是一个独立代理，通过 CSR 直接映射到 source。不再体素化。
+        """
         if raw.count == 0:
             origin = np.zeros(3, dtype=np.float32) if origin is None else origin
-            return cls(np.empty((0,3), np.int32), np.array([0], np.int64),
-                       np.empty(0, np.int32), np.empty((0,3), np.float32), origin=origin,
-                       voxel_size=voxel_size)
+            return cls(np.empty((0, 3), np.int32), np.array([0], np.int64),
+                       np.empty(0, np.int32), np.empty((0, 3), np.float32),
+                       origin=origin, voxel_size=voxel_size,
+                       source_points=source_points,
+                       source_raw_offsets=source_raw_offsets,
+                       source_raw_indices=source_raw_indices,
+                       is_stratified=source_raw_offsets is not None)
+
+        # === 融合路径：距离分层代理，1:1 映射，跳过体素化 ===
+        if source_raw_offsets is not None:
+            n = raw.count
+            keys = np.column_stack((np.arange(n, dtype=np.int32),
+                                    np.zeros((n, 2), dtype=np.int32)))
+            offsets = np.arange(n + 1, dtype=np.int64)
+            raw_order = np.arange(n, dtype=np.int32)
+            return cls(keys, offsets, raw_order, raw.points, raw.colors,
+                       np.zeros(3, dtype=np.float32), voxel_size=1.0,
+                       source_points=source_points, source_colors=source_colors,
+                       source_raw_offsets=source_raw_offsets,
+                       source_raw_indices=source_raw_indices,
+                       is_stratified=True)
+
+        # === 标准路径：体素下采样，需要体素化 ===
         p = raw.points
         vs = float(voxel_size or cls.voxel_size)
+        if vs < 1e-6:
+            log.warning("[PCFD] voxel_size %.6f too small, clamping to %.6f", vs, cls.voxel_size)
+            vs = cls.voxel_size
+
         origin = (np.floor(np.min(p, axis=0) / vs) * vs
                   if origin is None else np.asarray(origin, dtype=np.float32))
+
         keys = np.floor((p - origin) / vs).astype(np.int32)
-        order = np.lexsort((keys[:,2], keys[:,1], keys[:,0]))
+        order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
         sk = keys[order]
-        starts = np.r_[0, np.flatnonzero(np.any(sk[1:] != sk[:-1], axis=1)) + 1]
+
+        key_changes = np.concatenate([
+            [True],
+            np.any(sk[1:] != sk[:-1], axis=1)
+        ])
+        starts = np.flatnonzero(key_changes)
         offsets = np.r_[starts, len(order)].astype(np.int64)
         voxel_keys = sk[starts]
-        # reduceat avoids one Python loop and the temporary per-voxel index arrays.
+
         counts = np.diff(offsets).astype(np.float32)
         sums = np.add.reduceat(p[order].astype(np.float32, copy=False), starts, axis=0)
         proxy = np.ascontiguousarray(sums / counts[:, None], dtype=np.float32)
+
         pcol = None
         if raw.colors is not None:
             csum = np.add.reduceat(raw.colors[order].astype(np.float32, copy=False), starts, axis=0)
             pcol = np.ascontiguousarray(csum / counts[:, None], dtype=np.float32)
-        result = cls(voxel_keys, offsets, order, proxy, pcol, origin, voxel_size=vs)
-        log.debug("[PCFD] index.build.done raw=%d voxel=%d ratio=%.4f", raw.count,
-                  len(proxy), len(proxy) / max(raw.count, 1))
+
+        result = cls(voxel_keys, offsets, order, proxy, pcol, origin, voxel_size=vs,
+                     source_points=source_points, source_colors=source_colors,
+                     is_stratified=False)
+
+        log.debug("[PCFD] index.build.done raw=%d voxel=%d ratio=%.4f vs=%.4f source=%s",
+                  raw.count, len(proxy), len(proxy) / max(raw.count, 1),
+                  vs, "yes" if source_points is not None else "no")
         return result
 
     def proxy_ids_for_points(self, points) -> np.ndarray:
-        """在不进行“全对最近邻搜索”的情况下，将代理坐标映射回代理行。"""
+        """【标准路径】坐标反查 proxy 索引。分层数据请勿使用。"""
         pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
         if not len(pts) or not len(self.voxel_keys):
             return np.empty(0, dtype=np.int32)
         keys = np.floor((pts - self.origin) / self.voxel_size).astype(np.int32)
-        # 向量化二进制查找.
         dtype = np.dtype([("x", "<i4"), ("y", "<i4"), ("z", "<i4")])
         table = self.voxel_keys.view(dtype).reshape(-1)
         query = keys.view(dtype).reshape(-1)
-        sorted_table = table
-        order = np.arange(len(table), dtype=np.int32)
-        at = np.searchsorted(sorted_table, query)
+        at = np.searchsorted(table, query)
         ids = np.full(len(query), -1, dtype=np.int32)
-        valid = at < len(sorted_table)
-        valid &= sorted_table[np.minimum(at, len(sorted_table) - 1)] == query
-        ids[valid] = order[at[valid]]
+        valid = at < len(table)
+        valid &= table[np.minimum(at, len(table) - 1)] == query
+        ids[valid] = at[valid]
         return ids
 
     def raw_to_voxel_ids(self, raw_ids=None) -> np.ndarray:
-        """
-        返回反向映射，且不构建 Python 字典。
-        """
         if self._raw_to_voxel is None:
             result = np.empty(len(self.raw_order), dtype=np.int32)
             for voxel_id, (start, end) in enumerate(zip(self.voxel_offsets[:-1], self.voxel_offsets[1:])):
@@ -139,7 +213,6 @@ class VoxelCascadeIndex:
         return out
 
     def iter_raw_ids(self, voxel_ids, chunk_size: int = 1_000_000):
-        """将原始 ID 按有界分块返回，同时精确保留体素判定结果。"""
         chunk_size = max(int(chunk_size), 1)
         vids = self.voxel_ids_for_proxy(voxel_ids)
         if not len(vids):
@@ -158,13 +231,6 @@ class VoxelCascadeIndex:
             yield np.concatenate(buf).astype(np.int32, copy=False)
 
     def iter_raw_ids_for_proxy(self, proxy_ids, chunk_size: int = 1_000_000):
-        """
-        将代理决策懒加载扩展至原始ID。
-
-        这是代理空间决策与原始点云之间受支持的边界。该方法有意识地生成CSR块，
-        而非显式构建一个可能包含数百万个元素的数组，同时确保
-        对于所选体素集，每个原始点仍被精确包含一次。
-        """
         yield from self.iter_raw_ids(self.proxy_to_voxel_ids(proxy_ids), chunk_size)
 
     def voxel_ids_for_proxy(self, proxy_ids) -> np.ndarray:
@@ -172,36 +238,29 @@ class VoxelCascadeIndex:
         return np.unique(ids[(ids >= 0) & (ids < len(self.voxel_keys))]).astype(np.int32)
 
     def proxy_to_voxel_ids(self, proxy_ids) -> np.ndarray:
-        """
-        显式的代理->体素映射。
-        """
         return self.voxel_ids_for_proxy(proxy_ids)
 
     def iter_raw_points(self, voxel_ids, points=None, chunk_size: int = 1_000_000):
-        """Yield ``(raw_ids, points)`` in bounded chunks without large copies."""
         source = self.raw_order if points is None else np.asarray(points)
         for raw_ids in self.iter_raw_ids(voxel_ids, chunk_size=chunk_size):
             yield raw_ids, source[raw_ids]
 
     def voxel_to_raw_ids(self, voxel_ids, deduplicate=True) -> np.ndarray:
         vids = self.voxel_ids_for_proxy(voxel_ids)
-        if not len(vids): return np.empty(0, np.int32)
+        if not len(vids):
+            return np.empty(0, np.int32)
         parts = [self.raw_order[self.voxel_offsets[v]:self.voxel_offsets[v+1]] for v in vids]
         result = np.concatenate(parts).astype(np.int32, copy=False)
         return np.unique(result) if deduplicate else result
 
     def iter_raw_points_for_proxy(self, proxy_ids, points, colors=None,
                                   chunk_size: int = 1_000_000):
-        """
-        将代理决策懒加载地展开为原始点块。
-        """
         source = np.asarray(points)
         colour_source = None if colors is None else np.asarray(colors)
         for raw_ids in self.iter_raw_ids_for_proxy(proxy_ids, chunk_size):
             yield raw_ids, source[raw_ids], (None if colour_source is None else colour_source[raw_ids])
 
     def raw_count_for_proxy(self, proxy_ids) -> int:
-        """返回精确的原始扩展大小，且不分配原始 ID。"""
         return self.raw_count_for_voxels(self.proxy_to_voxel_ids(proxy_ids))
 
     def raw_count_for_voxels(self, voxel_ids) -> int:
@@ -210,6 +269,65 @@ class VoxelCascadeIndex:
 
     def proxy_to_raw_ids(self, proxy_ids, deduplicate=True) -> np.ndarray:
         return self.voxel_to_raw_ids(proxy_ids, deduplicate)
+
+    # ==================== Source 原始空间映射 (CSR 唯一) ====================
+
+    def has_source_mapping(self) -> bool:
+        return (self.source_points is not None and
+                self.source_raw_offsets is not None and
+                self.source_raw_indices is not None)
+
+    def proxy_to_source_ids(self, proxy_ids, deduplicate=True) -> np.ndarray:
+        """Proxy → Source 原始点索引 (CSR 向量化查询)。"""
+        if not self.has_source_mapping():
+            return self.proxy_to_raw_ids(proxy_ids, deduplicate)
+
+        pids = np.asarray(proxy_ids, dtype=np.int64).reshape(-1)
+        pids = pids[(pids >= 0) & (pids < len(self.proxy_points))]
+        if len(pids) == 0:
+            return np.empty(0, dtype=np.int32)
+
+        starts = self.source_raw_offsets[pids]
+        ends = self.source_raw_offsets[pids + 1]
+        counts = ends - starts
+        total = int(counts.sum())
+        if total == 0:
+            return np.empty(0, dtype=np.int32)
+
+        offsets_in_group = np.arange(total, dtype=np.int64) - np.repeat(
+            np.concatenate([[0], np.cumsum(counts[:-1], dtype=np.int64)]),
+            counts.astype(np.int64)
+        )
+        global_offsets = np.repeat(starts, counts.astype(np.int64)) + offsets_in_group
+        result = self.source_raw_indices[global_offsets].astype(np.int32, copy=False)
+        return np.unique(result) if deduplicate else result
+
+    def source_count_for_proxy(self, proxy_ids) -> int:
+        if not self.has_source_mapping():
+            return self.raw_count_for_proxy(proxy_ids)
+        pids = np.asarray(proxy_ids, dtype=np.int64).reshape(-1)
+        pids = pids[(pids >= 0) & (pids < len(self.proxy_points))]
+        if len(pids) == 0:
+            return 0
+        return int(np.sum(self.source_raw_offsets[pids + 1] - self.source_raw_offsets[pids]))
+
+    def source_to_proxy_ids(self, source_ids) -> np.ndarray:
+        if not self.has_source_mapping():
+            return self.raw_to_voxel_ids(source_ids)
+        wanted = set(np.asarray(source_ids, dtype=np.int64).reshape(-1).tolist())
+        if not wanted:
+            return np.empty(0, dtype=np.int32)
+        hits = []
+        for pid, (start, end) in enumerate(zip(self.source_raw_offsets[:-1], self.source_raw_offsets[1:])):
+            if any(int(value) in wanted for value in self.source_raw_indices[start:end]):
+                hits.append(pid)
+        return np.asarray(hits, dtype=np.int32)
+
+    def get_source_points(self):
+        return self.source_points
+
+    def get_source_colors(self):
+        return self.source_colors
 
     def query_aabb(self, min_bound, max_bound, raw_points, exact=True) -> np.ndarray:
         lo = np.asarray(min_bound, dtype=np.float32); hi = np.asarray(max_bound, dtype=np.float32)
