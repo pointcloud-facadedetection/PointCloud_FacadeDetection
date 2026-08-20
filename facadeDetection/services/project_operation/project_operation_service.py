@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from typing import Optional
 import numpy as np
 from PySide6.QtWidgets import QColorDialog, QMessageBox
@@ -16,6 +17,7 @@ class ProjectOperationService:
         self._pointcloud_service = pointcloud_service
         self._render_service = render_service
         self._last_roi_indices: Optional[list[int]] = None
+        self._last_roi_bounds = None
         self.on_facade_results = None
         self._project_uuid: Optional[str] = None
         self._last_facade_results: Optional[list[dict]] = None
@@ -177,10 +179,9 @@ class ProjectOperationService:
                 self._viewport.clear_roi_visuals()
         except Exception as e:
             print(f"清除 ROI 视觉失败: {e}", flush=True)
-        self._last_roi_indices = None
 
     def _render_roi_bbox(self, cloud_name: str, indices: list[int]):
-        """根据 ROI 索引计算 AABB 并在视口渲染 3D 白框。"""
+        """根据 ROI 索引计算 AABB 并在视口渲染3D框。"""
         try:
             data = self._viewport.get_cloud_data(cloud_name)
             if data is None:
@@ -238,85 +239,105 @@ class ProjectOperationService:
         except Exception as exc:
             print(f"进入 ROI 框选模式失败: {exc}", flush=True)
 
-    def _on_roi_selected(self, min_bound, max_bound, indices):
-        """
-        ROI 框选完成后的回调：根据框选索引估计整栋建筑 BBOX，存档并可视化。
-
-        修复要点：
-        1. 如果 indices 为空，先尝试用 min_bound/max_bound 计算
-        2. 添加更详细的调试日志
-        3. 如果仍然为空，给出更具体的错误提示
-        """
+    def _on_roi_selected(self, min_bound, max_bound, indices, p1=None, p2=None):
+        """ROI 框选完成回调"""
+        t0 = time.monotonic()
         try:
             names = self._viewport.get_cloud_names()
             cloud = names[-1] if names else None
+            
+            if indices is None:
+                n_indices = 0
+                indices_list = []
+            elif isinstance(indices, np.ndarray):
+                n_indices = len(indices)
+                indices_list = indices.tolist() if indices.ndim == 1 else []
+            else:
+                n_indices = len(indices)
+                indices_list = list(indices)
+            
+            print(
+                f"[ROI] 开始: cloud={cloud}, 索引={n_indices}",
+                flush=True,
+            )
 
-            # 尝试从 indices 获取，如果为空则尝试从 BBox 计算
-            if not isinstance(indices, (list, tuple, np.ndarray)) or len(indices) == 0:
+            if n_indices == 0:
                 if min_bound is not None and max_bound is not None:
-                    # 从 BBox 计算索引
                     data = self._viewport.get_cloud_data(cloud)
                     if data is not None and data.get('pos') is not None:
                         pos = np.asarray(data['pos'], dtype=float)
                         bmin = np.asarray(min_bound, dtype=float).reshape(1, 3)
                         bmax = np.asarray(max_bound, dtype=float).reshape(1, 3)
                         mask = np.all((pos >= bmin) & (pos <= bmax), axis=1)
-                        indices = np.where(mask)[0].astype(int).tolist()
+                        indices_list = np.where(mask)[0].astype(int).tolist()
+                        n_indices = len(indices_list)
 
-            if not cloud or not isinstance(indices, (list, tuple, np.ndarray)) or len(indices) == 0:
+            if not cloud or n_indices == 0:
                 try:
                     QMessageBox.information(
                         None,
                         '框选检测区域',
-                        '未选中有效区域。提示：请确保在视口中拖拽框选建筑立面区域!'
+                        '未选中有效区域。提示：请确保在视口中拖拽框选建筑立面区域!',
                     )
                 except Exception:
                     print('未选中有效区域，请重试。', flush=True)
                 return
 
-            # 找到渲染服务实例
             render = self._get_render_service()
             if render is None:
-                # 渲染服务不可用时，仅记录原始索引
-                self.set_detection_roi(None, None, indices)
+                print(
+                    "[ROI] 警告: RenderService不可用，仅保存索引",
+                    flush=True,
+                )
+                self.set_detection_roi(None, None, indices_list)
                 return
 
-            # 1) 尝试根据框选索引拟合立面平面
-            plane, sel_pts = render.fit_plane_on_selection(cloud, indices)
+            screen_rect = (p1, p2) if p1 is not None and p2 is not None else None
 
-            # 距离容差（米）：使用 DETECT_DIST_TOL_MM（毫米）转换为米，避免将倍率 2.5 误作米值
-            try:
-                tol = float(getattr(__import__('config.settings', fromlist=['Config']).Config, 'DETECT_DIST_TOL_MM', 20.0)) / 1000.0
-            except Exception:
-                tol = 0.02
-
-            # 2) 在平面约束下计算整栋建筑 BBox
-            if plane is not None:
-                bmin, bmax = render.compute_building_bbox_from_selection(cloud, indices, plane=plane, tol=None)
-            else:
-                bmin, bmax = render.compute_building_bbox_from_selection(cloud, indices)
+            bmin, bmax = render.compute_building_bbox_from_selection(
+                cloud,
+                indices_list, 
+                screen_rect=screen_rect,
+                plane=None,
+                tol=None,
+            )
 
             if bmin is None or bmax is None:
-                # 主墙面识别失败时不保存被遮挡物控制的伪 BBox。
-                print('未能识别稳定的主墙面，请扩大框选区域后重试。', flush=True)
-                return
+                print('[ROI] BBox生成失败，使用AABB兜底', flush=True)
+                try:
+                    data = self._viewport.get_cloud_data(cloud)
+                    pos = np.asarray(data['pos'], dtype=float)
+                    idx_arr = np.asarray(indices_list, dtype=int)
+                    idx_arr = idx_arr[(idx_arr >= 0) & (idx_arr < len(pos))]
+                    sel_pts = pos[idx_arr]
+                    bmin = np.min(sel_pts, axis=0)
+                    bmax = np.max(sel_pts, axis=0)
+                    margin = np.max(bmax - bmin) * 0.05 + 0.1
+                    bmin -= margin
+                    bmax += margin
+                except Exception as e:
+                    print(f"[ROI] AABB失败: {e}", flush=True)
+                    return
 
-            # 可视化 ROI BBOX（红色）
             try:
                 render.visualize_building_bbox(bmin, bmax, color=(1.0, 0.2, 0.2))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ROI] 可视化失败: {e}", flush=True)
 
-            # 以 BBOX 计算并存储 ROI 索引
             self.set_detection_roi(bmin, bmax, None)
+            elapsed = time.monotonic() - t0
             print(
-                f"ROI 已设定：建筑 BBox [{bmin[0]:.2f}, {bmin[1]:.2f}, {bmin[2]:.2f}] ~ "
-                f"[{bmax[0]:.2f}, {bmax[1]:.2f}, {bmax[2]:.2f}]",
+                f"[ROI] 完成 (耗时{elapsed:.3f}s): "
+                f"[{bmin[0]:.2f},{bmin[1]:.2f},{bmin[2]:.2f}] ~ "
+                f"[{bmax[0]:.2f},{bmax[1]:.2f},{bmax[2]:.2f}]",
                 flush=True,
             )
             self._last_roi_bounds = (bmin, bmax)
+
         except Exception as exc:
-            print(f"ROI 计算失败: {exc}", flush=True)
+            print(f"[ROI] 异常: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
 
     def _get_render_service(self):
         """获取渲染服务实例的统一入口。"""
@@ -337,11 +358,13 @@ class ProjectOperationService:
             names = self._viewport.get_cloud_names()
             if not names:
                 self._last_roi_indices = None
+                self._last_roi_bounds = None
                 return
             cloud = names[-1]
             data = self._viewport.get_cloud_data(cloud)
             if data is None or (data.get('pos') is None) or len(data['pos']) == 0:
                 self._last_roi_indices = None
+                self._last_roi_bounds = None
                 return
             pos = np.asarray(data['pos'], dtype=float)
             if indices is None or len(indices) == 0:
@@ -360,13 +383,22 @@ class ProjectOperationService:
                 self._last_roi_indices = None
             else:
                 self._last_roi_indices = np.unique(idx).tolist()
+            # 保留 BBox 作为检测输入。索引是渲染点云空间的索引，可能与
+            # detection dataset 的 proxy 索引不同，因此 BBox 是更稳定的兼容路径。
+            if min_bound is not None and max_bound is not None:
+                bmin = np.asarray(min_bound, dtype=float).reshape(3)
+                bmax = np.asarray(max_bound, dtype=float).reshape(3)
+                self._last_roi_bounds = (np.minimum(bmin, bmax), np.maximum(bmin, bmax))
+            else:
+                self._last_roi_bounds = None
         except Exception:
             self._last_roi_indices = None
+            self._last_roi_bounds = None
 
 
     def facade_detection(self):
         self._notify('facade_detection')
-        # 检测前清除旧的 ROI 视觉（仅清除 2D/3D 视觉，不重置相机）
+        # 检测前清除旧的 ROI 视觉（仅清除 2D/3D 视觉，不重置当前检测条件）
         self._clear_roi_visuals()
 
         if self._facade_service is None:
@@ -382,10 +414,20 @@ class ProjectOperationService:
             return
         cloud_name = names[-1]
         try:
-            # “建筑外立面检测”必须是完整场景检测。框选只负责选择建筑，
-            # 不能把选择框作为算法裁剪边界，否则墙体会被框边截断。
-            results = self._facade_service.detect(
-                cloud_name=cloud_name, project_uuid=self._project_uuid)
+            roi_indices = self._last_roi_indices
+            roi_bounds = self._last_roi_bounds
+            if roi_indices or roi_bounds is not None:
+                # 框选检测使用 seed 模式：全场景识别，按 ROI 选择相交立面，
+                # 避免把建筑墙体截断；没有 ROI 时保持全局检测行为。
+                results = self._facade_service.detect_on_roi(
+                    cloud_name=cloud_name,
+                    roi_indices=roi_indices,
+                    roi_bounds=roi_bounds,
+                    project_uuid=self._project_uuid,
+                    roi_scope='seed')
+            else:
+                results = self._facade_service.detect(
+                    cloud_name=cloud_name, project_uuid=self._project_uuid)
             self._last_facade_results = results
             if callable(self.on_facade_results):
                 try:

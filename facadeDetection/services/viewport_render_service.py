@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
@@ -314,290 +315,167 @@ class ViewportRenderService:
         return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
     # ---- ROI utilities (selection -> facade plane -> building BBOX) ----
-    def fit_plane_on_selection(self, cloud_name: str, indices: list[int],
-                               prefer_frontmost: bool = True,
-                               front_fraction: float = 0.25,
-                               mode: str = 'dominant') -> tuple[np.ndarray | None, np.ndarray | None]:
-        """根据选定的索引拟合一个平面，并返回 (plane_model[4], selected_points)。
-        plane_model：[nx, ny, nz, d]，包含单位法向量；若操作失败，则返回 (None, None)。
-
-        prefer_frontmost:
-            当为 True 时，优先使用靠近相机前方向的前景点进行拟合（基于投影深度的前 20%~30% 片层），
-            以减少后景干扰，更符合“最近立面”需求；若无法获取投影或结果过少，则回退到全部选中点。
-        front_fraction:
-            前景分位阈值（0~1），默认 0.25 表示使用最靠前的 25% 深度点。
-        mode:
-            选择候选平面的策略：
-            - 'auto': 前景可用且面积足够时选前景，否则选面积最大者（可绕过脚手架等遮挡层）
-            - 'front': 总是选前景（若不可用则回退全部）
-            - 'dominant': 总是选面积最大者
+    def compute_building_bbox_from_selection(
+        self,
+        cloud_name: str,
+        indices: list[int],
+        screen_rect: tuple | None = None,
+        thickness: float | None = None,
+        plane: np.ndarray | None = None,
+        tol: float | None = None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """
+        核心设计：
+        - 不拟合平面，直接用选中点3D坐标
+        - 沿相机front方向外扩厚度（向量形式，非单轴）
+        - 使用正确的world_per_pixel
+        """
+        t_start = time.monotonic()
+
         try:
-            data = self.viewport.get_cloud_data(cloud_name)
-            if data is None:
-                return None, None
-            pos = data.get('pos')
-            if pos is None or len(pos) == 0:
-                return None, None
-            idx = np.asarray(indices, dtype=int)
-            idx = idx[(idx >= 0) & (idx < len(pos))]
-            if len(idx) < 3:
-                return None, None
-            pts = np.asarray(pos)[idx]
-
-            # 依据投影深度选择“前景点”子集以拟合最近立面（可选）
-            front_pts = None
-            front_idx = None
-            if hasattr(self.viewport, 'project_points'):
-                try:
-                    proj = self.viewport.project_points(pts)
-                    if proj is not None:
-                        screen, valid = proj
-                        if screen is not None and len(screen) == len(pts):
-                            z = screen[:, 2]
-                            m = np.asarray(valid, dtype=bool)
-                            z = z[m]
-                            if z.size >= 10:
-                                # 统一“越小越近”：若范围更贴近上界说明符号反了，则取相反分位
-                                frac = float(np.clip(front_fraction, 0.05, 0.5))
-                                zmin, zmax = float(np.min(z)), float(np.max(z))
-                                use_small = (np.median(z) - zmin) < (zmax - np.median(z))
-                                thresh = zmin + frac * (zmax - zmin) if use_small else zmax - frac * (zmax - zmin)
-                                sel = (screen[m, 2] <= thresh) if use_small else (screen[m, 2] >= thresh)
-                                keep_mask_full = np.zeros(len(pts), dtype=bool)
-                                keep_mask_full[m] = sel
-                                # 过少则选择前 K 个“最靠前”的点
-                                if keep_mask_full.sum() < 30:
-                                    order = np.argsort(screen[m, 2]) if use_small else np.argsort(-screen[m, 2])
-                                    k = max(30, min(len(order)//3, 2000))
-                                    pick = np.zeros(len(pts), dtype=bool)
-                                    true_idx = np.nonzero(m)[0]
-                                    pick[true_idx[order[:k]]] = True
-                                    keep_mask_full = pick
-                                if keep_mask_full.any():
-                                    front_pts = pts[keep_mask_full]
-                                    front_idx = idx[keep_mask_full]
-                except Exception:
-                    pass
-
-            # 计算两个候选：前景（若可用）与全部选中点
-            candidates: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
-            def _fit_and_area(points: np.ndarray) -> tuple[np.ndarray, float]:
-                if points is None or len(points) < 3:
-                    return None, 0.0
-                try:
-                    from algorithms.geometry import fit_plane_irls
-                    model = fit_plane_irls(points, init_model=None, max_iters=int(getattr(Config, 'FACADE_IRLS_ITERS', 3)))
-                except Exception:
-                    from algorithms.geometry import fit_plane_svd
-                    model = fit_plane_svd(points)
-                # 估计 UV 面积用于偏好大尺度墙面
-                try:
-                    from algorithms.geometry import plane_basis_from_normal, project_to_plane, estimate_uv_bbox_area
-                    nrm = model[:3]
-                    nrm = nrm / (np.linalg.norm(nrm) + 1e-12)
-                    cen = np.mean(points, axis=0)
-                    u, v = plane_basis_from_normal(nrm)
-                    uv = project_to_plane(points, cen, u, v)
-                    area = float(estimate_uv_bbox_area(uv))
-                except Exception:
-                    area = 0.0
-                # 归一化法向
-                n = model[:3]
-                n = n / (np.linalg.norm(n) + 1e-12)
-                model[:3] = n
-                return np.asarray(model, dtype=float), area
-
-            # 前景候选
-            if prefer_frontmost and front_pts is not None and len(front_pts) >= 3:
-                m_front, _ = _fit_and_area(front_pts)
-                candidates.append((m_front, front_pts, front_idx))
-
-            # 全部选中点候选
-            m_all, _ = _fit_and_area(pts)
-            candidates.append((m_all, pts, idx))
-
-            # 选择策略
-            chosen_model = None
-            chosen_pts = None
-            chosen_idx = None
-            try:
-                # 垂直筛选阈值
-                nz_thr = float(getattr(Config, 'VERTICAL_NZ_THR', 0.20))
-            except Exception:
-                nz_thr = 0.20
-
-            def _is_vertical(m: np.ndarray) -> bool:
-                if m is None:
-                    return False
-                n = m[:3]
-                n = n / (np.linalg.norm(n) + 1e-12)
-                return abs(float(n[2])) <= nz_thr
-
-            # 面积比较（优先大尺度主墙面）
-            areas = []
-            for m, p, _ in candidates:
-                if m is None or p is None:
-                    areas.append(0.0)
-                else:
-                    try:
-                        from algorithms.geometry import plane_basis_from_normal, project_to_plane, estimate_uv_bbox_area
-                        nrm = m[:3] / (np.linalg.norm(m[:3]) + 1e-12)
-                        cen = np.mean(p, axis=0)
-                        u, v = plane_basis_from_normal(nrm)
-                        uv = project_to_plane(p, cen, u, v)
-                        areas.append(float(estimate_uv_bbox_area(uv)))
-                    except Exception:
-                        areas.append(0.0)
-
-            # 选择模型
-            if mode == 'front' and len(candidates) >= 1:
-                # 选择第一个（前景）有效且垂直，否则回退到面积最大
-                m, p, id_arr = candidates[0]
-                if _is_vertical(m):
-                    chosen_model, chosen_pts, chosen_idx = m, p, id_arr
-                else:
-                    k = int(np.argmax(areas))
-                    chosen_model, chosen_pts, chosen_idx = candidates[k]
-            else:
-                # auto/dominant
-                if mode == 'auto' and prefer_frontmost and len(candidates) >= 2 and _is_vertical(candidates[0][0]) and areas[0] >= max(areas[1] * 0.5, 5.0):
-                    chosen_model, chosen_pts, chosen_idx = candidates[0]
-                else:
-                    k = int(np.argmax(areas))
-                    chosen_model, chosen_pts, chosen_idx = candidates[k]
-
-            if chosen_model is None or chosen_pts is None:
-                return None, None
-
-            # 使用深度剥离进一步稳定主墙（避免凸出物干扰）
-            try:
-                from algorithms.geometry import split_by_depth_histogram
-                # 自适应距离容差（米）
-                tol_m = float(getattr(Config, 'DETECT_DIST_TOL_MM', 20.0)) / 1000.0
-                masks = split_by_depth_histogram(chosen_pts, chosen_model, tol_m, min_points=80)
-                if masks and len(masks) > 1:
-                    # 选择 UV 面积最大的片层
-                    best_i = 0
-                    best_area = -1.0
-                    for i, mk in enumerate(masks):
-                        sub = chosen_pts[mk]
-                        try:
-                            from algorithms.geometry import plane_basis_from_normal, project_to_plane, estimate_uv_bbox_area
-                            nrm = chosen_model[:3] / (np.linalg.norm(chosen_model[:3]) + 1e-12)
-                            cen = np.mean(sub, axis=0)
-                            u, v = plane_basis_from_normal(nrm)
-                            uv = project_to_plane(sub, cen, u, v)
-                            area = float(estimate_uv_bbox_area(uv))
-                        except Exception:
-                            area = float(len(sub))
-                        if area > best_area:
-                            best_area = area
-                            best_i = i
-                    mk = masks[best_i]
-                    chosen_pts = chosen_pts[mk]
-                    chosen_idx = chosen_idx[mk]
-                    # 小步 IRLS 精修
-                    try:
-                        from algorithms.geometry import fit_plane_irls
-                        chosen_model = fit_plane_irls(chosen_pts, init_model=chosen_model, max_iters=3,
-                                                      huber_delta=float(getattr(Config, 'DETECT_DIST_TOL_MM', 20.0))/1000.0)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # 归一化法向并返回
-            n = chosen_model[:3]
-            n = n / (np.linalg.norm(n) + 1e-12)
-            chosen_model[:3] = n
-            return np.asarray(chosen_model, dtype=float), chosen_pts
-        except Exception:
-            return None, None
-
-    def compute_building_bbox_from_selection(self, cloud_name: str, indices: list[int],
-                                             fixed_margin: float | None = None, max_iter: int = 8,
-                                             max_volume_ratio: float | None = None,
-                                             plane: np.ndarray | None = None,
-                                             tol: float | None = None) -> tuple[np.ndarray | None, np.ndarray | None]:
-        try:
+            # ---------- 0. 数据获取 ----------
             data = self.viewport.get_cloud_data(cloud_name)
             if not data or data.get('pos') is None:
+                print("[ROI-BBox] 失败: 无点云数据", flush=True)
                 return None, None
-            all_pos = np.asarray(data['pos'], dtype=float).reshape(-1, 3)
+
+            all_pos = np.asarray(data['pos'], dtype=np.float64).reshape(-1, 3)
             idx = np.unique(np.asarray(indices, dtype=int).reshape(-1))
             idx = idx[(idx >= 0) & (idx < len(all_pos))]
             if len(idx) < 3:
+                print(f"[ROI-BBox] 失败: 选中点过少 ({len(idx)})", flush=True)
                 return None, None
+
             seed = all_pos[idx]
-            scale = self._estimate_scene_scale(cloud_name)
 
-            if plane is None:
-                plane, _ = self.fit_plane_on_selection(cloud_name, idx.tolist(),
-                                                       prefer_frontmost=False, mode='dominant')
-            if plane is None:
-                return None, None
-            n = np.asarray(plane[:3], dtype=float)
-            n /= np.linalg.norm(n) + 1e-12
-            d = float(plane[3])
-            if abs(n[2]) > float(getattr(Config, 'VERTICAL_NZ_THR', 0.20)):
-                return None, None
+            # ---------- 1. 直接计算选中点AABB ----------
+            min_raw = np.min(seed, axis=0)
+            max_raw = np.max(seed, axis=0)
+            center_raw = (min_raw + max_raw) / 2.0
+            extent_raw = max_raw - min_raw
+            print(f"[ROI-BBox] 选中点范围: [{min_raw[0]:.2f},{min_raw[1]:.2f},{min_raw[2]:.2f}] ~ "
+                  f"[{max_raw[0]:.2f},{max_raw[1]:.2f},{max_raw[2]:.2f}], "
+                  f"跨度=[{extent_raw[0]:.2f},{extent_raw[1]:.2f},{extent_raw[2]:.2f}]", flush=True)
 
-            from algorithms.geometry import plane_axes, connected_components_2d_grid
-            u, v = plane_axes(n, 'vertical_facade')
-            origin = np.mean(seed, axis=0)
-            seed_uv = np.column_stack(((seed-origin) @ u, (seed-origin) @ v))
+            # ---------- 2. 获取相机参数 ----------
+            camera = getattr(self.viewport, '_camera', None)
+            if camera is None:
+                print("[ROI-BBox] 警告: 无camera，使用纯几何AABB", flush=True)
+                # 无相机时，直接返回选中点AABB + 各向同性外扩
+                margin = np.max(extent_raw) * 0.05 + 0.5
+                return min_raw - margin, max_raw + margin
 
-            if tol is None:
-                tol = float(np.clip(scale * 0.01, 0.08, 0.5))
-            else:
-                tol = float(np.clip(tol, 0.05, max(scale * 0.03, 0.5)))
-            signed = all_pos @ n + d
-            near = np.abs(signed) <= tol
-            near_ids = np.flatnonzero(near)
-            if len(near_ids) < 20:
-                return None, None
-            near_uv = np.column_stack(((all_pos[near_ids]-origin) @ u,
-                                       (all_pos[near_ids]-origin) @ v))
+            front, up, right = camera.get_camera_basis()
+            if front is None:
+                print("[ROI-BBox] 警告: 无法获取相机基向量，使用纯几何AABB", flush=True)
+                margin = np.max(extent_raw) * 0.05 + 0.5
+                return min_raw - margin, max_raw + margin
 
-            comps = connected_components_2d_grid(near_uv, grid_size=None, min_cells=3,
-                                                  adaptive_ratio=2.5, sample_ratio=0.1,
-                                                  connectivity=8, close_radius_cells=3)
-            if comps:
-                def score(mask):
-                    pts = near_uv[mask]
-                    overlap = np.sum((seed_uv[:, 0] >= pts[:, 0].min()) &
-                                     (seed_uv[:, 0] <= pts[:, 0].max()) &
-                                     (seed_uv[:, 1] >= pts[:, 1].min()) &
-                                     (seed_uv[:, 1] <= pts[:, 1].max()))
-                    return (overlap / max(len(seed), 1)) * max(np.ptp(pts[:, 0]) * np.ptp(pts[:, 1]), 1e-6)
-                component = comps[int(np.argmax([score(m) for m in comps]))]
-                wall_ids = near_ids[component]
-            else:
-                wall_ids = near_ids
-            wall_uv = np.column_stack(((all_pos[wall_ids]-origin) @ u,
-                                       (all_pos[wall_ids]-origin) @ v))
-            umin, vmin = np.min(wall_uv, axis=0)
-            umax, vmax = np.max(wall_uv, axis=0)
+            # ---------- 3. 沿front方向外扩厚度 ----------
+            # 计算选中点沿front方向的深度分布
+            # 使用选中点自身中心作为参考（比lookat更稳定）
+            depths = (seed - center_raw) @ front
+            
+            # 过滤前后各2.5%的极端点
+            d_p05 = float(np.percentile(depths, 2.5))
+            d_p95 = float(np.percentile(depths, 97.5))
+            d_center = (d_p05 + d_p95) / 2.0
+            # d_min = float(np.min(depths))
+            # d_max = float(np.max(depths))
+            depth_span = d_p95 - d_p05
 
-            footprint = (((all_pos-origin) @ u >= umin) & ((all_pos-origin) @ u <= umax) &
-                         ((all_pos-origin) @ v >= vmin) & ((all_pos-origin) @ v <= vmax))
-            ids = np.flatnonzero(footprint)
-            if len(ids) < 3:
-                ids = wall_ids
-            coords = np.column_stack(((all_pos[ids]-origin) @ u,
-                                       (all_pos[ids]-origin) @ v,
-                                       (all_pos[ids]-origin) @ n))
-            lo = np.min(coords, axis=0); hi = np.max(coords, axis=0)
-            result = origin + np.array([u, v, n]).T @ np.array([[(lo[0]+hi[0])/2],
-                                                                  [(lo[1]+hi[1])/2],
-                                                                  [(lo[2]+hi[2])/2]])[:, 0]
-            half = np.array([(hi[0]-lo[0])/2, (hi[1]-lo[1])/2, (hi[2]-lo[2])/2])
-            axes = np.column_stack([u, v, n])
-            corners = result + np.array([[-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]]) * half @ axes.T
-            return np.min(corners, axis=0), np.max(corners, axis=0)
+            # 厚度策略：基于选中点自身的深度跨度，而非整个场景
+            # 目标：覆盖选中点前后一定范围，给立面检测留余量
+            if thickness is None:
+                # 基础厚度：选中点深度跨度的50%，最小0.5米，最大5米
+                base_thick = max(depth_span * 0.5, 0.5)
+                base_thick = min(base_thick, 5.0)  # 限制最大5米
+                thickness = base_thick
+
+            # half_thick: 沿front方向从中心外扩的距离
+            # 确保包含所有选中点（d_min到d_max）+ 额外余量
+            half_thick = max(thickness / 2.0, abs(d_p05 - d_center), abs(d_p95 - d_center))
+
+            print(f"[ROI-BBox] 深度分布: min={d_p05:.3f}, max={d_p95:.3f}, "
+                  f"span={depth_span:.3f}, half_thick={half_thick:.3f}", flush=True)
+
+            # 计算过滤后中心在front方向上的位置
+            center_depth_offset = (d_p05 + d_p95) / 2.0
+            effective_center = center_raw + center_depth_offset * front
+
+            # 重新计算相对于effective_center的深度
+            depths_centered = (seed - effective_center) @ front
+            d_min_eff = float(np.min(depths_centered))
+            d_max_eff = float(np.max(depths_centered))
+
+            # 目标范围: [-half_thick, +half_thick]
+            expand_front = max(0, half_thick - d_max_eff)
+            expand_back = max(0, -half_thick - d_min_eff)
+
+
+            # 应用到min/max（注意：front方向的分量可能使min变小、max变大）
+            min_bound = min_raw.copy()
+            max_bound = max_raw.copy()
+
+            # 沿front方向，每个轴独立外扩
+            if expand_front > 0:
+                for i in range(3):
+                    if front[i] > 1e-6:
+                        max_bound[i] += expand_front * front[i]
+                    elif front[i] < -1e-6:
+                        min_bound[i] += expand_front * front[i]
+
+            # 后向扩展（沿front负方向）
+            if expand_back > 0:
+                for i in range(3):
+                    if front[i] > 1e-6:
+                        min_bound[i] -= expand_back * front[i]
+                    elif front[i] < -1e-6:
+                        max_bound[i] -= expand_back * front[i]
+
+            # ---------- 5. 非front方向轻微外扩（避免边界截断）----------
+            margin = np.max(extent_raw) * 0.01 + 0.05  # 1% + 5cm
+            
+            # 找到垂直于front的平面内的两个轴
+            for i in range(3):
+                if abs(right[i]) > 1e-6:
+                    if right[i] > 0:
+                        min_bound[i] -= margin * right[i]
+                        max_bound[i] += margin * right[i]
+                    else:
+                        min_bound[i] += margin * right[i]
+                        max_bound[i] -= margin * right[i]
+            
+            # 在up方向外扩
+            for i in range(3):
+                if abs(up[i]) > 1e-6:
+                    if up[i] > 0:
+                        min_bound[i] -= margin * up[i]
+                        max_bound[i] += margin * up[i]
+                    else:
+                        min_bound[i] += margin * up[i]
+                        max_bound[i] -= margin * up[i]
+
+            # 确保min < max
+            for i in range(3):
+                if min_bound[i] > max_bound[i]:
+                    min_bound[i], max_bound[i] = max_bound[i], min_bound[i]
+
+            elapsed = time.monotonic() - t_start
+            print(
+                f"[ROI-BBox] 成功: Bbox=[{min_bound[0]:.2f},{min_bound[1]:.2f},{min_bound[2]:.2f}] ~ "
+                f"[{max_bound[0]:.2f},{max_bound[1]:.2f},{max_bound[2]:.2f}], "
+                f"耗时={elapsed:.3f}s",
+                flush=True,
+            )
+
+            return min_bound, max_bound
+
         except Exception as e:
-            print(f"compute_building_bbox_from_selection failed: {e}", flush=True)
+            elapsed = time.monotonic() - t_start
+            print(f"[ROI-BBox] 异常 ({elapsed:.3f}s): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return None, None
 
     def _estimate_scene_scale(self, cloud_name: str | None = None) -> float:
@@ -619,7 +497,7 @@ class ViewportRenderService:
                     max_extent = max(max_extent, float(np.max(extent)))
             return max(max_extent, 1.0)
         except Exception:
-            return 50.0  # 默认 50 米
+            return 100.0  # 默认 100 米
 
     def visualize_building_bbox(self, min_bound, max_bound, color=(1.0, 0.2, 0.2)) -> None:
         """Render a 3D bbox for the building ROI in the viewport."""
