@@ -1,3 +1,4 @@
+import time
 from PySide6.QtCore import Qt, QPoint, QObject, QEvent, QRect
 from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtWidgets import QWidget
@@ -232,16 +233,26 @@ class ROISelectionController:
             pass
 
     def finish(self, p1: QPoint, p2: QPoint):
-        # compute indices then call on_complete
+        print(f"[ROI-Controller] 开始: p1=({p1.x()},{p1.y()}), p2=({p2.x()},{p2.y()})", flush=True)
+    
+        # 计算索引
         idx = self._compute_indices(p1, p2, self._cloud_name)
         cb = self._on_complete
-        # keep overlay visible until service clears? We hide to avoid confusion.
+    
+        # 先取消overlay（释放输入锁定）
         self.cancel()
+    
         if callable(cb):
             try:
-                cb(None, None, idx)
-            except Exception:
-                pass
+                print(f"[ROI-Controller] 触发回调...", flush=True)
+                cb(None, None, idx, p1, p2)
+                print(f"[ROI-Controller] 回调完成", flush=True)
+            except Exception as e:
+                print(f"[ROI-Controller] 回调异常: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[ROI-Controller] 警告: 回调不可调用 ({type(cb)})", flush=True)
 
     # expose overlay for viewport window bridge
     def overlay(self):
