@@ -38,7 +38,7 @@ QWidget#applicationShell,
 QStackedWidget#pageStack,
 QWidget[pageRole="workspace"],
 QWidget[uiRole="contentArea"] {
-    background-color: #EEF2F7;
+    background-color: #FFFFFF;
 }
 
 QWidget#applicationHeader {
@@ -56,11 +56,11 @@ QLabel#applicationBrandMark {
     font-weight: 700;
 }
 
-QLabel#applicationBrandTitle {
+QLabel#applicationPageTitle {
     color: #F8FAFC;
     background-color: transparent;
-    font-size: 17px;
-    font-weight: 600;
+    font-size: 22px;
+    font-weight: 700;
 }
 
 QLabel#currentProjectLabel {
@@ -71,30 +71,6 @@ QLabel#currentProjectLabel {
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 500;
-}
-
-QWidget[uiRole="pageHeadingRow"] {
-    background-color: transparent;
-    border: none;
-}
-
-QLabel[uiRole="pageTitle"] {
-    min-height: 32px;
-    color: #111827;
-    background-color: transparent;
-    border: none;
-    padding: 0;
-    font-size: 23px;
-    font-weight: 700;
-}
-
-QLabel[uiRole="pageIndex"] {
-    color: #1E40AF;
-    background-color: #E7EEFF;
-    border: 1px solid #C9D8FF;
-    border-radius: 9px;
-    font-size: 12px;
-    font-weight: 700;
 }
 
 QLabel[uiRole="sectionTitle"] {
@@ -113,24 +89,22 @@ QLabel[uiRole="supportingText"] {
 
 QFrame[uiRole="workspaceSurface"] {
     background-color: #FFFFFF;
-    border: 1px solid #D5DEEA;
-    border-radius: 12px;
+    border: none;
+    border-radius: 0;
 }
 
 QWidget[uiRole="workspaceBody"],
 QWidget#overviewColumns {
     background-color: #FFFFFF;
     border: none;
-    border-bottom-left-radius: 11px;
-    border-bottom-right-radius: 11px;
+    border-radius: 0;
 }
 
 QWidget[uiRole="pageHeader"] {
     background-color: #F6F8FB;
     border: none;
     border-bottom: 1px solid #DDE5EF;
-    border-top-left-radius: 11px;
-    border-top-right-radius: 11px;
+    border-radius: 0;
 }
 
 QFrame[uiRole="commandGroup"] {
@@ -187,8 +161,35 @@ QPushButton:disabled {
 }
 
 QPushButton[uiRole="headerAction"] {
+    color: #FFFFFF;
+    background-color: #2457D6;
+    border: 1px solid #2457D6;
     min-height: 20px;
     padding: 7px 14px;
+}
+
+/* 顶部命令栏是高频操作区，概览页与项目操作页统一使用主蓝色。 */
+QPushButton[uiRole="headerAction"]:hover {
+    color: #FFFFFF;
+    background-color: #1E48B8;
+    border-color: #1E48B8;
+}
+
+QPushButton[uiRole="headerAction"]:pressed {
+    color: #FFFFFF;
+    background-color: #1E3A8A;
+    border-color: #1E3A8A;
+}
+
+QPushButton[uiRole="headerAction"]:focus {
+    color: #FFFFFF;
+    border-color: #93C5FD;
+}
+
+QPushButton[uiRole="headerAction"]:disabled {
+    color: #94A3B8;
+    background-color: #E2E8F0;
+    border-color: #E2E8F0;
 }
 
 QPushButton[buttonRole="primary"],
@@ -319,24 +320,6 @@ QWidget#bottomNavigation {
     border-radius: 11px;
 }
 
-/* Overview: a flat project list and one muted summary rail. */
-QFrame#overviewSummaryBar {
-    background-color: #F8FAFD;
-    border: none;
-    border-bottom: 1px solid #DDE5EF;
-}
-
-QWidget[uiRole="metricSegment"] {
-    background-color: transparent;
-    border: none;
-}
-
-QFrame[uiRole="metricDivider"] {
-    color: #DDE5EF;
-    background-color: #DDE5EF;
-    border: none;
-}
-
 QFrame[uiRole="workspaceSection"] {
     background-color: #FFFFFF;
     border: none;
@@ -370,26 +353,11 @@ QLabel#overviewWorkspaceNameLabel {
 }
 
 QLabel#overviewWorkspacePathLabel,
-QLabel#overviewWorkspaceFileLabel,
-QLabel[uiRole="metricTitle"] {
+QLabel#overviewWorkspaceFileLabel {
     color: #64748B;
     background-color: transparent;
     font-size: 12px;
     font-weight: 400;
-}
-
-QLabel[uiRole="summaryMetricValue"] {
-    color: #111827;
-    background-color: transparent;
-    font-size: 24px;
-    font-weight: 700;
-}
-
-QLabel[uiRole="summaryTextValue"] {
-    color: #1E3A8A;
-    background-color: transparent;
-    font-size: 16px;
-    font-weight: 600;
 }
 
 QScrollArea#projectListScrollArea,
@@ -439,13 +407,6 @@ QLabel#projectMetaLabel {
     background-color: transparent;
     font-size: 12px;
     font-weight: 400;
-}
-
-QWidget#projectActionPanel QPushButton {
-    min-width: 0;
-    min-height: 0;
-    padding: 0 12px;
-    font-size: 13px;
 }
 
 QWidget#projectEmptyState,
@@ -509,21 +470,33 @@ QToolButton#btn_collapse_right_sidebar:hover {
 
 QToolButton#btn_expand_left_sidebar,
 QToolButton#btn_expand_right_sidebar {
-    color: #FFFFFF;
-    background-color: #1E40AF;
-    border: 1px solid #1E40AF;
+    color: #111827;
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
     border-radius: 6px;
-    font-size: 15px;
+    font-size: 16px;
+    font-weight: 700;
 }
 
 QToolButton#btn_expand_left_sidebar:hover,
 QToolButton#btn_expand_right_sidebar:hover {
-    background-color: #1D4ED8;
-    border-color: #1D4ED8;
+    background-color: #F8FAFC;
+    border-color: #94A3B8;
+}
+
+QToolButton#btn_expand_left_sidebar:pressed,
+QToolButton#btn_expand_right_sidebar:pressed {
+    background-color: #E2E8F0;
+    border-color: #94A3B8;
 }
 
 QWidget#viewportPanel {
     background-color: #FFFFFF;
+    border: none;
+}
+
+QWidget#viewportControlBar {
+    background-color: #111827;
     border: none;
 }
 
@@ -539,7 +512,7 @@ QLabel#viewportStateLabel {
 QWidget#open3dViewport {
     background-color: #111827;
     border: 1px solid #B7C4D5;
-    border-radius: 10px;
+    border-radius: 0;
 }
 
 /* Report workspace: stable page title, flat sub-navigation and one viewer. */
@@ -579,7 +552,7 @@ QWidget#reportDocumentPage {
 QWidget#reportPdfWebView {
     background-color: #FFFFFF;
     border: 1px solid #D5DEEA;
-    border-radius: 8px;
+    border-radius: 0;
 }
 
 QLineEdit,

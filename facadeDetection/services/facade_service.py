@@ -1,4 +1,5 @@
-from algorithms.facade_detection import detect_facades
+# 立面算法已迁入 algorithms.facade 子包，服务层同步使用最新入口。
+from algorithms.facade.facade_detection import detect_facades
 
 
 class FacadeService:

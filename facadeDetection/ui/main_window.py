@@ -1,9 +1,10 @@
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QTimer, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, QTimer, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -28,12 +29,17 @@ from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
-from services.pointcloud_service import PointCloudService
 from services.facade_service import FacadeService
 from services.report_export import ReportExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
+
+try:
+    # main 的 UI 已预留点云服务接入，但对应模块尚未随 main 一起提交。
+    from services.pointcloud_service import PointCloudService
+except ModuleNotFoundError:
+    PointCloudService = None
 
 
 PAGE_DEFINITIONS = (
@@ -42,13 +48,6 @@ PAGE_DEFINITIONS = (
     ('检测复核', 'inspection_review'),
     ('报告预览/导出', 'report_export'),
 )
-
-PAGE_INDEXES = {
-    'project_overview': '01',
-    'project_operation': '02',
-    'inspection_review': '03',
-    'report_export': '04',
-}
 
 PAGE_BUTTON_NAMES = {
     'project_overview': 'btn_overview',
@@ -66,6 +65,7 @@ PAGE_HEADER_ACTIONS = {
         ('新建项目', 'btn_new_project'),
     ),
     'project_operation': (
+        ('重置视图', 'btn_reset_view'),
         ('改变颜色', 'btn_change_color'),
         ('点云去噪', 'btn_denoise'),
         ('点云配准', 'btn_registration'),
@@ -157,9 +157,10 @@ PAGE_HEADER_GROUPS = {
 class ElidedLabel(QLabel):
     """在空间不足时省略中间文本，同时保留完整内容供 Tooltip 查看。"""
 
-    def __init__(self, text='', parent=None):
+    def __init__(self, text='', parent=None, maximum_hint_width=480):
         super().__init__('', parent)
-        self._full_text = text
+        self._full_text = str(text)
+        self._maximum_hint_width = maximum_hint_width
         self.setMinimumWidth(0)
         self.setSizePolicy(
             QSizePolicy.Policy.Ignored,
@@ -168,7 +169,8 @@ class ElidedLabel(QLabel):
         self._update_elided_text()
 
     def setText(self, text):
-        self._full_text = text
+        self._full_text = str(text)
+        self.updateGeometry()
         self._update_elided_text()
 
     def fullText(self):
@@ -180,7 +182,11 @@ class ElidedLabel(QLabel):
 
     def sizeHint(self):
         hint = super().sizeHint()
-        hint.setWidth(min(hint.width(), 480))
+        # 使用完整文本计算理想宽度；布局空间不足时再由 resizeEvent 省略。
+        full_text_width = self.fontMetrics().horizontalAdvance(self._full_text) + 32
+        if self._maximum_hint_width is not None:
+            full_text_width = min(full_text_width, self._maximum_hint_width)
+        hint.setWidth(max(hint.width(), full_text_width))
         return hint
 
     def minimumSizeHint(self):
@@ -346,22 +352,37 @@ class MainWindow(QMainWindow):
         # Unified render service for business modules
         self.render_service = ViewportRenderService(self.viewport, db=None)
         self.project_overview_service = ProjectOverviewService(self.viewport, self.render_service, db=None)
-        # Facade service uses viewport + render service
-        self.facade_service = FacadeService(self.viewport, db=None, render_service=self.render_service)
-        # Point cloud service for preprocess/denoise
-        self.pointcloud_service = PointCloudService(self.viewport, self.render_service)
-        # Pass facade service into operation scheduler for ROI detection
-        self.project_operation_service = ProjectOperationService(
-            self.viewport,
-            facade_service=self.facade_service,
-            pointcloud_service=self.pointcloud_service,
+        # main 中业务服务与 UI 的接口版本暂不一致，按实际能力兼容装配。
+        try:
+            self.facade_service = FacadeService(
+                self.viewport,
+                db=None,
+                render_service=self.render_service,
+            )
+        except TypeError:
+            self.facade_service = FacadeService(self.viewport, db=None)
+
+        self.pointcloud_service = (
+            PointCloudService(self.viewport, self.render_service)
+            if PointCloudService is not None
+            else None
         )
+        try:
+            self.project_operation_service = ProjectOperationService(
+                self.viewport,
+                facade_service=self.facade_service,
+                pointcloud_service=self.pointcloud_service,
+                render_service=self.render_service,
+            )
+        except TypeError:
+            self.project_operation_service = ProjectOperationService(
+                self.viewport,
+            )
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
-        self.page_title_labels = {}
         self._sidebar_collapsed = {'left': False, 'right': False}
         # 默认定位到 data/projects，便于跨机迁移
         try:
@@ -427,18 +448,21 @@ class MainWindow(QMainWindow):
         brand_mark.setFixedSize(44, 44)
         layout.addWidget(brand_mark)
 
-        brand_title = QLabel('点云外立面智能检测平台')
-        brand_title.setObjectName('applicationBrandTitle')
-        layout.addWidget(brand_title)
+        # 顶栏只显示当前页面名称，避免和窗口标题重复展示平台名称。
+        self.application_page_title = QLabel(PAGE_DEFINITIONS[0][0])
+        self.application_page_title.setObjectName('applicationPageTitle')
+        layout.addWidget(self.application_page_title)
 
         layout.addStretch(1)
 
-        self.current_project_label = ElidedLabel('当前项目：未选择')
+        self.current_project_label = ElidedLabel(
+            '当前项目：未选择',
+            maximum_hint_width=None,
+        )
         self.current_project_label.setObjectName('currentProjectLabel')
         self.current_project_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.current_project_label.setProperty('uiRole', 'supportingText')
         self.current_project_label.setMinimumWidth(200)
-        self.current_project_label.setMaximumWidth(360)
         self.current_project_label.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
@@ -469,18 +493,8 @@ class MainWindow(QMainWindow):
 
         return stack
 
-    def _create_page_title(self, page_title, page_key):
-        label = QLabel(page_title)
-        label.setObjectName(f'{page_key}PageTitle')
-        label.setProperty('uiRole', 'pageTitle')
-        label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.page_title_labels[page_key] = label
-        return label
-
     def _create_page_shell(self, page_title, page_key, page=None):
-        """为四个主页面提供相同的标题、命令栏和工作区层级。"""
+        """为四个主页面提供无外层间隙的命令栏和工作区。"""
         page = page or QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
@@ -490,24 +504,8 @@ class MainWindow(QMainWindow):
         content.setProperty('uiRole', 'contentArea')
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(24, 18, 24, 16)
-        content_layout.setSpacing(14)
-
-        heading_row = QWidget()
-        heading_row.setProperty('uiRole', 'pageHeadingRow')
-        heading_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        # 固定标题行高度，避免报告页内部导航把工作区整体向下挤动。
-        heading_row.setFixedHeight(44)
-        heading_layout = QHBoxLayout(heading_row)
-        heading_layout.setContentsMargins(0, 0, 0, 0)
-        heading_layout.setSpacing(12)
-        page_index = QLabel(PAGE_INDEXES[page_key])
-        page_index.setProperty('uiRole', 'pageIndex')
-        page_index.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        page_index.setFixedSize(36, 36)
-        heading_layout.addWidget(page_index)
-        heading_layout.addWidget(self._create_page_title(page_title, page_key))
-        heading_layout.addStretch(1)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
         workspace = QFrame()
         workspace.setObjectName(f'{page_key}WorkspaceSurface')
@@ -529,60 +527,15 @@ class MainWindow(QMainWindow):
         workspace_body_layout.setSpacing(0)
         workspace_layout.addWidget(workspace_body, 1)
 
-        content_layout.addWidget(heading_row)
         content_layout.addWidget(workspace, 1)
         page_layout.addWidget(content, 1)
-        return page, workspace_body_layout, heading_layout
+        return page, workspace_body_layout
 
     def _create_project_overview_page(self, page_title, page_key):
-        page, body_layout, _heading_layout = self._create_page_shell(
+        page, body_layout = self._create_page_shell(
             page_title,
             page_key,
         )
-
-        # 概览顶部使用连续数据带，而不是多张独立卡片，建立稳定视觉重心。
-        summary_bar = QFrame()
-        summary_bar.setObjectName('overviewSummaryBar')
-        summary_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        summary_bar.setFixedHeight(88)
-        summary_layout = QHBoxLayout(summary_bar)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(0)
-
-        self.metric_project_count_label = QLabel('0')
-        self.metric_project_count_label.setProperty('uiRole', 'summaryMetricValue')
-        self.metric_file_count_label = QLabel('0')
-        self.metric_file_count_label.setProperty('uiRole', 'summaryMetricValue')
-        self.metric_current_project_label = ElidedLabel('未选择')
-        self.metric_current_project_label.setProperty('uiRole', 'summaryTextValue')
-        self.metric_current_project_label.setMinimumWidth(160)
-        self.metric_current_project_label.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Preferred,
-        )
-
-        metric_items = (
-            ('项目总数', self.metric_project_count_label, 1),
-            ('数据文件', self.metric_file_count_label, 1),
-            ('当前项目', self.metric_current_project_label, 2),
-        )
-        for item_index, (title, value_label, stretch) in enumerate(metric_items):
-            segment = QWidget()
-            segment.setProperty('uiRole', 'metricSegment')
-            segment_layout = QVBoxLayout(segment)
-            segment_layout.setContentsMargins(24, 12, 24, 12)
-            segment_layout.setSpacing(2)
-            segment_layout.addWidget(value_label)
-            title_label = QLabel(title)
-            title_label.setProperty('uiRole', 'metricTitle')
-            segment_layout.addWidget(title_label)
-            summary_layout.addWidget(segment, stretch)
-            if item_index < len(metric_items) - 1:
-                divider = QFrame()
-                divider.setProperty('uiRole', 'metricDivider')
-                divider.setFrameShape(QFrame.Shape.VLine)
-                summary_layout.addWidget(divider)
-        body_layout.addWidget(summary_bar)
 
         # 概览与其他页面共用同一工作区；内部只用分栏，不再套第二层卡片。
         overview_columns = QWidget()
@@ -647,7 +600,7 @@ class MainWindow(QMainWindow):
 
         workspace_title = QLabel('当前工作区')
         workspace_title.setProperty('uiRole', 'sectionTitle')
-        self.overview_workspace_name_label = QLabel('未选择项目')
+        self.overview_workspace_name_label = ElidedLabel('未选择项目')
         self.overview_workspace_name_label.setObjectName(
             'overviewWorkspaceNameLabel'
         )
@@ -675,7 +628,7 @@ class MainWindow(QMainWindow):
     def _create_operation_page(self, page_title, page_key):
         page = QWidget()
         self.operation_page = page
-        page, body_layout, _heading_layout = self._create_page_shell(
+        page, body_layout = self._create_page_shell(
             page_title,
             page_key,
             page=page,
@@ -705,10 +658,10 @@ class MainWindow(QMainWindow):
         viewport_panel.setObjectName('viewportPanel')
         viewport_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         viewport_layout = QVBoxLayout(viewport_panel)
-        viewport_layout.setContentsMargins(16, 16, 16, 16)
-        viewport_layout.setSpacing(8)
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        viewport_layout.setSpacing(0)
         viewport_heading_row = QHBoxLayout()
-        viewport_heading_row.setContentsMargins(0, 0, 0, 0)
+        viewport_heading_row.setContentsMargins(16, 6, 16, 6)
         viewport_heading_row.setSpacing(12)
         viewport_title = QLabel('三维视口')
         viewport_title.setObjectName('viewportTitleLabel')
@@ -720,6 +673,32 @@ class MainWindow(QMainWindow):
         viewport_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         viewport_heading_row.addWidget(viewport_state)
         viewport_layout.addLayout(viewport_heading_row)
+
+        # 原生 Open3D 窗口会盖住普通 Qt 浮层，因此在黑色视口顶部预留
+        # 一条同色控制带，专门承载侧栏展开按钮。
+        self.viewport_control_bar = QWidget()
+        self.viewport_control_bar.setObjectName('viewportControlBar')
+        self.viewport_control_bar.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground,
+            True,
+        )
+        viewport_control_layout = QHBoxLayout(self.viewport_control_bar)
+        viewport_control_layout.setContentsMargins(8, 4, 8, 4)
+        viewport_control_layout.setSpacing(8)
+
+        self.left_sidebar_expand_button = self._create_sidebar_expand_button(
+            'left',
+            self.viewport_control_bar,
+        )
+        self.right_sidebar_expand_button = self._create_sidebar_expand_button(
+            'right',
+            self.viewport_control_bar,
+        )
+        viewport_control_layout.addWidget(self.left_sidebar_expand_button)
+        viewport_control_layout.addStretch(1)
+        viewport_control_layout.addWidget(self.right_sidebar_expand_button)
+        self.viewport_control_bar.hide()
+        viewport_layout.addWidget(self.viewport_control_bar)
         viewport_layout.addWidget(self.viewport.get_widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
@@ -729,11 +708,7 @@ class MainWindow(QMainWindow):
         self.operation_splitter.setStretchFactor(1, 1)
         self.operation_splitter.setStretchFactor(2, 0)
         self.operation_splitter.setSizes([210, 1000, 210])
-        self.operation_splitter.installEventFilter(self)
         body_layout.addWidget(self.operation_splitter, 1)
-
-        self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
-        self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
         return page
 
     def _init_right_panel_widgets(self):
@@ -836,22 +811,22 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _create_report_export_page(self, page_title, page_key):
-        page, body_layout, heading_layout = self._create_page_shell(
+        page, body_layout = self._create_page_shell(
             page_title,
             page_key,
         )
-        body_layout.setContentsMargins(16, 16, 16, 16)
-        body_layout.setSpacing(16)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
 
         self.report_navigation_stack = QStackedWidget()
         self.report_navigation_stack.setObjectName('reportNavigationStack')
-        heading_layout.addWidget(self._create_report_navigation())
 
         document_header = QWidget()
         document_header.setObjectName('reportDocumentHeader')
         document_header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        document_header.setFixedHeight(48)
         document_header_layout = QHBoxLayout(document_header)
-        document_header_layout.setContentsMargins(0, 0, 0, 0)
+        document_header_layout.setContentsMargins(16, 0, 16, 0)
         document_header_layout.setSpacing(16)
         self.report_document_title_label = ElidedLabel(REPORT_EMPTY_TITLE)
         self.report_document_title_label.setObjectName('reportDocumentTitleLabel')
@@ -957,7 +932,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _create_placeholder_page(self, page_title, page_key):
-        page, body_layout, _heading_layout = self._create_page_shell(
+        page, body_layout = self._create_page_shell(
             page_title,
             page_key,
         )
@@ -972,15 +947,22 @@ class MainWindow(QMainWindow):
         panel.setProperty('uiRole', 'pageHeader')
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         panel.setMinimumHeight(56)
-        panel.setMaximumHeight(200)
-        panel.installEventFilter(self)
-        header_layout = FlowLayout(
-            panel,
-            margin=6,
-            horizontal_spacing=8,
-            vertical_spacing=8,
-        )
-        self.page_header_layouts[panel] = header_layout
+        if page_key == 'report_export':
+            # 报告页命令较少，使用固定横向布局把内部切换放到右侧空白区。
+            panel.setMaximumHeight(56)
+            header_layout = QHBoxLayout(panel)
+            header_layout.setContentsMargins(6, 6, 14, 6)
+            header_layout.setSpacing(8)
+        else:
+            panel.setMaximumHeight(200)
+            panel.installEventFilter(self)
+            header_layout = FlowLayout(
+                panel,
+                margin=6,
+                horizontal_spacing=8,
+                vertical_spacing=8,
+            )
+            self.page_header_layouts[panel] = header_layout
 
         actions_by_name = {
             button_name: label
@@ -1015,7 +997,12 @@ class MainWindow(QMainWindow):
 
             header_layout.addWidget(group)
 
-        QTimer.singleShot(0, lambda: self._resize_page_header(panel))
+        if page_key == 'report_export':
+            # 报告内部切换与“打开 PDF”同处一个命令栏，释放原独立标题行。
+            header_layout.addStretch(1)
+            header_layout.addWidget(self._create_report_navigation())
+        else:
+            QTimer.singleShot(0, lambda: self._resize_page_header(panel))
         return panel
 
     def _create_sidebar(self, object_name, side):
@@ -1063,16 +1050,15 @@ class MainWindow(QMainWindow):
         sidebar.setProperty('expandedWidth', 210)
         return sidebar, toggle_button
 
-    def _create_sidebar_expand_button(self, side):
-        button = QToolButton(self.operation_page)
+    def _create_sidebar_expand_button(self, side, parent):
+        button = QToolButton(parent)
         button.setObjectName(f'btn_expand_{side}_sidebar')
         button.setText('▶' if side == 'left' else '◀')
         label = '左侧栏' if side == 'left' else '右侧栏'
         button.setToolTip(f'展开{label}')
         button.setAccessibleName(f'展开{label}')
-        button.setFixedSize(30, 46)
+        button.setFixedSize(36, 34)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 保持普通 Qt 子控件；原生化会连带提升 PageStack 并造成切页层级错乱。
         button.hide()
         return button
 
@@ -1139,16 +1125,15 @@ class MainWindow(QMainWindow):
     def set_current_page(self, page_index):
         if not 0 <= page_index < len(PAGE_DEFINITIONS):
             return
-        page_key = PAGE_DEFINITIONS[page_index][1]
+        page_title, page_key = PAGE_DEFINITIONS[page_index]
         button = self.page_buttons.get(page_key)
         if button is not None and not button.isEnabled():
             return
 
         self.page_stack.setCurrentIndex(page_index)
+        self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
-        if page_key == 'project_operation':
-            QTimer.singleShot(0, self._position_sidebar_expand_buttons)
         self._update_window_title(page_key)
 
     def _set_report_navigation(self, page_index):
@@ -1183,6 +1168,7 @@ class MainWindow(QMainWindow):
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
+            'btn_reset_view': self.project_operation_service.reset_view,
             'btn_change_color': self.project_operation_service.change_color,
             'btn_denoise': self.project_operation_service.denoise,
             'btn_registration': self.project_operation_service.registration,
@@ -1288,30 +1274,32 @@ class MainWindow(QMainWindow):
 
     def _create_project(self):
         from ui.dialogs.project_create_dialog import ProjectCreateDialog
+
         dlg = ProjectCreateDialog(self)
         result_code = dlg.exec()
-        try:
-            from PySide6.QtWidgets import QDialog
-            accepted_code = int(QDialog.DialogCode.Accepted)
-        except Exception:
-            accepted_code = 1
-        if result_code != accepted_code:
+        if result_code != int(QDialog.DialogCode.Accepted):
             return
         payload = dlg.values()
-        info = self.project_overview_service.create_project(
+        project = self.project_overview_service.create_project(
             name=payload.get('name', ''),
             org_unit=payload.get('org_unit'),
             address=payload.get('address'),
             remarks=payload.get('remarks'),
         )
-        # Activate the newly created project
-        project = type('PC', (object,), info)()
-        # Normalize to ProjectCard-like
-        project.project_id = info.get('project_uuid')
-        project.name = info.get('name')
-        project.directory_path = info.get('root_dir')
         self._refresh_project_list()
         self._activate_project(project)
+
+    def _prompt_project_name(self, title, initial_text=''):
+        """使用可容纳真实工程长名称的项目名称输入框。"""
+        dialog = QInputDialog(self)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText('项目名称：')
+        dialog.setTextValue(initial_text)
+        dialog.setMinimumSize(560, 190)
+        dialog.resize(620, 210)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        return dialog.textValue(), accepted
 
     def _select_project(self):
         projects = self.project_overview_service.list_projects()
@@ -1404,29 +1392,15 @@ class MainWindow(QMainWindow):
             self._set_report_pdf_status('PDF 已加载', 'success')
             self.report_preview_state_stack.setCurrentIndex(1)
 
-    def _update_overview_metrics(self, projects=None):
-        """同步概览统计卡，避免在 UI 层复制项目业务状态。"""
-        if not hasattr(self, 'metric_project_count_label'):
-            return
-        if projects is None:
-            projects = self.project_overview_service.list_projects()
-
-        project_list = list(projects)
-        file_count = sum(len(project.file_paths) for project in project_list)
-
-        self.metric_project_count_label.setText(str(len(project_list)))
-        self.metric_file_count_label.setText(str(file_count))
+    def _update_overview_workspace(self):
+        """同步概览右侧的当前工作区信息。"""
         if self.current_project is None:
-            self.metric_current_project_label.setText('未选择')
-            self.metric_current_project_label.setToolTip('')
             self.overview_workspace_name_label.setText('未选择项目')
             self.overview_workspace_path_label.setText('选择项目后显示本地目录')
             self.overview_workspace_path_label.setToolTip('')
             self.overview_workspace_file_label.setText('0 个数据文件')
             return
 
-        self.metric_current_project_label.setText(self.current_project.name)
-        self.metric_current_project_label.setToolTip(self.current_project.name)
         self.overview_workspace_name_label.setText(self.current_project.name)
         self.overview_workspace_name_label.setToolTip(self.current_project.name)
         self.overview_workspace_path_label.setText(
@@ -1435,9 +1409,8 @@ class MainWindow(QMainWindow):
         self.overview_workspace_path_label.setToolTip(
             self.current_project.directory_path
         )
-        self.overview_workspace_file_label.setText(
-            f'{len(self.current_project.file_paths)} 个数据文件'
-        )
+        # 新持久化模型按需读取资源，不在项目卡片中缓存可能过期的文件数。
+        self.overview_workspace_file_label.setText('项目目录已连接')
 
     def _refresh_project_list(self):
         while self.project_list_layout.count() > 1:
@@ -1449,7 +1422,7 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
         projects = self.project_overview_service.list_projects()
-        self._update_overview_metrics(projects)
+        self._update_overview_workspace()
         if not projects:
             empty_state = TechnicalCanvas('facade', '暂无项目')
             empty_state.setObjectName('projectEmptyState')
@@ -1481,8 +1454,12 @@ class MainWindow(QMainWindow):
             project_info_layout.setContentsMargins(0, 0, 0, 0)
             project_info_layout.setSpacing(4)
 
-            project_name = QLabel(project.name)
+            project_name = ElidedLabel(
+                project.name,
+                maximum_hint_width=None,
+            )
             project_name.setObjectName('projectNameLabel')
+            project_name.setToolTip(project.name)
             project_name.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
@@ -1503,7 +1480,7 @@ class MainWindow(QMainWindow):
             open_button.setToolTip('进入项目工作区')
             open_button.setAccessibleName('打开项目')
             open_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            open_button.setFixedSize(72, 32)
+            open_button.setMinimumSize(72, 36)
             open_button.clicked.connect(
                 lambda _checked=False, project_id=project.project_id:
                 self._open_project_card(project_id)
@@ -1514,7 +1491,7 @@ class MainWindow(QMainWindow):
             edit_button.setToolTip('修改项目名称')
             edit_button.setAccessibleName('编辑项目')
             edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            edit_button.setFixedSize(72, 32)
+            edit_button.setMinimumSize(72, 36)
             edit_button.clicked.connect(
                 lambda _checked=False, project_id=project.project_id:
                 self._edit_project(project_id)
@@ -1526,7 +1503,7 @@ class MainWindow(QMainWindow):
             delete_button.setToolTip('删除项目')
             delete_button.setAccessibleName('删除项目')
             delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            delete_button.setFixedSize(72, 32)
+            delete_button.setMinimumSize(72, 36)
             delete_button.clicked.connect(
                 lambda _checked=False, project_id=project.project_id:
                 self._delete_project(project_id)
@@ -1559,11 +1536,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '编辑项目', '项目不存在或已被删除。')
             return
 
-        new_name, accepted = QInputDialog.getText(
-            self,
+        new_name, accepted = self._prompt_project_name(
             '编辑项目',
-            '项目名称：',
-            text=project.name,
+            project.name,
         )
         if not accepted:
             return
@@ -1661,19 +1636,16 @@ class MainWindow(QMainWindow):
         for page_key, button in self.page_buttons.items():
             button.setEnabled(page_key == 'project_overview' or has_project)
 
-        for page_title, page_key in PAGE_DEFINITIONS:
-            page_title_label = self.page_title_labels.get(page_key)
-            if page_title_label is not None:
-                page_title_label.setText(page_title)
-
         if has_project:
             self.current_project_label.setText(f'当前项目：{project.name}')
-            self.current_project_label.setToolTip(project.directory_path)
+            self.current_project_label.setToolTip(
+                f'{project.name}\n{project.directory_path}'
+            )
         else:
             self.current_project_label.setText('当前项目：未选择')
             self.current_project_label.setToolTip('')
             self.set_current_page(0)
-        self._update_overview_metrics()
+        self._update_overview_workspace()
         self._update_window_title()
 
     def _update_window_title(self, page_key=None):
@@ -1702,12 +1674,12 @@ class MainWindow(QMainWindow):
         dock.setProperty('expandedWidth', max(180, min(dock.width(), 260)))
         dock.hide()
         expand_button.show()
-        expand_button.raise_()
-        QTimer.singleShot(0, self._position_sidebar_expand_buttons)
+        self._update_sidebar_expand_controls()
 
     def _expand_sidebar(self, side, dock, expand_button):
         self._sidebar_collapsed[side] = False
         expand_button.hide()
+        self._update_sidebar_expand_controls()
         dock.show()
         target_width = int(dock.property('expandedWidth') or 210)
         QTimer.singleShot(
@@ -1724,30 +1696,12 @@ class MainWindow(QMainWindow):
         sizes[1] = max(1, total_width - target_width - sizes[other_index])
         self.operation_splitter.setSizes(sizes)
 
-    def _position_sidebar_expand_buttons(self):
-        splitter_top_left = self.operation_splitter.mapTo(
-            self.operation_page,
-            QPoint(0, 0),
-        )
-        top = splitter_top_left.y() + 8
-        margin = 8
-
-        if not self.left_sidebar_expand_button.isHidden():
-            self.left_sidebar_expand_button.move(
-                splitter_top_left.x() + margin,
-                top,
-            )
-            self.left_sidebar_expand_button.raise_()
-
-        if not self.right_sidebar_expand_button.isHidden():
-            self.right_sidebar_expand_button.move(
-                splitter_top_left.x()
-                + self.operation_splitter.width()
-                - self.right_sidebar_expand_button.width()
-                - margin,
-                top,
-            )
-            self.right_sidebar_expand_button.raise_()
+    def _update_sidebar_expand_controls(self):
+        """仅在有侧栏收起时显示黑色视口顶部的展开控制带。"""
+        if any(self._sidebar_collapsed.values()):
+            self.viewport_control_bar.show()
+            return
+        self.viewport_control_bar.hide()
 
     def eventFilter(self, watched, event):
         if (
@@ -1755,15 +1709,6 @@ class MainWindow(QMainWindow):
             and event.type() == QEvent.Type.Resize
         ):
             self._schedule_page_header_resize(watched)
-        if (
-            watched is getattr(self, 'operation_splitter', None)
-            and event.type() in (
-                QEvent.Type.Resize,
-                QEvent.Type.Show,
-                QEvent.Type.Move,
-            )
-        ):
-            QTimer.singleShot(0, self._position_sidebar_expand_buttons)
         return super().eventFilter(watched, event)
 
     def _schedule_page_header_resize(self, panel):
