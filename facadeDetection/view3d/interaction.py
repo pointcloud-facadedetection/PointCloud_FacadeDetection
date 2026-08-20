@@ -258,15 +258,14 @@ class ViewportInteractor:
         x1, x2 = sorted([int(start.x()), int(end.x())])
         y1, y2 = sorted([int(start.y()), int(end.y())])
 
-        # 最小矩形阈值：1x1 像素
         if (x2 - x1) < 1 or (y2 - y1) < 1:
             return np.array([], dtype=np.int64)
 
-        # 分块投影并收集框内点
         n = int(len(pos))
         chunk = 1_000_000
-        hits: list[int] = []
+        hits = []
         base = 0
+        
         while base < n:
             tail = min(n, base + chunk)
             pts = pos[base:tail]
@@ -278,6 +277,8 @@ class ViewportInteractor:
             if screen is None or len(screen) == 0:
                 base = tail
                 continue
+            
+            # 注意：screen坐标是逻辑像素，与Qt事件坐标一致
             m = (
                 valid
                 & (screen[:, 0] >= x1)
@@ -296,13 +297,16 @@ class ViewportInteractor:
 
         idx = np.unique(np.asarray(hits, dtype=np.int64))
 
-        # 调试日志
         try:
             if getattr(Config, 'DEBUG_SELECTION', False):
-                print(f"[DEBUG] Selection: rect=({x1},{y1})-({x2},{y2}), "
-                      f"cloud={name}, total={n}, selected={len(idx)}", flush=True)
+                print(
+                    f"[DEBUG] Selection: rect=({x1},{y1})-({x2},{y2}), "
+                    f"cloud={name}, total={n}, selected={len(idx)}",
+                    flush=True,
+                )
         except Exception:
             pass
+            
         return idx
 
     def pick_nearest_point(self, pos, cloud_name=None):

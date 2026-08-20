@@ -472,12 +472,12 @@ class Open3DViewport(BaseViewport):
         except Exception:
             pass
 
-    def _handle_roi_complete(self, min_bound, max_bound, indices):
+    def _handle_roi_complete(self, min_bound, max_bound, indices, p1=None, p2=None):
         """如果提供了外部回调函数，则将ROI选择结果转发至该回调函数。"""
         cb = self._roi_on_complete
         if callable(cb):
             try:
-                cb(min_bound, max_bound, indices)
+                cb(min_bound, max_bound, indices, p1, p2)
             except Exception:
                 pass
 
