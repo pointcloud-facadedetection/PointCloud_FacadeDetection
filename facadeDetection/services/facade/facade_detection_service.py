@@ -22,7 +22,7 @@ log = logging.getLogger("facadeDetection.facade")
 
 
 class FacadeDetectionService:
-    """外立面检测业务编排服务。"""
+    """外立面检测业务编排服务"""
 
     def __init__(self, viewport, pointcloud_service=None, index_service: Optional[FacadeIndexService] = None):
         self._viewport = viewport
@@ -43,43 +43,63 @@ class FacadeDetectionService:
         return data, dataset
 
     def detect(self, cloud_name: str, project_uuid: Optional[str] = None) -> list[dict]:
-        """全局立面检测。"""
+        """全局立面检测"""
         started = time.perf_counter()
         trace("facade.detect.begin", cloud=cloud_name)
 
-        pcd = self._viewport.get_cloud_data(cloud_name)
-        if pcd is None:
-            return []
-
+        # 获取数据集（含 VoxelCascadeIndex 和 source_raw_ids）
         data, dataset = self._get_dataset(cloud_name)
         if dataset is None:
-            trace("facade.detect.warn", cloud=cloud_name, reason="no_dataset")
+            trace("facade.detect.error", cloud=cloud_name, reason="no_dataset")
+            return []
+
+        proxy_pts = dataset.proxy_points
+        if len(proxy_pts) == 0:
+            trace("facade.detect.error", cloud=cloud_name, reason="empty_proxy")
+            return []
 
         geo = o3d.geometry.PointCloud()
-        geo.points = o3d.utility.Vector3dVector(pcd["pos"].astype(float))
-        if pcd.get("color") is not None and len(pcd["color"]) == len(pcd["pos"]):
-            geo.colors = o3d.utility.Vector3dVector(pcd["color"].astype(float))
+        geo.points = o3d.utility.Vector3dVector(proxy_pts.astype(float))
+        
+        # 若代理点有法向则复用，否则估计
+        if hasattr(dataset, 'proxy_normals') and dataset.proxy_normals is not None:
+            geo.normals = o3d.utility.Vector3dVector(dataset.proxy_normals.astype(float))
+        else:
+            # 兜底：估计法向（仅对小数据）
+            if len(proxy_pts) < 500000:
+                geo.estimate_normals(
+                    search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                        radius=max(float(Config.DEFAULT_VOXEL_SIZE) * 4, 0.2), 
+                        max_nn=30
+                    )
+                )
 
         vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
         min_area = float(getattr(Config, 'MIN_FACADE_AREA', 10.0))
 
-        detect_kwargs = (dataset.metadata if dataset is not None else {}) or {}
+        detect_kwargs = dataset.metadata or {}
+        
         result = detect_facades_adaptive(
-            geo, voxel_size=vsize, min_facade_area=min_area,
+            geo, 
+            dataset=dataset,          
+            voxel_size=vsize, 
+            min_facade_area=min_area,
             metadata=detect_kwargs,
             scan_origin=detect_kwargs.get('scan_origins'),
         )
 
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
 
+        # 索引归一化：facade 的 inlier_indices 当前是 proxy 局部索引
+        # 需要映射到 proxy_global，再映射到 raw（若需要）
         if self._index_service is not None:
-            proxy_ids = self._index_service.proxy_ids_for_positions(
-                cloud_name, np.asarray(pcd['pos']), np.arange(len(pcd['pos'])))
+            # proxy 局部 → proxy_global
+            proxy_ids = np.arange(len(proxy_pts), dtype=np.int32)
             self._index_service.normalize_facade_indices(facades, proxy_ids)
             self._index_service.populate_voxel_ids(facades, cloud_name)
 
         trace("facade.detect.done", cloud=cloud_name, facades=len(facades),
-              seconds=f"{time.perf_counter()-started:.2f}")
+              proxy_points=len(proxy_pts), seconds=f"{time.perf_counter()-started:.2f}")
 
         if project_uuid:
             self._persist_results(project_uuid, facades)
@@ -92,96 +112,102 @@ class FacadeDetectionService:
                       project_uuid: Optional[str] = None,
                       min_facade_area: float | None = None,
                       roi_scope: str = 'seed') -> list[dict]:
-        """立面检测入口。
-
-        ``roi_scope`` 保持三种明确语义：
-        - ``global``：没有 ROI 时使用完整代理点云；
-        - ``seed``：ROI 只用于筛选命中的完整立面，算法仍运行于全场景；
-        - ``clip``：兼容旧行为，仅在 ROI 内检测。
-        """
+        """ROI 立面检测"""
         started = time.perf_counter()
         if roi_scope not in {'global', 'seed', 'clip'}:
             raise ValueError(f'unsupported roi_scope: {roi_scope}')
+        
         has_roi = roi_box is not None or roi_bounds is not None or (
             roi_indices is not None and len(roi_indices) > 0
         )
         if not has_roi:
             roi_scope = 'global'
+        
         trace("facade.roi.begin", cloud=cloud_name,
               roi_indices=len(roi_indices or []), bounds=bool(roi_bounds),
               box=bool(roi_box), scope=roi_scope)
 
-        pcd = self._viewport.get_cloud_data(cloud_name)
-        if pcd is None:
+        data, dataset = self._get_dataset(cloud_name)
+        if dataset is None:
+            trace("facade.roi.error", cloud=cloud_name, reason="no_dataset")
             return []
 
-        data, dataset = self._get_dataset(cloud_name)
+        proxy_pts = dataset.proxy_points
+        n_proxy = len(proxy_pts)
+        if n_proxy == 0:
+            return []
 
-        pos = np.asarray(pcd["pos"], dtype=float).reshape(-1, 3)
-        col = pcd.get("color")
-        if min_facade_area is None:
-            min_facade_area = 5.0
-
-        seed_mask = np.ones(len(pos), dtype=bool)
+        seed_mask = np.ones(n_proxy, dtype=bool)
         if roi_box is not None:
             center = np.asarray(roi_box['center'], dtype=float)
             axes = np.asarray(roi_box['axes'], dtype=float).reshape(3, 3)
             half = np.asarray(roi_box['half_extent'], dtype=float)
-            local = (pos - center) @ axes.T
+            local = (proxy_pts - center) @ axes.T
             seed_mask = np.all(np.abs(local) <= half + 1e-9, axis=1)
         elif roi_bounds is not None:
             bmin = np.asarray(roi_bounds[0], dtype=float)
             bmax = np.asarray(roi_bounds[1], dtype=float)
-            seed_mask = np.all((pos >= bmin) & (pos <= bmax), axis=1)
+            seed_mask = np.all((proxy_pts >= bmin) & (proxy_pts <= bmax), axis=1)
         elif roi_indices is not None and len(roi_indices):
-            seed_mask = np.zeros(len(pos), dtype=bool)
+            seed_mask = np.zeros(n_proxy, dtype=bool)
             valid = np.asarray(roi_indices, dtype=int)
-            seed_mask[valid[(valid >= 0) & (valid < len(pos))]] = True
+            seed_mask[valid[(valid >= 0) & (valid < n_proxy)]] = True
 
-        crop_mask = seed_mask if roi_scope == 'clip' else np.ones(len(pos), dtype=bool)
+        # clip 模式：只取 ROI 内点；seed 模式：全点检测，后过滤
+        crop_mask = seed_mask if roi_scope == 'clip' else np.ones(n_proxy, dtype=bool)
         global_indices = np.flatnonzero(crop_mask).astype(np.int64)
         seed_indices_local = np.flatnonzero(seed_mask).astype(np.int64)
-        trace("facade.roi.selected", source_points=len(pos),
+        
+        trace("facade.roi.selected", proxy_points=n_proxy,
               selected=len(global_indices), roi_seed=len(seed_indices_local),
               seconds=f"{time.perf_counter()-started:.2f}")
 
         if len(global_indices) == 0:
             return []
 
-        roi_pos = pos[global_indices]
-        roi_col = np.asarray(col)[global_indices] if col is not None and len(col) == len(pos) else None
-
+        # 构建 ROI 子集 o3d.PointCloud
+        roi_pos = proxy_pts[global_indices]
         geo = o3d.geometry.PointCloud()
-        geo.points = o3d.utility.Vector3dVector(roi_pos)
-        if roi_col is not None:
-            geo.colors = o3d.utility.Vector3dVector(roi_col.astype(float))
+        geo.points = o3d.utility.Vector3dVector(roi_pos.astype(float))
+        
+        # 复用法向
+        if hasattr(dataset, 'proxy_normals') and dataset.proxy_normals is not None:
+            roi_normals = dataset.proxy_normals[global_indices]
+            geo.normals = o3d.utility.Vector3dVector(roi_normals.astype(float))
 
         vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
 
-        detect_kwargs = (dataset.metadata if dataset is not None else {}) or {}
-        detect_fn = detect_facades_adaptive
-        result = detect_fn(
-            geo, voxel_size=vsize,
+        detect_kwargs = dataset.metadata or {}
+
+        result = detect_facades_adaptive(
+            geo,
+            dataset=dataset,           
+            voxel_size=vsize,
             min_facade_area=float(getattr(Config, 'MIN_FACADE_AREA', min_facade_area or 10.0)),
             roi_indices=(np.arange(len(roi_pos), dtype=np.int64)
                          if roi_scope == 'clip' else None),
-            roi_bounds=None, enable_grow=False,
+            roi_bounds=None,
+            enable_grow=False,
             metadata=detect_kwargs,
             scan_origin=detect_kwargs.get('scan_origins'),
         )
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
 
+        # seed 模式：只保留与 ROI 相交的 facade
         if roi_scope == 'seed' and len(seed_indices_local):
             seed_set = set(seed_indices_local.tolist())
             facades = [f for f in facades if seed_set.intersection(
                 np.asarray(f.get('inlier_indices', []), dtype=np.int64).tolist()
             )]
+
         trace("facade.roi.algorithm_done", proxy_points=len(roi_pos),
               facades=len(facades), scope=roi_scope,
               seconds=f"{time.perf_counter()-started:.2f}")
 
+        # 索引归一化
         if self._index_service is not None:
-            roi_proxy_ids = self._index_service.proxy_ids_for_positions(cloud_name, roi_pos, global_indices)
+            # ROI 局部 → 全局 proxy 索引
+            roi_proxy_ids = global_indices.astype(np.int32)
             self._index_service.normalize_facade_indices(facades, roi_proxy_ids)
             self._index_service.populate_voxel_ids(facades, cloud_name)
 

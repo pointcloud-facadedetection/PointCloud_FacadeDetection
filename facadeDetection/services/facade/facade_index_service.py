@@ -25,7 +25,6 @@ class FacadeIndexService:
         """通过点云服务获取数据集。"""
         if self._pointcloud_service is None:
             return None
-        # 优先使用 viewport 中的 dataset_id 反查
         vp = getattr(self._pointcloud_service, 'viewport', None)
         if vp is not None:
             data = vp.get_cloud_data(cloud_name)
@@ -77,54 +76,82 @@ class FacadeIndexService:
             facade['voxel_count'] = len(voxel_ids)
 
     def build_quality_domain(self, facade: dict, cloud_name: str) -> tuple[np.ndarray, dict]:
-        """构建质量域：通过 VoxelCascadeIndex 将代理空间立面映射到原始空间。"""
+        """
+        构建质量域：通过 VoxelCascadeIndex 将代理空间立面映射到原始空间。
+
+        【关键修复】距离分层下采样后，使用 source_raw_ids 直接映射到原始高保真点，
+        不再依赖体素坐标反查（避免 1e-4 超细体素导致的 1:1 映射退化）。
+        """
         dataset = self._get_dataset(cloud_name)
         if dataset is None:
             return np.empty(0, np.int32), {'error': 'dataset_unavailable'}
 
         index = dataset.index
-        raw_points = np.asarray(dataset.raw.points, dtype=np.float64)
-        source_points = raw_points
-        source_ids_map = None
-        source_asset = None
         metadata = dataset.metadata or {}
+
+        # === 修复：优先使用 source 原始点进行质量计算 ===
         source_id = metadata.get('source_id')
         pcs = self._pointcloud_service
+        source_asset = None
+        source_points = None
+        source_colors = None
+
         if pcs is not None and source_id:
             source_asset = pcs.get_source_asset(source_id)
-            if source_asset is not None:
-                source_points = np.asarray(source_asset['points'], dtype=np.float64)
-                source_ids_map = np.asarray(metadata.get('source_raw_ids', []), dtype=np.int64)
 
-        voxel_ids = facade.get('voxel_ids')
-        if voxel_ids is None or len(voxel_ids) == 0:
-            proxy_indices = as_array(
-                facade.get('proxy_indices', facade.get('inlier_indices', [])),
-                dtype=np.int32
-            )
-            if len(proxy_indices) == 0:
-                return np.empty(0, np.int32), {'error': 'no_proxy_indices'}
-            voxel_ids = index.proxy_to_voxel_ids(proxy_indices)
-            voxel_ids = np.unique(voxel_ids[voxel_ids >= 0])
+        # 获取 facade 的代理索引
+        proxy_indices = as_array(
+            facade.get('proxy_indices', facade.get('inlier_indices', [])),
+            dtype=np.int32
+        )
+        if len(proxy_indices) == 0:
+            return np.empty(0, np.int32), {'error': 'no_proxy_indices'}
 
-        voxel_ids = np.asarray(voxel_ids, dtype=np.int32)
-        if len(voxel_ids) == 0:
-            return np.empty(0, np.int32), {'error': 'no_voxel_ids'}
+        # === 核心修复：使用 source 映射直接获取原始点索引 ===
+        if index.has_source_mapping():
+            # ✅ 正确路径：proxy -> source_raw_ids -> 原始高保真点
+            raw_indices = index.proxy_to_source_ids(proxy_indices, deduplicate=True)
+            source_points = index.get_source_points()
 
-        raw_count = index.raw_count_for_voxels(voxel_ids)
-        trace("quality.domain.raw_count", voxels=len(voxel_ids), raw_count=int(raw_count))
+            # 获取原始点颜色（如果有）
+            if source_asset is not None and source_asset.get('colors') is not None:
+                source_colors = source_asset['colors']
 
-        if raw_count <= 5_000_000:
-            raw_indices = index.voxel_to_raw_ids(voxel_ids, deduplicate=True)
+            trace("quality.domain.source_mapping", 
+                  proxy=len(proxy_indices), source_raw=len(raw_indices),
+                  source_points=len(source_points) if source_points is not None else 0)
         else:
-            chunks = []
-            for chunk in index.iter_raw_ids(voxel_ids, chunk_size=1_000_000):
-                chunks.append(chunk)
-            raw_indices = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.int32)
-            raw_indices = np.unique(raw_indices)
+            # 退化路径：没有 source 映射，使用 processed 点
+            voxel_ids = facade.get('voxel_ids')
+            if voxel_ids is None or len(voxel_ids) == 0:
+                voxel_ids = index.proxy_to_voxel_ids(proxy_indices)
+                voxel_ids = np.unique(voxel_ids[voxel_ids >= 0])
+
+            voxel_ids = np.asarray(voxel_ids, dtype=np.int32)
+            if len(voxel_ids) == 0:
+                return np.empty(0, np.int32), {'error': 'no_voxel_ids'}
+
+            raw_count = index.raw_count_for_voxels(voxel_ids)
+            trace("quality.domain.raw_count", voxels=len(voxel_ids), raw_count=int(raw_count))
+
+            if raw_count <= 5_000_000:
+                raw_indices = index.voxel_to_raw_ids(voxel_ids, deduplicate=True)
+            else:
+                chunks = []
+                for chunk in index.iter_raw_ids(voxel_ids, chunk_size=1_000_000):
+                    chunks.append(chunk)
+                raw_indices = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.int32)
+                raw_indices = np.unique(raw_indices)
+
+            source_points = np.asarray(dataset.raw.points, dtype=np.float64)
+            if dataset.raw.colors is not None:
+                source_colors = np.asarray(dataset.raw.colors, dtype=np.float64)
 
         if len(raw_indices) == 0:
             return np.empty(0, np.int32), {'error': 'no_raw_indices'}
+
+        # === 使用原始点进行平面距离计算 ===
+        pts = source_points[raw_indices] if source_points is not None else np.empty((0, 3))
 
         plane_model = np.asarray(facade.get('plane_model', []), dtype=np.float64)
         if plane_model.shape[0] != 4:
@@ -138,7 +165,6 @@ class FacadeIndexService:
         n = plane_model[:3]
         d = float(plane_model[3])
 
-        pts = raw_points[raw_indices]
         signed_dist = pts @ n + d
 
         voxel_size = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
@@ -170,24 +196,20 @@ class FacadeIndexService:
         main_mask = np.abs(signed_dist - median_dist) <= distance_limit
         defect_mask = (~main_mask) & (np.abs(signed_dist - median_dist) <= distance_limit * 2.0)
         valid_mask = main_mask | defect_mask
-        processed_quality_indices = raw_indices[valid_mask]
-        if source_ids_map is not None and len(source_ids_map) == len(raw_points):
-            valid_source = ((processed_quality_indices >= 0) &
-                            (processed_quality_indices < len(source_ids_map)))
-            quality_indices = source_ids_map[processed_quality_indices[valid_source]].astype(np.int32)
-        else:
-            quality_indices = processed_quality_indices
+        quality_indices = raw_indices[valid_mask]
 
         main_count = int(np.sum(main_mask))
         defect_count = int(np.sum(defect_mask))
+        filtered_out = int(len(raw_indices) - len(quality_indices))
 
         stats = {
-            'voxel_count': int(len(voxel_ids)),
+            'voxel_count': int(facade.get('voxel_count', 0)),
+            'proxy_count': int(len(proxy_indices)),
             'raw_before_filter': int(len(raw_indices)),
             'raw_after_filter': int(len(quality_indices)),
             'main_depth_count': main_count,
             'defect_count': defect_count,
-            'filtered_out': int(len(raw_indices) - len(quality_indices)),
+            'filtered_out': filtered_out,
             'distance_limit_mm': float(distance_limit * 1000.0),
             'adaptive_max_mm': float(adaptive_max * 1000.0),
             'depth_span_mm': float(depth_span * 1000.0),
@@ -196,11 +218,16 @@ class FacadeIndexService:
             'signed_dist_mean_mm': float(np.mean(signed_dist) * 1000.0) if len(signed_dist) else 0.0,
             'signed_dist_std_mm': float(np.std(signed_dist) * 1000.0) if len(signed_dist) else 0.0,
             'signed_dist_p99_mm': float(np.percentile(np.abs(signed_dist), 99) * 1000.0) if len(signed_dist) else 0.0,
+            'source_mapping': index.has_source_mapping(),
         }
 
-        stats['quality_source'] = 'fls_source_raw' if source_ids_map is not None else 'processed_raw'
-        stats['processed_raw_count'] = int(len(processed_quality_indices))
-        stats['source_raw_count'] = int(len(quality_indices))
+        if index.has_source_mapping():
+            stats['quality_source'] = 'fls_source_raw'
+            stats['source_raw_count'] = int(len(quality_indices))
+        else:
+            stats['quality_source'] = 'processed_raw'
+            stats['processed_raw_count'] = int(len(quality_indices))
+
         return quality_indices, stats
 
     def map_roi_to_raw(self, cloud_name: str, roi_proxy_indices: np.ndarray) -> np.ndarray:
@@ -208,6 +235,10 @@ class FacadeIndexService:
         dataset = self._get_dataset(cloud_name)
         if dataset is None:
             return np.empty(0, dtype=np.int32)
+
+        # === 修复：优先使用 source 映射 ===
+        if dataset.index.has_source_mapping():
+            return dataset.index.proxy_to_source_ids(roi_proxy_indices, deduplicate=True)
         return dataset.index.proxy_to_raw_ids(roi_proxy_indices, deduplicate=True)
 
     def map_raw_to_proxy(self, cloud_name: str, raw_indices: np.ndarray) -> np.ndarray:
@@ -226,4 +257,7 @@ class FacadeIndexService:
             facade.get('proxy_indices', facade.get('inlier_indices', [])),
             dtype=np.int32
         )
+        # === 修复：优先使用 source 映射计数 ===
+        if dataset.index.has_source_mapping():
+            return dataset.index.source_count_for_proxy(proxy_indices)
         return dataset.index.raw_count_for_proxy(proxy_indices)

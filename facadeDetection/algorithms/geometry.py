@@ -1,12 +1,14 @@
-from typing import List, Optional, Tuple
+import logging
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 import copy
 import cv2
 from collections import deque
 
+log = logging.getLogger("facadeDetection.pointcloud")
 
-# ==================== 距离自适应几何工具（原 range_adaptive.py）====================
+# ==================== 距离自适应几何工具 ====================
 
 def estimate_point_ranges(points, scan_origin=None):
     """计算每个点到最近测站的距离。"""
@@ -67,18 +69,22 @@ def fit_plane_weighted(points, weights=None, irls_iters=0):
     return model
 
 
-def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=24):
+def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=8):
     """按距离分壳统计滤波，保留非离群点索引。"""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     ranges = np.asarray(ranges, dtype=float).reshape(-1)
     n = len(pts)
     if n < 2:
         return np.arange(n, dtype=np.int32)
+    
+    # 全局最近邻距离（一次性计算）
     cloud = o3d.geometry.PointCloud()
     cloud.points = o3d.utility.Vector3dVector(pts)
     nn = np.asarray(cloud.compute_nearest_neighbor_distance())
+    
     keep = np.ones(n, dtype=bool)
     edges = np.quantile(ranges, np.linspace(0, 1, max(1, int(n_shells)) + 1))
+    
     for i in range(len(edges) - 1):
         mask = (ranges >= edges[i]) & ((ranges <= edges[i + 1]) if i == len(edges)-2 else (ranges < edges[i+1]))
         if mask.sum() < 30:
@@ -87,104 +93,254 @@ def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=24):
         med = float(np.median(d)); mad = 1.4826 * float(np.median(np.abs(d-med)))
         threshold = med + std_ratio * max(mad, .15 * med, 1e-6)
         keep[np.where(mask)[0][d > threshold]] = False
+    
     return np.flatnonzero(keep).astype(np.int32)
 
 
-def stratified_downsample(points, colors, ranges, source_ids=None,
-                          shells=((8., .10), (16., .08), (28., .06),
-                                  (45., .05), (70., .045), (100., .04)),
-                          min_range=.5, crop_range=120.,
-                          elevations=None, scan_origin=None,
-                          min_voxel=0.02, max_voxel=0.20,
-                          elevation_low_scale=1.0, elevation_high_scale=0.55,
-                          elevation_threshold_deg=40.0):
-    """按距离层选体素代表点，并返回代表点对应的源行号。"""
+def fast_shell_outlier_mask(points, ranges, shells=((10., .10), (20., .08), (35., .06),
+                                                      (50., .05), (80., .045), (100., .04)),
+                            min_range=.5, crop_range=500.,
+                            std_ratio=2.5, min_neighbors=5,
+                            min_voxel=0.02, max_voxel=0.20):
+    """ 基于预定义壳层的快速去噪 """
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     rng = np.asarray(ranges, dtype=np.float32).reshape(-1)
-    if len(pts) != len(rng):
-        raise ValueError("points/ranges 长度不一致")
-    src = np.arange(len(pts), dtype=np.int32) if source_ids is None else np.asarray(source_ids, dtype=np.int32).reshape(-1)
-    if len(src) != len(pts):
-        raise ValueError("points/source_ids 长度不一致")
-    col = None if colors is None else np.asarray(colors, dtype=np.float32).reshape(-1, 3)
+    n = len(pts)
+    if n < 2:
+        return np.ones(n, dtype=bool)
 
-    if elevations is None and scan_origin is not None:
-        elevations = estimate_elevation_angles(pts, scan_origin)
-    elev = np.asarray(elevations, dtype=np.float32).reshape(-1) if elevations is not None else np.zeros(len(pts), dtype=np.float32)
-    if len(elev) != len(pts):
-        raise ValueError("points/elevations 长度不一致")
+    keep = np.ones(n, dtype=bool)
+    lo = float(min_range)
+    bounds = list(shells) + [(float("inf"), None)]
+
+    for hi, base_voxel in bounds:
+        mask = ((rng >= lo) & (rng < min(float(hi), crop_range + 1e-9))
+                & (rng <= crop_range))
+        ids = np.flatnonzero(mask)
+        if len(ids) == 0:
+            lo = float(hi)
+            if lo >= crop_range:
+                break
+            continue
+
+        if base_voxel is None:
+            base_voxel = shells[-1][1] if shells else 0.05
+
+        shell_pts = pts[ids]
+        n_shell = len(shell_pts)
+        if n_shell < min_neighbors + 1:
+            lo = float(hi)
+            if lo >= crop_range:
+                break
+            continue
+
+        # 轻量统计：点到壳层重心的距离
+        centroid = np.mean(shell_pts, axis=0)
+        dists = np.linalg.norm(shell_pts - centroid, axis=1)
+        med = float(np.median(dists))
+        mad = 1.4826 * float(np.median(np.abs(dists - med)))
+        threshold = med + std_ratio * max(mad, 0.15 * med, 1e-6)
+        outlier_local = np.where(dists > threshold)[0]
+        keep[ids[outlier_local]] = False
+
+        lo = float(hi)
+        if lo >= crop_range:
+            break
+
+    return keep
+
+
+def stratified_downsample(points, colors, ranges, source_ids=None,
+                          shells=((10., .10), (20., .08), (35., .06),
+                                  (50., .05), (80., .045), (100., .04)),
+                          min_range=.5, crop_range=500.,
+                          elevations=None, scan_origin=None,
+                          min_voxel=0.02, max_voxel=0.20,
+                          elevation_low_scale=1.0, elevation_high_scale=0.75,
+                          elevation_threshold_deg=50.0):
+    """
+    按距离层选体素代表点，并返回代表点对应的源行号。
+
+    1. 壳层内使用统一体素大小
+    2. 添加原点偏移，确保体素网格空间对齐
+    3. 取最接近体素重心的点作为代表，保持几何连续性
+    4. elevation_scale_factor 应用于壳层中位数
+    """
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    rng = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    src = (np.arange(len(pts), dtype=np.int32) if source_ids is None
+           else np.asarray(source_ids, dtype=np.int32).reshape(-1))
+    col = None if colors is None else np.asarray(colors, dtype=np.float32).reshape(-1, 3)
+    elev = (np.asarray(elevations, dtype=np.float32).reshape(-1)
+            if elevations is not None else np.zeros(len(pts), dtype=np.float32))
 
     selected_p, selected_c, selected_s, selected_r = [], [], [], []
     lo = float(min_range)
     bounds = list(shells) + [(float("inf"), None)]
+
     for hi, base_voxel in bounds:
-        mask = (rng >= lo) & (rng < min(float(hi), crop_range + 1e-9)) & (rng <= crop_range)
+        mask = ((rng >= lo) & (rng < min(float(hi), crop_range + 1e-9))
+                & (rng <= crop_range))
         ids = np.flatnonzero(mask)
-        if len(ids):
-            if base_voxel:
-                scale = elevation_scale_factor(
-                    elev[ids], elevation_low_scale, elevation_high_scale, elevation_threshold_deg)
-                per_voxel = np.clip(base_voxel * scale, min_voxel, max_voxel)
-                keys = np.floor(pts[ids] / per_voxel[:, None]).astype(np.int64)
-                _, first = np.unique(keys, axis=0, return_index=True)
-                ids = ids[np.sort(first)]
-            selected_p.append(pts[ids]); selected_s.append(src[ids]); selected_r.append(rng[ids])
-            if col is not None:
-                selected_c.append(col[ids])
+
+        if len(ids) == 0:
+            lo = float(hi)
+            if lo >= crop_range:
+                break
+            continue
+
+        if base_voxel:
+            # 壳层统一体素大小
+            median_elev = float(np.median(np.abs(elev[ids])))
+            scale = elevation_scale_factor(
+                median_elev, elevation_low_scale, elevation_high_scale,
+                elevation_threshold_deg)
+            voxel_size = float(np.clip(base_voxel * scale, min_voxel, max_voxel))
+
+            shell_pts = pts[ids]
+            origin = np.floor(np.min(shell_pts, axis=0) / voxel_size) * voxel_size
+            keys = np.floor((shell_pts - origin) / voxel_size).astype(np.int64)
+
+            sort_order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+            sorted_keys = keys[sort_order]
+            sorted_ids_local = np.arange(len(ids), dtype=np.int32)[sort_order]  # 局部索引
+
+            # 找到组边界
+            key_changes = np.concatenate([
+                [True],
+                np.any(sorted_keys[1:] != sorted_keys[:-1], axis=1)
+            ])
+            group_starts = np.flatnonzero(key_changes)
+            group_ends = np.concatenate([group_starts[1:], [len(sorted_ids_local)]])
+
+            n_groups = len(group_starts)
+            if n_groups == 0:
+                lo = float(hi)
+                if lo >= crop_range:
+                    break
+                continue
+
+            # 准备排序后的点
+            sorted_pts = shell_pts[sorted_ids_local]
+            group_counts = group_ends - group_starts
+
+            # 每组坐标和（向量化）
+            sums_x = np.add.reduceat(sorted_pts[:, 0], group_starts)
+            sums_y = np.add.reduceat(sorted_pts[:, 1], group_starts)
+            sums_z = np.add.reduceat(sorted_pts[:, 2], group_starts)
+
+            # 重心
+            centroids = np.column_stack([
+                sums_x / group_counts,
+                sums_y / group_counts,
+                sums_z / group_counts
+            ])
+
+            # 为每个点标记所属组
+            group_ids = np.empty(len(sorted_pts), dtype=np.int32)
+            for gi, (gs, ge) in enumerate(zip(group_starts, group_ends)):
+                group_ids[gs:ge] = gi
+
+            # 计算每个点到其组重心的距离（向量化）
+            dx = sorted_pts[:, 0] - centroids[group_ids, 0]
+            dy = sorted_pts[:, 1] - centroids[group_ids, 1]
+            dz = sorted_pts[:, 2] - centroids[group_ids, 2]
+            dists_to_centroid = dx * dx + dy * dy + dz * dz  # 避免 sqrt，比较平方距离
+
+            #  向量化取每组最小距离索引
+            representative_local_ids = np.empty(n_groups, dtype=np.int32)
+            for gi, (gs, ge) in enumerate(zip(group_starts, group_ends)):
+                group_dists = dists_to_centroid[gs:ge]
+                representative_local_ids[gi] = gs + np.argmin(group_dists)
+
+            # 映射回全局 ids
+            ids = ids[sorted_ids_local[representative_local_ids]]
+
+        selected_p.append(pts[ids])
+        selected_s.append(src[ids])
+        selected_r.append(rng[ids])
+        if col is not None:
+            selected_c.append(col[ids])
+
         lo = float(hi)
         if lo >= crop_range:
             break
+
     if not selected_p:
         empty = np.empty((0, 3), np.float32)
-        return empty, (empty.copy() if col is not None else None), np.empty(0, np.int32), np.empty(0, np.float32)
-    return np.vstack(selected_p), (np.vstack(selected_c) if col is not None else None), np.concatenate(selected_s), np.concatenate(selected_r)
+        return empty, None, np.empty(0, np.int32), np.empty(0, np.float32)
+
+    return (np.vstack(selected_p),
+            (np.vstack(selected_c) if col is not None else None),
+            np.concatenate(selected_s),
+            np.concatenate(selected_r))
 
 
-# ==================== 立面检测重构版新增工具 ====================
+def stratified_proxy_build(points, colors, ranges, **kwargs):
+    """Build the single Proxy domain and its exact Proxy -> Source CSR map.
 
-def deduplicate_clusters(clusters: List[np.ndarray]) -> List[np.ndarray]:
+    The existing downsampler selects one representative per adaptive voxel.
+    This companion keeps the same selection policy, but records every source
+    row in the voxel instead of reconstructing membership from coordinates.
     """
-    基于集合包含关系去重：若 cluster A 被 B 严格包含，则丢弃 A。
-    用于多尺度 3D 连通域结果融合。
-    """
-    if not clusters:
-        return []
-    sets = [set(c.tolist()) for c in clusters]
-    n = len(clusters)
-    discarded = [False] * n
-    for i in range(n):
-        if discarded[i]:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    rng = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    if len(pts) != len(rng):
+        raise ValueError("points and ranges length mismatch")
+    src = np.arange(len(pts), dtype=np.int32)
+    if not len(pts):
+        return (np.empty((0, 3), np.float32), None,
+                np.zeros(1, np.int64), np.empty(0, np.int32),
+                np.empty(0, np.float32))
+
+    # Reproduce the adaptive voxel grouping, then preserve the complete group.
+    shells = kwargs.pop("shells", ((10., .10), (20., .08), (35., .06),
+                                    (50., .05), (80., .045), (100., .04)))
+    elevations = kwargs.pop("elevations", None)
+    col = None if colors is None else np.asarray(colors, dtype=np.float32).reshape(-1, 3)
+    if col is not None and len(col) != len(pts):
+        raise ValueError("colors length mismatch")
+    proxy_parts, color_parts, range_parts, source_parts = [], [], [], []
+    # Proxy construction must cover every Source row.  A display crop belongs
+    # to a later decision, not to the persistent mapping.
+    lo = float(kwargs.pop("min_range", 0.0)); crop = float(kwargs.pop("crop_range", np.max(rng)))
+    elev = np.zeros(len(pts), np.float32) if elevations is None else np.asarray(elevations, dtype=np.float32)
+    for hi, base in list(shells) + [(float("inf"), None)]:
+        mask = (rng >= lo) & (rng < min(float(hi), crop + 1e-9)) & (rng <= crop)
+        ids = np.flatnonzero(mask)
+        if len(ids) == 0:
+            lo = float(hi)
             continue
-        si = sets[i]
-        for j in range(i + 1, n):
-            if discarded[j]:
-                continue
-            sj = sets[j]
-            if si.issubset(sj) and len(si) < len(sj) * 0.95:
-                discarded[i] = True
-                break
-            elif sj.issubset(si) and len(sj) < len(si) * 0.95:
-                discarded[j] = True
-    return [clusters[i] for i in range(n) if not discarded[i]]
+        if base is None:
+            # Keep the final open-ended distance shell instead of silently
+            # dropping all points beyond the last configured boundary.
+            base = shells[-1][1]
+        scale = elevation_scale_factor(float(np.median(np.abs(elev[ids]))),
+                                       kwargs.get("elevation_low_scale", 1.0),
+                                       kwargs.get("elevation_high_scale", .75),
+                                       kwargs.get("elevation_threshold_deg", 50.0))
+        vs = float(np.clip(base * scale, kwargs.get("min_voxel", .02), kwargs.get("max_voxel", .20)))
+        shell = pts[ids]
+        origin = np.floor(np.min(shell, axis=0) / vs) * vs
+        keys = np.floor((shell - origin) / vs).astype(np.int64)
+        order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+        sk = keys[order]
+        starts = np.flatnonzero(np.r_[True, np.any(sk[1:] != sk[:-1], axis=1)])
+        ends = np.r_[starts[1:], len(order)]
+        for start, end in zip(starts, ends):
+            group = ids[order[start:end]]
+            center = np.mean(pts[group], axis=0)
+            rep = group[np.argmin(np.sum((pts[group] - center) ** 2, axis=1))]
+            proxy_parts.append(pts[rep]); range_parts.append(rng[rep]); source_parts.append(group)
+            if col is not None: color_parts.append(col[rep])
+        lo = float(hi)
+        if lo >= crop: break
+    proxy = np.asarray(proxy_parts, dtype=np.float32).reshape(-1, 3)
+    offsets = np.zeros(len(source_parts) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum([len(x) for x in source_parts], dtype=np.int64)
+    indices = np.concatenate(source_parts).astype(np.int32, copy=False) if source_parts else np.empty(0, np.int32)
+    return proxy, (np.asarray(color_parts, np.float32) if col is not None else None), offsets, indices, np.asarray(range_parts, np.float32)
 
-
-def filter_clusters_by_planarity(clusters: List[np.ndarray], points: np.ndarray,
-                                 min_ratio: float = 0.15) -> List[np.ndarray]:
-    """
-    用 PCA 特征值过滤非平面簇（树木/植被）。
-    保留 λ₃/λ₁ < min_ratio 的簇。
-    """
-    valid = []
-    for c in clusters:
-        pts = points[c]
-        if len(pts) < 10:
-            continue
-        centered = pts - np.mean(pts, axis=0)
-        _, s, _ = np.linalg.svd(centered, full_matrices=False)
-        s = np.sort(s)[::-1]
-        if s[0] > 1e-6 and (s[2] / s[0] < min_ratio):
-            valid.append(c)
-    return valid
 
 def fit_plane_svd(points):
     """最小二乘 SVD 拟合平面"""
