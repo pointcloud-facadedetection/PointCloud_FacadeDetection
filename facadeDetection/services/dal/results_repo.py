@@ -38,9 +38,14 @@ class ResultsRepo:
                     project_id=project.id,
                     scene_id=scene.id,
                     label=f"Facade {int(item.get('id', 0))}",
+                    # Keep the complete index-space payload.  Quality evaluation
+                    # after reopening depends on these fields, not just on the
+                    # plane preview/summary.
                     plane_json={key: item.get(key) for key in (
-                        "plane_model", "normal", "center", "inlier_indices"
-                    )},
+                        "plane_model", "normal", "center", "inlier_indices",
+                        "proxy_indices", "measurement_indices", "voxel_ids",
+                        "cloud_name", "__index_space",
+                    ) if item.get(key) is not None},
                     bbox_json=item.get("bbox_2d"),
                     area=float(item.get("area", 0.0)),
                     orientation=item.get("type_label") or item.get("type"),
@@ -71,7 +76,13 @@ class ResultsRepo:
                     project_id=proj.id,
                     scene_id=scene_id,
                     label=d.get("label", "facade"),
-                    plane_json=d.get("plane_json"),
+                    plane_json=d.get("plane_json") or {
+                        key: d.get(key) for key in (
+                            "plane_model", "normal", "center", "inlier_indices",
+                            "proxy_indices", "measurement_indices", "voxel_ids",
+                            "cloud_name", "__index_space",
+                        ) if d.get(key) is not None
+                    },
                     bbox_json=d.get("bbox_json"),
                     area=d.get("area"),
                     orientation=d.get("orientation"),

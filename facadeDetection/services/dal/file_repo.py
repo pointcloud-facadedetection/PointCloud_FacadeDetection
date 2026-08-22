@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 
 from config.storage import Storage
 from db.connection import project_session
@@ -23,6 +23,35 @@ def _sha256(path: Path) -> str:
 
 
 class FileRepo:
+    @staticmethod
+    def list_assets(project_uuid: str, *, pointcloud_only: bool = False) -> list[FileAsset]:
+        with project_session(project_uuid) as s:
+            proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()
+            if not proj:
+                return []
+            q = select(FileAsset).where(FileAsset.project_id == proj.id, FileAsset.is_deleted == False)
+            if pointcloud_only:
+                # Keep old projects readable: early versions stored PLY assets
+                # with inconsistent kind values, while the extension remained
+                # reliable.  This must match station synchronization.
+                q = q.where(or_(
+                    FileAsset.kind == FileKind.raw_pointcloud.value,
+                    FileAsset.ext.ilike('.ply'),
+                    FileAsset.path.ilike('%.ply'),
+                ))
+            return s.execute(q.order_by(FileAsset.id.asc())).scalars().all()
+
+    @staticmethod
+    def validate_asset(asset: FileAsset) -> tuple[bool, str]:
+        path = Path(asset.path)
+        if not path.is_file():
+            return False, "missing"
+        if asset.size_bytes is not None and path.stat().st_size != asset.size_bytes:
+            return False, "size_mismatch"
+        if asset.sha256 and _sha256(path) != asset.sha256:
+            return False, "sha256_mismatch"
+        return True, "ok"
+
     @staticmethod
     def import_file(project_uuid: str, src_path: str, kind: FileKind, *, copy_into_project: bool = False) -> Optional[FileAsset]:
         """
@@ -74,6 +103,24 @@ class FileRepo:
                 path_to_store = str(dst.resolve())
                 size = dst.stat().st_size
                 sha = _sha256(dst)
+
+            # Import is idempotent within a project.  Prefer the canonical
+            # source path, then use the content fingerprint so a renamed copy
+            # is not registered as a second station.
+            existing = s.execute(select(FileAsset).where(
+                FileAsset.project_id == proj.id,
+                FileAsset.is_deleted == False,
+                FileAsset.kind == (kind.value if kind else guess_file_kind(str(src))),
+                or_(FileAsset.path == path_to_store,
+                    and_(FileAsset.sha256 == sha, FileAsset.size_bytes == size)),
+            ).order_by(FileAsset.id.asc())).scalars().first()
+            if existing is not None:
+                existing.path = path_to_store
+                existing.size_bytes = size
+                existing.sha256 = sha
+                existing.original_name = src.name
+                existing.ext = src.suffix.lower()
+                return existing
 
             asset = FileAsset(
                 project_id=proj.id,
