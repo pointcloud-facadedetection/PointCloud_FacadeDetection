@@ -37,6 +37,14 @@ class ViewportRenderService:
         else:
             raise RuntimeError('Viewport does not support adding point cloud data')
 
+    def clear_station_scene(self):
+        for name in list(self.viewport.get_cloud_names() if hasattr(self.viewport, 'get_cloud_names') else []):
+            if str(name).startswith('pcfd.station.'):
+                self.viewport.remove_cloud(name)
+
+    def show_station_cloud(self, station_id, name, points, colors=None):
+        self.show_point_cloud(f'pcfd.station.{station_id}.{name}', points, colors)
+
     def show_image(self, name: str, image: np.ndarray):
         if hasattr(self.viewport, 'show_image'):
             self.viewport.show_image(name, image)
@@ -327,7 +335,7 @@ class ViewportRenderService:
         """
         核心设计：
         - 不拟合平面，直接用选中点3D坐标
-        - 沿相机front方向外扩厚度（向量形式，非单轴）
+        - 各向同性外扩（所有轴等比例），避免方向性偏移
         - 使用正确的world_per_pixel
         """
         t_start = time.monotonic()
@@ -347,114 +355,64 @@ class ViewportRenderService:
                 return None, None
 
             seed = all_pos[idx]
+            n_seed = len(seed)
 
-            # ---------- 1. 直接计算选中点AABB ----------
+            # ---------- 1. 计算选中点AABB ----------
             min_raw = np.min(seed, axis=0)
             max_raw = np.max(seed, axis=0)
             center_raw = (min_raw + max_raw) / 2.0
             extent_raw = max_raw - min_raw
-            print(f"[ROI-BBox] 选中点范围: [{min_raw[0]:.2f},{min_raw[1]:.2f},{min_raw[2]:.2f}] ~ "
-                  f"[{max_raw[0]:.2f},{max_raw[1]:.2f},{max_raw[2]:.2f}], "
-                  f"跨度=[{extent_raw[0]:.2f},{extent_raw[1]:.2f},{extent_raw[2]:.2f}]", flush=True)
+            max_span = float(np.max(extent_raw))
+            
+            print(
+                f"[ROI-BBox] 选中 {n_seed} 点, 范围: "
+                f"[{min_raw[0]:.2f},{min_raw[1]:.2f},{min_raw[2]:.2f}] ~ "
+                f"[{max_raw[0]:.2f},{max_raw[1]:.2f},{max_raw[2]:.2f}], "
+                f"跨度=[{extent_raw[0]:.2f},{extent_raw[1]:.2f},{extent_raw[2]:.2f}]",
+                flush=True,
+            )
 
-            # ---------- 2. 获取相机参数 ----------
+            # ---------- 2. 各向同性外扩 ----------
+            # 外扩比例：最大跨度的 5%
+            expand_ratio = 0.05
+            # 绝对最小外扩：1米（保证立面检测有足够空间）
+            expand_min = 1.0
+            # 绝对最大外扩：最大跨度的 10%（防止过度膨胀）
+            expand_max = max_span * 0.10
+            
+            expand = min(max(max_span * expand_ratio, expand_min), expand_max)
+            
+            # 各向同性外扩：所有轴等比例扩展
+            min_bound = min_raw - expand
+            max_bound = max_raw + expand
+
+            # ---------- 3. 可选：相机方向感知的外扩（仅用于厚度方向）----------
             camera = getattr(self.viewport, '_camera', None)
-            if camera is None:
-                print("[ROI-BBox] 警告: 无camera，使用纯几何AABB", flush=True)
-                # 无相机时，直接返回选中点AABB + 各向同性外扩
-                margin = np.max(extent_raw) * 0.05 + 0.5
-                return min_raw - margin, max_raw + margin
+            if camera is not None:
+                try:
+                    front, _, _ = camera.get_camera_basis()
+                    if front is not None:
+                        # 计算选中点沿front方向的深度跨度
+                        depths = (seed - center_raw) @ front
+                        d_min = float(np.min(depths))
+                        d_max = float(np.max(depths))
+                        depth_span = d_max - d_min
+                        
+                        # 如果深度跨度很小（用户正对墙面），额外增加front方向厚度
+                        # 这确保即使选中点都在同一深度层，也有前后余量
+                        if depth_span < max_span * 0.1:  # 深度跨度小于最大跨度的10%
+                            extra_thick = max(max_span * 0.05, 0.3)  # 额外5%或0.3米
+                            
+                            # 向量形式：沿front正负方向各外扩extra_thick/2
+                            half_extra = extra_thick / 2.0
+                            for i in range(3):
+                                if abs(front[i]) > 1e-6:
+                                    delta = half_extra * abs(front[i])
+                                    min_bound[i] -= delta
+                                    max_bound[i] += delta
 
-            front, up, right = camera.get_camera_basis()
-            if front is None:
-                print("[ROI-BBox] 警告: 无法获取相机基向量，使用纯几何AABB", flush=True)
-                margin = np.max(extent_raw) * 0.05 + 0.5
-                return min_raw - margin, max_raw + margin
-
-            # ---------- 3. 沿front方向外扩厚度 ----------
-            # 计算选中点沿front方向的深度分布
-            # 使用选中点自身中心作为参考（比lookat更稳定）
-            depths = (seed - center_raw) @ front
-            
-            # 过滤前后各2.5%的极端点
-            d_p05 = float(np.percentile(depths, 2.5))
-            d_p95 = float(np.percentile(depths, 97.5))
-            d_center = (d_p05 + d_p95) / 2.0
-            # d_min = float(np.min(depths))
-            # d_max = float(np.max(depths))
-            depth_span = d_p95 - d_p05
-
-            # 厚度策略：基于选中点自身的深度跨度，而非整个场景
-            # 目标：覆盖选中点前后一定范围，给立面检测留余量
-            if thickness is None:
-                # 基础厚度：选中点深度跨度的50%，最小0.5米，最大5米
-                base_thick = max(depth_span * 0.5, 0.5)
-                base_thick = min(base_thick, 5.0)  # 限制最大5米
-                thickness = base_thick
-
-            # half_thick: 沿front方向从中心外扩的距离
-            # 确保包含所有选中点（d_min到d_max）+ 额外余量
-            half_thick = max(thickness / 2.0, abs(d_p05 - d_center), abs(d_p95 - d_center))
-
-            print(f"[ROI-BBox] 深度分布: min={d_p05:.3f}, max={d_p95:.3f}, "
-                  f"span={depth_span:.3f}, half_thick={half_thick:.3f}", flush=True)
-
-            # 计算过滤后中心在front方向上的位置
-            center_depth_offset = (d_p05 + d_p95) / 2.0
-            effective_center = center_raw + center_depth_offset * front
-
-            # 重新计算相对于effective_center的深度
-            depths_centered = (seed - effective_center) @ front
-            d_min_eff = float(np.min(depths_centered))
-            d_max_eff = float(np.max(depths_centered))
-
-            # 目标范围: [-half_thick, +half_thick]
-            expand_front = max(0, half_thick - d_max_eff)
-            expand_back = max(0, -half_thick - d_min_eff)
-
-
-            # 应用到min/max（注意：front方向的分量可能使min变小、max变大）
-            min_bound = min_raw.copy()
-            max_bound = max_raw.copy()
-
-            # 沿front方向，每个轴独立外扩
-            if expand_front > 0:
-                for i in range(3):
-                    if front[i] > 1e-6:
-                        max_bound[i] += expand_front * front[i]
-                    elif front[i] < -1e-6:
-                        min_bound[i] += expand_front * front[i]
-
-            # 后向扩展（沿front负方向）
-            if expand_back > 0:
-                for i in range(3):
-                    if front[i] > 1e-6:
-                        min_bound[i] -= expand_back * front[i]
-                    elif front[i] < -1e-6:
-                        max_bound[i] -= expand_back * front[i]
-
-            # ---------- 5. 非front方向轻微外扩（避免边界截断）----------
-            margin = np.max(extent_raw) * 0.01 + 0.05  # 1% + 5cm
-            
-            # 找到垂直于front的平面内的两个轴
-            for i in range(3):
-                if abs(right[i]) > 1e-6:
-                    if right[i] > 0:
-                        min_bound[i] -= margin * right[i]
-                        max_bound[i] += margin * right[i]
-                    else:
-                        min_bound[i] += margin * right[i]
-                        max_bound[i] -= margin * right[i]
-            
-            # 在up方向外扩
-            for i in range(3):
-                if abs(up[i]) > 1e-6:
-                    if up[i] > 0:
-                        min_bound[i] -= margin * up[i]
-                        max_bound[i] += margin * up[i]
-                    else:
-                        min_bound[i] += margin * up[i]
-                        max_bound[i] -= margin * up[i]
+                except Exception:
+                    pass
 
             # 确保min < max
             for i in range(3):
@@ -462,10 +420,10 @@ class ViewportRenderService:
                     min_bound[i], max_bound[i] = max_bound[i], min_bound[i]
 
             elapsed = time.monotonic() - t_start
+            final_extent = max_bound - min_bound
             print(
                 f"[ROI-BBox] 成功: Bbox=[{min_bound[0]:.2f},{min_bound[1]:.2f},{min_bound[2]:.2f}] ~ "
-                f"[{max_bound[0]:.2f},{max_bound[1]:.2f},{max_bound[2]:.2f}], "
-                f"耗时={elapsed:.3f}s",
+                f"[{max_bound[0]:.2f},{max_bound[1]:.2f},{max_bound[2]:.2f}], 耗时={elapsed:.3f}s",
                 flush=True,
             )
 

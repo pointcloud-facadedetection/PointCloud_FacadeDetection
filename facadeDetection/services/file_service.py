@@ -249,6 +249,16 @@ class FileService:
         imported_metadata = []
         for p in ply_paths:
             try:
+                # FLS 批量结果必须逐站写入项目 FileAsset；否则视口虽有多个
+                # cloud，项目站点域无法发现第二站点，重开项目也会丢失。
+                asset = None
+                if project_uuid:
+                    asset = FileRepo.import_file(
+                        project_uuid=project_uuid,
+                        src_path=p,
+                        kind=FileKind.raw_pointcloud,
+                        copy_into_project=False,
+                    )
                 source_pts, source_cols = self._load_point_cloud(p)
                 scan_meta = next((s for s in getattr(result, 'scans', [])
                                   if str(getattr(s, 'ply_path', '')) == str(Path(p).resolve())), None)

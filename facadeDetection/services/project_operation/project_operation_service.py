@@ -21,6 +21,10 @@ class ProjectOperationService:
         self.on_facade_results = None
         self._project_uuid: Optional[str] = None
         self._last_facade_results: Optional[list[dict]] = None
+        self._station_service = None
+
+    def set_station_service(self, service):
+        self._station_service = service
 
     def set_active_project_uuid(self, project_uuid: Optional[str]):
         self._project_uuid = project_uuid
@@ -126,8 +130,11 @@ class ProjectOperationService:
                 @Slot()
                 def run(self):
                     try:
+                        print('[PCFD] denoise.worker_start', flush=True)
                         self.finished.emit(service.denoise(method='adaptive', update_viewport=False))
                     except Exception as exc:
+                        import traceback
+                        traceback.print_exc()
                         self.failed.emit(str(exc))
             self._denoise_thread = QThread()
             self._denoise_worker = Worker()
@@ -144,30 +151,47 @@ class ProjectOperationService:
 
     @Slot(object)
     def _on_denoise_finished(self, stats):
-        if stats:
-            data = self._viewport.get_cloud_data(stats['name'])
-            if data is not None:
-                # Patch: 优先使用队列更新点云数据方法
-                if hasattr(self._viewport, "queue_update_cloud_points"):
-                    self._viewport.queue_update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
-                elif hasattr(self._viewport, "update_cloud_points"):
-                    self._viewport.update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
-            stats.pop('proxy_points', None); stats.pop('proxy_colors', None)
-            print(f"去噪完成: {stats}", flush=True)
+        try:
+            if stats:
+                data = self._viewport.get_cloud_data(stats['name'])
+                if data is not None:
+                    if hasattr(self._viewport, "queue_update_cloud_points"):
+                        self._viewport.queue_update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
+                    elif hasattr(self._viewport, "update_cloud_points"):
+                        self._viewport.update_cloud_points(stats['name'], stats['proxy_points'], stats.get('proxy_colors'))
+                stats.pop('proxy_points', None); stats.pop('proxy_colors', None)
+                print(f"去噪完成: {stats}", flush=True)
+            else:
+                print('去噪未产生结果。', flush=True)
+        finally:
+            self._finish_denoise_state()
 
     @Slot(str)
     def _on_denoise_failed(self, message):
         print(f"去噪失败: {message}", flush=True)
+        self._finish_denoise_state()
 
     @Slot()
     def _clear_denoise_worker(self):
-        self._denoise_worker.deleteLater()
-        self._denoise_thread.deleteLater()
+        worker = self._denoise_worker
+        thread = self._denoise_thread
         self._denoise_worker = None
         self._denoise_thread = None
+        if worker is not None:
+            worker.deleteLater()
+        if thread is not None:
+            thread.deleteLater()
+
+    def _finish_denoise_state(self):
+        """Allow a new job even if a queued cleanup callback was delayed."""
+        # Do not delete QObjects here; QThread.finished owns that lifecycle.
+        if self._denoise_thread is not None and not self._denoise_thread.isRunning():
+            self._clear_denoise_worker()
 
     def registration(self):
         self._notify('registration')
+        if self._station_service is not None:
+            return self._station_service.register_selected()
 
     # ------------------------------------------------------------------
     # ROI 视觉辅助：统一清除与渲染
