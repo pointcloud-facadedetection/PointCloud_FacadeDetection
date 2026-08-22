@@ -102,11 +102,23 @@ class PointCloudService:
         vp = self.viewport
         if vp is None:
             return None
+        # Station preview clouds are full-resolution review resources.  The
+        # legacy processing pipeline must continue to use the FileService
+        # dataset/proxy cloud, otherwise a 32M-point PLY is sent through the
+        # expensive fallback denoise path after project restore.
+        if hasattr(vp, "get_cloud_names") and hasattr(vp, "get_cloud_data"):
+            for candidate in reversed(vp.get_cloud_names() or []):
+                if str(candidate).startswith("pcfd.station."):
+                    continue
+                data = vp.get_cloud_data(candidate)
+                if data and data.get("dataset_id"):
+                    return candidate
         name = getattr(vp, "_active_name", None)
-        if name:
+        if name and not str(name).startswith("pcfd.station."):
             return name
         if hasattr(vp, "get_cloud_names"):
-            names = vp.get_cloud_names()
+            names = [n for n in (vp.get_cloud_names() or [])
+                     if not str(n).startswith("pcfd.station.")]
             if names:
                 return names[-1]
         return None
@@ -149,6 +161,9 @@ class PointCloudService:
             return None
 
         dataset_id = data.get("dataset_id")
+        if not dataset_id:
+            print(f"[PCFD] denoise.skip cloud={name} reason=no_dataset_id", flush=True)
+            return None
         pts = np.asarray(data["pos"], dtype=np.float32)
         cols = None
         try:
@@ -158,6 +173,9 @@ class PointCloudService:
             cols = None
 
         dataset = self.datasets.get(dataset_id) if dataset_id else None
+        if dataset is None:
+            print(f"[PCFD] denoise.skip cloud={name} dataset={dataset_id} reason=dataset_not_registered", flush=True)
+            return None
         n_before = len(pts)
         keep_proxy = np.empty(0, dtype=np.int32)
 
@@ -266,7 +284,11 @@ class PointCloudService:
                         new_meta['elevations'] = old_elev[keep_proxy].tolist()
 
                 # 重新注册 dataset（替换旧的）
-                self.register_dataset(dataset_id, new_pts, new_cols, metadata=new_meta)
+                # register_dataset replaces the in-memory dataset object. Keep the
+                # local reference in sync; otherwise the following source mapping
+                # still reads the stale pre-denoise index and detection loses the
+                # dataset contract.
+                dataset = self.register_dataset(dataset_id, new_pts, new_cols, metadata=new_meta)
 
                 # 计算 raw_ids
                 raw_ids = dataset.index.proxy_to_source_ids(keep_proxy, deduplicate=True)
@@ -305,7 +327,7 @@ class PointCloudService:
             vp.add_cloud(name, new_pts, new_cols)
 
         stats = {
-            "name": name, "method": method, "voxel_size": float(voxel_size),
+            "name": name, "method": method,
             "points_before": n_before, "points_after": n_after,
             "dataset_id": dataset_id, "raw_ids": raw_ids,
             "raw_count": int(raw_count),
