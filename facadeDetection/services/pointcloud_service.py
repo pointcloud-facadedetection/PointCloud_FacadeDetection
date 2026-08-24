@@ -59,6 +59,38 @@ class PointCloudService:
     def get_dataset(self, dataset_id: str) -> Optional[PointCloudDataset]:
         return self.datasets.get(dataset_id)
 
+    def bind_processing_cloud(self, cloud_name: str) -> Optional[str]:
+        """Repair a restored viewport cloud's metadata from the dataset registry.
+
+        Open3D scene restoration predates the in-memory dataset contract in
+        some projects, so the cloud can exist while ``dataset_id`` is absent.
+        Match only the filename suffix; never bind a station preview cloud.
+        """
+        vp = self.viewport
+        if vp is None or not cloud_name or str(cloud_name).startswith('pcfd.station.'):
+            return None
+        data = vp.get_cloud_data(cloud_name) if hasattr(vp, 'get_cloud_data') else None
+        if data is None:
+            return None
+        current = data.get('dataset_id')
+        if current in self.datasets:
+            return current
+        leaf = str(cloud_name).replace('\\', '/').rsplit('/', 1)[-1]
+        matches = [did for did in self.datasets if str(did).rsplit(':', 1)[-1] == leaf]
+        if len(matches) != 1:
+            return None
+        dataset_id = matches[0]
+        dataset = self.datasets[dataset_id]
+        data.update({'dataset_id': dataset_id, 'domain': 'proxy',
+                     'index_space': 'proxy_global',
+                     'is_processing_cloud': True,
+                     'proxy_ids': np.arange(len(data.get('pos', [])), dtype=np.int32)})
+        if len(data.get('pos', [])) != len(dataset.proxy_points):
+            print(f'[PCFD] cloud.bind_size_mismatch cloud={cloud_name} '
+                  f'display={len(data.get("pos", []))} dataset={len(dataset.proxy_points)}', flush=True)
+        print(f'[PCFD] cloud.bind_repaired cloud={cloud_name} dataset={dataset_id}', flush=True)
+        return dataset_id
+
     def map_proxy_decision(self, dataset_id: str, proxy_ids, source: str = "unknown",
                            expand_raw: bool = True) -> np.ndarray | None:
         dataset = self.datasets[dataset_id]
@@ -123,6 +155,31 @@ class PointCloudService:
                 return names[-1]
         return None
 
+    def resolve_processing_cloud(self, preferred: Optional[str] = None) -> Optional[str]:
+        """Return the proxy cloud bound to a registered dataset.
+
+        Station clouds are deliberately display-only and must never be selected
+        merely because they happen to be the last Open3D geometry.
+        """
+        vp = self.viewport
+        if vp is None or not hasattr(vp, "get_cloud_data"):
+            return None
+        names = vp.get_cloud_names() if hasattr(vp, "get_cloud_names") else []
+        candidates = ([preferred] if preferred else []) + list(reversed(names or []))
+        seen = set()
+        for name in candidates:
+            if not name or name in seen or str(name).startswith("pcfd.station."):
+                continue
+            seen.add(name)
+            data = vp.get_cloud_data(name) or {}
+            dataset_id = self.bind_processing_cloud(name)
+            if dataset_id and dataset_id in self.datasets and data.get("domain", "proxy") == "proxy":
+                data.setdefault("is_processing_cloud", True)
+                data.setdefault("index_space", "proxy_global")
+                data.setdefault("proxy_ids", np.arange(len(data.get("pos", [])), dtype=np.int32))
+                return name
+        return self._pick_active_cloud_name()
+
     def _rebuild_csr_for_keep(self, old_offsets, old_indices, keep_proxy):
         """ 从保留的 proxy 索引重建 CSR 映射。"""
         n_new = len(keep_proxy)
@@ -150,7 +207,7 @@ class PointCloudService:
             print("PointCloudService: viewport 未注入，无法去噪", flush=True)
             return None
 
-        name = self._pick_active_cloud_name()
+        name = self.resolve_processing_cloud()
         if not name:
             print("PointCloudService: 未找到可去噪的点云", flush=True)
             return None
@@ -291,7 +348,11 @@ class PointCloudService:
                 dataset = self.register_dataset(dataset_id, new_pts, new_cols, metadata=new_meta)
 
                 # 计算 raw_ids
-                raw_ids = dataset.index.proxy_to_source_ids(keep_proxy, deduplicate=True)
+                # The rebuilt dataset is renumbered: its proxy rows are now
+                # 0..n_after-1.  ``keep_proxy`` belongs to the old dataset and
+                # must not be queried against the new index.
+                new_proxy_ids = np.arange(n_after, dtype=np.int32)
+                raw_ids = dataset.index.proxy_to_source_ids(new_proxy_ids, deduplicate=True)
                 raw_count = len(raw_ids)
 
                 # 更新 viewport 的 dataset_id 引用
@@ -314,10 +375,13 @@ class PointCloudService:
 
         # 更新视口
         if dataset is not None and n_after > 0:
-            data["proxy_ids"] = keep_proxy
+            # After rebuilding, the displayed rows are the new dataset's
+            # global proxy rows, not the old pre-denoise row numbers.
+            data["proxy_ids"] = np.arange(n_after, dtype=np.int32)
             data["domain"] = "proxy"
-            data["index_space"] = "proxy"
-            self.map_proxy_decision(dataset_id, keep_proxy, source="denoise", expand_raw=False)
+            data["index_space"] = "proxy_global"
+            self.map_proxy_decision(dataset_id, np.arange(n_after, dtype=np.int32),
+                                    source="denoise", expand_raw=False)
 
         if hasattr(vp, "queue_update_cloud_points"):
             vp.queue_update_cloud_points(name, new_pts, new_cols)

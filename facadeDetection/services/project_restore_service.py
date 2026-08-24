@@ -51,7 +51,8 @@ class ProjectRestoreService:
                             for m in metrics],
                         **{key: geometry[key] for key in (
                             'plane_model', 'normal', 'center', 'inlier_indices',
-                            'proxy_indices', 'measurement_indices', 'voxel_ids',
+                         'proxy_indices', 'measurement_indices', 'voxel_ids',
+                         'review_status',
                             'cloud_name', '__index_space') if key in geometry}}
                 result.append(item)
             return result
