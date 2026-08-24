@@ -497,6 +497,10 @@ class Open3DViewport(BaseViewport):
             return
         self._scene.update_cloud_points(name, positions, colors)
 
+    def replace_cloud_snapshot(self, name, positions, colors=None, metadata=None):
+        """GUI-thread atomic point/colour/metadata replacement."""
+        return self._scene.replace_cloud_snapshot(name, positions, colors, metadata)
+
     def remove_cloud(self, name):
         self._scene.remove_cloud(name)
         if not self._scene.point_data:

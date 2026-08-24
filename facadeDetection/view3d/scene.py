@@ -56,6 +56,22 @@ class PointCloudScene:
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=False)
 
+    def replace_cloud_snapshot(self, name, positions, colors=None, metadata=None):
+        """Atomically replace displayed points and business metadata."""
+        if name not in self.point_data:
+            return False
+        positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
+        data = self.point_data[name]
+        data["pos"] = positions
+        if colors is None:
+            colors = data.get("color")
+        data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
+        if metadata:
+            data.update(metadata)
+        self.active_name = name
+        self.refresh_cloud(name, reset_bounding_box=False)
+        return True
+
     def remove_cloud(self, name):
         self.adapter.remove_geometry(name)
         self.adapter.remove_geometry(f"{name}__bbox")
