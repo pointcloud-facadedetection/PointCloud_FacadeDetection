@@ -69,7 +69,7 @@ QLabel#currentProjectLabel {
     border: 1px solid #2B3A52;
     border-radius: 8px;
     padding: 6px 12px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
 }
 
@@ -83,7 +83,7 @@ QLabel[uiRole="sectionTitle"] {
 QLabel[uiRole="supportingText"] {
     color: #64748B;
     background-color: transparent;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 400;
 }
 
@@ -123,7 +123,7 @@ QLabel[uiRole="commandGroupLabel"] {
     background-color: transparent;
     border: none;
     padding: 0 2px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
 }
 
@@ -190,6 +190,54 @@ QPushButton[uiRole="headerAction"]:disabled {
     color: #94A3B8;
     background-color: #E2E8F0;
     border-color: #E2E8F0;
+}
+
+QToolButton[uiRole="sidebarToggle"] {
+    color: #FFFFFF;
+    background-color: #2457D6;
+    border: 1px solid #2457D6;
+    border-radius: 7px;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+QToolButton[uiRole="sidebarToggle"]:hover {
+    background-color: #1E48B8;
+    border-color: #1E48B8;
+}
+
+QToolButton[uiRole="sidebarToggle"]:pressed,
+QToolButton[uiRole="sidebarToggle"]:checked {
+    background-color: #1E3A8A;
+    border-color: #1E3A8A;
+}
+
+QToolButton[uiRole="windowControl"] {
+    color: #E5EDF8;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    font-family: "Segoe UI Symbol", "Microsoft YaHei UI";
+    font-size: 17px;
+    font-weight: 500;
+}
+
+QToolButton[uiRole="windowControl"]:hover {
+    color: #FFFFFF;
+    background-color: #243044;
+}
+
+QToolButton[uiRole="windowControl"]:pressed {
+    background-color: #334155;
+}
+
+QToolButton[uiRole="windowControl"][windowAction="close"]:hover {
+    color: #FFFFFF;
+    background-color: #C42B1C;
+}
+
+QToolButton[uiRole="windowControl"][windowAction="close"]:pressed {
+    background-color: #A91F14;
 }
 
 QPushButton[buttonRole="primary"],
@@ -441,62 +489,13 @@ QFrame#rightDock {
     border-left: 1px solid #E2E8F0;
 }
 
-QWidget[uiRole="sidebarTitleBar"] {
-    background-color: #E9EEF5;
-    border: none;
-    border-bottom: 1px solid #E2E8F0;
-}
-
 QWidget[uiRole="sidebarBody"] {
     background-color: #F7F9FC;
     border: none;
 }
 
-QToolButton#btn_collapse_left_sidebar,
-QToolButton#btn_collapse_right_sidebar {
-    color: #475569;
-    background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    font-size: 14px;
-}
-
-QToolButton#btn_collapse_left_sidebar:hover,
-QToolButton#btn_collapse_right_sidebar:hover {
-    color: #1E40AF;
-    background-color: #EFF6FF;
-    border-color: #BFDBFE;
-}
-
-QToolButton#btn_expand_left_sidebar,
-QToolButton#btn_expand_right_sidebar {
-    color: #111827;
-    background-color: #FFFFFF;
-    border: 1px solid #CBD5E1;
-    border-radius: 6px;
-    font-size: 16px;
-    font-weight: 700;
-}
-
-QToolButton#btn_expand_left_sidebar:hover,
-QToolButton#btn_expand_right_sidebar:hover {
-    background-color: #F8FAFC;
-    border-color: #94A3B8;
-}
-
-QToolButton#btn_expand_left_sidebar:pressed,
-QToolButton#btn_expand_right_sidebar:pressed {
-    background-color: #E2E8F0;
-    border-color: #94A3B8;
-}
-
 QWidget#viewportPanel {
     background-color: #FFFFFF;
-    border: none;
-}
-
-QWidget#viewportControlBar {
-    background-color: #111827;
     border: none;
 }
 
@@ -506,7 +505,7 @@ QLabel#viewportStateLabel {
     border: 1px solid #D5DEEA;
     border-radius: 7px;
     padding: 4px 8px;
-    font-size: 12px;
+    font-size: 13px;
 }
 
 QWidget#open3dViewport {
@@ -673,7 +672,8 @@ def apply_application_theme(app: QApplication) -> None:
         for family in requested_families
         if family.casefold() in available_families
     ]
-    font = QFont(font_families[0] if font_families else "Sans Serif", 10)
+    # 11pt 在老师演示用的 1920×1080 屏幕上更易读，Qt 仍会随系统缩放自适应。
+    font = QFont(font_families[0] if font_families else "Sans Serif", 11)
     if font_families:
         font.setFamilies(font_families)
     font.setStyleHint(QFont.StyleHint.SansSerif)
