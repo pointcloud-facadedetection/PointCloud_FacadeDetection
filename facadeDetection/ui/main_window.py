@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -204,6 +204,58 @@ class ElidedLabel(QLabel):
         QLabel.setText(self, visible_text)
 
 
+class ApplicationTitleBar(QWidget):
+    """无边框窗口的可拖动标题栏，保留系统标题栏的常用交互。"""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            window_handle = self.window().windowHandle()
+            if window_handle is not None and window_handle.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            toggle_window_state = getattr(
+                self.window(),
+                '_toggle_maximize_restore',
+                None,
+            )
+            if toggle_window_state is not None:
+                toggle_window_state()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+
+class WindowResizeHandle(QWidget):
+    """透明窗口缩放热区，替代 Windows 会露出白边的原生粗边框。"""
+
+    def __init__(self, edges, cursor, parent=None):
+        super().__init__(parent)
+        self._edges = edges
+        self._last_start_result = None
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setCursor(cursor)
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self.window().isMaximized()
+        ):
+            window_handle = self.window().windowHandle()
+            if window_handle is not None:
+                # 交给操作系统执行缩放，拖动过程比手算 geometry 更顺滑。
+                self._last_start_result = window_handle.startSystemResize(
+                    self._edges
+                )
+                if self._last_start_result:
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+
 class TechnicalCanvas(QWidget):
     """绘制与点云/工程场景相关的轻量空状态，不依赖额外图片资源。"""
 
@@ -344,6 +396,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName('mainWindow')
+        # 完全隐藏 Windows 非客户区，避免缩放边框在深色标题栏上方露出白条。
+        # 窗口缩放由八个透明 WindowResizeHandle 继续交给系统完成。
+        self.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
         self.setWindowTitle(APPLICATION_TITLE)
         self.resize(1600, 900)
         # 三维工作台在过窄尺寸下失去可用性；该下限同时保证命令栏和四页签不溢出。
@@ -395,6 +452,7 @@ class MainWindow(QMainWindow):
         self._report_navigation_index = 0
         self._report_webview_error = None
         self._setup_ui()
+        self._create_resize_handles()
         self._connect_buttons()
         # Hook: display facade stats in the right dock when results ready
         try:
@@ -432,25 +490,33 @@ class MainWindow(QMainWindow):
         )
 
     def _create_application_header(self):
-        """创建始终可见的应用栏，页面名称与业务操作留给内容区。"""
-        header = QWidget()
+        """创建可拖动的自定义标题栏，并承载窗口控制按钮。"""
+        header = ApplicationTitleBar()
         header.setObjectName('applicationHeader')
         header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         header.setFixedHeight(68)
 
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 12, 24, 12)
+        layout.setContentsMargins(24, 12, 0, 12)
         layout.setSpacing(10)
 
         brand_mark = QLabel('P3D')
         brand_mark.setObjectName('applicationBrandMark')
         brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_mark.setFixedSize(44, 44)
+        brand_mark.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
         layout.addWidget(brand_mark)
 
         # 顶栏只显示当前页面名称，避免和窗口标题重复展示平台名称。
         self.application_page_title = QLabel(PAGE_DEFINITIONS[0][0])
         self.application_page_title.setObjectName('applicationPageTitle')
+        self.application_page_title.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
         layout.addWidget(self.application_page_title)
 
         layout.addStretch(1)
@@ -467,8 +533,169 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
         )
+        self.current_project_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
         layout.addWidget(self.current_project_label)
+
+        window_controls = QWidget()
+        window_controls.setObjectName('windowControls')
+        controls_layout = QHBoxLayout(window_controls)
+        controls_layout.setContentsMargins(4, 0, 0, 0)
+        controls_layout.setSpacing(0)
+
+        self.window_minimize_button = self._create_window_control_button(
+            'btn_window_minimize',
+            '—',
+            '最小化',
+        )
+        self.window_maximize_button = self._create_window_control_button(
+            'btn_window_maximize_restore',
+            '□',
+            '最大化',
+        )
+        self.window_close_button = self._create_window_control_button(
+            'btn_window_close',
+            '×',
+            '关闭',
+        )
+        self.window_close_button.setProperty('windowAction', 'close')
+        controls_layout.addWidget(self.window_minimize_button)
+        controls_layout.addWidget(self.window_maximize_button)
+        controls_layout.addWidget(self.window_close_button)
+        layout.addWidget(window_controls)
+
+        self.window_minimize_button.clicked.connect(self.showMinimized)
+        self.window_maximize_button.clicked.connect(
+            self._toggle_maximize_restore
+        )
+        self.window_close_button.clicked.connect(self.close)
         return header
+
+    def _create_window_control_button(self, object_name, text, tooltip):
+        """创建与深色标题栏一致的标准窗口控制按钮。"""
+        button = QToolButton()
+        button.setObjectName(object_name)
+        button.setProperty('uiRole', 'windowControl')
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.setFixedSize(48, 44)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
+
+    def _create_resize_handles(self):
+        """在窗口四边和四角创建不可见的系统缩放热区。"""
+        handle_definitions = (
+            ('top', Qt.Edge.TopEdge, Qt.CursorShape.SizeVerCursor),
+            ('bottom', Qt.Edge.BottomEdge, Qt.CursorShape.SizeVerCursor),
+            ('left', Qt.Edge.LeftEdge, Qt.CursorShape.SizeHorCursor),
+            ('right', Qt.Edge.RightEdge, Qt.CursorShape.SizeHorCursor),
+            (
+                'top_left',
+                Qt.Edge.TopEdge | Qt.Edge.LeftEdge,
+                Qt.CursorShape.SizeFDiagCursor,
+            ),
+            (
+                'top_right',
+                Qt.Edge.TopEdge | Qt.Edge.RightEdge,
+                Qt.CursorShape.SizeBDiagCursor,
+            ),
+            (
+                'bottom_left',
+                Qt.Edge.BottomEdge | Qt.Edge.LeftEdge,
+                Qt.CursorShape.SizeBDiagCursor,
+            ),
+            (
+                'bottom_right',
+                Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
+                Qt.CursorShape.SizeFDiagCursor,
+            ),
+        )
+        self._resize_handles = {}
+        for name, edges, cursor in handle_definitions:
+            handle = WindowResizeHandle(edges, cursor, self)
+            handle.setObjectName(f'windowResizeHandle_{name}')
+            self._resize_handles[name] = handle
+        self._position_resize_handles()
+
+    def _position_resize_handles(self):
+        if not hasattr(self, '_resize_handles'):
+            return
+
+        width = self.width()
+        height = self.height()
+        edge_size = 6
+        corner_size = 10
+        geometries = {
+            'top': (
+                corner_size,
+                0,
+                max(0, width - corner_size * 2),
+                edge_size,
+            ),
+            'bottom': (
+                corner_size,
+                max(0, height - edge_size),
+                max(0, width - corner_size * 2),
+                edge_size,
+            ),
+            'left': (
+                0,
+                corner_size,
+                edge_size,
+                max(0, height - corner_size * 2),
+            ),
+            'right': (
+                max(0, width - edge_size),
+                corner_size,
+                edge_size,
+                max(0, height - corner_size * 2),
+            ),
+            'top_left': (0, 0, corner_size, corner_size),
+            'top_right': (
+                max(0, width - corner_size),
+                0,
+                corner_size,
+                corner_size,
+            ),
+            'bottom_left': (
+                0,
+                max(0, height - corner_size),
+                corner_size,
+                corner_size,
+            ),
+            'bottom_right': (
+                max(0, width - corner_size),
+                max(0, height - corner_size),
+                corner_size,
+                corner_size,
+            ),
+        }
+        visible = not (self.isMaximized() or self.isFullScreen())
+        for name, handle in self._resize_handles.items():
+            handle.setGeometry(*geometries[name])
+            handle.setVisible(visible)
+            if visible:
+                handle.raise_()
+
+    def _toggle_maximize_restore(self):
+        """在最大化和普通窗口间切换，并同步中间按钮的含义。"""
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        QTimer.singleShot(0, self._update_maximize_button)
+
+    def _update_maximize_button(self):
+        if not hasattr(self, 'window_maximize_button'):
+            return
+        is_maximized = self.isMaximized()
+        self.window_maximize_button.setText('❐' if is_maximized else '□')
+        action = '还原' if is_maximized else '最大化'
+        self.window_maximize_button.setToolTip(action)
+        self.window_maximize_button.setAccessibleName(action)
 
     def _create_page_stack(self):
         stack = QStackedWidget()
@@ -640,14 +867,8 @@ class MainWindow(QMainWindow):
         # 三个区域共享一个工作台外框，细分隔线代替三张彼此孤立的卡片。
         self.operation_splitter.setHandleWidth(1)
 
-        (
-            self.left_dock,
-            self.left_sidebar_button,
-        ) = self._create_sidebar('leftDock', 'left')
-        (
-            self.right_dock,
-            self.right_sidebar_button,
-        ) = self._create_sidebar('rightDock', 'right')
+        self.left_dock = self._create_sidebar('leftDock')
+        self.right_dock = self._create_sidebar('rightDock')
         # Prepare right panel layout for results
         try:
             self._init_right_panel_widgets()
@@ -674,31 +895,6 @@ class MainWindow(QMainWindow):
         viewport_heading_row.addWidget(viewport_state)
         viewport_layout.addLayout(viewport_heading_row)
 
-        # 原生 Open3D 窗口会盖住普通 Qt 浮层，因此在黑色视口顶部预留
-        # 一条同色控制带，专门承载侧栏展开按钮。
-        self.viewport_control_bar = QWidget()
-        self.viewport_control_bar.setObjectName('viewportControlBar')
-        self.viewport_control_bar.setAttribute(
-            Qt.WidgetAttribute.WA_StyledBackground,
-            True,
-        )
-        viewport_control_layout = QHBoxLayout(self.viewport_control_bar)
-        viewport_control_layout.setContentsMargins(8, 4, 8, 4)
-        viewport_control_layout.setSpacing(8)
-
-        self.left_sidebar_expand_button = self._create_sidebar_expand_button(
-            'left',
-            self.viewport_control_bar,
-        )
-        self.right_sidebar_expand_button = self._create_sidebar_expand_button(
-            'right',
-            self.viewport_control_bar,
-        )
-        viewport_control_layout.addWidget(self.left_sidebar_expand_button)
-        viewport_control_layout.addStretch(1)
-        viewport_control_layout.addWidget(self.right_sidebar_expand_button)
-        self.viewport_control_bar.hide()
-        viewport_layout.addWidget(self.viewport_control_bar)
         viewport_layout.addWidget(self.viewport.get_widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
@@ -969,6 +1165,28 @@ class MainWindow(QMainWindow):
             for label, button_name in PAGE_HEADER_ACTIONS[page_key]
         }
         groups = PAGE_HEADER_GROUPS[page_key]
+
+        if page_key == 'project_operation':
+            # 回放中老师指定：两个侧栏开关常驻在“视图”分组之前。
+            sidebar_group = QFrame()
+            sidebar_group.setProperty('uiRole', 'commandGroup')
+            sidebar_group.setAttribute(
+                Qt.WidgetAttribute.WA_StyledBackground,
+                True,
+            )
+            sidebar_group_layout = QHBoxLayout(sidebar_group)
+            sidebar_group_layout.setContentsMargins(8, 4, 12, 4)
+            sidebar_group_layout.setSpacing(6)
+            self.left_sidebar_button = self._create_sidebar_toggle_button(
+                'left'
+            )
+            self.right_sidebar_button = self._create_sidebar_toggle_button(
+                'right'
+            )
+            sidebar_group_layout.addWidget(self.left_sidebar_button)
+            sidebar_group_layout.addWidget(self.right_sidebar_button)
+            header_layout.addWidget(sidebar_group)
+
         for group_index, (group_name, button_names) in enumerate(groups):
             group = QFrame()
             group.setProperty('uiRole', 'commandGroup')
@@ -1005,7 +1223,46 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._resize_page_header(panel))
         return panel
 
-    def _create_sidebar(self, object_name, side):
+    def _create_sidebar_toggle_button(self, side):
+        """创建 VS Code 式分栏图标，一个按钮切换一侧边栏。"""
+        button = QToolButton()
+        button.setObjectName(f'btn_toggle_{side}_sidebar')
+        button.setProperty('uiRole', 'sidebarToggle')
+        button.setCheckable(True)
+        button.setFixedSize(38, 36)
+        button.setIconSize(QSize(20, 20))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_sidebar_toggle_button(side, button)
+        return button
+
+    def _create_sidebar_toggle_icon(self, side, expanded):
+        """绘制 VS Code 的左右侧栏轮廓，避免依赖机器上的图标主题。"""
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        outline = QRectF(2.25, 2.75, 15.5, 14.5)
+        panel_fill = QColor('#BFDBFE' if expanded else '#5B7FD8')
+        if side == 'left':
+            panel = QRectF(3.25, 3.75, 4.5, 12.5)
+            divider_x = 7.75
+        else:
+            panel = QRectF(12.25, 3.75, 4.5, 12.5)
+            divider_x = 12.25
+
+        painter.fillRect(panel, panel_fill)
+        painter.setPen(QPen(QColor('#FFFFFF'), 1.5))
+        painter.drawRoundedRect(outline, 2.0, 2.0)
+        painter.drawLine(
+            QPointF(divider_x, outline.top()),
+            QPointF(divider_x, outline.bottom()),
+        )
+        painter.end()
+        return QIcon(pixmap)
+
+    def _create_sidebar(self, object_name):
         sidebar = QFrame()
         sidebar.setObjectName(object_name)
         sidebar.setProperty('uiRole', 'sidebar')
@@ -1015,31 +1272,6 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        title_bar = QWidget()
-        title_bar.setObjectName(f'{object_name}TitleBar')
-        title_bar.setProperty('uiRole', 'sidebarTitleBar')
-        title_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(6, 4, 6, 4)
-
-        toggle_button = QToolButton()
-        toggle_button.setObjectName(f'btn_collapse_{side}_sidebar')
-        toggle_button.setText('◀' if side == 'left' else '▶')
-        label = '左侧栏' if side == 'left' else '右侧栏'
-        toggle_button.setToolTip(f'收起{label}')
-        toggle_button.setAccessibleName(f'收起{label}')
-        toggle_button.setFixedSize(28, 28)
-        toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        if side == 'left':
-            title_layout.addStretch(1)
-        title_layout.addWidget(
-            toggle_button,
-            alignment=Qt.AlignmentFlag.AlignVCenter,
-        )
-        if side == 'right':
-            title_layout.addStretch(1)
-        sidebar_layout.addWidget(title_bar)
-
         panel = QWidget()
         panel.setObjectName(f'{object_name}Panel')
         panel.setProperty('uiRole', 'sidebarBody')
@@ -1048,19 +1280,7 @@ class MainWindow(QMainWindow):
         sidebar.setMinimumWidth(180)
         sidebar.setMaximumWidth(260)
         sidebar.setProperty('expandedWidth', 210)
-        return sidebar, toggle_button
-
-    def _create_sidebar_expand_button(self, side, parent):
-        button = QToolButton(parent)
-        button.setObjectName(f'btn_expand_{side}_sidebar')
-        button.setText('▶' if side == 'left' else '◀')
-        label = '左侧栏' if side == 'left' else '右侧栏'
-        button.setToolTip(f'展开{label}')
-        button.setAccessibleName(f'展开{label}')
-        button.setFixedSize(36, 34)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.hide()
-        return button
+        return sidebar
 
     def _create_bottom(self):
         """在页面底部提供四个互斥页面页签。"""
@@ -1201,32 +1421,10 @@ class MainWindow(QMainWindow):
             self.header_buttons[button_name].clicked.connect(callback)
 
         self.left_sidebar_button.clicked.connect(
-            lambda: self._collapse_sidebar(
-                'left',
-                self.left_dock,
-                self.left_sidebar_expand_button,
-            )
+            lambda: self._toggle_sidebar('left')
         )
         self.right_sidebar_button.clicked.connect(
-            lambda: self._collapse_sidebar(
-                'right',
-                self.right_dock,
-                self.right_sidebar_expand_button,
-            )
-        )
-        self.left_sidebar_expand_button.clicked.connect(
-            lambda: self._expand_sidebar(
-                'left',
-                self.left_dock,
-                self.left_sidebar_expand_button,
-            )
-        )
-        self.right_sidebar_expand_button.clicked.connect(
-            lambda: self._expand_sidebar(
-                'right',
-                self.right_dock,
-                self.right_sidebar_expand_button,
-            )
+            lambda: self._toggle_sidebar('right')
         )
 
     def _open_upload_file_dialog(self):
@@ -1669,18 +1867,24 @@ class MainWindow(QMainWindow):
             title = f'{title} - {suffix}'
         self.setWindowTitle(title)
 
-    def _collapse_sidebar(self, side, dock, expand_button):
+    def _toggle_sidebar(self, side):
+        """同一个命令栏按钮负责侧栏的展开和收起。"""
+        dock = self.left_dock if side == 'left' else self.right_dock
+        if self._sidebar_collapsed[side]:
+            self._expand_sidebar(side, dock)
+        else:
+            self._collapse_sidebar(side, dock)
+
+    def _collapse_sidebar(self, side, dock):
         self._sidebar_collapsed[side] = True
         dock.setProperty('expandedWidth', max(180, min(dock.width(), 260)))
         dock.hide()
-        expand_button.show()
-        self._update_sidebar_expand_controls()
+        self._update_sidebar_toggle_button(side)
 
-    def _expand_sidebar(self, side, dock, expand_button):
+    def _expand_sidebar(self, side, dock):
         self._sidebar_collapsed[side] = False
-        expand_button.hide()
-        self._update_sidebar_expand_controls()
         dock.show()
+        self._update_sidebar_toggle_button(side)
         target_width = int(dock.property('expandedWidth') or 210)
         QTimer.singleShot(
             0,
@@ -1696,12 +1900,32 @@ class MainWindow(QMainWindow):
         sizes[1] = max(1, total_width - target_width - sizes[other_index])
         self.operation_splitter.setSizes(sizes)
 
-    def _update_sidebar_expand_controls(self):
-        """仅在有侧栏收起时显示黑色视口顶部的展开控制带。"""
-        if any(self._sidebar_collapsed.values()):
-            self.viewport_control_bar.show()
-            return
-        self.viewport_control_bar.hide()
+    def _update_sidebar_toggle_button(self, side, button=None):
+        button = button or (
+            self.left_sidebar_button
+            if side == 'left'
+            else self.right_sidebar_button
+        )
+        collapsed = self._sidebar_collapsed[side]
+        button.setText('')
+        button.setIcon(
+            self._create_sidebar_toggle_icon(side, expanded=not collapsed)
+        )
+        label = '左侧栏' if side == 'left' else '右侧栏'
+        action = '展开' if collapsed else '收起'
+        button.setToolTip(f'{action}{label}')
+        button.setAccessibleName(f'{action}{label}')
+        button.setChecked(collapsed)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._update_maximize_button()
+            QTimer.singleShot(0, self._position_resize_handles)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_resize_handles()
 
     def eventFilter(self, watched, event):
         if (
