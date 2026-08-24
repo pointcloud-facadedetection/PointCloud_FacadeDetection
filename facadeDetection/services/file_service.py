@@ -164,7 +164,11 @@ class FileService:
             if data is not None and self.pointcloud_service is not None:
                 data["dataset_id"] = dataset_id
                 data["domain"] = "proxy"
-                data["index_space"] = "proxy"
+                data["index_space"] = "proxy_global"
+                data["is_processing_cloud"] = True
+                data["proxy_ids"] = np.arange(len(pts_ds), dtype=np.int32)
+                print(f"[PCFD] cloud.bound cloud={name} dataset={dataset_id} "
+                      f"proxy={len(pts_ds)}", flush=True)
 
             # Update pcfd index assets
             try:
@@ -328,6 +332,21 @@ class FileService:
                         name=Path(p).name,
                         points=dataset.proxy_points,
                         colors=dataset.proxy_colors)
+                    # The FLS batch path used to render the proxy but omitted
+                    # the cloud-to-dataset contract that upload_files writes.
+                    # Consequently the next project operation saw a perfectly
+                    # valid cloud with no dataset_id.
+                    data = self.viewport.get_cloud_data(Path(p).name)
+                    if data is not None:
+                        data.update({
+                            'dataset_id': dataset_id,
+                            'domain': 'proxy',
+                            'index_space': 'proxy_global',
+                            'is_processing_cloud': True,
+                            'proxy_ids': np.arange(len(dataset.proxy_points), dtype=np.int32),
+                        })
+                    print(f'[PCFD] cloud.bound cloud={Path(p).name} '
+                          f'dataset={dataset_id} proxy={len(dataset.proxy_points)}', flush=True)
                 else:
                     proc_pts, proc_cols = voxel_downsample(proc_pts, proc_cols, voxel_size=0.05)
                     self.render_service.show_point_cloud(

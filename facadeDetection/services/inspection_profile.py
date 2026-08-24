@@ -19,6 +19,14 @@ class InspectionProfile:
     warn_ratio: float = 1.0
     fail_ratio: float = 2.0
     algorithm_version: str = "facade-quality"
+    ruler_width_m: float = 0.055
+    select_band_m: float = 0.01
+    hole_band_m: float = 0.02
+    bin_size_m: float = 0.04
+    top_q: float = 1.0
+    sor_enabled: bool = True
+    sor_sigma: float = 4.0
+    scan_step_m: float = 0.05
 
     def snapshot(self) -> dict:
         return asdict(self)

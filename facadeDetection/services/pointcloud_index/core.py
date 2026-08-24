@@ -49,6 +49,11 @@ class PointCloudDataset:
     metadata: dict | None = None
 
     @property
+    def revision(self) -> str:
+        """处理版本；结果必须绑定到该版本，避免旧索引静默复用。"""
+        return str((self.metadata or {}).get("revision") or self.dataset_id)
+
+    @property
     def proxy_points(self) -> np.ndarray:
         return self.index.proxy_points
 
@@ -59,6 +64,12 @@ class PointCloudDataset:
     @property
     def proxy_store(self) -> RawPointStore:
         return self.raw
+
+    @property
+    def processed_raw_points(self) -> np.ndarray:
+        """当前处理域高保真点。分层数据优先使用其 source 数组。"""
+        mapped = self.index.get_source_points()
+        return mapped if mapped is not None else self.raw.points
 
 
 class VoxelCascadeIndex:
@@ -301,6 +312,13 @@ class VoxelCascadeIndex:
         global_offsets = np.repeat(starts, counts.astype(np.int64)) + offsets_in_group
         result = self.source_raw_indices[global_offsets].astype(np.int32, copy=False)
         return np.unique(result) if deduplicate else result
+
+    # Explicit dual-domain names. Keep the old methods as compatibility aliases.
+    def proxy_to_processed_raw_ids(self, proxy_ids, deduplicate=True) -> np.ndarray:
+        return self.proxy_to_source_ids(proxy_ids, deduplicate)
+
+    def processed_raw_to_proxy_ids(self, raw_ids) -> np.ndarray:
+        return self.source_to_proxy_ids(raw_ids)
 
     def source_count_for_proxy(self, proxy_ids) -> int:
         if not self.has_source_mapping():

@@ -10,6 +10,22 @@ from models import Facade, Heatmap, QualityMetric, Project, ResultScene
 
 class ResultsRepo:
     @staticmethod
+    def update_facade_review_status(project_uuid: str, facade_id: int, status: str) -> None:
+        """Persist the operator's review state without creating a new result."""
+        if status not in {'pending', 'incomplete', 'complete'}:
+            raise ValueError(f'unsupported facade review status: {status}')
+        with project_session(project_uuid) as s:
+            facade = s.execute(
+                select(Facade).where(Facade.id == int(facade_id), Facade.is_deleted == 0)
+            ).scalar_one_or_none()
+            if facade is None:
+                raise ValueError(f'立面不存在: {facade_id}')
+            payload = dict(facade.plane_json or {})
+            payload['review_status'] = status
+            facade.plane_json = payload
+            s.flush()
+
+    @staticmethod
     def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> None:
         """Persist a detection batch and its basic metrics in the active scene.
 
@@ -44,6 +60,7 @@ class ResultsRepo:
                     plane_json={key: item.get(key) for key in (
                         "plane_model", "normal", "center", "inlier_indices",
                         "proxy_indices", "measurement_indices", "voxel_ids",
+                        "review_status",
                         "cloud_name", "__index_space",
                     ) if item.get(key) is not None},
                     bbox_json=item.get("bbox_2d"),
@@ -80,6 +97,7 @@ class ResultsRepo:
                         key: d.get(key) for key in (
                             "plane_model", "normal", "center", "inlier_indices",
                             "proxy_indices", "measurement_indices", "voxel_ids",
+                            "review_status",
                             "cloud_name", "__index_space",
                         ) if d.get(key) is not None
                     },
