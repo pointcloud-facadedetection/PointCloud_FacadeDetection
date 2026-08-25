@@ -1,11 +1,10 @@
 import numpy as np
 
 from .geometry_factory import make_point_cloud
-from .lod import build_lod_indices, display_arrays, normalize_colors
+from .lod import display_arrays, normalize_colors
 
 
 class PointCloudScene:
-    MAX_RENDER_POINTS = 5_000_000
 
     def __init__(self, adapter):
         self.adapter = adapter
@@ -24,7 +23,6 @@ class PointCloudScene:
             "pos": positions,
             "color": colors,
             "size": float(point_size),
-            "render_indices": build_lod_indices(len(positions), self.MAX_RENDER_POINTS),
         }
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=reset_view or not had_clouds)
@@ -51,13 +49,28 @@ class PointCloudScene:
             return
         positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
         data = self.point_data[name]
-        if colors is None:
-            colors = data["color"] if len(data["color"]) == len(positions) else None
         data["pos"] = positions
+        if colors is None:
+            colors = data.get("color")
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
-        data["render_indices"] = build_lod_indices(len(positions), self.MAX_RENDER_POINTS)
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=False)
+
+    def replace_cloud_snapshot(self, name, positions, colors=None, metadata=None):
+        """Atomically replace displayed points and business metadata."""
+        if name not in self.point_data:
+            return False
+        positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
+        data = self.point_data[name]
+        data["pos"] = positions
+        if colors is None:
+            colors = data.get("color")
+        data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
+        if metadata:
+            data.update(metadata)
+        self.active_name = name
+        self.refresh_cloud(name, reset_bounding_box=False)
+        return True
 
     def remove_cloud(self, name):
         self.adapter.remove_geometry(name)
@@ -87,8 +100,3 @@ class PointCloudScene:
 
     def get_cloud_data(self, name):
         return self.point_data.get(name)
-
-    def active_data(self):
-        if self.active_name is None:
-            return None
-        return self.point_data.get(self.active_name)

@@ -4,22 +4,22 @@ import numpy as np
 
 
 class BaseViewport(ABC):
-    """Renderer-independent viewport contract used by the facade UI."""
+    """Renderer-independent viewport contract."""
 
     @abstractmethod
     def get_widget(self):
         ...
 
     @abstractmethod
-    def add_cloud(self, name: str, positions, colors=None, point_size=0.3, reset_view=False):
+    def add_cloud(self, name: str, positions, colors=None, point_size=0.3):
         ...
 
     @abstractmethod
-    def update_cloud_color(self, name: str, colors, preserve_view=True):
+    def update_cloud_color(self, name: str, colors):
         ...
 
     @abstractmethod
-    def update_cloud_points(self, name: str, positions, colors=None, preserve_view=True):
+    def update_cloud_points(self, name: str, positions, colors=None):
         ...
 
     @abstractmethod
@@ -52,22 +52,6 @@ class BaseViewport(ABC):
 
     @abstractmethod
     def toggle_normals(self, name: str, normals, length=0.5, max_lines=8000) -> bool:
-        ...
-
-    @abstractmethod
-    def auto_range(self):
-        ...
-
-    @abstractmethod
-    def reset_view(self):
-        ...
-
-    @abstractmethod
-    def get_camera_state(self):
-        ...
-
-    @abstractmethod
-    def set_camera_state(self, state):
         ...
 
     @abstractmethod

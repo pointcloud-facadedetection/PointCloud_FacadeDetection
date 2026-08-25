@@ -1,8 +1,6 @@
-import sys
-import ctypes
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QAbstractNativeEventFilter, QCoreApplication, QPoint
-from PySide6.QtGui import QImage, QWindow
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint, Slot, Signal
+from PySide6.QtGui import QImage, QWindow, QPainter, QPen, QColor
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .base_viewport import BaseViewport
@@ -12,178 +10,85 @@ from .geometry_factory import (
 )
 from .interaction import ViewportInteractor
 from .open3d_adapter import Open3DAdapter
+from .roi_selection import ROISelectionController
 from .scene import PointCloudScene
 from .window_embed import NativeWindowFinder
 
 
-class _Open3DAppProxy:
-    def __init__(self, owner):
-        self.owner = owner
-
-    def process_events(self):
-        self.owner.process_events()
-
-
 class _ContainerEventBridge(QObject):
-    def __init__(self, interactor, parent=None):
+    """Qt 事件桥接器：统一事件路径，仅在未锁定时转发到 interactor。"""
+    def __init__(self, interactor, overlay=None, parent=None):
         super().__init__(parent)
         self.interactor = interactor
+        self._overlay = overlay
 
     def eventFilter(self, watched, event):
         try:
+            # ROI 硬锁：让事件流向 Overlay（Overlay 已 grabMouse/grabKeyboard）
+            if getattr(self.interactor, 'input_locked', False):
+                return False
             et = event.type()
+            handled = False
             if et == QEvent.MouseButtonPress:
-                return self.interactor.handle_mouse_press(event)
-            if et == QEvent.MouseMove:
-                return self.interactor.handle_mouse_move(event)
-            if et == QEvent.MouseButtonRelease:
-                return self.interactor.handle_mouse_release(event)
-            if et == QEvent.Wheel:
-                return self.interactor.handle_wheel(event)
+                handled = bool(self.interactor.handle_mouse_press(event))
+            elif et == QEvent.MouseMove:
+                handled = bool(self.interactor.handle_mouse_move(event))
+            elif et == QEvent.MouseButtonRelease:
+                handled = bool(self.interactor.handle_mouse_release(event))
+            elif et == QEvent.Wheel:
+                handled = bool(self.interactor.handle_wheel(event))
+            if self._overlay is not None:
+                try:
+                    self._overlay.update()
+                except Exception:
+                    pass
+            # 若已处理则返回 True，避免事件继续传递到原生窗口
+            return handled
         except Exception:
-            pass
-        return super().eventFilter(watched, event)
-
-
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-class _WinNativeMouseBridge(QAbstractNativeEventFilter):
-    WM_MOUSEMOVE = 0x0200
-    WM_LBUTTONDOWN = 0x0201
-    WM_LBUTTONUP = 0x0202
-    WM_RBUTTONDOWN = 0x0204
-    WM_RBUTTONUP = 0x0205
-    WM_MOUSEWHEEL = 0x020A
-    MK_LBUTTON = 0x0001
-    MK_RBUTTON = 0x0002
-
-    class MSG(ctypes.Structure):
-        _fields_ = [
-            ("hwnd", ctypes.c_void_p),
-            ("message", ctypes.c_uint),
-            ("wParam", ctypes.c_size_t),
-            ("lParam", ctypes.c_size_t),
-            ("time", ctypes.c_uint),
-            ("pt", POINT),
-        ]
-
-    def __init__(self, hwnd, interactor, dpr_provider=None):
-        super().__init__()
-        self._hwnd = int(hwnd)
+            return super().eventFilter(watched, event)
+# 直接在 QWindow 上安装事件桥，确保原生窗口的鼠标事件能送达到 interactor。
+class _QWindowEventBridge(QObject):
+    def __init__(self, interactor, overlay_getter=None, parent=None):
+        super().__init__(parent)
         self._interactor = interactor
-        self._dpr_provider = dpr_provider
+        self._overlay_getter = overlay_getter  # callable -> overlay or None
 
-    def _dpr(self):
+    def _update_overlay(self):
         try:
-            if callable(self._dpr_provider):
-                dpr = float(self._dpr_provider())
-                return dpr if dpr else 1.0
+            if callable(self._overlay_getter):
+                ov = self._overlay_getter()
+                if ov is not None:
+                    ov.update()
         except Exception:
             pass
-        return 1.0
 
-    class _SimpleMouseEvent:
-        def __init__(self, x, y, button, buttons):
-            self._pos = QPoint(x, y)
-            self._button = button
-            self._buttons = buttons
-
-        def button(self):
-            return self._button
-
-        def buttons(self):
-            return self._buttons
-
-        def position(self):
-            class _P:
-                def __init__(self, p): self._p = p
-                def toPoint(self): return self._p
-            return _P(self._pos)
-
-        def pos(self):
-            return self._pos
-
-    class _SimpleWheelEvent:
-        def __init__(self, x, y, delta):
-            self._pos = QPoint(x, y)
-            self._delta = int(delta)
-
-        def angleDelta(self):
-            return QPoint(0, self._delta)
-
-        def pixelDelta(self):
-            return QPoint(0, 0)
-
-        def position(self):
-            class _P:
-                def __init__(self, p): self._p = p
-                def toPoint(self): return self._p
-            return _P(self._pos)
-
-        def pos(self):
-            return self._pos
-
-    def nativeEventFilter(self, eventType, message):
+    def eventFilter(self, watched, event):
         try:
-            et = eventType.decode() if isinstance(eventType, (bytes, bytearray)) else eventType
-            if et != "windows_generic_MSG":
-                return False, 0
-            try:
-                addr = int(message)
-            except Exception:
-                return False, 0
-
-            msg = ctypes.cast(addr, ctypes.POINTER(self.MSG)).contents
-            if int(msg.hwnd) != self._hwnd:
-                return False, 0
-
-            m = msg.message
-            x = msg.lParam & 0xFFFF
-            y = (msg.lParam >> 16) & 0xFFFF
-            if x & 0x8000: x = x - 0x10000
-            if y & 0x8000: y = y - 0x10000
-
-            dpr = self._dpr()
-            if dpr and dpr != 1.0:
-                x = int(x / dpr)
-                y = int(y / dpr)
-
-            buttons = Qt.NoButton
-            if (msg.wParam & self.MK_LBUTTON) != 0:
-                buttons |= Qt.LeftButton
-            if (msg.wParam & self.MK_RBUTTON) != 0:
-                buttons |= Qt.RightButton
-
-            if m == self.WM_LBUTTONDOWN:
-                ev = self._SimpleMouseEvent(x, y, Qt.LeftButton, Qt.LeftButton)
-                self._interactor.handle_mouse_press(ev)
-                return False, 0
-            if m == self.WM_LBUTTONUP:
-                ev = self._SimpleMouseEvent(x, y, Qt.LeftButton, Qt.NoButton)
-                self._interactor.handle_mouse_release(ev)
-                return False, 0
-            if m == self.WM_RBUTTONDOWN:
-                ev = self._SimpleMouseEvent(x, y, Qt.RightButton, Qt.RightButton)
-                self._interactor.handle_mouse_press(ev)
-                return False, 0
-            if m == self.WM_RBUTTONUP:
-                ev = self._SimpleMouseEvent(x, y, Qt.RightButton, Qt.NoButton)
-                self._interactor.handle_mouse_release(ev)
-                return False, 0
-            if m == self.WM_MOUSEMOVE:
-                ev = self._SimpleMouseEvent(x, y, Qt.NoButton, buttons)
-                self._interactor.handle_mouse_move(ev)
-                return False, 0
-            if m == self.WM_MOUSEWHEEL:
-                delta = ctypes.c_short((msg.wParam >> 16) & 0xFFFF).value
-                ev = self._SimpleWheelEvent(x, y, delta)
-                self._interactor.handle_wheel(ev)
-                return False, 0
+            # ROI 硬锁时：不要拦截，交由 Overlay（顶层 Tool 窗口）处理
+            if getattr(self._interactor, 'input_locked', False):
+                return False
+            et = event.type()
+            handled = False
+            from PySide6.QtCore import QEvent as _QE
+            if et == _QE.MouseButtonPress:
+                handled = bool(self._interactor.handle_mouse_press(event))
+            elif et == _QE.MouseMove:
+                handled = bool(self._interactor.handle_mouse_move(event))
+            elif et == _QE.MouseButtonRelease:
+                handled = bool(self._interactor.handle_mouse_release(event))
+            elif et == _QE.Wheel:
+                handled = bool(self._interactor.handle_wheel(event))
+            if handled:
+                self._update_overlay()
+                return True
         except Exception:
             pass
-        return False, 0
+        return False
+
+
+class _RenderQueue(QObject):
+    color = Signal(str, object)
+    points = Signal(str, object, object)
 
 
 class Open3DViewport(BaseViewport):
@@ -202,21 +107,42 @@ class Open3DViewport(BaseViewport):
         self._qwindow = None
         self._fallback_label = None
         self._event_bridge = None
-        self._render_paused = False
         self._window_title = "PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
         self._init_success = False
-        self._grid_visible = True
+        self._overlay = None
+        self._roi_controller = None
+        # 交互模式
+        class InteractionMode:
+            NAVIGATE = 'navigate'
+            PICK = 'pick'
+            ROI = 'roi'
+        self.InteractionMode = InteractionMode
+        self._mode = InteractionMode.NAVIGATE
+
+        # ROI 选择模式状态
+        self._roi_on_complete = None
+        self._scene_view_initialized = False
 
         self.native = self
-        self.app = _Open3DAppProxy(self)
+        self._render_queue = _RenderQueue(self._root)
+        self._render_queue.color.connect(self.update_cloud_color, Qt.QueuedConnection)
+        self._render_queue.points.connect(self.update_cloud_points, Qt.QueuedConnection)
 
         self._init_ui()
 
         self._timer = QTimer(self._root)
         self._timer.timeout.connect(self.process_events)
         self._timer.start(16)
+
+    def queue_update_cloud_color(self, name, colors):
+        """Thread-safe color update; Open3D is touched only by the Qt GUI thread."""
+        self._render_queue.color.emit(name, colors)
+
+    def queue_update_cloud_points(self, name, positions, colors=None):
+        """Thread-safe geometry replacement for worker completion callbacks."""
+        self._render_queue.points.emit(name, positions, colors)
 
     @property
     def _clouds(self):
@@ -276,7 +202,7 @@ class Open3DViewport(BaseViewport):
             self._adapter.create_window(self._window_title, width=1280, height=960, visible=True)
             handle = self._window_finder.find(
                 self._window_title,
-                timeout=3.0,
+                timeout=120.0,
                 process_events=self.process_events,
             )
             if handle is None:
@@ -286,36 +212,113 @@ class Open3DViewport(BaseViewport):
             self._container = QWidget.createWindowContainer(self._qwindow, self._root)
             self._container.setFocusPolicy(Qt.StrongFocus)
             self._container.setMouseTracking(True)
-            self._event_bridge = _ContainerEventBridge(self._interactor, self._root)
-            self._container.installEventFilter(self._event_bridge)
-            self._qwindow.installEventFilter(self._event_bridge)
-            layout.addWidget(self._container)
 
-            if sys.platform == "win32":
-                def _get_dpr():
+            # Overlay：红色实线矩形，用于建筑外立面 ROI 框选
+            class _Overlay(QWidget):
+                def __init__(self, owner, interactor):
+                    super().__init__(owner)
+                    self._interactor = interactor
+                    self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                    self.setAttribute(Qt.WA_NoSystemBackground, True)
+                    self.setAttribute(Qt.WA_TranslucentBackground, True)
+                    self.show()
+
+                def paintEvent(self, event):
                     try:
-                        if hasattr(self._container, "devicePixelRatioF"):
-                            return self._container.devicePixelRatioF()
-                        if hasattr(self._container, "devicePixelRatio"):
-                            return self._container.devicePixelRatio()
+                        from config.settings import Config
+                        rect = self._interactor.get_selection_rect()
+                        if not rect:
+                            return
+                        (p1, p2) = rect
+                        x1, y1 = p1.x(), p1.y()
+                        x2, y2 = p2.x(), p2.y()
+                        x, y = min(x1, x2), min(y1, y2)
+                        w, h = abs(x2 - x1), abs(y2 - y1)
+
+                        painter = QPainter(self)
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+
+                        # 选择样式来自配置
+                        br, bg, bb, ba = getattr(Config, 'SELECT_BORDER_RGBA', (255, 0, 0, 240))
+                        bw = int(getattr(Config, 'SELECT_BORDER_WIDTH', 2))
+
+                        pen = QPen(QColor(int(br), int(bg), int(bb), int(ba)))
+                        pen.setWidth(max(1, bw))
+                        pen.setStyle(Qt.SolidLine)
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(x, y, w, h)
+
+                        # 绘制顶点标记（左上、右下）
+                        painter.setBrush(QColor(int(br), int(bg), int(bb), int(ba)))
+                        marker_size = max(4, bw + 2)
+                        painter.drawEllipse(x1 - marker_size//2, y1 - marker_size//2, marker_size, marker_size)
+                        painter.drawEllipse(x2 - marker_size//2, y2 - marker_size//2, marker_size, marker_size)
+
+                        painter.end()
                     except Exception:
                         pass
-                    return 1.0
-                self._native_mouse_bridge = _WinNativeMouseBridge(
-                    handle, self._interactor, dpr_provider=_get_dpr
-                )
-                app = QCoreApplication.instance()
-                if app is not None:
-                    app.installNativeEventFilter(self._native_mouse_bridge)
+
+            # 修复：将 overlay 作为 _container 的子 widget，确保坐标系一致
+            self._overlay = _Overlay(self._container, self._interactor)
+            self._overlay.setObjectName("viewportOverlay")
+            self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._overlay.setGeometry(0, 0, self._container.width(), self._container.height())
+            self._overlay.raise_()
+            self._overlay.show()
+
+            def _sync_overlay_size():
+                try:
+                    if self._overlay is None or self._container is None:
+                        return
+                    # overlay 作为 _container 的子 widget，geometry 相对于 _container
+                    self._overlay.setGeometry(0, 0, self._container.width(), self._container.height())
+                    self._overlay.raise_()
+                    self._overlay.show()
+                except Exception:
+                    pass
+
+            original_resize = self._root.resizeEvent
+            def _on_root_resize(event):
+                if callable(original_resize):
+                    original_resize(event)
+                _sync_overlay_size()
+            self._root.resizeEvent = _on_root_resize
+
+            QTimer.singleShot(0, _sync_overlay_size)
+
+            self._event_bridge = _ContainerEventBridge(
+                self._interactor, overlay=self._overlay, parent=self._root
+            )
+            # 作为兜底安装在 container 上（主要通道由 QWindow 事件桥处理）
+            self._container.installEventFilter(self._event_bridge)
+            layout.addWidget(self._container)
+
+            self._roi_controller = ROISelectionController(self, container_widget=self._container)
+
+            # 在 QWindow 上安装事件桥，确保右键平移与拖拽事件送达 interactor
+            try:
+                def _get_overlay():
+                    return self._roi_controller.overlay() if hasattr(self._roi_controller, 'overlay') else self._overlay
+                self._qwindow_event_bridge = _QWindowEventBridge(self._interactor, overlay_getter=_get_overlay, parent=self._root)
+                self._qwindow.installEventFilter(self._qwindow_event_bridge)
+            except Exception:
+                pass
 
             self._camera.viewport_widget = self._container
+            # 向相机提供场景比例估计值，以确保投影/标记尺寸的一致性
+            try:
+                self._camera.set_scene_scale_provider(self._fallback_scene_scale)
+            except Exception:
+                pass
             self._adapter.configure_render_options()
             self._init_success = True
-            self._setup_initial_camera()
+            # 原生 Open3D 启动时会自带一个摄像机；项目视图
+            # 只有在加载完第一个云后才会初始化。
 
         except Exception as exc:
             import traceback
-            error_msg = f"Open3D render initialization failed.\\n\\n{type(exc).__name__}: {exc}\\n\\n{traceback.format_exc()}"
+            error_msg = f"Open3D render initialization failed.\n\n{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
             self._fallback_label = QLabel(error_msg)
             self._fallback_label.setAlignment(Qt.AlignCenter)
             self._fallback_label.setStyleSheet(
@@ -325,22 +328,75 @@ class Open3DViewport(BaseViewport):
             self._adapter.destroy()
             self._init_success = False
 
-    def _setup_initial_camera(self):
+    def _initialize_scene_view(self):
         try:
             ctr = self._adapter.get_view_control()
             if ctr is None:
                 return
-            front = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
-            front = front / np.linalg.norm(front)
-            ctr.set_lookat(np.array([0.0, 0.0, 0.0], dtype=np.float64))
-            ctr.set_front(front)
-            ctr.set_up(np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            # 默认切换为正交投影：FoV=Config.ORTHO_FOV_DEG 触发 Open3D 正交模式
+            try:
+                current_fov = ctr.get_field_of_view()
+                from config.settings import Config
+                target = float(getattr(Config, 'ORTHO_FOV_DEG', 5.0))
+                if current_fov > (target + 0.5):
+                    ctr.change_field_of_view(target - current_fov)
+            except Exception:
+                pass
+            # 对齐至便于展示立面的正投影正面视图
+            center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            try:
+                pts = []
+                for data in self._scene.point_data.values():
+                    p = data.get("pos")
+                    if p is not None and len(p) > 0:
+                        pts.append(np.asarray(p, dtype=np.float64))
+                if pts:
+                    allp = np.vstack(pts)
+                    center = np.mean(allp, axis=0)
+            except Exception:
+                pass
+            # 项目统一默认视角：沿 X 轴正面观察，Z 轴严格向上。
+            # 点云坐标中建筑立面法向位于 X/Y 平面；当前项目正面为 +X。
+            front = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+            ctr.set_lookat(center.astype(np.float64))
+            ctr.set_front(front / (np.linalg.norm(front) + 1e-12))
+            ctr.set_up(up / (np.linalg.norm(up) + 1e-12))
+            # 合理的初始缩放比例
             ctr.set_zoom(0.6)
+            self._scene_view_initialized = True
+        except Exception:
+            pass
+
+    # ---------------- 统一交互模式 ----------------
+    def set_mode(self, mode: str):
+        """切换交互模式：navigate/pick/roi，统一事件与锁定策略。"""
+        try:
+            mode = str(mode).lower()
+        except Exception:
+            mode = self.InteractionMode.NAVIGATE
+        self._mode = mode
+        try:
+            if mode == self.InteractionMode.ROI:
+                # 硬锁输入，仅 Overlay 接收事件
+                setattr(self._interactor, 'input_locked', True)
+                # 关闭点选/框选（由 Overlay 控制）
+                self._interactor.pick_enabled = False
+                self._interactor.selection_enabled = False
+            elif mode == self.InteractionMode.PICK:
+                setattr(self._interactor, 'input_locked', False)
+                self._interactor.selection_enabled = False
+                # pick_enabled 由 enter_pick_mode 设置细节
+            else:  # NAVIGATE
+                setattr(self._interactor, 'input_locked', False)
+                self._interactor.pick_enabled = False
+                self._interactor.selection_enabled = False
         except Exception:
             pass
 
     def process_events(self):
-        if not self._init_success or self._render_paused:
+        if not self._init_success:
             return
         try:
             self._adapter.poll()
@@ -359,30 +415,91 @@ class Open3DViewport(BaseViewport):
     def get_widget(self):
         return self._root
 
+    def project_points(self, points):
+        """将 3D 点投影为屏幕坐标（逻辑像素）。返回 (screen, valid) 或 None。"""
+        try:
+            return self._camera.project_points(points)
+        except Exception:
+            return None
+
     def get_picked_point(self):
         return self._interactor.last_picked_point
 
-    def add_cloud(self, name, positions, colors=None, point_size=0.3, reset_view=False):
+    # ------------------------------------------------------------------
+    # ROI 视觉辅助：2D 红框 + 3D 包围盒
+    # ------------------------------------------------------------------
+    def clear_roi_visuals(self):
+        self._interactor.clear_selection_rect()
+        self._adapter.remove_geometry("__roi_selection_bbox")
+        if self._overlay is not None:
+            self._overlay.update()
+
+    def show_roi_bbox(self, min_bound, max_bound, color=(1.0, 1.0, 1.0)):
+        self._adapter.remove_geometry("__roi_selection_bbox")
+        self._adapter.add_geometry("__roi_selection_bbox", make_bbox(min_bound, max_bound, color=color), reset_bounding_box=False)
+        if self._overlay is not None:
+            self._overlay.update()
+
+    # ------------------------------------------------------------------
+    # 高级 ROI 框选模式（建筑外立面检测专用）
+    # ------------------------------------------------------------------
+    def enter_roi_selection(self, cloud_name=None, on_complete=None):
+        """全新 ROI 框选：由 ROISelectionController 接管，硬性锁定视口交互。"""
+        try:
+            self.clear_roi_visuals()
+        except Exception:
+            pass
+        try:
+            # store callback for forwarding
+            self._roi_on_complete = on_complete
+            if self._roi_controller is not None:
+                # 统一切换模式到 ROI
+                self.set_mode(self.InteractionMode.ROI)
+                self._roi_controller.start(cloud_name, self._handle_roi_complete)
+        except Exception:
+            pass
+
+    def exit_roi_selection(self):
+        try:
+            if self._roi_controller is not None:
+                self._roi_controller.cancel()
+        except Exception:
+            pass
+        self._roi_on_complete = None
+        try:
+            # 恢复导航模式
+            self.set_mode(self.InteractionMode.NAVIGATE)
+        except Exception:
+            pass
+
+    def _handle_roi_complete(self, min_bound, max_bound, indices, p1=None, p2=None):
+        """如果提供了外部回调函数，则将ROI选择结果转发至该回调函数。"""
+        cb = self._roi_on_complete
+        if callable(cb):
+            try:
+                cb(min_bound, max_bound, indices, p1, p2)
+            except Exception:
+                pass
+
+    def add_cloud(self, name, positions, colors=None, point_size=0.3):
         had_clouds = bool(self._scene.point_data)
-        self._scene.add_cloud(name, positions, colors, point_size=point_size, reset_view=reset_view)
-        if reset_view or not had_clouds:
-            self.auto_range()
+        self._scene.add_cloud(name, positions, colors, point_size=point_size, reset_view=not had_clouds)
+        if not had_clouds and not self._scene_view_initialized:
+            self._initialize_scene_view()
 
-    def update_cloud_color(self, name, colors, preserve_view=True):
+    def update_cloud_color(self, name, colors):
         if name not in self._scene.point_data:
             return
-        state = self.get_camera_state() if preserve_view else None
         self._scene.update_cloud_color(name, colors)
-        if preserve_view and state is not None:
-            self.set_camera_state(state)
 
-    def update_cloud_points(self, name, positions, colors=None, preserve_view=True):
+    def update_cloud_points(self, name, positions, colors=None):
         if name not in self._scene.point_data:
             return
-        state = self.get_camera_state() if preserve_view else None
         self._scene.update_cloud_points(name, positions, colors)
-        if preserve_view and state is not None:
-            self.set_camera_state(state)
+
+    def replace_cloud_snapshot(self, name, positions, colors=None, metadata=None):
+        """GUI-thread atomic point/colour/metadata replacement."""
+        return self._scene.replace_cloud_snapshot(name, positions, colors, metadata)
 
     def remove_cloud(self, name):
         self._scene.remove_cloud(name)
@@ -392,6 +509,7 @@ class Open3DViewport(BaseViewport):
     def clear(self):
         self.clear_pick_markers()
         self._scene.clear()
+        self._scene_view_initialized = False
 
     def set_point_size(self, name, size):
         self._scene.set_point_size(name, size)
@@ -427,26 +545,14 @@ class Open3DViewport(BaseViewport):
         self._scene.normal_names.add(normal_name)
         return True
 
-    def auto_range(self):
-        if self._scene.point_data:
-            self._camera.auto_range()
-        else:
-            self._setup_initial_camera()
-
-    def reset_view(self):
-        self.auto_range()
-
-    def get_camera_state(self):
-        return self._camera.get_state()
-
-    def set_camera_state(self, state):
-        self._camera.set_state(state)
-
     def get_cloud_names(self):
         return self._scene.get_cloud_names()
 
     def get_cloud_data(self, name):
         return self._scene.get_cloud_data(name)
+
+    def get_active_cloud_name(self):
+        return self._scene.active_name
 
     def set_selection_enabled(self, enabled, cloud_name=None):
         self._interactor.set_selection_enabled(enabled, cloud_name=cloud_name)
@@ -457,11 +563,19 @@ class Open3DViewport(BaseViewport):
     def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
         self.set_selection_enabled(False)
         self.set_pick_enabled(True, radius=pick_radius, cloud_name=cloud_name)
+        try:
+            self.set_mode(self.InteractionMode.PICK)
+        except Exception:
+            pass
         if callback is not None:
             self.point_pick_callback = callback
 
     def exit_pick_mode(self):
         self.set_pick_enabled(False)
+        try:
+            self.set_mode(self.InteractionMode.NAVIGATE)
+        except Exception:
+            pass
 
     def update_pick_markers(self, src_points=None, tgt_points=None):
         self.clear_pick_markers()
@@ -522,16 +636,43 @@ class Open3DViewport(BaseViewport):
             ctr = self._adapter.get_view_control()
             if ctr is None:
                 return 0.08
-            params = ctr.convert_to_pinhole_camera_parameters()
-            fx = float(params.intrinsic.intrinsic_matrix[0, 0])
-            screen, valid = self._camera.project_points(pts)
-            if screen is None:
-                return 0.08
-            z = screen[:, 2][valid]
-            if len(z) == 0:
-                return 0.08
-            z_avg = float(np.median(z))
-            world_per_pixel = z_avg / max(fx, 1e-6)
+            if not self._camera.is_orthographic():
+                try:
+                    params = ctr.convert_to_pinhole_camera_parameters()
+                    fx = float(params.intrinsic.intrinsic_matrix[0, 0])
+                    screen, valid = self._camera.project_points(pts)
+                    if screen is None:
+                        return 0.08
+                    z = screen[:, 2][valid]
+                    if len(z) == 0:
+                        return 0.08
+                    z_avg = float(np.median(z))
+                    world_per_pixel = z_avg / max(fx, 1e-6)
+                    r = world_per_pixel * float(pixel_radius)
+                    return float(max(0.02, min(r, 0.5)))
+                except Exception:
+                    pass
+
+            try:
+                if hasattr(self._container, "devicePixelRatioF"):
+                    dpr = float(self._container.devicePixelRatioF())
+                elif hasattr(self._container, "devicePixelRatio"):
+                    dpr = float(self._container.devicePixelRatio())
+                else:
+                    dpr = 1.0
+            except Exception:
+                dpr = 1.0
+            try:
+                zoom = float(ctr.get_zoom())
+            except Exception:
+                zoom = 0.6
+            scene_scale = self._fallback_scene_scale()
+            scene_factor = max(0.2, min(scene_scale / 10.0, 3.0))
+            from config.settings import Config
+            pan_base = float(getattr(Config, 'PAN_BASE_SPEED', 0.06))
+            zoom_factor = 0.6 / max(zoom, 0.02)
+            world_per_pixel = pan_base * zoom_factor * scene_factor / max(1.0, dpr)
+            world_per_pixel = max(world_per_pixel, 1e-6)
             r = world_per_pixel * float(pixel_radius)
             return float(max(0.02, min(r, 0.5)))
         except Exception:

@@ -1,14 +1,28 @@
 import numpy as np
 import open3d as o3d
+import threading
 
 
 class Open3DAdapter:
     def __init__(self):
         self.vis = None
         self.geometries = {}
-        self._grid_lines = None
+        self._owner_thread_id = None
+        self._destroyed = False
+
+    def _assert_owner(self):
+        """Visualizer/GLFW is single-threaded; fail early instead of racing WGL."""
+        if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError('Open3D visualization must run on the GUI thread')
+        if self._destroyed:
+            return False
+        return self.vis is not None
 
     def create_window(self, title, width=1280, height=960, visible=True):
+        if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError('Open3D window must be created on the GUI thread')
+        self._owner_thread_id = threading.get_ident()
+        self._destroyed = False
         self.vis = o3d.visualization.Visualizer()
         ok = self.vis.create_window(
             window_name=title,
@@ -29,7 +43,7 @@ class Open3DAdapter:
         opt.show_coordinate_frame = True
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
-        if self.vis is None:
+        if not self._assert_owner():
             return
         old = self.geometries.get(name)
         if old is not None:
@@ -41,7 +55,7 @@ class Open3DAdapter:
         self.vis.add_geometry(geometry, reset_bounding_box=reset_bounding_box)
 
     def remove_geometry(self, name):
-        if self.vis is None:
+        if not self._assert_owner():
             return
         geom = self.geometries.pop(name, None)
         if geom is not None:
@@ -51,37 +65,38 @@ class Open3DAdapter:
                 pass
 
     def clear(self):
+        if not self._assert_owner():
+            return
         for name in list(self.geometries.keys()):
             self.remove_geometry(name)
 
     def set_point_size(self, size):
-        if self.vis is not None:
+        if self._assert_owner():
             self.vis.get_render_option().point_size = float(size)
 
     def poll(self):
-        if self.vis is None:
+        if not self._assert_owner():
             return
         self.vis.poll_events()
         self.vis.update_renderer()
 
-    def reset_view_point(self):
-        if self.vis is not None:
-            self.vis.reset_view_point(True)
-
     def get_view_control(self):
-        if self.vis is None:
+        if not self._assert_owner():
             return None
         return self.vis.get_view_control()
 
     def capture_screen(self):
-        if self.vis is None:
+        if not self._assert_owner():
             return None
         return self.vis.capture_screen_float_buffer(do_render=True)
 
     def destroy(self):
+        if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError('Open3D window must be destroyed on the GUI thread')
         try:
             if self.vis is not None:
                 self.vis.destroy_window()
         finally:
             self.vis = None
             self.geometries.clear()
+            self._destroyed = True
