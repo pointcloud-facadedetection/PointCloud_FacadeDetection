@@ -428,26 +428,39 @@ class ProjectOperationService:
             else:
                 results = self._facade_service.detect(
                     cloud_name=cloud_name, project_uuid=self._project_uuid)
-            self._last_facade_results = results
-            if callable(self.on_facade_results):
-                try:
-                    self.on_facade_results(results)
-                except Exception:
-                    pass
-            # 启用点击选择：在视口中点击立面点，高亮对应立面
-            try:
-                self._enable_facade_click_select(cloud_name, results or [])
-            except Exception:
-                pass
-            # 渲染立面高亮
-            try:
-                render = self._get_render_service()
-                if render is not None:
-                    render.highlight_facades(cloud_name, results or [])
-            except Exception:
-                pass
+            self._apply_facade_results(cloud_name, results)
         except Exception as e:
             print(f'立面检测失败: {e}', flush=True)
+
+    def restore_facade_results(self, cloud_name: str, results: list[dict]) -> bool:
+        """从暂存快照恢复立面检测结果到视口与右侧列表。"""
+        if not results:
+            return False
+        try:
+            self._apply_facade_results(cloud_name, results)
+            print(f'已加载暂存立面结果: {len(results)} 个', flush=True)
+            return True
+        except Exception as e:
+            print(f'加载暂存立面结果失败: {e}', flush=True)
+            return False
+
+    def _apply_facade_results(self, cloud_name: str, results: list[dict]) -> None:
+        self._last_facade_results = results
+        if callable(self.on_facade_results):
+            try:
+                self.on_facade_results(results)
+            except Exception:
+                pass
+        try:
+            self._enable_facade_click_select(cloud_name, results or [])
+        except Exception:
+            pass
+        try:
+            render = self._get_render_service()
+            if render is not None:
+                render.highlight_facades(cloud_name, results or [])
+        except Exception:
+            pass
 
     def quality_inspection(self):
         self._notify('quality_inspection')

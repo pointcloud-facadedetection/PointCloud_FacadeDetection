@@ -1,1 +1,2 @@
-# 算法层 — 待算法工程师设计
+# 算法层
+# 自动 2D-3D 匹配见 facadeDetection.algorithms.auto_photo_pointcloud_matching

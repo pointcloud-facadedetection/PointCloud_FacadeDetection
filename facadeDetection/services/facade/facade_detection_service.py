@@ -15,6 +15,7 @@ import open3d as o3d
 from algorithms.facade.facade_detection import detect_facades_adaptive
 from config.settings import Config
 from services.dal.results_repo import ResultsRepo
+from services.facade.facade_cache import save_facade_snapshot
 from services.facade.facade_index_service import FacadeIndexService
 from utils.logging_utils import trace
 
@@ -102,7 +103,7 @@ class FacadeDetectionService:
               proxy_points=len(proxy_pts), seconds=f"{time.perf_counter()-started:.2f}")
 
         if project_uuid:
-            self._persist_results(project_uuid, facades)
+            self._persist_results(project_uuid, facades, cloud_name)
         return facades
 
     def detect_on_roi(self, cloud_name: str,
@@ -217,13 +218,18 @@ class FacadeDetectionService:
                   voxels=facade.get('voxel_count', 0))
 
         if project_uuid:
-            self._persist_results(project_uuid, facades)
+            self._persist_results(project_uuid, facades, cloud_name)
 
         trace("facade.roi.done", cloud=cloud_name, facades=len(facades),
               seconds=f"{time.perf_counter()-started:.2f}")
         return facades
 
-    def _persist_results(self, project_uuid: str, facades: list[dict]) -> None:
+    def _persist_results(self, project_uuid: str, facades: list[dict], cloud_name: str) -> None:
+        try:
+            path = save_facade_snapshot(project_uuid, cloud_name, facades)
+            print(f'立面检测结果已暂存: {path}', flush=True)
+        except Exception as e:
+            print(f'FacadeDetectionService: 暂存快照失败: {e}', flush=True)
         try:
             ResultsRepo.save_detected_facades(project_uuid, facades)
         except Exception as e:

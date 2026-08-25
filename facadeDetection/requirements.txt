@@ -5,3 +5,16 @@ PySide6
 qtwebview2==0.5.0
 sqlalchemy
 pypinyin
+
+
+## auto_photo_pointcloud_matching (GlueStick + LightGlue fallback)
+## pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+## pip install git+https://github.com/cvg/LightGlue.git
+torch
+torchvision
+
+## GlueStick (Windows: 先装预编译 pytlsd，避免源码编译)
+## pip install pytlsd==0.0.2
+## pip install git+https://github.com/cvg/GlueStick.git --no-deps
+## pip install omegaconf==2.2.* scipy scikit-learn seaborn tqdm build
+## python -c "import pytlsd; from gluestick.models.two_view_pipeline import TwoViewPipeline; print('OK')"

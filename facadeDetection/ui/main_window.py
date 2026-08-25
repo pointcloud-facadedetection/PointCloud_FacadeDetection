@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (
 from qtwebview2 import QtWebView2Widget
 
 from .widgets.flow_layout import FlowLayout
+from .widgets.photo_view_widget import PhotoViewWidget
 from services.inspection_review import InspectionReviewService
+from services.photo_match_service import PhotoMatchService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
@@ -90,6 +92,9 @@ UPLOAD_FILE_FILTER = (
 
 REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
 REPORT_EMPTY_TITLE = '请选择PDF上传'
+PHOTO_FILE_FILTER = (
+    '图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp);;所有文件 (*)'
+)
 
 
 class MainWindow(QMainWindow):
@@ -117,6 +122,7 @@ class MainWindow(QMainWindow):
         )
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
+        self.photo_match_service = PhotoMatchService()
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
@@ -259,6 +265,10 @@ class MainWindow(QMainWindow):
             self._init_right_panel_widgets()
         except Exception:
             pass
+        try:
+            self._init_left_panel_widgets()
+        except Exception:
+            pass
 
         viewport_panel = QWidget()
         viewport_layout = QVBoxLayout(viewport_panel)
@@ -287,6 +297,10 @@ class MainWindow(QMainWindow):
         viewport_layout.addWidget(config_bar)
         self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
         self._on_standard_changed(0)
+        self.photo_view = PhotoViewWidget()
+        self.photo_view.setVisible(False)
+        self.photo_view.point_clicked.connect(self._on_photo_match_point_clicked)
+        viewport_layout.addWidget(self.photo_view)
         viewport_layout.addWidget(self.viewport.get_widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
@@ -295,7 +309,7 @@ class MainWindow(QMainWindow):
         self.operation_splitter.setStretchFactor(0, 0)
         self.operation_splitter.setStretchFactor(1, 1)
         self.operation_splitter.setStretchFactor(2, 0)
-        self.operation_splitter.setSizes([210, 1000, 210])
+        self.operation_splitter.setSizes([230, 1000, 210])
         self.operation_splitter.installEventFilter(self)
         layout.addWidget(self.operation_splitter, 1)
 
@@ -345,6 +359,52 @@ class MainWindow(QMainWindow):
         self.list_facades.setObjectName('lstFacades')
         lay.addWidget(self.list_facades, 1)
         self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
+
+    def _init_left_panel_widgets(self):
+        panel = self.left_dock.findChild(QWidget, 'leftDockPanel')
+        if panel is None:
+            return
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+
+        title = QLabel('2D-3D 匹配')
+        title.setStyleSheet('font-weight:600; color:#303641;')
+        lay.addWidget(title)
+
+        hint = QLabel('先上传 2D 照片，再进入标注：照片与点云交替点击，至少 6 对后可估计相机内外参。')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color:#5b626d; font-size:12px;')
+        lay.addWidget(hint)
+
+        self.btn_upload_photo = QPushButton('上传2D照片')
+        self.btn_annotate_matches = QPushButton('进入标注模式')
+        self.btn_undo_photo_match = QPushButton('撤销点对')
+        self.btn_exit_photo_annotate = QPushButton('退出标注')
+        self.btn_photo_cloud_match = QPushButton('估算相机内外参数')
+        for button in (
+            self.btn_upload_photo,
+            self.btn_annotate_matches,
+            self.btn_undo_photo_match,
+            self.btn_exit_photo_annotate,
+            self.btn_photo_cloud_match,
+        ):
+            button.setMinimumHeight(34)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            lay.addWidget(button)
+
+        self.lbl_photo_match_status = QLabel('尚未上传照片')
+        self.lbl_photo_match_status.setWordWrap(True)
+        self.lbl_photo_match_status.setStyleSheet('color:#5b626d; font-size:12px;')
+        lay.addWidget(self.lbl_photo_match_status)
+        lay.addStretch(1)
+
+        self.btn_upload_photo.clicked.connect(self._open_upload_photo_dialog)
+        self.btn_annotate_matches.clicked.connect(self._enter_photo_annotate_mode)
+        self.btn_undo_photo_match.clicked.connect(self._undo_photo_match_pair)
+        self.btn_exit_photo_annotate.clicked.connect(self._exit_photo_annotate_mode)
+        self.btn_photo_cloud_match.clicked.connect(self._estimate_photo_camera_pose)
+        self._refresh_photo_match_ui()
 
     def _show_facade_results(self, results: list[dict]):
         self._quality_result_cache.clear()
@@ -592,8 +652,8 @@ class MainWindow(QMainWindow):
         panel.setObjectName(f'{object_name}Panel')
         sidebar_layout.addWidget(panel, 1)
         sidebar.setMinimumWidth(180)
-        sidebar.setMaximumWidth(260)
-        sidebar.setProperty('expandedWidth', 210)
+        sidebar.setMaximumWidth(280)
+        sidebar.setProperty('expandedWidth', 230)
         return sidebar, toggle_button
 
     def _create_sidebar_expand_button(self, side):
@@ -749,7 +809,7 @@ class MainWindow(QMainWindow):
             'btn_calculate_detail': (
                 self.project_operation_service.calculate_detail
             ),
-            'btn_align_2d_3d': self.project_operation_service.align_2d_3d,
+            'btn_align_2d_3d': self._enter_photo_match_workspace,
         }
         report_actions = {
             'btn_open_report_pdf': self._open_report_pdf,
@@ -791,6 +851,146 @@ class MainWindow(QMainWindow):
                 self.right_sidebar_expand_button,
             )
         )
+
+    def _enter_photo_match_workspace(self):
+        self.project_operation_service.align_2d_3d()
+        operation_index = next(
+            index
+            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
+            if key == 'project_operation'
+        )
+        self.set_current_page(operation_index)
+        if self._sidebar_collapsed.get('left'):
+            self._expand_sidebar(
+                'left',
+                self.left_dock,
+                self.left_sidebar_expand_button,
+            )
+        self.photo_view.setVisible(True)
+        self._refresh_photo_match_ui()
+
+    def _open_upload_photo_dialog(self):
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            '选择 2D 照片',
+            self._last_upload_directory,
+            PHOTO_FILE_FILTER,
+        )
+        if not file_path:
+            return
+        self._last_upload_directory = str(Path(file_path).parent)
+        try:
+            image = self.photo_match_service.load_photo(file_path)
+        except ValueError as exc:
+            QMessageBox.warning(self, '上传 2D 照片', str(exc))
+            return
+        self.photo_view.set_image(image)
+        self.photo_view.setVisible(True)
+        self._exit_photo_annotate_mode(silent=True)
+        self._refresh_photo_match_ui()
+
+    def _enter_photo_annotate_mode(self):
+        state = self.photo_match_service.state
+        if not state.photo_path:
+            QMessageBox.information(self, '标注模式', '请先上传 2D 照片。')
+            return
+        state.annotating = True
+        state.next_is_photo = True
+        self.photo_view.set_interactive(True)
+        self.viewport.enter_pick_mode(callback=self._on_cloud_match_point_picked)
+        self._refresh_photo_match_ui()
+
+    def _exit_photo_annotate_mode(self, silent=False):
+        self.photo_match_service.state.annotating = False
+        self.photo_match_service.state.next_is_photo = True
+        self.photo_view.set_interactive(False)
+        try:
+            self.viewport.exit_pick_mode()
+        except Exception:
+            pass
+        if not silent:
+            self._refresh_photo_match_ui()
+
+    def _undo_photo_match_pair(self):
+        self.photo_match_service.undo_last()
+        self._refresh_photo_match_markers()
+        self._refresh_photo_match_ui()
+
+    def _on_photo_match_point_clicked(self, pixel_x, pixel_y):
+        try:
+            self.photo_match_service.add_photo_point(pixel_x, pixel_y)
+        except RuntimeError as exc:
+            QMessageBox.information(self, '标注照片', str(exc))
+            return
+        self._refresh_photo_match_markers()
+        self._refresh_photo_match_ui()
+
+    def _on_cloud_match_point_picked(self, picked):
+        point = picked.get('point') if isinstance(picked, dict) else picked
+        try:
+            self.photo_match_service.add_cloud_point(point)
+        except RuntimeError as exc:
+            print(f'标注点云失败: {exc}', flush=True)
+            return
+        self._refresh_photo_match_markers()
+        self._refresh_photo_match_ui()
+
+    def _estimate_photo_camera_pose(self):
+        try:
+            result = self.photo_match_service.solve_pose()
+        except ValueError as exc:
+            QMessageBox.warning(self, '估算相机内外参数', str(exc))
+            return
+        mean_error = result.get('reprojection_mean_px')
+        inliers = result.get('inlier_count')
+        method = result.get('pnp_method', '')
+        message = (
+            f'估计完成。\n'
+            f'PnP：{method}\n'
+            f'内点：{inliers}\n'
+        )
+        if mean_error is not None:
+            message += f'平均重投影误差：{float(mean_error):.2f} px'
+        QMessageBox.information(self, '估算相机内外参数', message)
+        self._refresh_photo_match_ui()
+
+    def _refresh_photo_match_markers(self):
+        self.photo_view.set_markers(self.photo_match_service.photo_points())
+        cloud_points = self.photo_match_service.cloud_points()
+        try:
+            self.viewport.update_pick_markers(src_points=cloud_points)
+        except Exception:
+            pass
+
+    def _refresh_photo_match_ui(self):
+        state = self.photo_match_service.state
+        complete = self.photo_match_service.complete_pair_count()
+        has_photo = bool(state.photo_path)
+        if not hasattr(self, 'lbl_photo_match_status'):
+            return
+        self.btn_annotate_matches.setEnabled(has_photo and not state.annotating)
+        self.btn_undo_photo_match.setEnabled(has_photo and bool(state.correspondences))
+        self.btn_exit_photo_annotate.setEnabled(state.annotating)
+        self.btn_photo_cloud_match.setEnabled(complete >= 6)
+        if not has_photo:
+            self.lbl_photo_match_status.setText('尚未上传照片')
+            return
+        name = Path(state.photo_path).name
+        if state.annotating:
+            next_hint = '请点击照片' if state.next_is_photo else '请点击 3D 点云'
+            self.lbl_photo_match_status.setText(
+                f'已上传：{name}\n匹配点：{complete} 对（至少 6 对）\n{next_hint}'
+            )
+        elif state.pose:
+            error = state.pose.get('reprojection_mean_px')
+            extra = f'，误差 {float(error):.2f} px' if error is not None else ''
+            self.lbl_photo_match_status.setText(
+                f'已上传：{name}\n匹配点：{complete} 对\n已完成位姿估计{extra}'
+            )
+        else:
+            self.lbl_photo_match_status.setText(
+                f'已上传：{name}\n匹配点：{complete} 对（至少 6 对后估计内参与位姿）'
+            )
 
     def _open_upload_file_dialog(self):
         file_paths, _selected_filter = QFileDialog.getOpenFileNames(
@@ -1095,6 +1295,30 @@ class MainWindow(QMainWindow):
             if key == 'project_operation'
         )
         self.set_current_page(operation_index)
+        self._restore_cached_facade_results(project)
+
+    def _restore_cached_facade_results(self, project):
+        project_uuid = getattr(project, 'project_id', None)
+        if not project_uuid:
+            return
+        try:
+            from services.facade.facade_cache import load_facade_snapshot
+            snapshot = load_facade_snapshot(project_uuid)
+        except Exception:
+            return
+        if not snapshot:
+            return
+        names = []
+        try:
+            names = self.viewport.get_cloud_names()
+        except Exception:
+            names = []
+        if not names:
+            return
+        stored_name = snapshot.get('cloud_name')
+        cloud_name = stored_name if stored_name in names else names[-1]
+        facades = snapshot.get('facades') or []
+        self.project_operation_service.restore_facade_results(cloud_name, facades)
 
     def _set_current_project(self, project):
         self.current_project = project
