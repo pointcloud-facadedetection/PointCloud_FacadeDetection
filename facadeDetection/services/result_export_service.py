@@ -4,21 +4,17 @@ import traceback
 from pathlib import Path
 import numpy as np
 import cv2
-import uuid
 from algorithms.facade.projection import rasterize_facade
 
 
 class ResultExportService:
-    """Export service: only generates heatmap PNG on demand.
-    No JSON/NPZ export to avoid large files and blocking UI.
+    """Export service: generates heatmap PNG on demand.
+    Cleaned: removed redundant fields, unified defect visualization.
     """
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
                        pixel_size=0.01):
-        """
-        按需生成缺陷热力图 PNG。不生成 JSON/NPZ。
-        在 dialog 弹出后，点击"显示检测效果"时调用。
-        """
+        """Generate defect heatmap PNG. No JSON/NPZ export."""
         root = None
         try:
             if not isinstance(results_dir, (str, Path)) or str(results_dir) == '':
@@ -47,10 +43,17 @@ class ResultExportService:
                 print(f'[PCFD] export_heatmap: no windows, skip', flush=True)
                 return None
 
+            heatmap_mode = str(quality.get('heatmap_mode') or 'flatness')
+
             # Check valid windows
             n_valid = 0
             for w in windows:
-                fgm = w.get('flatness_gap_mm', np.nan)
+                if heatmap_mode == 'verticality':
+                    fgm = w.get('verticality_deviation_mm_2m', np.nan)
+                elif heatmap_mode == 'flatness_raw':
+                    fgm = w.get('flatness_raw_max_gap_mm', np.nan)
+                else:
+                    fgm = w.get('flatness_gap_mm', np.nan)
                 try:
                     if np.isfinite(float(fgm)):
                         n_valid += 1
@@ -66,9 +69,9 @@ class ResultExportService:
             legend_path = self._create_heatmap_legend(
                 root,
                 quality.get('parameters', {}).get(
-                    'flatness_limit_mm',
-                    quality.get('thresholds', {}).get('flatness_limit_mm', 4.0)),
-                float(overall.get('flatness_max_gap_mm', 4.0)))
+                    'verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm',
+                    quality.get('thresholds', {}).get('verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm', 4.0)),
+                float(overall.get('verticality_deviation_mm_2m' if heatmap_mode == 'verticality' else 'flatness_raw_max_gap_mm' if heatmap_mode == 'flatness_raw' else 'flatness_max_gap_mm', 4.0)))
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
                   f'heatmap={heatmap_path.name if heatmap_path else None}', flush=True)
@@ -97,86 +100,83 @@ class ResultExportService:
             return None
 
     def _export_window_heatmap(self, root, facade_no, pts_local, windows, plane_model, pixel_size, quality):
-        """把窗口结果投影成 PNG。"""
-        if isinstance(windows, list):
-            centers_list = []
-            for r in windows:
-                cx = r.get('center_xyz')
-                if cx is not None and len(cx) == 3:
-                    try:
-                        if all(np.isfinite(float(x)) for x in cx):
-                            centers_list.append([float(x) for x in cx])
-                            continue
-                    except (TypeError, ValueError):
-                        pass
-                # fallback: reconstruct from uv
-                uv = r.get('center_uv', (np.nan, np.nan))
+        """Export window results as heatmap PNG with unified defect coloring."""
+        mode = str(quality.get('heatmap_mode') or 'flatness')
+        
+        # Extract centers and defect values
+        centers_list = []
+        values_list = []
+        
+        for r in windows:
+            cx = r.get('center_xyz')
+            if cx is not None and len(cx) == 3:
                 try:
-                    if len(uv) >= 2 and np.isfinite(float(uv[0])) and np.isfinite(float(uv[1])):
-                        origin = np.asarray(quality.get('projection_origin', [0,0,0]))
-                        u_axis = np.asarray(quality.get('projection_u_axis', [1,0,0]))
-                        v_axis = np.asarray(quality.get('projection_v_axis', [0,1,0]))
-                        center_xyz = origin + float(uv[0]) * u_axis + float(uv[1]) * v_axis
-                        centers_list.append(center_xyz.tolist())
+                    if all(np.isfinite(float(x)) for x in cx):
+                        centers_list.append([float(x) for x in cx])
+                    else:
                         continue
                 except (TypeError, ValueError):
-                    pass
-                centers_list.append([np.nan, np.nan, np.nan])
-
-            centers = np.asarray(centers_list, dtype=float).reshape(-1, 3)
-            flat = np.asarray([r.get('flatness_gap_mm', np.nan) for r in windows], dtype=float)
-
-            signed_flat = np.full_like(flat, np.nan)
-            for i, r in enumerate(windows):
-                gap = r.get('flatness_gap_mm', np.nan)
-                try:
-                    gap = float(gap)
-                    if not np.isfinite(gap):
-                        signed_flat[i] = np.nan
-                        continue
-                except (TypeError, ValueError):
-                    signed_flat[i] = np.nan
                     continue
-                dep_id = r.get('depression_source_id', -1)
-                if isinstance(dep_id, (int, np.integer)) and dep_id >= 0:
-                    signed_flat[i] = -gap
-                else:
-                    signed_flat[i] = gap
+            else:
+                continue
 
-        else:
-            centers = np.asarray(windows.get('center_xyz', []), dtype=float).reshape(-1, 3)
-            flat = np.asarray(windows.get('flatness_gap_mm', []), dtype=float).reshape(-1)
-            signed_flat = np.asarray(windows.get('flatness_signed_gap_mm', -flat), dtype=float).reshape(-1)
+            if mode == 'verticality':
+                val = r.get('verticality_deviation_mm_2m', np.nan)
+            elif mode == 'flatness_raw':
+                val = r.get('flatness_raw_max_gap_mm', np.nan)
+            else:
+                val = r.get('flatness_gap_mm', np.nan)
+            
+            try:
+                val = float(val)
+                if not np.isfinite(val):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            
+            values_list.append(val)
 
-        if len(centers) == 0 or len(flat) == 0:
+        centers = np.asarray(centers_list, dtype=float).reshape(-1, 3)
+        values = np.asarray(values_list, dtype=float)
+
+        if len(centers) == 0 or len(values) == 0:
             raise ValueError('质量结果没有有效窗口，无法导出热力图')
 
-        valid_mask = np.all(np.isfinite(centers), axis=1) & np.isfinite(flat)
-        if not np.any(valid_mask):
-            raise ValueError('质量结果没有有效窗口中心点，无法导出热力图')
+        # Get limit
+        limit_key = 'verticality_limit_mm' if mode == 'verticality' else 'flatness_limit_mm'
+        limit_mm = float(quality.get('parameters', {}).get(
+            limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
+        
+        # Convert to meters for rasterize
+        values_m = values / 1000.0
+        limit_m = limit_mm / 1000.0
 
-        centers = centers[valid_mask]
-        flat = flat[valid_mask]
-        signed_flat = signed_flat[valid_mask]
-
-        limit_m = float(quality.get('parameters', {}).get(
-            'flatness_limit_mm', quality.get('thresholds', {}).get('flatness_limit_mm', 4.0))) / 1000.0
-        values_m = signed_flat / 1000.0
-
+        # Generate unified heatmap colors: gray -> yellow -> orange -> red
         abs_values_m = np.abs(values_m)
         t = np.clip((abs_values_m - limit_m) / max(limit_m, 1e-9), 0.0, 1.0)
 
         colors = np.zeros((len(values_m), 3), dtype=float)
-        is_recessed = values_m < 0
-
-        protrude_mask = ~is_recessed
-        colors[protrude_mask, 0] = np.clip(0.5 + 0.5 * t[protrude_mask], 0, 1)
-        colors[protrude_mask, 1] = np.clip(0.8 - 0.8 * t[protrude_mask], 0, 1)
-        colors[protrude_mask, 2] = np.clip(0.2 - 0.2 * t[protrude_mask], 0, 1)
-
-        colors[is_recessed, 0] = np.clip(0.2 - 0.2 * t[is_recessed], 0, 1)
-        colors[is_recessed, 1] = np.clip(0.5 + 0.3 * t[is_recessed], 0, 1)
-        colors[is_recessed, 2] = np.clip(0.8 + 0.2 * t[is_recessed], 0, 1)
+        
+        # Gray (0.75, 0.75, 0.75) at t=0 -> Yellow (1, 1, 0) at t=0.33
+        # -> Orange (1, 0.5, 0) at t=0.66 -> Red (1, 0, 0) at t=1.0
+        
+        mask1 = t <= 0.33
+        tt1 = t[mask1] / 0.33
+        colors[mask1, 0] = 0.75 + 0.25 * tt1
+        colors[mask1, 1] = 0.75 + 0.25 * tt1
+        colors[mask1, 2] = 0.75 - 0.75 * tt1
+        
+        mask2 = (t > 0.33) & (t <= 0.66)
+        tt2 = (t[mask2] - 0.33) / 0.33
+        colors[mask2, 0] = 1.0
+        colors[mask2, 1] = 1.0 - 0.5 * tt2
+        colors[mask2, 2] = 0.0
+        
+        mask3 = t > 0.66
+        tt3 = (t[mask3] - 0.66) / 0.34
+        colors[mask3, 0] = 1.0
+        colors[mask3, 1] = 0.5 - 0.5 * tt3
+        colors[mask3, 2] = 0.0
 
         base = np.full((len(centers), 3), 0.75, dtype=float)
 
@@ -219,7 +219,7 @@ class ResultExportService:
         return heatmap_path
 
     def _create_heatmap_legend(self, root, limit_mm, max_mm):
-        """创建热力图颜色图例 PNG。"""
+        """Create unified heatmap color legend PNG."""
         h, w = 80, 500
         legend = np.ones((h, w, 3), dtype=np.uint8) * 245
 
@@ -231,16 +231,23 @@ class ResultExportService:
 
         for i in range(n_segments):
             t = i / max(n_segments - 1, 1)
-            if t < 0.5:
-                tt = t * 2
-                r = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
-                g = int(np.clip((0.5 + 0.3 * tt) * 255, 0, 255))
-                b = int(np.clip((0.8 + 0.2 * tt) * 255, 0, 255))
+            
+            # Unified color: gray -> yellow -> orange -> red
+            if t <= 0.33:
+                tt = t / 0.33
+                r = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
+                g = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
+                b = int(np.clip((0.75 - 0.75 * tt) * 255, 0, 255))
+            elif t <= 0.66:
+                tt = (t - 0.33) / 0.33
+                r = 255
+                g = int(np.clip((1.0 - 0.5 * tt) * 255, 0, 255))
+                b = 0
             else:
-                tt = (t - 0.5) * 2
-                r = int(np.clip((0.5 + 0.5 * tt) * 255, 0, 255))
-                g = int(np.clip((0.8 - 0.8 * tt) * 255, 0, 255))
-                b = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
+                tt = (t - 0.66) / 0.34
+                r = 255
+                g = int(np.clip((0.5 - 0.5 * tt) * 255, 0, 255))
+                b = 0
 
             legend[bar_y:bar_y + bar_h, bar_x_start + i] = [b, g, r]
 
@@ -249,15 +256,14 @@ class ResultExportService:
         color = (60, 60, 60)
         thickness = 1
 
-        cv2.putText(legend, f"凹陷", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"-{max_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+        cv2.putText(legend, "合格", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"<{limit_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
         mid_x = w // 2 - 30
-        cv2.putText(legend, f"合格", (mid_x, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"<{limit_mm:.1f}mm", (mid_x - 10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+        cv2.putText(legend, "警告", (mid_x, bar_y + bar_h + 20), font, font_scale, color, thickness)
 
-        cv2.putText(legend, f"凸起", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"+{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+        cv2.putText(legend, "严重", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
         legend_path = Path(root) / 'heatmap_legend.png'
         cv2.imwrite(str(legend_path), legend)

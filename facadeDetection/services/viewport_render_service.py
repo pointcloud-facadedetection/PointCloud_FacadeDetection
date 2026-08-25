@@ -345,6 +345,28 @@ class ViewportRenderService:
             g = 0.091 - 1.33*t + 3.51*t**2 - 1.84*t**3
             b = 0.106 + 1.097*t - 2.295*t**2 + 1.98*t**3
             arr = np.stack([r, g, b], axis=1)
+        elif cmap == 'unified_defect':
+            # UNIFIED DEFECT: gray -> yellow -> orange -> red
+            arr = np.empty((len(t), 3), dtype=np.float32)
+            # Gray (0.5,0.5,0.5) at t=0 -> Yellow (1,1,0) at t=0.33
+            mask1 = t <= 0.33
+            tt1 = t[mask1] / 0.33
+            arr[mask1, 0] = 0.5 + 0.5 * tt1
+            arr[mask1, 1] = 0.5 + 0.5 * tt1
+            arr[mask1, 2] = 0.5 - 0.5 * tt1
+            # Yellow -> Orange
+            mask2 = (t > 0.33) & (t <= 0.66)
+            tt2 = (t[mask2] - 0.33) / 0.33
+            arr[mask2, 0] = 1.0
+            arr[mask2, 1] = 1.0 - 0.5 * tt2
+            arr[mask2, 2] = 0.0
+            # Orange -> Red
+            mask3 = t > 0.66
+            tt3 = (t[mask3] - 0.66) / 0.34
+            arr[mask3, 0] = 1.0
+            arr[mask3, 1] = 0.5 - 0.5 * tt3
+            arr[mask3, 2] = 0.0
+            return np.clip(arr, 0.0, 1.0)
         else:
             # simple blue->cyan->yellow->red
             arr = np.empty((len(t), 3), dtype=np.float32)
@@ -587,7 +609,7 @@ class ViewportRenderService:
     def apply_quality_colors(self, cloud_name: str, quality_result: dict,
                              base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
                              index_service=None) -> None:
-        """将质量结果应用到点云颜色。"""
+        """将质量结果应用到点云颜色 - 统一缺陷值热力图。"""
         try:
             if not isinstance(quality_result, dict):
                 raise TypeError(f'quality_result must be dict, got {type(quality_result).__name__}')
@@ -599,22 +621,13 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
+            # Start from dark neutral base
             colors = np.tile(np.asarray((0.06, 0.08, 0.11), dtype=np.float32).reshape(1, 3), (n, 1))
             mode = quality_result.get('heatmap_mode', 'flatness')
             windows = quality_result.get('windows')
 
-            if isinstance(windows, list):
-                # v2 quality results are records per ruler position.  Adapt
-                # them at the rendering boundary; the algorithm contract
-                # remains list-based and JSON serializable.
-                windows = {
-                    'center_xyz': np.asarray([r.get('center_xyz', [np.nan] * 3) for r in windows]),
-                    'flatness_gap_mm': np.asarray([r.get('flatness_gap_mm', np.nan) for r in windows]),
-                    'flatness_signed_gap_mm': -np.asarray([r.get('flatness_gap_mm', np.nan) for r in windows]),
-                    'verticality_angle_deg': np.asarray([r.get('verticality_angle_deg', np.nan) for r in windows]),
-                }
-            if not isinstance(windows, dict):
-                raise ValueError('质量结果缺少 windows 数据')
+            if not isinstance(windows, list) or len(windows) == 0:
+                return
 
             if index_service is None:
                 return
@@ -622,44 +635,50 @@ class ViewportRenderService:
             if dataset is None:
                 return
 
-            centers = np.asarray(windows.get('center_xyz', []), dtype=np.float32).reshape(-1, 3)
+            # Extract centers and values
+            centers = np.asarray([r.get('center_xyz', [np.nan] * 3) for r in windows], dtype=np.float32).reshape(-1, 3)
+            
             values_key = {
-                'verticality': 'verticality_angle_deg',
-                'recessed': 'flatness_signed_gap_mm',
-                'protruding': 'flatness_signed_gap_mm',
+                'flatness_raw': 'flatness_raw_max_gap_mm',
+                'verticality': 'verticality_deviation_mm_2m',
             }.get(mode, 'flatness_gap_mm')
-            values = np.asarray(windows.get(values_key, []), dtype=np.float32).reshape(-1)
+            values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
 
-            if len(centers) != len(values):
-                return
             valid = np.isfinite(centers).all(axis=1) & np.isfinite(values)
             if not np.any(valid):
                 return
 
+            centers = centers[valid]
+            values = values[valid]
+
+            # Get limit for scaling
+            limit = float((quality_result.get('thresholds') or {}).get(
+                'verticality_limit_mm' if mode == 'verticality' else 'flatness_limit_mm', 4.0))
+
+            # Domain mapping
             domain_raw = np.asarray(quality_result.get('__global_indices', []), dtype=np.int64)
             if len(domain_raw) == 0:
                 return
 
             domain_proxy = index_service.map_raw_to_proxy(cloud_name, domain_raw)
 
-            from algorithms.geometry import plane_axes, classify_plane
             plane = np.asarray((quality_result.get('overall') or {}).get('plane_model') or [], dtype=float)
             if plane.size != 4:
                 return
             plane = plane / (np.linalg.norm(plane[:3]) + 1e-12)
-            facade_type, _type_label, _v, _h = classify_plane(plane[:3])
-            u_axis = np.asarray(quality_result.get('projection_u_axis', []), dtype=float)
-            v_axis = np.asarray(quality_result.get('projection_v_axis', []), dtype=float)
+            
+            u_axis = np.asarray(quality_result.get('projection_u_axis', []), dtype=np.float64)
+            v_axis = np.asarray(quality_result.get('projection_v_axis', []), dtype=np.float64)
             if u_axis.size != 3 or v_axis.size != 3:
+                from algorithms.geometry import classify_plane, plane_axes
+                facade_type, _, _, _ = classify_plane(plane[:3])
                 u_axis, v_axis = plane_axes(plane[:3], facade_type)
 
-            valid_centers = valid
-            centers = centers[valid_centers]
-            values = values[valid_centers]
             origin = np.asarray(quality_result.get('projection_origin',
                                                     np.mean(centers, axis=0)),
                                dtype=np.float64).reshape(3)
 
+            # Map domain points to grid
             valid_proxy = (domain_proxy >= 0)
             if not np.any(valid_proxy):
                 return
@@ -669,23 +688,32 @@ class ViewportRenderService:
             dv = (domain_points - origin) @ v_axis
             cu = (centers - origin) @ u_axis
             cv = (centers - origin) @ v_axis
-            step = max(float((quality_result.get('step_size_m') or
-                              quality_result.get('window_size_m') or 0.05)), 1e-6)
+            
+            step = max(float((quality_result.get('parameters') or {}).get('scan_step_m') or
+                              quality_result.get('step_size_m') or 0.05), 1e-6)
 
-            u_min = float(quality_result.get('projection_u_min_m', du.min()))
-            v_min = float(quality_result.get('projection_v_min_m', dv.min()))
+            u_min = float(quality_result.get('projection', {}).get('u_min_m', du.min()))
+            v_min = float(quality_result.get('projection', {}).get('v_min_m', dv.min()))
+
+            # Cell keys for domain points and window centers
             dkey = np.column_stack((np.floor((du - u_min) / step),
                                     np.floor((dv - v_min) / step))).astype(np.int64)
-            saved_u = np.asarray(windows.get('cell_u', []), dtype=np.int64).reshape(-1)
-            saved_v = np.asarray(windows.get('cell_v', []), dtype=np.int64).reshape(-1)
-            ckey = np.column_stack((saved_u, saved_v)) if len(saved_u) == len(values) and len(saved_v) == len(values) else np.column_stack((np.floor((cu - u_min) / step),
+            ckey = np.column_stack((np.floor((cu - u_min) / step),
                                     np.floor((cv - v_min) / step))).astype(np.int64)
 
-            cell_values = {tuple(k): float(v) for k, v in zip(ckey.tolist(), values.tolist())}
+            # Build cell value map: take max absolute defect per cell
+            cell_values = {}
+            for key, value in zip(ckey.tolist(), values.tolist()):
+                key_t = tuple(int(x) for x in key)
+                if key_t not in cell_values or abs(float(value)) > abs(cell_values[key_t]):
+                    cell_values[key_t] = float(value)
+
+            # Map domain points to cells
             mask = np.asarray([tuple(k) in cell_values for k in dkey], dtype=bool)
             proxy_ids = domain_proxy[mask]
             vals = np.asarray([cell_values[tuple(k)] for k in dkey if tuple(k) in cell_values], dtype=np.float32)
 
+            # Map to display rows
             best = {int(pid): float(value) for pid, value in zip(proxy_ids.tolist(), vals.tolist())}
             displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
             lookup = {int(v): i for i, v in enumerate(displayed)} if len(displayed) == n else None
@@ -697,39 +725,40 @@ class ViewportRenderService:
                 return
 
             finite = values_arr[valid_rows]
-            limit = float((quality_result.get('thresholds') or {}).get('flatness_limit_mm', 1.0))
-            if mode == 'verticality':
-                limit = float((quality_result.get('thresholds') or {}).get('verticality_limit_deg', limit))
+            
+            # Unified heatmap coloring: gray -> yellow -> orange -> red
+            scale = max(float(np.nanpercentile(np.abs(finite), 97)) if len(finite) else limit,
+                        limit * 0.75, 1e-6)
+            t = np.clip(np.abs(finite) / scale, 0, 1)
+            
+            heat_colors = np.zeros((len(t), 3), dtype=np.float32)
+            
+            # Gray (0.75, 0.75, 0.75) -> Yellow (1, 1, 0) -> Orange (1, 0.5, 0) -> Red (1, 0, 0)
+            mask1 = t <= 0.33
+            tt1 = t[mask1] / 0.33
+            heat_colors[mask1, 0] = 0.75 + 0.25 * tt1
+            heat_colors[mask1, 1] = 0.75 + 0.25 * tt1
+            heat_colors[mask1, 2] = 0.75 - 0.75 * tt1
+            
+            mask2 = (t > 0.33) & (t <= 0.66)
+            tt2 = (t[mask2] - 0.33) / 0.33
+            heat_colors[mask2, 0] = 1.0
+            heat_colors[mask2, 1] = 1.0 - 0.5 * tt2
+            heat_colors[mask2, 2] = 0.0
+            
+            mask3 = t > 0.66
+            tt3 = (t[mask3] - 0.66) / 0.34
+            heat_colors[mask3, 0] = 1.0
+            heat_colors[mask3, 1] = 0.5 - 0.5 * tt3
+            heat_colors[mask3, 2] = 0.0
 
-            if mode in ('flatness', 'verticality'):
-                scale = max(limit * 2.0, 1e-6)
-                t = np.clip(np.abs(finite) / scale, 0, 1)
-                colors[rows[valid_rows]] = np.stack([t, 0.55 + 0.35 * (1 - t), 0.08 * (1 - t)], axis=1)
-            elif mode == 'recessed':
-                negative = np.abs(finite[finite < 0])
-                scale = max(float(np.percentile(negative, 98)) if len(negative) else limit, 1e-6)
-                t = np.clip(np.abs(finite) / scale, 0, 1)
-                colors[rows[valid_rows]] = np.stack([
-                    np.clip(0.2 - 0.2 * t, 0, 1),
-                    np.clip(0.5 + 0.3 * t, 0, 1),
-                    np.clip(0.8 + 0.2 * t, 0, 1)
-                ], axis=1)
-            elif mode == 'protruding':
-                positive = np.abs(finite[finite > 0])
-                scale = max(float(np.percentile(positive, 98)) if len(positive) else limit, 1e-6)
-                t = np.clip(np.abs(finite) / scale, 0, 1)
-                colors[rows[valid_rows]] = np.stack([
-                    np.clip(0.5 + 0.5 * t, 0, 1),
-                    np.clip(0.8 - 0.8 * t, 0, 1),
-                    np.clip(0.2 - 0.2 * t, 0, 1)
-                ], axis=1)
+            colors[rows[valid_rows]] = np.clip(heat_colors, 0, 1)
 
             trace('quality.heatmap', mode=mode,
                    windows=len(values), raw=len(domain_raw),
                    proxy=len(domain_proxy), voxels=len(best),
                    displayed=int(np.sum(valid_rows)),
-                   step=f'{step:.4f}',
-                   interval_origin=quality_result.get('interval_origin_m', 0.0))
+                   step=f'{step:.4f}')
 
             self._update_cloud_color(cloud_name, colors)
 

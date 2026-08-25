@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
-RULER_KERNEL_VERSION = "rulermeasure-1.2"
+RULER_KERNEL_VERSION = "ruler-flatness-3d-2.0"
 
 
 def make_frame(normal, points, ruler_dir=None):
@@ -70,7 +70,6 @@ def sor_mask_grid(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
     if n <= k + 1:
         return np.ones(n, dtype=bool)
     
-    # Create 2D grid of (u, w*w_weight)
     x = u.astype(np.float64)
     y = (w * w_weight).astype(np.float64)
     
@@ -86,7 +85,6 @@ def sor_mask_grid(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
     iy = np.clip(((y - ylo) / cell).astype(np.int64) + 1, 0, ny - 1)
     cnt = np.bincount(ix * ny + iy, minlength=nx * ny).reshape(nx, ny)
     
-    # 3x3 neighborhood sum
     csx = np.cumsum(np.pad(cnt, ((1, 1), (0, 0))), axis=0)
     sx = csx[2:] - csx[:-2] + cnt
     csy = np.cumsum(np.pad(sx, ((0, 0), (1, 1))), axis=1)
@@ -103,7 +101,7 @@ def sor_mask_grid(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
         sel, mds = None, md
     
     med = np.median(mds)
-    threshold = med + 4.0 * (1.4826 * np.median(np.abs(mds - med)) + 1e-12)
+    threshold = med + sigma * (1.4826 * np.median(np.abs(mds - med)) + 1e-12)
     keep = np.ones(n, dtype=bool)
     if sel is None:
         keep = md <= threshold
@@ -206,7 +204,6 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     if len(p) < 3:
         raise ValueError("点数不足")
     
-    # Filter NaN/Inf points
     valid_mask = np.all(np.isfinite(p), axis=1)
     if not np.any(valid_mask):
         raise ValueError("所有点坐标均无效（含 nan/inf）")
@@ -285,19 +282,16 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     solid = np.flatnonzero(solid_mask)
     selected = np.flatnonzero(surf & np.isin(bins, solid))
     
-    # Correct top_q implementation: use quantile within each segment
+    # Correct top_q implementation
     tops = []
     for b in solid:
         ix = selected[bins[selected] == b]
         if len(ix):
             if top_q >= 1.0:
-                # Absolute maximum
                 tops.append(ix[np.argmax(w[ix])])
             else:
-                # True quantile: find point closest to quantile value
                 segment_w = w[ix]
                 target_w = np.quantile(segment_w, top_q)
-                # Find point with w closest to target_w
                 closest_idx = ix[np.argmin(np.abs(segment_w - target_w))]
                 tops.append(closest_idx)
     
@@ -305,7 +299,7 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     if len(tops) < 2:
         raise ValueError("实区分段不足以放置靠尺")
     
-    # Holes: find gaps in solid_mask
+    # Holes
     pad = np.r_[True, solid_mask, True]
     hs = np.flatnonzero(~pad[1:-1] & pad[:-2])
     he = np.flatnonzero(~pad[1:-1] & pad[2:]) + 1
@@ -328,7 +322,10 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
 
 
 def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0.2):
-    # Use u_span for default center, not top_u boundaries
+    """Compute ruler flatness at given u_center position.
+    
+    Returns cleaned dict with only essential fields for quality aggregation.
+    """
     if u_center is None:
         u_center = float(0.5 * (surface.u_span[0] + surface.u_span[1]))
     
@@ -346,14 +343,19 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
         }
     
     hull = upper_hull(tu, tw)
-    j = int(np.clip(np.searchsorted(tu[hull], u_center, side="right"), 1, len(hull)-1))
+    # Center of gravity moment balance: find pivot pair straddling u_center
+    cg = float(np.clip(u_center, tu[hull[0]], tu[hull[-1]]))
+    j = int(np.clip(np.searchsorted(tu[hull], cg, side="right"), 1, len(hull)-1))
     p, q = hull[j-1], hull[j]
     slope = (tw[q]-tw[p])/(tu[q]-tu[p])
     intercept = tw[p]-slope*tu[p]
-    gap = (slope*tu+intercept-tw)/np.hypot(1, slope)
+    
+    # Gap: positive = depression (ruler above surface), negative = protrusion
+    # Consistent with rulermeasure.txt: (a*u + c - w) / hypot(1, a)
+    gap = (slope * tu + intercept - tw) / np.hypot(1, slope)
     gi = int(np.argmax(gap))
     
-    # Calculate hole coverage
+    # Hole coverage
     overlap = (np.clip(np.minimum(surface.holes[:, 1], u_center+ruler_length/2) -
                        np.maximum(surface.holes[:, 0], u_center-ruler_length/2), 0, None)
                if surface.holes.size else np.empty(0))
@@ -362,20 +364,18 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
     coverage_valid = hole_ratio <= max_hole_ratio
     
     signed_gap = float(gap[gi])
+    
+    # Return minimal essential fields only
     return {
         "ok": True,
         "u_center": float(u_center),
-        "max_depression": float(max(signed_gap, 0.0)),
-        "signed_gap": signed_gap,
-        "recessed_gap": float(max(signed_gap, 0.0)),
-        "protruding_gap": float(max(-signed_gap, 0.0)),
-        "absolute_gap": float(abs(signed_gap)),
+        "gap_mm": float(max(signed_gap, 0.0)) * 1000.0,  # defect value in mm (always >= 0)
+        "signed_gap_mm": signed_gap * 1000.0,  # signed for advanced analysis
         "depression_u": float(tu[gi]),
         "depression_xyz": surface.to_world(tu[gi], tw[gi]),
         "depression_source_id": int(ts[gi]),
         "angle_deg": float(np.degrees(np.arctan(abs(slope)))),
         "slope": float(slope),
-        "line": (float(slope), float(intercept)),
         "pivots_u": (float(tu[p]), float(tu[q])),
         "pivots_xyz": np.vstack((surface.to_world(tu[p], tw[p]), surface.to_world(tu[q], tw[q]))),
         "pivot_source_ids": (int(ts[p]), int(ts[q])),
