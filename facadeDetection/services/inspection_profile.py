@@ -24,9 +24,18 @@ class InspectionProfile:
     hole_band_m: float = 0.02
     bin_size_m: float = 0.04
     top_q: float = 1.0
+    strip_step_m: float = 0.05
     sor_enabled: bool = True
     sor_sigma: float = 4.0
+    sor_k: int = 8
+    sor_method: str = "local"
+    sor_w_weight: float = 50.0
     scan_step_m: float = 0.05
+    max_hole_ratio: float = 0.20
+    verticality_bin_size_m: float = 0.05
+    verticality_enabled: bool = True
+    parallel_mode: str = "process"
+    n_jobs: int = 4
 
     def snapshot(self) -> dict:
         return asdict(self)
@@ -35,10 +44,12 @@ class InspectionProfile:
 class InspectionProfileService:
     """标准注册表；后续可将注册表替换为数据库，不影响算法接口。"""
     PRESETS = (
-        InspectionProfile("masonry_normal", "普通砌块", "v1.0", "masonry", 8.0, 5.0),
-        InspectionProfile("masonry_precision", "高精砌块", "v1.0", "masonry", 4.0, 4.0),
-        InspectionProfile("timber_formwork", "木模", "v1.0", "formwork", 8.0, 8.0),
-        InspectionProfile("aluminum_formwork", "铝模", "v1.0", "formwork", 4.0, 4.0),
+        InspectionProfile("structure_main", "主体", "v2.0", "structure", 8.0, 10.0),
+        InspectionProfile("plaster_normal", "普通抹灰", "v2.0", "plaster", 4.0, 4.0),
+        InspectionProfile("plaster_advanced", "高级抹灰", "v2.0", "plaster", 3.0, 3.0),
+        InspectionProfile("tile_finish", "饰面砖", "v2.0", "tile", 4.0, 3.0),
+        InspectionProfile("coating_normal", "普通涂饰", "v2.0", "coating", 4.0, 4.0),
+        InspectionProfile("coating_advanced", "高级涂饰", "v2.0", "coating", 3.0, 3.0),
     )
 
     @classmethod

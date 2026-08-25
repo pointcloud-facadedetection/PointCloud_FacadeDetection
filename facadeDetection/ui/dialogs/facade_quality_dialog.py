@@ -107,8 +107,9 @@ class FacadeQualityDialog(QDialog):
         # Overall metrics
         overall = self._quality.get('overall') or {}
         gap = float(overall.get('flatness_max_gap_mm', 0.0) or 0.0)
+        raw_gap = float(overall.get('flatness_raw_max_gap_mm', gap) or gap)
         vangle_raw = overall.get('verticality_max_angle_deg')
-        vgap_raw = overall.get('verticality_max_deviation_mm')
+        vgap_raw = overall.get('verticality_deviation_mm_2m', overall.get('verticality_max_deviation_mm'))
         vangle = float(vangle_raw) if vangle_raw is not None and np.isfinite(vangle_raw) else None
         vgap = float(vgap_raw) if vgap_raw is not None and np.isfinite(vgap_raw) else None
         flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
@@ -140,9 +141,9 @@ class FacadeQualityDialog(QDialog):
 
         meta_text = f"{standard}"
         if vangle is not None:
-            meta_text += f"平整度最大间隙: {gap:.2f} mm    垂直度最大偏差角: {vangle:.3f}°    "
+            meta_text += f"平整度有效最大间隙: {gap:.2f} mm    平整度原始最大间隙: {raw_gap:.2f} mm    垂直度最大偏差角: {vangle:.3f}°    "
         else:
-            meta_text += f"平整度最大间隙: {gap:.2f} mm    垂直度最大偏差角: --    "
+            meta_text += f"平整度有效最大间隙: {gap:.2f} mm    平整度原始最大间隙: {raw_gap:.2f} mm    垂直度最大偏差角: --    "
 
         if vgap is not None:
             meta_text += f"垂直度2m最大偏差: {vgap:.2f} mm    "
@@ -189,6 +190,7 @@ class FacadeQualityDialog(QDialog):
         btn_row.addStretch(1)
         self._mode_combo = QComboBox(self)
         self._mode_combo.addItem('平整度效果', 'flatness')
+        self._mode_combo.addItem('平整度原始极值', 'flatness_raw')
         self._mode_combo.addItem('垂直度效果', 'verticality')
         btn_show = QPushButton("显示检测效果")
         btn_restore = QPushButton("恢复原始颜色")

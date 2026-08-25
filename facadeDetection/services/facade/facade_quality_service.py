@@ -55,8 +55,8 @@ class FacadeQualityService:
             if profile is not None:
                 flatness_limit = profile.flatness_limit_mm / 1000.0
                 verticality_limit_mm = profile.verticality_limit_mm
-                ruler_size = 2.0
-                ruler_step = 0.05
+                ruler_size = float(getattr(profile, 'measure_height_m', ruler_size or 2.0))
+                ruler_step = float(getattr(profile, 'scan_step_m', ruler_step or 0.05))
 
             if self._index_service is None:
                 trace("quality.error", facade_no=facade_no, 
@@ -176,12 +176,14 @@ class FacadeQualityService:
                 ruler_length_m=rsize,
                 ruler_width_m=float(getattr(profile, 'ruler_width_m', .055)),
                 scan_step_m=rstep,
+                strip_step_m=float(getattr(profile, 'strip_step_m', rstep)),
                 select_band_m=float(getattr(profile, 'select_band_m', .01)),
                 hole_band_m=float(getattr(profile, 'hole_band_m', .02)),
                 bin_size_m=float(getattr(profile, 'bin_size_m', .04)),
                 top_q=float(getattr(profile, 'top_q', 1.0)),
                 flatness_limit_mm=float(flatness_limit) * 1000.0,
                 verticality_limit_mm=float(verticality_limit_mm),
+                verticality_bin_size_m=float(getattr(profile, 'verticality_bin_size_m', .05)),
                 min_points=int(getattr(profile, 'min_points', 30)),
                 sor_enabled=bool(getattr(profile, 'sor_enabled', True)),
                 sor_sigma=float(getattr(profile, 'sor_sigma', 4.0)),
@@ -189,7 +191,7 @@ class FacadeQualityService:
                 sor_method=str(getattr(profile, 'sor_method', 'local')),
                 sor_w_weight=float(getattr(profile, 'sor_w_weight', 50.0)),
                 max_hole_ratio=float(getattr(profile, 'max_hole_ratio', .20)),
-                verticality_enabled=False,
+                verticality_enabled=bool(getattr(profile, 'verticality_enabled', True)),
                 plane_model=tuple(float(x) for x in plane_model),
                 interval_size_m=gsize,
                 parallel_mode=str(getattr(profile, 'parallel_mode', 'process')),
@@ -209,7 +211,7 @@ class FacadeQualityService:
                 'plane_model': plane_model.tolist(),
                 'normal': plane_model[:3].tolist(),
                 'center': facade_ref['center'],
-                'measurement_method': 'rulermeasure_star_III',
+                'measurement_method': 'rulermeasure_star_i_vertical_i_v2',
             })
             result.setdefault('thresholds', {}).update({
                 'flatness_limit_mm': float(params.flatness_limit_mm),
