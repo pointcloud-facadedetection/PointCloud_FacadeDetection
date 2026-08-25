@@ -39,6 +39,8 @@ class FacadeDetectionService:
             return None, None
         dataset_id = data.get('dataset_id')
         service = self._pointcloud_service
+        if not dataset_id and service is not None and hasattr(service, 'bind_processing_cloud'):
+            dataset_id = service.bind_processing_cloud(cloud_name)
         dataset = service.get_dataset(dataset_id) if service and dataset_id else None
         return data, dataset
 
@@ -98,11 +100,23 @@ class FacadeDetectionService:
             self._index_service.normalize_facade_indices(facades, proxy_ids)
             self._index_service.populate_voxel_ids(facades, cloud_name)
 
+        # Every persisted/rendered result is tied to the exact processing
+        # dataset.  This prevents a result from a previous denoise revision
+        # being applied to the new proxy rows after project restore.
+        revision = getattr(dataset, 'revision', str(dataset.dataset_id))
+        for facade in facades:
+            facade['dataset_id'] = dataset.dataset_id
+            facade['dataset_revision'] = revision
+            facade['index_space'] = 'proxy_global'
+            facade['review_status'] = facade.get('review_status',
+                                                 facade.get('preview_status', 'pending'))
+            facade['quality_ready'] = facade['review_status'] == 'complete'
+
         trace("facade.detect.done", cloud=cloud_name, facades=len(facades),
               proxy_points=len(proxy_pts), seconds=f"{time.perf_counter()-started:.2f}")
 
-        if project_uuid:
-            self._persist_results(project_uuid, facades)
+        # Detection is a working-set operation.  It must not create a
+        # historical scene before quality evaluation has succeeded.
         return facades
 
     def detect_on_roi(self, cloud_name: str,
@@ -211,13 +225,22 @@ class FacadeDetectionService:
             self._index_service.normalize_facade_indices(facades, roi_proxy_ids)
             self._index_service.populate_voxel_ids(facades, cloud_name)
 
+        revision = getattr(dataset, 'revision', str(dataset.dataset_id))
+        for facade in facades:
+            facade['dataset_id'] = dataset.dataset_id
+            facade['dataset_revision'] = revision
+            facade['index_space'] = 'proxy_global'
+            facade['review_status'] = facade.get('review_status',
+                                                 facade.get('preview_status', 'pending'))
+            facade['quality_ready'] = facade['review_status'] == 'complete'
+
         for facade in facades:
             trace("facade.roi.mapping", facade=facade.get('id'),
                   proxy=len(facade.get('proxy_indices', [])),
                   voxels=facade.get('voxel_count', 0))
 
-        if project_uuid:
-            self._persist_results(project_uuid, facades)
+        # ROI detection is also process data; persistence is committed by the
+        # quality-result transaction, not by this method.
 
         trace("facade.roi.done", cloud=cloud_name, facades=len(facades),
               seconds=f"{time.perf_counter()-started:.2f}")
