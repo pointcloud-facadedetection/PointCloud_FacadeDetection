@@ -7,7 +7,12 @@ from typing import Optional
 from services.dal.project_repo import ProjectRepo
 from services.file_service import FileService
 from services.dal.file_repo import FileRepo
+from utils.logging_utils import log_event
+from models import Facade, QualityMetric
+from db.connection import project_session
+from sqlalchemy import select
 from services.viewport_render_service import ViewportRenderService
+from services.dal.pointcloud_station_repo import PointCloudStationRepo
 
 
 @dataclass
@@ -96,6 +101,9 @@ class ProjectOverviewService:
                                 svc.upload_files(project_uuid=puid, file_path=asset.path, copy_into_project=False)
                         except Exception:
                             pass
+                    # The index branch returns early, so it must explicitly
+                    # rebuild the station projection as well.
+                    PointCloudStationRepo.sync_assets(puid)
                     return ProjectCard(project_id=puid, name=pname, directory_path=str(path))
         except Exception:
             pass
@@ -113,6 +121,7 @@ class ProjectOverviewService:
                         svc.upload_files(project_uuid=p.project_id, file_path=asset.path, copy_into_project=False)
                 except Exception:
                     pass
+                PointCloudStationRepo.sync_assets(p.project_id)
                 return p
         # 未登记则创建新项目（名称取目录名）
         info = ProjectRepo.create_project(name=path.name or "未命名项目")
@@ -127,6 +136,7 @@ class ProjectOverviewService:
             if ply_candidates:
                 svc = self._ensure_file_service()
                 svc.upload_files(project_uuid=pc.project_id, file_path=str(ply_candidates[0]), copy_into_project=False)
+                PointCloudStationRepo.sync_assets(pc.project_id)
         except Exception:
             pass
         return pc
@@ -140,14 +150,52 @@ class ProjectOverviewService:
             ProjectRepo.load_and_activate(project_id)
         except Exception:
             return
+        # Rebuild the station projection before the UI asks for its list.  This
+        # is required for legacy projects whose FileAsset rows predate the
+        # station table.
         try:
-            asset = FileRepo.get_latest_raw_pointcloud(project_id)
-            if asset is not None and self.render_service is not None:
-                svc = self._ensure_file_service()
-                # 请勿将原始文件复制到项目缓存中；原始文件的绝对路径已保存在数据库中
-                svc.upload_files(project_uuid=project_id, file_path=asset.path, copy_into_project=False)
-        except Exception:
-            pass
+            PointCloudStationRepo.sync_assets(project_id)
+        except Exception as exc:
+            log_event(project_id, 'stations.sync_failed', error=str(exc))
+        try:
+            svc = self._ensure_file_service()
+            for asset in FileRepo.list_assets(project_id, pointcloud_only=True):
+                valid, reason = FileRepo.validate_asset(asset)
+                log_event(project_id, 'asset.validate', path=asset.path, result=reason)
+                if valid:
+                    svc.upload_files(project_uuid=project_id, file_path=asset.path, copy_into_project=False)
+                    log_event(project_id, 'asset.loaded', path=asset.path)
+        except Exception as exc:
+            log_event(project_id, 'assets.restore_failed', error=str(exc))
+        # FileService may create/repair FileAsset rows while reopening a
+        # legacy project.  The projection must be rebuilt *after* that work,
+        # otherwise the UI sees an empty station list until the next reopen.
+        try:
+            PointCloudStationRepo.sync_assets(project_id)
+        except Exception as exc:
+            log_event(project_id, 'stations.sync_failed_after_restore', error=str(exc))
+
+    def load_historical_facades(self, project_id: str) -> list[dict]:
+        with project_session(project_id) as s:
+            rows = s.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.id)).scalars().all()
+            result = []
+            for row in rows:
+                metrics = s.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
+                geometry = row.plane_json or {}
+                result.append({'id': row.id, 'type': row.label, 'type_label': row.label,
+                               'area': row.area or 0.0, 'plane': row.plane_json,
+                               'bbox': row.bbox_json,
+                               # Historical results must remain valid quality
+                               # inputs, not merely display summaries.
+                               **{key: geometry[key] for key in (
+                                   'plane_model', 'normal', 'center', 'inlier_indices',
+                                   'proxy_indices', 'measurement_indices', 'voxel_ids',
+                                   'cloud_name', '__index_space') if key in geometry},
+                               'quality_metrics': [{'name': m.metric_name, 'value': m.value,
+                                                    'unit': m.unit, 'pass': m.pass_flag}
+                                                   for m in metrics]})
+            log_event(project_id, 'results.loaded', facades=len(result))
+            return result
 
     def remove_project(self, project_id: str) -> bool:
         return ProjectRepo.delete_project(project_id, hard=False)
@@ -196,18 +244,33 @@ class ProjectOverviewService:
         )
 
     def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:
+        if not project_uuid:
+            raise ValueError('请先新建或选择项目，再上传点云文件。')
         svc = self._ensure_file_service()
         # 这是项目首次载入入口；避免旧项目 geometry 影响 Open3D 初始 fit。
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
         normalized = [str(Path(p).expanduser().resolve()) for p in file_paths if p]
+        # 将同名 PLY/.dist 组合成一个上传任务；.dist 不是独立点云资产。
+        dist_by_stem = {
+            Path(p).stem.lower(): p for p in normalized
+            if Path(p).suffix.lower() == '.dist'
+        }
+        pointclouds = [p for p in normalized if Path(p).suffix.lower() != '.dist']
         uploaded: list[str] = []
-        for p in normalized:
+        for p in pointclouds:
             try:
-                svc.upload_files(project_uuid=project_uuid, file_path=p, copy_into_project=False)
+                dist_path = dist_by_stem.get(Path(p).stem.lower())
+                svc.upload_files(project_uuid=project_uuid, file_path=p,
+                                 distance_path=dist_path,
+                                 copy_into_project=False)
                 uploaded.append(p)
             except Exception as e:
                 print(f"上传失败: {p} -> {e}", flush=True)
+        # FileService persists FileAsset before rendering.  Synchronize the
+        # station projection only after all uploads have completed so the UI
+        # never observes a half-populated station list.
+        PointCloudStationRepo.sync_assets(project_uuid)
         return uploaded
 
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
@@ -215,4 +278,9 @@ class ProjectOverviewService:
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
         res = svc.import_fls_directory(dir_path, project_uuid)
+        # FLS import creates one FileAsset per generated PLY. Refresh the
+        # station registry immediately so the operation page can select all
+        # stations without requiring a second project activation.
+        if project_uuid and res.get('success'):
+            PointCloudStationRepo.sync_assets(project_uuid)
         return res

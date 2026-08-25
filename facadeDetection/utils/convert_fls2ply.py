@@ -5,6 +5,7 @@ import re
 import subprocess
 import shutil
 import time
+import signal
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
@@ -129,6 +130,22 @@ def _write_project_index(project_dir: Path, result: ConversionResult):
         json.dump(index, f, ensure_ascii=False, indent=2)
     print(f"[INFO] 项目索引已写入: {index_path}")
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """在 Windows 上终止转换器及其可能创建的子进程。"""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            proc.kill()
+
 # ============================================================================
 # 对外暴露的转换主函数（关键字传参）
 # ============================================================================
@@ -185,40 +202,40 @@ def convert_fls_to_ply(
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # 不要分别串行读取 stdout/stderr：任一管道写满都会造成死锁。
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             cwd=str(exe.parent),
         )
 
-        if proc.stdout:
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                stdout_lines.append(line)
-                if on_stdout:
-                    on_stdout(line)
-                else:
-                    print(f"[STDOUT] {line}")
-
-        if proc.stderr:
-            for line in proc.stderr:
-                line = line.rstrip("\n")
-                stderr_lines.append(line)
-                if on_stderr:
-                    on_stderr(line)
-                else:
-                    print(f"[STDERR] {line}")
-        proc.wait(timeout=timeout_sec)
+        output, _ = proc.communicate(timeout=timeout_sec)
+        for line in (output or "").splitlines():
+            stdout_lines.append(line)
+            if on_stdout:
+                on_stdout(line)
+            else:
+                print(f"[PROCESS] {line}")
         returncode = proc.returncode
 
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_process_tree(proc)
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
         result.message = f"转换超时（>{timeout_sec}秒）"
         result.stdout_log = stdout_lines
         result.stderr_log = stderr_lines
         return result
     except Exception as e:
+        if proc.poll() is None:
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         result.message = f"子进程异常: {e}"
         result.stdout_log = stdout_lines
         result.stderr_log = stderr_lines
@@ -252,6 +269,7 @@ def convert_fls_to_ply(
                 shutil.copy2(str(json_file), str(dest_json))
     result.scans = scan_metas
 
+    print(f"[INFO] FlSRead.exe 退出码: {returncode}, 耗时: {elapsed:.1f} 秒", flush=True)
     if returncode != 0:
         result.success = False
         result.message = f"FlSRead.exe 返回非零退出码: {returncode} (0x{returncode:08X})"
