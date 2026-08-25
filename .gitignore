@@ -15,10 +15,17 @@ env/
 
 *.db
 *.sqlite
+*.db-shm
+*.db-wal
+*.lock
 uploads/
 
 *.ply
 *.fls
+*.png
+*.json
+*.pdf
+*.npz
 
 .DS_Store
 Thumbs.db

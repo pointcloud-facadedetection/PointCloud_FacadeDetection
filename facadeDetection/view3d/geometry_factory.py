@@ -1,5 +1,4 @@
 import math
-
 import numpy as np
 import open3d as o3d
 
@@ -10,36 +9,6 @@ def make_point_cloud(positions, colors):
     pcd.colors = o3d.utility.Vector3dVector(np.asarray(colors, dtype=np.float64))
     return pcd
 
-
-def make_grid_lines(size=10.0, step=1.0, plane='xz', color=(0.3, 0.3, 0.3)):
-    """创建网格线辅助显示地面/参考平面。"""
-    lines = []
-    colors = []
-    half = size / 2.0
-    n = int(size / step)
-
-    for i in range(n + 1):
-        t = -half + i * step
-        if plane == 'xz':
-            lines.append([t, 0, -half])
-            lines.append([t, 0, half])
-            lines.append([-half, 0, t])
-            lines.append([half, 0, t])
-        elif plane == 'xy':
-            lines.append([t, -half, 0])
-            lines.append([t, half, 0])
-            lines.append([-half, t, 0])
-            lines.append([half, t, 0])
-
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(np.array(lines, dtype=np.float64))
-    line_set.lines = o3d.utility.Vector2iVector(
-        [[i, i + 1] for i in range(0, len(lines), 2)]
-    )
-    line_set.colors = o3d.utility.Vector3dVector(
-        np.tile(np.asarray(color, dtype=np.float64), (len(lines) // 2, 1))
-    )
-    return line_set
 
 def make_bbox(min_bound, max_bound, color=(0.3, 0.8, 1.0)):
     bbox = o3d.geometry.AxisAlignedBoundingBox(
