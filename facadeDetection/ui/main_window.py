@@ -127,7 +127,7 @@ class MainWindow(QMainWindow):
         self.header_buttons = {}
         self.page_header_layouts = {}
         self.page_title_labels = {}
-        self._sidebar_collapsed = {'left': False, 'right': False}
+        self._sidebar_collapsed = {'left': True, 'right': False}
         # 默认定位到 data/projects，便于跨机迁移
         try:
             Storage.ensure_base_dirs()
@@ -315,6 +315,11 @@ class MainWindow(QMainWindow):
 
         self.left_sidebar_expand_button = self._create_sidebar_expand_button('left')
         self.right_sidebar_expand_button = self._create_sidebar_expand_button('right')
+        self._collapse_sidebar(
+            'left',
+            self.left_dock,
+            self.left_sidebar_expand_button,
+        )
         return page
 
     def _on_standard_changed(self, _index):
@@ -364,7 +369,14 @@ class MainWindow(QMainWindow):
         panel = self.left_dock.findChild(QWidget, 'leftDockPanel')
         if panel is None:
             return
-        lay = QVBoxLayout(panel)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.photo_match_panel = QWidget()
+        self.photo_match_panel.setObjectName('photoMatchPanel')
+        self.photo_match_panel.setVisible(False)
+        lay = QVBoxLayout(self.photo_match_panel)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(8)
 
@@ -398,6 +410,7 @@ class MainWindow(QMainWindow):
         self.lbl_photo_match_status.setStyleSheet('color:#5b626d; font-size:12px;')
         lay.addWidget(self.lbl_photo_match_status)
         lay.addStretch(1)
+        outer.addWidget(self.photo_match_panel)
 
         self.btn_upload_photo.clicked.connect(self._open_upload_photo_dialog)
         self.btn_annotate_matches.clicked.connect(self._enter_photo_annotate_mode)
@@ -860,6 +873,8 @@ class MainWindow(QMainWindow):
             if key == 'project_operation'
         )
         self.set_current_page(operation_index)
+        if hasattr(self, 'photo_match_panel'):
+            self.photo_match_panel.setVisible(True)
         if self._sidebar_collapsed.get('left'):
             self._expand_sidebar(
                 'left',
