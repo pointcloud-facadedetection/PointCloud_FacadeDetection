@@ -36,6 +36,17 @@ class ViewportRenderService:
             self.viewport.add_cloud(name, points, colors)
         else:
             raise RuntimeError('Viewport does not support adding point cloud data')
+        # Do not rely on the renderer to preserve business metadata.  The
+        # FileService normally binds this immediately; this fallback also
+        # covers alternative viewport adapters and makes the contract visible.
+        try:
+            data = self.viewport.get_cloud_data(name)
+            if data is not None:
+                data.setdefault('domain', 'proxy')
+                data.setdefault('index_space', 'proxy_global')
+                data.setdefault('proxy_ids', np.arange(len(points), dtype=np.int32))
+        except Exception:
+            pass
 
     def clear_station_scene(self):
         for name in list(self.viewport.get_cloud_names() if hasattr(self.viewport, 'get_cloud_names') else []):
@@ -43,7 +54,51 @@ class ViewportRenderService:
                 self.viewport.remove_cloud(name)
 
     def show_station_cloud(self, station_id, name, points, colors=None):
-        self.show_point_cloud(f'pcfd.station.{station_id}.{name}', points, colors)
+        cloud_name = f'pcfd.station.{station_id}.{name}'
+        self.show_point_cloud(cloud_name, points, colors)
+        # Station clouds are raw review resources, not proxy datasets.  Undo
+        # the generic renderer defaults explicitly so the resolver can never
+        # select them for processing.
+        try:
+            data = self.viewport.get_cloud_data(cloud_name)
+            if data is not None:
+                data.update({'domain': 'source', 'index_space': 'raw_global',
+                             'is_processing_cloud': False})
+                data.pop('dataset_id', None)
+                data.pop('proxy_ids', None)
+        except Exception:
+            pass
+
+    def _proxy_rows_for_display(self, cloud_name, proxy_ids):
+        """Convert dataset-global proxy IDs to current viewport row IDs."""
+        data = self.viewport.get_cloud_data(cloud_name)
+        if data is None:
+            return np.empty(0, dtype=np.int64)
+        ids = np.asarray(proxy_ids, dtype=np.int64).reshape(-1)
+        displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64).reshape(-1)
+        n = len(data.get('pos', []))
+        if len(displayed) == n:
+            lookup = {int(value): row for row, value in enumerate(displayed.tolist())}
+            return np.asarray([lookup.get(int(value), -1) for value in ids], dtype=np.int64)
+        # Freshly loaded clouds use identity proxy rows.
+        return ids
+
+    def facade_color_for(self, facade: dict, order: int = 0):
+        """Return the discrete color shared by viewport and result panel."""
+        palette = getattr(Config, 'FACADE_INSTANCE_COLORS', []) or []
+        if palette:
+            try:
+                return tuple(palette[int(facade.get('id', order)) % len(palette)])
+            except Exception:
+                return tuple(palette[order % len(palette)])
+        ftype = str(facade.get('type') or facade.get('type_label') or '').lower()
+        if 'horizontal' in ftype:
+            color = self._facade_colors.get('horizontal')
+        elif 'inclined' in ftype:
+            color = self._facade_colors.get('inclined')
+        else:
+            color = self._facade_colors.get('vertical_facade')
+        return tuple(color or (0.2, 0.65, 0.95))
 
     def show_image(self, name: str, image: np.ndarray):
         if hasattr(self.viewport, 'show_image'):
@@ -118,44 +173,31 @@ class ViewportRenderService:
             except Exception:
                 pass
 
-            instance_colors = getattr(Config, 'FACADE_INSTANCE_COLORS', [])
             for order, f in enumerate(facades or []):
-                ftype = str(f.get('type') or f.get('type_label') or '').lower()
-                col = None
-                if 'vertical' in ftype:
-                    col = self._facade_colors.get('vertical_facade')
-                elif 'horizontal' in ftype:
-                    col = self._facade_colors.get('horizontal')
-                else:
-                    col = self._facade_colors.get('inclined') or self._facade_colors.get('vertical_facade')
-
-                # 实例色优先于类型色，使相邻立面即使同属 vertical_facade
-                # 也能在视口中被清晰区分；选择高亮仍具有最高优先级。
-                if instance_colors:
-                    try:
-                        color_index = int(f.get('id', order)) % len(instance_colors)
-                    except Exception:
-                        color_index = order % len(instance_colors)
-                    col = instance_colors[color_index]
-
-                # Apply highlight if selected
-                try:
-                    fid = int(f.get('id', -1))
-                except Exception:
-                    fid = -1
-                if self._selected_facade_id is not None and fid == self._selected_facade_id:
-                    col = self._highlight_color
+                col = self.facade_color_for(f, order)
 
                 if col is None:
                     continue
                 col = np.asarray(col, dtype=np.float32)
 
-                idx = np.asarray(f.get('inlier_indices') or [], dtype=int)
+                # Detection service guarantees proxy_global after normalization.
+                # Never fall back to algorithm-local indices here.
+                proxy_ids = f.get('proxy_indices', [])
+                if not proxy_ids:
+                    proxy_ids = f.get('inlier_indices', [])
+                idx = self._proxy_rows_for_display(cloud_name, proxy_ids)
                 m = (idx >= 0) & (idx < n)
                 idx = idx[m]
                 if len(idx):
                     colors[idx] = col
 
+            trace('facade.color', cloud=cloud_name,
+                  facades=len(facades or []), displayed_points=n,
+                  valid_proxy_indices=int(sum(
+                      len(self._proxy_rows_for_display(cloud_name,
+                          f.get('proxy_indices') or f.get('inlier_indices', [])))
+                       for f in (facades or []))),
+                  colored=int(np.sum(np.any(colors != np.asarray(base_color), axis=1))))
             self._update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
@@ -176,22 +218,14 @@ class ViewportRenderService:
             self._highlight_color = tuple(highlight)
 
     def select_facade(self, cloud_name: str, facade_id: int) -> None:
-        """根据 ID 突出显示单个立面，同时保持其他立面的文字颜色统一。"""
+        """记录选中立面；立面颜色层保持确定性，不重复重绘。"""
         try:
             self._selected_facade_id = int(facade_id)
         except Exception:
             self._selected_facade_id = None
-        facades = self._facades_cache.get(cloud_name) or []
-        if facades:
-            self.highlight_facades(cloud_name, facades)
 
     def clear_selected_facade(self, cloud_name: str | None = None) -> None:
         self._selected_facade_id = None
-        if cloud_name is None:
-            return
-        facades = self._facades_cache.get(cloud_name) or []
-        if facades:
-            self.highlight_facades(cloud_name, facades)
 
     def set_global_point_color(self, color: Tuple[float, float, float]) -> None:
         """在视口内将整个点云场景统一着色."""
@@ -230,14 +264,11 @@ class ViewportRenderService:
             valid = (idx >= 0) & (idx < n)
             if not np.any(valid):
                 return
-            original = data.get('color')
-            # Keep RGB only when it is sufficiently dark; bright source RGB
-            # makes defect colors unreadable in the 3D view.
-            if original is not None and np.asarray(original).shape == (n, 3):
-                source = np.asarray(original, dtype=np.float32)
-                colors = np.clip(source * 0.35, 0.0, 0.42)
-            else:
-                colors = np.tile(np.asarray(base_color, dtype=np.float32), (n, 1))
+            # Do not blend source RGB here.  A previous heatmap/highlight may
+            # otherwise be used as the next base and produces the observed
+            # white gradient.  Rendering always starts from a deterministic
+            # neutral base.
+            colors = np.tile(np.asarray(base_color, dtype=np.float32), (n, 1))
             colors[idx[valid]] = np.clip(rgb[valid] * 1.15, 0.0, 1.0)
             self._update_cloud_color(cloud_name, colors)
         except Exception as e:
@@ -527,7 +558,8 @@ class ViewportRenderService:
             # Fallback: 基于平面距离着色
             all_indices, all_values = [], []
             for f in facades or []:
-                idx = np.asarray(f.get('inlier_indices', []) or [], dtype=int)
+                idx = self._proxy_rows_for_display(
+                    cloud_name, f.get('proxy_indices', f.get('inlier_indices', [])))
                 idx = idx[(idx >= 0) & (idx < n_total)]
                 if len(idx) == 0:
                     continue
@@ -571,8 +603,18 @@ class ViewportRenderService:
             mode = quality_result.get('heatmap_mode', 'flatness')
             windows = quality_result.get('windows')
 
+            if isinstance(windows, list):
+                # v2 quality results are records per ruler position.  Adapt
+                # them at the rendering boundary; the algorithm contract
+                # remains list-based and JSON serializable.
+                windows = {
+                    'center_xyz': np.asarray([r.get('center_xyz', [np.nan] * 3) for r in windows]),
+                    'flatness_gap_mm': np.asarray([r.get('flatness_gap_mm', np.nan) for r in windows]),
+                    'flatness_signed_gap_mm': -np.asarray([r.get('flatness_gap_mm', np.nan) for r in windows]),
+                    'verticality_angle_deg': np.asarray([r.get('verticality_angle_deg', np.nan) for r in windows]),
+                }
             if not isinstance(windows, dict):
-                raise ValueError('质量结果缺少 windows 数组')
+                raise ValueError('质量结果缺少 windows 数据')
 
             if index_service is None:
                 return

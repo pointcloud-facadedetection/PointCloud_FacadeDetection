@@ -9,7 +9,6 @@ import numpy as np
 
 from utils.array_utils import as_array, valid_ids
 from utils.logging_utils import trace
-from config.settings import Config
 
 
 class FacadeIndexService:
@@ -150,74 +149,13 @@ class FacadeIndexService:
         if len(raw_indices) == 0:
             return np.empty(0, np.int32), {'error': 'no_raw_indices'}
 
-        # === 使用原始点进行平面距离计算 ===
-        pts = source_points[raw_indices] if source_points is not None else np.empty((0, 3))
-
-        plane_model = np.asarray(facade.get('plane_model', []), dtype=np.float64)
-        if plane_model.shape[0] != 4:
-            return raw_indices, {'warning': 'invalid_plane_model', 'raw_count': len(raw_indices)}
-
-        norm = np.linalg.norm(plane_model[:3])
-        if norm < 1e-12:
-            return raw_indices, {'warning': 'degenerate_plane', 'raw_count': len(raw_indices)}
-
-        plane_model = plane_model / norm
-        n = plane_model[:3]
-        d = float(plane_model[3])
-
-        signed_dist = pts @ n + d
-
-        voxel_size = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
-        detect_tol = float(getattr(Config, 'DETECT_DIST_TOL_MM', 20.0)) / 1000.0
-        voxel_error = voxel_size * np.sqrt(3.0)
-
-        median_dist = float(np.median(signed_dist)) if len(signed_dist) else 0.0
-        mad_dist = float(np.median(np.abs(signed_dist - median_dist))) if len(signed_dist) else 0.0
-        robust_sigma = 1.4826 * mad_dist
-
-        base_limit = max(
-            float(getattr(Config, 'FACADE_QUALITY_DEPTH_MIN_M', 0.02)),
-            voxel_error + detect_tol + float(getattr(Config, 'FACADE_QUALITY_DEPTH_MULT', 3.0)) * robust_sigma,
-        )
-
-        depth_span = float(np.max(signed_dist) - np.min(signed_dist)) if len(signed_dist) > 0 else 0.0
-        adaptive_max = max(
-            float(getattr(Config, 'FACADE_QUALITY_DEPTH_MAX_M', 0.50)),
-            min(depth_span * 0.5, 2.0)
-        )
-        distance_limit = min(base_limit, adaptive_max)
-
-        trace("quality.domain.depth",
-              base_limit=f"{base_limit:.3f}",
-              adaptive_max=f"{adaptive_max:.3f}",
-              final_limit=f"{distance_limit:.3f}",
-              depth_span=f"{depth_span:.3f}")
-
-        main_mask = np.abs(signed_dist - median_dist) <= distance_limit
-        defect_mask = (~main_mask) & (np.abs(signed_dist - median_dist) <= distance_limit * 2.0)
-        valid_mask = main_mask | defect_mask
-        quality_indices = raw_indices[valid_mask]
-
-        main_count = int(np.sum(main_mask))
-        defect_count = int(np.sum(defect_mask))
-        filtered_out = int(len(raw_indices) - len(quality_indices))
-
+        # 质量域只负责 proxy -> source/raw 映射。禁止在这里计算或执行平面
+        # 深度过滤；靠尺内核独占 SOR、空洞和表面判定。
+        quality_indices = np.asarray(raw_indices, dtype=np.int64)
         stats = {
             'voxel_count': int(facade.get('voxel_count', 0)),
             'proxy_count': int(len(proxy_indices)),
-            'raw_before_filter': int(len(raw_indices)),
-            'raw_after_filter': int(len(quality_indices)),
-            'main_depth_count': main_count,
-            'defect_count': defect_count,
-            'filtered_out': filtered_out,
-            'distance_limit_mm': float(distance_limit * 1000.0),
-            'adaptive_max_mm': float(adaptive_max * 1000.0),
-            'depth_span_mm': float(depth_span * 1000.0),
-            'signed_dist_median_mm': float(median_dist * 1000.0),
-            'signed_dist_mad_mm': float(mad_dist * 1000.0),
-            'signed_dist_mean_mm': float(np.mean(signed_dist) * 1000.0) if len(signed_dist) else 0.0,
-            'signed_dist_std_mm': float(np.std(signed_dist) * 1000.0) if len(signed_dist) else 0.0,
-            'signed_dist_p99_mm': float(np.percentile(np.abs(signed_dist), 99) * 1000.0) if len(signed_dist) else 0.0,
+            'raw_count': int(len(quality_indices)),
             'source_mapping': index.has_source_mapping(),
         }
 
@@ -246,6 +184,10 @@ class FacadeIndexService:
         dataset = self._get_dataset(cloud_name)
         if dataset is None:
             return np.empty(0, dtype=np.int32)
+        # Source ids belong to the high-fidelity domain when CSR mapping is
+        # present; raw_to_voxel_ids addresses the processed proxy store only.
+        if dataset.index.has_source_mapping():
+            return dataset.index.source_to_proxy_ids(raw_indices)
         return dataset.index.raw_to_voxel_ids(raw_indices)
 
     def get_raw_count_for_facade(self, cloud_name: str, facade: dict) -> int:
