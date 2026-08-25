@@ -24,7 +24,7 @@ from utils.file_lifecycle import ensure_project_folders, gc_project, validate_pa
 class ProjectRepo:
     @staticmethod
     def create_project(name: str, org_unit: str | None = None, address: str | None = None,
-                       remarks: str | None = None) -> dict:
+                       remarks: str | None = None, building_floor: str | None = None) -> dict:
         project_uuid = str(_uuid.uuid4())
         # New: create dirs by pinyin abbreviation of name and initialize pcfd index
         try:
@@ -78,6 +78,7 @@ class ProjectRepo:
                 org_unit=org_unit,
                 address=address,
                 remarks=remarks,
+                building_floor=building_floor,
                 root_dir=str(dirs["root"]),
             )
             s.add(proj)

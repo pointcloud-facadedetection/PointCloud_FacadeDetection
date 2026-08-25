@@ -43,6 +43,7 @@ class ProjectOverviewService:
         org_unit: str | None = None,
         address: str | None = None,
         remarks: str | None = None,
+        building_floor: str | None = None,
     ) -> ProjectCard:
         """创建持久化项目，并向 UI 返回统一的项目卡片模型。"""
         info = ProjectRepo.create_project(
@@ -50,6 +51,7 @@ class ProjectOverviewService:
             org_unit=org_unit,
             address=address,
             remarks=remarks,
+            building_floor=building_floor,
         )
         return ProjectCard(
             project_id=info["project_uuid"],

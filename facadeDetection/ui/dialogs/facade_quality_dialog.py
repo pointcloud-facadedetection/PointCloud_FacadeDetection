@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable, Optional
+import math
 import numpy as np
 
 from PySide6.QtCore import Qt
@@ -30,9 +31,10 @@ class FacadeQualityDialog(QDialog):
 
     def __init__(self, parent: Optional[QWidget], facade_label: str, quality_result: dict,
                  on_show_colors: Optional[Callable[[], None]] = None,
-                 on_restore_colors: Optional[Callable[[], None]] = None):
+                 on_restore_colors: Optional[Callable[[], None]] = None,
+                 project_name: str = ''):
         super().__init__(parent)
-        self.setWindowTitle(f"立面质量评估 - {facade_label}")
+        self.setWindowTitle(f"{project_name} - {facade_label} 质量评估结果" if project_name else f"{facade_label} 质量评估结果")
         self.resize(1000, 700)
         self.setStyleSheet("""
             QDialog { background: #f3f5f8; }
@@ -128,6 +130,14 @@ class FacadeQualityDialog(QDialog):
         profile = self._quality.get('profile_snapshot') or {}
         standard = f"标准：{profile.get('standard_name', '未指定')} {profile.get('version', '')}"
 
+        summary = QLabel(
+            f"当前评估标准：{profile.get('standard_name', '未指定')}｜"
+            f"立面整体平整度平均合格率：{flat_rate:.1f} %｜"
+            f"立面整体垂直度平均合格率：{vert_rate:.1f} %"
+        )
+        summary.setStyleSheet('font-weight:700; padding:10px; background:#FFFFFF; border:1px solid #DCE2E8; border-radius:6px;')
+        layout.addWidget(summary)
+
         meta_text = f"{standard}"
         if vangle is not None:
             meta_text += f"平整度最大间隙: {gap:.2f} mm    垂直度最大偏差角: {vangle:.3f}°    "
@@ -162,12 +172,12 @@ class FacadeQualityDialog(QDialog):
             f"区间：{interval_size:g}m，共{interval_count}个"
         ))
 
-        self._table = table = QTableWidget(0, 10, self)
+        self._table = table = QTableWidget(0, 8, self)
         table.setObjectName('tblQualityGrids')
         table.setHorizontalHeaderLabels([
-            "区间", "状态", "点数", "窗口数", "有效窗口",
-            "平整度最大间隙(mm)", "平整度合格率(%)", "质量合格率(%)",
-            "垂直度最大偏差角(°)", "垂直度最大偏差(mm)"
+            "区间正确高度", "区间对应点数", "实际窗口数", "合格窗口数",
+            "平整度最大间隙(mm)", "区间平整度合格率(%)",
+            "垂直度最大偏差(mm)", "垂直度合格率(%)"
         ])
         self._refresh_intervals()
         table.resizeColumnsToContents()
@@ -214,27 +224,20 @@ class FacadeQualityDialog(QDialog):
         intervals = self._quality.get('intervals') or []
         self._table.setRowCount(len(intervals))
         for r, item in enumerate(intervals):
-            status = item.get('status', 'ok')
-            status_text = '✓' if status == 'ok' else ('⚠ ' + status if status != 'ok' else '✓')
-
             vals = [
                 str(item.get('label') or (
                     f"{float(item.get('v_min_m', 0.0)):.2f}–"
                     f"{float(item.get('v_max_m', 0.0)):.2f}m"
                 )),
-                status_text,
                 str(item.get('point_count', 0)),
                 str(item.get('window_count', 0)),
                 str(item.get('valid_window_count', 0)),
                 f"{float(item.get('flatness_max_gap_mm', 0)):.2f}",
                 f"{float(item.get('flatness_pass_rate', 0))*100:.1f}",
-                f"{float(item.get('quality_pass_rate', 0))*100:.1f}",
-                f"{float(item.get('verticality_max_angle_deg', 0)):.3f}",
                 f"{float(item.get('verticality_max_deviation_mm_2m', 0)):.2f}",
+                f"{float(item.get('verticality_pass_rate', 0))*100:.1f}",
             ]
             for c, value in enumerate(vals):
                 cell = QTableWidgetItem(value)
-                if status != 'ok':
-                    cell.setForeground(Qt.GlobalColor.gray)
                 self._table.setItem(r, c, cell)
         self._table.resizeColumnsToContents()

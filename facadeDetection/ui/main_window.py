@@ -43,6 +43,9 @@ import numpy as np
 from qtwebview2 import QtWebView2Widget
 
 from .widgets.flow_layout import FlowLayout
+from .widgets.station_panel import StationPanel
+from .widgets.pointcloud_controls import PointCloudControls
+from .widgets.facade_panel import FacadePanel
 from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
@@ -81,8 +84,6 @@ PAGE_HEADER_ACTIONS = {
         ('新建项目', 'btn_new_project'),
     ),
     'project_operation': (
-        ('重置视图', 'btn_reset_view'),
-        ('改变颜色', 'btn_change_color'),
         ('点云去噪', 'btn_denoise'),
         ('点云配准', 'btn_registration'),
         ('框选检测区域', 'btn_select_detection_area'),
@@ -140,7 +141,6 @@ PAGE_HEADER_GROUPS = {
         ),
     ),
     'project_operation': (
-        ('视图', ('btn_reset_view', 'btn_change_color')),
         ('点云处理', ('btn_denoise', 'btn_registration')),
         (
             '区域处理',
@@ -951,7 +951,7 @@ class MainWindow(QMainWindow):
         self.operation_splitter.setStretchFactor(2, 0)
         # Keep both side panels usable at the default 1600px window width;
         # the result rows contain an action control and must not be squeezed.
-        self.operation_splitter.setSizes([230, 940, 300])
+        self.operation_splitter.setSizes([230, 850, 390])
         body_layout.addWidget(self.operation_splitter, 1)
         return page
 
@@ -983,12 +983,14 @@ class MainWindow(QMainWindow):
         self.lbl_facade_summary = QLabel('未检测')
         self.lbl_facade_summary.setObjectName('lblFacadeSummary')
         self.lbl_facade_summary.setStyleSheet('color:#5b626d;')
-        self.lbl_facade_summary.setMinimumHeight(28)
+        self.lbl_facade_summary.setMinimumHeight(42)
+        self.lbl_facade_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.lbl_facade_summary)
         self.btn_evaluate_selected = QPushButton('评估选中立面')
         self.btn_evaluate_selected.setToolTip('对右侧列表当前选中的立面执行质量评估')
         self.btn_evaluate_selected.clicked.connect(self._evaluate_selected_facade)
         lay.addWidget(self.btn_evaluate_selected)
+        self.btn_evaluate_selected.setMinimumHeight(34)
         # 条目点击只选中/高亮，质量计算由条目右侧独立按钮触发。
         from PySide6.QtWidgets import QListWidget
         self.list_facades = QListWidget()
@@ -1245,7 +1247,8 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f'[PCFD] ui.restore_error facade_id={facade_id} error={e}', flush=True)
 
-        label = f"#{facade_no} (ID:{facade_id}) {str(facade.get('type_label') or facade.get('type') or '-')}"
+        label = f'立面 {facade_no}'
+        project_name = getattr(self.current_project, 'name', '') if self.current_project else ''
 
         # Ensure quality is a dict
         if not isinstance(quality, dict):
@@ -1253,7 +1256,8 @@ class MainWindow(QMainWindow):
             quality = {}
 
         try:
-            dlg = FacadeQualityDialog(self, label, quality, 
+            dlg = FacadeQualityDialog(self, label, quality,
+                                      project_name=project_name,
                                       on_show_colors=_show_effect, 
                                       on_restore_colors=_restore)
             dlg.exec()
@@ -1684,31 +1688,26 @@ class MainWindow(QMainWindow):
         panel.setObjectName(f'{object_name}Panel')
         panel.setProperty('uiRole', 'sidebarBody')
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        panel.setStyleSheet('font-size:12px;')
         sidebar_layout.addWidget(panel, 1)
         if side == 'left':
             content = QVBoxLayout(panel)
             content.setContentsMargins(12, 12, 12, 12)
             content.setSpacing(8)
-            station_title = QLabel('多站点 PLY 文件管理')
-            station_title.setProperty('uiRole', 'sectionTitle')
-            content.addWidget(station_title)
-            self.station_list = QListWidget()
-            self.station_list.setObjectName('stationList')
-            self.station_list.setWordWrap(False)
+            station = StationPanel()
+            self.station_list = station.list
             self.station_list.setToolTip('单击站点切换视图；复选框用于多选')
             self.station_list.itemClicked.connect(self._on_station_clicked)
             self.station_list.itemChanged.connect(self._on_station_item_changed)
-            content.addWidget(self.station_list, 1)
-            buttons = QHBoxLayout()
-            delete_button = QPushButton('删除站点')
-            merge_button = QPushButton('合并显示')
-            delete_button.setProperty('buttonRole', 'danger')
-            merge_button.setProperty('buttonRole', 'primary')
-            delete_button.clicked.connect(self._delete_stations)
-            merge_button.clicked.connect(self._merge_stations)
-            buttons.addWidget(delete_button)
-            buttons.addWidget(merge_button)
-            content.addLayout(buttons)
+            station.delete_requested.connect(self._delete_stations)
+            station.merge_requested.connect(self._merge_stations)
+            content.addWidget(station, 3)
+            controls = PointCloudControls()
+            controls.reset_view_requested.connect(self.project_operation_service.reset_view)
+            controls.change_color_requested.connect(self.project_operation_service.change_color)
+            controls.point_size_changed.connect(self.viewport.set_all_point_size)
+            self.pointcloud_controls = controls
+            content.addWidget(controls, 1)
         sidebar.setMinimumWidth(200 if side == 'left' else 260)
         sidebar.setMaximumWidth(280 if side == 'left' else 380)
         sidebar.setProperty('expandedWidth', 230 if side == 'left' else 320)
@@ -1869,8 +1868,6 @@ class MainWindow(QMainWindow):
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
-            'btn_reset_view': self.project_operation_service.reset_view,
-            'btn_change_color': self.project_operation_service.change_color,
             'btn_denoise': self.project_operation_service.denoise,
             'btn_registration': self._run_station_registration,
             'btn_select_detection_area': (
@@ -1984,6 +1981,7 @@ class MainWindow(QMainWindow):
             org_unit=payload.get('org_unit'),
             address=payload.get('address'),
             remarks=payload.get('remarks'),
+            building_floor=payload.get('building_floor'),
         )
         self._refresh_project_list()
         self._activate_project(project)
@@ -2122,8 +2120,19 @@ class MainWindow(QMainWindow):
         projects = self.project_overview_service.list_projects()
         self._update_overview_workspace()
         if not projects:
-            empty_state = TechnicalCanvas('facade', '暂无项目')
+            empty_state = QWidget()
             empty_state.setObjectName('projectEmptyState')
+            empty_state.setStyleSheet('background:#FFFFFF;')
+            empty_layout = QVBoxLayout(empty_state)
+            empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title = QLabel('瑞捷建筑外立面质量检测平台')
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title.setStyleSheet('font-size:30px;font-weight:700;color:#334155;')
+            hint = QLabel('请新建 / 打开一个项目开始外立面质量检测工作')
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setStyleSheet('font-size:16px;color:#94A3B8;margin-top:10px;')
+            empty_layout.addWidget(title)
+            empty_layout.addWidget(hint)
             self.project_list_layout.insertWidget(0, empty_state, 1)
             self.project_list_layout.setStretch(1, 0)
             return
@@ -2422,6 +2431,8 @@ class MainWindow(QMainWindow):
         total_width = max(sum(sizes), self.operation_splitter.width())
         side_index = 0 if side == 'left' else 2
         other_index = 2 if side == 'left' else 0
+        sizes[side_index] = target_width
+        sizes[1] = max(1, total_width - target_width - sizes[other_index])
         sizes[side_index] = target_width
         sizes[1] = max(1, total_width - target_width - sizes[other_index])
         self.operation_splitter.setSizes(sizes)
