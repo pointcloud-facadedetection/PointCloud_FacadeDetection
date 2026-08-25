@@ -17,6 +17,7 @@ class Project(Base):
     org_unit = Column(String, nullable=True)
     address = Column(String, nullable=True)
     remarks = Column(String, nullable=True)
+    building_floor = Column(String, nullable=True)
     root_dir = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
