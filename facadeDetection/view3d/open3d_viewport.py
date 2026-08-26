@@ -509,6 +509,9 @@ class Open3DViewport(BaseViewport):
             self.clear_pick_markers()
 
     def clear(self):
+        if getattr(self._adapter, '_destroyed', False):
+            self._scene.clear()
+            return
         self.clear_pick_markers()
         self._scene.clear()
         self._scene_view_initialized = False
