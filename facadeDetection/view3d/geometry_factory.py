@@ -42,6 +42,32 @@ def make_sphere(point, color, radius):
     return mesh
 
 
+def make_axes_cross(point, color, size):
+    origin = np.asarray(point, dtype=np.float64).reshape(3)
+    arm = float(max(size, 1e-4))
+    pts = np.vstack(
+        [
+            origin,
+            origin + [arm, 0.0, 0.0],
+            origin,
+            origin - [arm, 0.0, 0.0],
+            origin,
+            origin + [0.0, arm, 0.0],
+            origin,
+            origin - [0.0, arm, 0.0],
+            origin,
+            origin + [0.0, 0.0, arm],
+            origin,
+            origin - [0.0, 0.0, arm],
+        ]
+    )
+    lines = o3d.geometry.LineSet()
+    lines.points = o3d.utility.Vector3dVector(pts)
+    lines.lines = o3d.utility.Vector2iVector([[i, i + 1] for i in range(0, 12, 2)])
+    lines.colors = o3d.utility.Vector3dVector(np.tile([list(color)], (6, 1)))
+    return lines
+
+
 def make_pair_lines(src_points, tgt_points):
     src = np.asarray(src_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(tgt_points, dtype=np.float64).reshape(-1, 3)

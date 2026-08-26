@@ -121,14 +121,8 @@ class ViewportRenderService:
                 else:
                     col = self._facade_colors.get('inclined') or self._facade_colors.get('vertical_facade')
 
-                # 实例色优先于类型色，使相邻立面即使同属 vertical_facade
-                # 也能在视口中被清晰区分；选择高亮仍具有最高优先级。
                 if instance_colors:
-                    try:
-                        color_index = int(f.get('id', order)) % len(instance_colors)
-                    except Exception:
-                        color_index = order % len(instance_colors)
-                    col = instance_colors[color_index]
+                    col = Config.facade_instance_color(f.get('id', order), order)
 
                 # Apply highlight if selected
                 try:

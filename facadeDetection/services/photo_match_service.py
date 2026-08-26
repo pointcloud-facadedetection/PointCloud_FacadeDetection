@@ -30,6 +30,7 @@ class PhotoMatchState:
     annotating: bool = False
     next_is_photo: bool = True
     pose: Optional[dict] = None
+    match_mode: str = 'manual'
 
 
 class PhotoMatchService:
@@ -55,6 +56,7 @@ class PhotoMatchService:
         self.state.annotating = False
         self.state.next_is_photo = True
         self.state.pose = None
+        self.state.match_mode = 'manual'
         return image
 
     def complete_pair_count(self) -> int:
@@ -78,6 +80,7 @@ class PhotoMatchService:
             )
         self.state.next_is_photo = False
         self.state.pose = None
+        self.state.match_mode = 'manual'
 
     def add_cloud_point(self, point) -> None:
         if not self.state.annotating:
@@ -92,6 +95,7 @@ class PhotoMatchService:
             last.cloud = xyz
         self.state.next_is_photo = True
         self.state.pose = None
+        self.state.match_mode = 'manual'
 
     def undo_last(self) -> None:
         if not self.state.correspondences:
@@ -136,4 +140,52 @@ class PhotoMatchService:
             image_height=self.state.image_height,
         )
         self.state.pose = result
+        self.state.match_mode = 'manual'
         return result
+
+    def apply_auto_match_result(self, result: dict) -> dict:
+        """把自动匹配得到的 2D-3D 对应点与位姿写入当前状态。"""
+        correspondences = list(result.get('correspondences') or [])
+        inlier_indices = result.get('inlier_indices') or []
+        if inlier_indices:
+            selected = []
+            for idx in inlier_indices:
+                try:
+                    selected.append(correspondences[int(idx)])
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if selected:
+                correspondences = selected
+        pairs = []
+        for item in correspondences:
+            image_point = item.get('image_point')
+            object_point = item.get('object_point')
+            if image_point is None or object_point is None:
+                continue
+            photo_xy = tuple(float(v) for v in np.asarray(image_point, dtype=float).reshape(2))
+            cloud_xyz = tuple(float(v) for v in np.asarray(object_point, dtype=float).reshape(3))
+            pairs.append(MatchPair(photo=photo_xy, cloud=cloud_xyz))
+        if len(pairs) < 6:
+            raise ValueError('自动匹配有效点对不足 6 对，无法写入结果')
+        pose = {
+            key: value
+            for key, value in result.items()
+            if key not in ('correspondences', 'match_visualization')
+        }
+        self.state.correspondences = pairs
+        self.state.annotating = False
+        self.state.next_is_photo = True
+        self.state.pose = pose
+        self.state.match_mode = 'auto'
+        return pose
+
+
+def bgr_to_qimage(bgr) -> QImage:
+    """OpenCV BGR 图转为可安全持有的 QImage。"""
+    import cv2
+
+    rgb = cv2.cvtColor(np.asarray(bgr), cv2.COLOR_BGR2RGB)
+    rgb = np.ascontiguousarray(rgb)
+    height, width = rgb.shape[:2]
+    return QImage(rgb.data, width, height, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+

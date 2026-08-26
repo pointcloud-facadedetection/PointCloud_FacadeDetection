@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from facadeDetection.algorithms.auto_photo_pointcloud_matching.facade_2D_matcher import (
+from algorithms.auto_photo_pointcloud_matching.facade_2D_matcher import (
     FacadeFeatureMatcher,
     _as_rgb_uint8,
 )

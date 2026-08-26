@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 
 
-from facadeDetection.algorithms.geometry import plane_axes
+from algorithms.geometry import plane_axes
 
 
 def _build_local_frame_from_plane(plane_params, points_3d):

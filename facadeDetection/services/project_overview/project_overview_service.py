@@ -117,16 +117,74 @@ class ProjectOverviewService:
             self.viewport.clear()
         try:
             ProjectRepo.load_and_activate(project_id)
-        except Exception:
+        except Exception as exc:
+            print(f'激活项目失败: {project_id} -> {exc}', flush=True)
+            return
+        cloud_path = self._find_project_pointcloud_path(project_id)
+        if not cloud_path:
+            print(f'项目没有可加载的点云: {project_id}', flush=True)
+            return
+        if self.render_service is None:
             return
         try:
+            svc = self._ensure_file_service()
+            dist_path = Path(cloud_path).with_suffix('.dist')
+            svc.upload_files(
+                project_uuid=project_id,
+                file_path=cloud_path,
+                distance_path=str(dist_path) if dist_path.exists() else None,
+                copy_into_project=False,
+            )
+        except Exception as exc:
+            print(f'加载项目点云失败: {cloud_path} -> {exc}', flush=True)
+
+    def _find_project_pointcloud_path(self, project_id: str) -> Optional[str]:
+        try:
             asset = FileRepo.get_latest_raw_pointcloud(project_id)
-            if asset is not None and self.render_service is not None:
-                svc = self._ensure_file_service()
-                # 请勿将原始文件复制到项目缓存中；原始文件的绝对路径已保存在数据库中
-                svc.upload_files(project_uuid=project_id, file_path=asset.path, copy_into_project=False)
+            if asset is not None and Path(asset.path).exists():
+                return asset.path
         except Exception:
             pass
+
+        project = self.get_project(project_id)
+        root = Path(project.directory_path) if project and project.directory_path else None
+        if root is None:
+            try:
+                from config.storage import Storage
+                root = Storage.project_root(project_id)
+            except Exception:
+                root = None
+        if root is None:
+            return None
+
+        candidates: list[Path] = []
+        try:
+            from config.storage import Storage
+            idx = Storage.load_pcfd_index(root) or {}
+            assets = idx.get('assets') or {}
+            for key in ('generated_ply', 'raw_pointclouds'):
+                for item in reversed(list(assets.get(key) or [])):
+                    path = Path(item)
+                    if not path.is_absolute():
+                        path = root / path
+                    candidates.append(path)
+        except Exception:
+            pass
+
+        search_roots = [root, root / 'raw', root / 'cache', root / 'results']
+        suffixes = {'.ply', '.pcd', '.xyz', '.pts', '.las', '.laz', '.e57'}
+        for folder in search_roots:
+            if not folder.exists():
+                continue
+            for path in folder.rglob('*'):
+                if path.is_file() and path.suffix.lower() in suffixes:
+                    candidates.append(path)
+
+        existing = [path for path in candidates if path.exists() and path.is_file()]
+        if not existing:
+            return None
+        newest = max(existing, key=lambda path: path.stat().st_mtime)
+        return str(newest.resolve())
 
     def remove_project(self, project_id: str) -> bool:
         return ProjectRepo.delete_project(project_id, hard=False)

@@ -10,7 +10,7 @@ import base64
 import cv2
 import numpy as np
 
-from facadeDetection.algorithms.geometry import signed_plane_distance
+from algorithms.geometry import signed_plane_distance
 
 
 def _default_distortion(dist_coeffs=None):

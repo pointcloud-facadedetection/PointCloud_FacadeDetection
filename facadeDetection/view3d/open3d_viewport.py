@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from .base_viewport import BaseViewport
 from .camera import CameraController
 from .geometry_factory import (
-    make_bbox, make_normals, make_pair_lines, make_sphere,
+    make_axes_cross, make_bbox, make_normals, make_pair_lines, make_sphere,
 )
 from .interaction import ViewportInteractor
 from .open3d_adapter import Open3DAdapter
@@ -110,6 +110,7 @@ class Open3DViewport(BaseViewport):
         self._window_title = "PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
+        self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
         self._init_success = False
         self._overlay = None
         self._roi_controller = None
@@ -226,8 +227,29 @@ class Open3DViewport(BaseViewport):
                 def paintEvent(self, event):
                     try:
                         from config.settings import Config
+                        from PySide6.QtCore import QRectF
+                        from PySide6.QtGui import QFont
+                        painter = QPainter(self)
+                        painter.setRenderHint(QPainter.Antialiasing, True)
+                        labels = getattr(self, '_pick_labels', None) or []
+                        if labels:
+                            font = QFont()
+                            font.setPixelSize(12)
+                            font.setBold(True)
+                            painter.setFont(font)
+                            for sx, sy, text in labels:
+                                painter.setPen(QPen(QColor(255, 255, 255), 1))
+                                painter.setBrush(QColor(220, 40, 40, 230))
+                                painter.drawEllipse(int(sx) - 9, int(sy) - 9, 18, 18)
+                                painter.setPen(QColor(255, 255, 255))
+                                painter.drawText(
+                                    QRectF(sx - 9, sy - 9, 18, 18),
+                                    Qt.AlignmentFlag.AlignCenter,
+                                    str(text),
+                                )
                         rect = self._interactor.get_selection_rect()
                         if not rect:
+                            painter.end()
                             return
                         (p1, p2) = rect
                         x1, y1 = p1.x(), p1.y()
@@ -235,10 +257,6 @@ class Open3DViewport(BaseViewport):
                         x, y = min(x1, x2), min(y1, y2)
                         w, h = abs(x2 - x1), abs(y2 - y1)
 
-                        painter = QPainter(self)
-                        painter.setRenderHint(QPainter.Antialiasing, True)
-
-                        # 选择样式来自配置
                         br, bg, bb, ba = getattr(Config, 'SELECT_BORDER_RGBA', (255, 0, 0, 240))
                         bw = int(getattr(Config, 'SELECT_BORDER_WIDTH', 2))
 
@@ -249,7 +267,6 @@ class Open3DViewport(BaseViewport):
                         painter.setBrush(Qt.NoBrush)
                         painter.drawRect(x, y, w, h)
 
-                        # 绘制顶点标记（左上、右下）
                         painter.setBrush(QColor(int(br), int(bg), int(bb), int(ba)))
                         marker_size = max(4, bw + 2)
                         painter.drawEllipse(x1 - marker_size//2, y1 - marker_size//2, marker_size, marker_size)
@@ -402,6 +419,8 @@ class Open3DViewport(BaseViewport):
             self._adapter.poll()
         except Exception:
             pass
+        if len(getattr(self, '_pick_marker_xyz', [])) > 0:
+            self._refresh_overlay_pick_labels()
 
     def close(self):
         self.destroy()
@@ -556,7 +575,7 @@ class Open3DViewport(BaseViewport):
     def set_pick_enabled(self, enabled, radius=14, cloud_name=None):
         self._interactor.set_pick_enabled(enabled, radius=radius, cloud_name=cloud_name)
 
-    def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
+    def enter_pick_mode(self, cloud_name=None, pick_radius=24, callback=None):
         self.set_selection_enabled(False)
         self.set_pick_enabled(True, radius=pick_radius, cloud_name=cloud_name)
         try:
@@ -577,15 +596,28 @@ class Open3DViewport(BaseViewport):
         self.clear_pick_markers()
         src = np.asarray(src_points if src_points is not None else [], dtype=np.float64).reshape(-1, 3)
         tgt = np.asarray(tgt_points if tgt_points is not None else [], dtype=np.float64).reshape(-1, 3)
+        self._pick_marker_xyz = src.copy() if len(src) else np.zeros((0, 3), dtype=np.float64)
 
         r_src = self._marker_radius_for_points(src) if len(src) else None
         r_tgt = self._marker_radius_for_points(tgt) if len(tgt) else None
 
         for i, point in enumerate(src):
+            radius = r_src or 0.08
             name = f"__pick_src_{i}"
             try:
-                self._adapter.add_geometry(name, make_sphere(point, [1.0, 0.2, 0.2], r_src or 0.08), reset_bounding_box=False)
+                self._adapter.add_geometry(
+                    name,
+                    make_sphere(point, [1.0, 0.15, 0.15], radius),
+                    reset_bounding_box=False,
+                )
                 self._pick_markers.append(name)
+                cross_name = f"__pick_src_cross_{i}"
+                self._adapter.add_geometry(
+                    cross_name,
+                    make_axes_cross(point, [1.0, 0.95, 0.2], radius * 4.0),
+                    reset_bounding_box=False,
+                )
+                self._pick_markers.append(cross_name)
             except Exception:
                 pass
 
@@ -609,12 +641,34 @@ class Open3DViewport(BaseViewport):
             self._adapter.poll()
         except Exception:
             pass
+        self._refresh_overlay_pick_labels()
+
+    def _refresh_overlay_pick_labels(self):
+        overlay = getattr(self, '_overlay', None)
+        if overlay is None:
+            return
+        pts = getattr(self, '_pick_marker_xyz', None)
+        labels = []
+        if pts is not None and len(pts) > 0:
+            projected = self._camera.project_points(pts)
+            if projected is not None:
+                screen, valid = projected
+                for index, (ok, xy) in enumerate(zip(valid, screen), start=1):
+                    if ok:
+                        labels.append((float(xy[0]), float(xy[1]), str(index)))
+        overlay._pick_labels = labels
+        overlay.update()
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
             self._adapter.remove_geometry(name)
         self._pick_markers = []
         self._pick_lines = []
+        self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
+        overlay = getattr(self, '_overlay', None)
+        if overlay is not None:
+            overlay._pick_labels = []
+            overlay.update()
 
     def save_screenshot(self, path):
         image = self._adapter.capture_screen()
@@ -645,7 +699,10 @@ class Open3DViewport(BaseViewport):
                     z_avg = float(np.median(z))
                     world_per_pixel = z_avg / max(fx, 1e-6)
                     r = world_per_pixel * float(pixel_radius)
-                    return float(max(0.02, min(r, 0.5)))
+                    scene_scale = self._fallback_scene_scale()
+                    min_r = max(scene_scale * 0.006, 0.08)
+                    max_r = max(scene_scale * 0.04, min_r)
+                    return float(max(min_r, min(r, max_r)))
                 except Exception:
                     pass
 
@@ -670,7 +727,10 @@ class Open3DViewport(BaseViewport):
             world_per_pixel = pan_base * zoom_factor * scene_factor / max(1.0, dpr)
             world_per_pixel = max(world_per_pixel, 1e-6)
             r = world_per_pixel * float(pixel_radius)
-            return float(max(0.02, min(r, 0.5)))
+            scene_scale = self._fallback_scene_scale()
+            min_r = max(scene_scale * 0.006, 0.08)
+            max_r = max(scene_scale * 0.04, min_r)
+            return float(max(min_r, min(r, max_r)))
         except Exception:
             return 0.08
 

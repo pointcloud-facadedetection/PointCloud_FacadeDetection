@@ -8,7 +8,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from facadeDetection.algorithms.photo_pointcloud_matching.pnp_solver import estimate_camera_matrix
+from algorithms.photo_pointcloud_matching.pnp_solver import estimate_camera_matrix
 
 
 def _default_distortion(dist_coeffs=None):

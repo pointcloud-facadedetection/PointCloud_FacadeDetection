@@ -126,6 +126,19 @@ class Config:
 
     HIGHLIGHT_COLOR = [0.2, 0.8, 0.2]
 
+    @classmethod
+    def facade_instance_color(cls, facade_id, order=0):
+        """与 3D 点云立面着色相同的实例色（按 id 循环）。"""
+        colors = cls.FACADE_INSTANCE_COLORS or []
+        if not colors:
+            return tuple(cls.FACADE_TYPE_COLORS.get('vertical_facade', (0.95, 0.68, 0.18)))
+        try:
+            index = int(facade_id) % len(colors)
+        except (TypeError, ValueError):
+            index = int(order) % len(colors)
+        rgb = colors[index]
+        return (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+
     # --- Quality evaluation constants ---
     QUALITY_PASS = 0
     QUALITY_WARN = 1

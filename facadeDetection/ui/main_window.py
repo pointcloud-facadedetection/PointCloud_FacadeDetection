@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, QThreadPool
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -27,7 +28,7 @@ from qtwebview2 import QtWebView2Widget
 from .widgets.flow_layout import FlowLayout
 from .widgets.photo_view_widget import PhotoViewWidget
 from services.inspection_review import InspectionReviewService
-from services.photo_match_service import PhotoMatchService
+from services.photo_match_service import PhotoMatchService, bgr_to_qimage
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
@@ -35,10 +36,11 @@ from services.pointcloud_service import PointCloudService
 from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService
 from config.storage import Storage
+from config.settings import Config
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
-from utils.workers import QualityWorker
+from utils.workers import AutoMatchWorker, MapBackWorker, QualityWorker
 
 
 PAGE_DEFINITIONS = (
@@ -123,6 +125,11 @@ class MainWindow(QMainWindow):
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
         self.photo_match_service = PhotoMatchService()
+        self._photo_match_facade = None
+        self._auto_match_busy = False
+        self._auto_match_token = 0
+        self._map_back_busy = False
+        self._map_back_token = 0
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
@@ -144,6 +151,10 @@ class MainWindow(QMainWindow):
         # exhaust Windows commit memory while CPUs remain underutilised.
         self._quality_pool = QThreadPool(self)
         self._quality_pool.setMaxThreadCount(1)
+        self._auto_match_pool = QThreadPool(self)
+        self._auto_match_pool.setMaxThreadCount(1)
+        self._map_back_pool = QThreadPool(self)
+        self._map_back_pool.setMaxThreadCount(1)
         self._setup_ui()
         self._connect_buttons()
         # Hook: display facade stats in the right dock when results ready
@@ -297,11 +308,29 @@ class MainWindow(QMainWindow):
         viewport_layout.addWidget(config_bar)
         self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
         self._on_standard_changed(0)
-        self.photo_view = PhotoViewWidget()
-        self.photo_view.setVisible(False)
+        self.viewport_stage = QWidget()
+        self.viewport_stage.setObjectName('viewportStage')
+        stage_layout = QVBoxLayout(self.viewport_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(0)
+        self.photo_strip = QWidget()
+        self.photo_strip.setObjectName('photoStrip')
+        strip_layout = QHBoxLayout(self.photo_strip)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(8)
+        self.photo_view = PhotoViewWidget(self.photo_strip, placeholder='尚未上传 2D 照片')
         self.photo_view.point_clicked.connect(self._on_photo_match_point_clicked)
-        viewport_layout.addWidget(self.photo_view)
-        viewport_layout.addWidget(self.viewport.get_widget(), 1)
+        self.scan_view = PhotoViewWidget(self.photo_strip, placeholder='备用 1')
+        self.scan_view.set_interactive(False)
+        self.spare_view = PhotoViewWidget(self.photo_strip, placeholder='备用 2')
+        self.spare_view.set_interactive(False)
+        for widget in (self.photo_view, self.scan_view, self.spare_view):
+            strip_layout.addWidget(widget, 1)
+        self.photo_strip.setVisible(False)
+        stage_layout.addWidget(self.photo_strip, 0)
+        stage_layout.addWidget(self.viewport.get_widget(), 1)
+        self.viewport_stage.installEventFilter(self)
+        viewport_layout.addWidget(self.viewport_stage, 1)
 
         self.operation_splitter.addWidget(self.left_dock)
         self.operation_splitter.addWidget(viewport_panel)
@@ -351,17 +380,12 @@ class MainWindow(QMainWindow):
         self.lbl_facade_summary.setObjectName('lblFacadeSummary')
         self.lbl_facade_summary.setStyleSheet('color:#5b626d;')
         lay.addWidget(self.lbl_facade_summary)
-        # simple table-like text area for stats + clickable container
-        self.lbl_facade_table = QLabel('')
-        self.lbl_facade_table.setObjectName('lblFacadeTable')
-        self.lbl_facade_table.setStyleSheet('font-family: Consolas, monospace; color:#333;')
-        self.lbl_facade_table.setWordWrap(True)
-        lay.addWidget(self.lbl_facade_table, 0)
 
-        # clickable facade items
         from PySide6.QtWidgets import QListWidget
         self.list_facades = QListWidget()
         self.list_facades.setObjectName('lstFacades')
+        self.list_facades.setIconSize(QPixmap(18, 18).size())
+        self.list_facades.setSpacing(2)
         lay.addWidget(self.list_facades, 1)
         self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
 
@@ -384,22 +408,30 @@ class MainWindow(QMainWindow):
         title.setStyleSheet('font-weight:600; color:#303641;')
         lay.addWidget(title)
 
-        hint = QLabel('先上传 2D 照片，再进入标注：照片与点云交替点击，至少 6 对后可估计相机内外参。')
+        hint = QLabel(
+            '手动：上传照片后进入标注，照片与点云交替点击，至少 6 对后估算相机内外参。\n'
+            '自动：先完成立面检测，在右侧列表点选目标立面，再点击自动匹配。\n'
+            '映射：匹配完成后可映射回 3D。将按扫描 JSON 位姿展示点云图，并摆正照片后贴到点云图上。'
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet('color:#5b626d; font-size:12px;')
         lay.addWidget(hint)
 
         self.btn_upload_photo = QPushButton('上传2D照片')
+        self.btn_auto_photo_match = QPushButton('自动匹配')
         self.btn_annotate_matches = QPushButton('进入标注模式')
         self.btn_undo_photo_match = QPushButton('撤销点对')
         self.btn_exit_photo_annotate = QPushButton('退出标注')
         self.btn_photo_cloud_match = QPushButton('估算相机内外参数')
+        self.btn_map_back_to_cloud = QPushButton('映射回3D点云')
         for button in (
             self.btn_upload_photo,
+            self.btn_auto_photo_match,
             self.btn_annotate_matches,
             self.btn_undo_photo_match,
             self.btn_exit_photo_annotate,
             self.btn_photo_cloud_match,
+            self.btn_map_back_to_cloud,
         ):
             button.setMinimumHeight(34)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -412,11 +444,41 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         outer.addWidget(self.photo_match_panel)
 
+        self.facade_detection_panel = QWidget()
+        self.facade_detection_panel.setObjectName('facadeDetectionPanel')
+        self.facade_detection_panel.setVisible(False)
+        facade_lay = QVBoxLayout(self.facade_detection_panel)
+        facade_lay.setContentsMargins(8, 8, 8, 8)
+        facade_lay.setSpacing(8)
+        facade_title = QLabel('立面检测')
+        facade_title.setStyleSheet('font-weight:600; color:#303641;')
+        facade_lay.addWidget(facade_title)
+        facade_hint = QLabel(
+            '运行顶部「立面检测」会把结果暂存到项目 results 目录。'
+            '若已有缓存文件，可在此直接加载，无需重新检测。'
+        )
+        facade_hint.setWordWrap(True)
+        facade_hint.setStyleSheet('color:#5b626d; font-size:12px;')
+        facade_lay.addWidget(facade_hint)
+        self.btn_load_facade_results = QPushButton('加载立面检测结果')
+        self.btn_load_facade_results.setMinimumHeight(34)
+        self.btn_load_facade_results.setCursor(Qt.CursorShape.PointingHandCursor)
+        facade_lay.addWidget(self.btn_load_facade_results)
+        self.lbl_facade_cache_status = QLabel('尚未加载缓存结果')
+        self.lbl_facade_cache_status.setWordWrap(True)
+        self.lbl_facade_cache_status.setStyleSheet('color:#5b626d; font-size:12px;')
+        facade_lay.addWidget(self.lbl_facade_cache_status)
+        facade_lay.addStretch(1)
+        outer.addWidget(self.facade_detection_panel)
+
         self.btn_upload_photo.clicked.connect(self._open_upload_photo_dialog)
+        self.btn_auto_photo_match.clicked.connect(self._run_auto_photo_match)
         self.btn_annotate_matches.clicked.connect(self._enter_photo_annotate_mode)
         self.btn_undo_photo_match.clicked.connect(self._undo_photo_match_pair)
         self.btn_exit_photo_annotate.clicked.connect(self._exit_photo_annotate_mode)
         self.btn_photo_cloud_match.clicked.connect(self._estimate_photo_camera_pose)
+        self.btn_map_back_to_cloud.clicked.connect(self._map_photo_back_to_cloud)
+        self.btn_load_facade_results.clicked.connect(self._load_cached_facade_results)
         self._refresh_photo_match_ui()
 
     def _show_facade_results(self, results: list[dict]):
@@ -424,31 +486,50 @@ class MainWindow(QMainWindow):
         count = len(results or [])
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
         if not results:
-            self.lbl_facade_table.setText('')
             self.list_facades.clear()
+            self._photo_match_facade = None
             return
-        lines = ["ID  类型       点数     面积(m²) "]
-        for f in results[:50]:
-            pid = f.get('id', 0)
-            lab = str(f.get('type_label') or f.get('type') or '-')[:8]
-            pts = int(f.get('point_count') or 0)
-            area = float(f.get('area') or 0.0)
-            lines.append(f"{pid:>2}  {lab:<8}  {pts:>6}  {area:>8.2f} ")
-        self.lbl_facade_table.setText('\n'.join(lines))
 
-        # Populate clickable list with labels like "Facade #<id> (<type>)"
+        from PySide6.QtWidgets import QListWidgetItem
         self.list_facades.clear()
-        for f in results:
-            from PySide6.QtWidgets import QListWidgetItem
-            pid = int(f.get('id', 0))
-            lab = str(f.get('type_label') or f.get('type') or '-')
-            item = QListWidgetItem(f"立面 #{pid}  ({lab})")
-            # store facade dict in item for retrieval
+        for order, f in enumerate(results):
+            pid = int(f.get('id', order))
+            pts = int(f.get('point_count') or 0)
+            rgb = Config.facade_instance_color(pid, order)
+            item = QListWidgetItem(f"立面 {pid}    点数 {pts:,}")
+            item.setIcon(self._facade_color_icon(rgb))
             item.setData(Qt.ItemDataRole.UserRole, f)
             self.list_facades.addItem(item)
 
         # cache for dialog use
         self._latest_facade_results = results
+        if self._photo_match_facade is not None:
+            selected_id = int(self._photo_match_facade.get('id', -1))
+            replacement = next(
+                (item for item in results if int(item.get('id', -1)) == selected_id),
+                None,
+            )
+            self._photo_match_facade = replacement
+        if hasattr(self, 'photo_match_panel'):
+            self._refresh_photo_match_ui()
+        if hasattr(self, 'lbl_facade_cache_status'):
+            self._refresh_facade_cache_status()
+
+    def _facade_color_icon(self, rgb, size=16):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(
+            int(round(max(0.0, min(1.0, rgb[0])) * 255)),
+            int(round(max(0.0, min(1.0, rgb[1])) * 255)),
+            int(round(max(0.0, min(1.0, rgb[2])) * 255)),
+        )
+        painter.setBrush(color)
+        painter.setPen(QPen(QColor(70, 70, 70), 1))
+        painter.drawRoundedRect(1, 1, size - 3, size - 3, 3, 3)
+        painter.end()
+        return QIcon(pixmap)
 
     def _active_cloud_name(self) -> str | None:
         try:
@@ -504,6 +585,20 @@ class MainWindow(QMainWindow):
             return
         cloud = self._active_cloud_name()
         if not cloud:
+            return
+        photo_match_open = (
+            hasattr(self, 'photo_match_panel') and self.photo_match_panel.isVisible()
+        )
+        if photo_match_open:
+            self._photo_match_facade = f
+            try:
+                self.render_service.select_facade(cloud, int(f.get('id', -1)))
+            except Exception:
+                pass
+            self.statusBar().showMessage(
+                f"已选择立面 #{int(f.get('id', 0))} 用于自动匹配", 4000
+            )
+            self._refresh_photo_match_ui()
             return
         project_uuid = getattr(self.current_project, 'project_id', None)
         if not project_uuid:
@@ -793,6 +888,8 @@ class MainWindow(QMainWindow):
             button.setChecked(True)
         if page_key == 'project_operation':
             QTimer.singleShot(0, self._position_sidebar_expand_buttons)
+        else:
+            self._set_photo_strip_visible(False)
         self._update_window_title(page_key)
 
     def _connect_buttons(self):
@@ -810,9 +907,7 @@ class MainWindow(QMainWindow):
             'btn_select_detection_area': (
                 self.project_operation_service.select_detection_area
             ),
-            'btn_facade_detection': (
-                self.project_operation_service.facade_detection
-            ),
+            'btn_facade_detection': self._run_facade_detection,
             'btn_quality_inspection': (
                 self.project_operation_service.quality_inspection
             ),
@@ -824,6 +919,11 @@ class MainWindow(QMainWindow):
             ),
             'btn_align_2d_3d': self._enter_photo_match_workspace,
         }
+        for action_name, callback in list(pointcloud_actions.items()):
+            if action_name != 'btn_align_2d_3d':
+                pointcloud_actions[action_name] = self._with_photo_strip_hidden(
+                    callback
+                )
         report_actions = {
             'btn_open_report_pdf': self._open_report_pdf,
             'btn_export_quality_report': self._export_quality_report,
@@ -865,6 +965,124 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def _show_facade_detection_workspace(self):
+        operation_index = next(
+            index
+            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
+            if key == 'project_operation'
+        )
+        self.set_current_page(operation_index)
+        if hasattr(self, 'photo_match_panel'):
+            self.photo_match_panel.setVisible(False)
+        if hasattr(self, 'facade_detection_panel'):
+            self.facade_detection_panel.setVisible(True)
+        self._set_photo_strip_visible(False)
+        if self._sidebar_collapsed.get('left'):
+            self._expand_sidebar(
+                'left',
+                self.left_dock,
+                self.left_sidebar_expand_button,
+            )
+        self._refresh_facade_cache_status()
+
+    def _run_facade_detection(self):
+        self._show_facade_detection_workspace()
+        self.project_operation_service.facade_detection()
+        self._refresh_facade_cache_status()
+
+    def _facade_results_directory(self) -> str:
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if project_uuid:
+            try:
+                from services.facade.facade_cache import results_dir
+                return str(results_dir(project_uuid))
+            except Exception:
+                pass
+        return self._last_upload_directory
+
+    def _refresh_facade_cache_status(self):
+        label = getattr(self, 'lbl_facade_cache_status', None)
+        if label is None:
+            return
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            label.setText('请先打开项目，再加载或运行立面检测。')
+            return
+        try:
+            from services.facade.facade_cache import list_facade_snapshots
+            files = list_facade_snapshots(project_uuid)
+        except Exception:
+            files = []
+        if not files:
+            label.setText('当前项目还没有缓存的立面检测结果。')
+            return
+        latest = files[0]
+        label.setText(
+            f'已找到 {len(files)} 个缓存文件。\n'
+            f'最近：{latest.name}'
+        )
+
+    def _load_cached_facade_results(self):
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            QMessageBox.information(self, '加载立面检测结果', '请先打开项目。')
+            return
+        from services.facade.facade_cache import list_facade_snapshots
+        cached = list_facade_snapshots(project_uuid)
+        if not cached:
+            QMessageBox.information(
+                self,
+                '加载立面检测结果',
+                '当前项目没有缓存的立面检测结果。请先运行一次立面检测。',
+            )
+            return
+        file_path, _selected = QFileDialog.getOpenFileName(
+            self,
+            '选择立面检测结果文件',
+            str(cached[0].parent),
+            '立面检测结果 (facade_detection*.json);;JSON 文件 (*.json);;所有文件 (*)',
+        )
+        if not file_path:
+            return
+        self._apply_facade_snapshot_file(file_path)
+
+    def _apply_facade_snapshot_file(self, file_path):
+        from services.facade.facade_cache import load_facade_snapshot_file
+        snapshot = load_facade_snapshot_file(file_path)
+        if not snapshot:
+            QMessageBox.warning(
+                self,
+                '加载立面检测结果',
+                '无法读取该文件，或文件中没有立面检测结果。',
+            )
+            return
+        if not self._apply_facade_snapshot(snapshot):
+            QMessageBox.warning(
+                self,
+                '加载立面检测结果',
+                '已读取文件，但当前视口没有点云，无法显示立面。',
+            )
+            return
+        if hasattr(self, 'lbl_facade_cache_status'):
+            self.lbl_facade_cache_status.setText(
+                f'已加载：{Path(file_path).name}\n立面数量：{len(snapshot.get("facades") or [])}'
+            )
+
+    def _apply_facade_snapshot(self, snapshot) -> bool:
+        names = []
+        try:
+            names = self.viewport.get_cloud_names()
+        except Exception:
+            names = []
+        if not names:
+            return False
+        stored_name = snapshot.get('cloud_name')
+        cloud_name = stored_name if stored_name in names else names[-1]
+        facades = snapshot.get('facades') or []
+        return bool(
+            self.project_operation_service.restore_facade_results(cloud_name, facades)
+        )
+
     def _enter_photo_match_workspace(self):
         self.project_operation_service.align_2d_3d()
         operation_index = next(
@@ -875,13 +1093,153 @@ class MainWindow(QMainWindow):
         self.set_current_page(operation_index)
         if hasattr(self, 'photo_match_panel'):
             self.photo_match_panel.setVisible(True)
+        if hasattr(self, 'facade_detection_panel'):
+            self.facade_detection_panel.setVisible(False)
         if self._sidebar_collapsed.get('left'):
             self._expand_sidebar(
                 'left',
                 self.left_dock,
                 self.left_sidebar_expand_button,
             )
-        self.photo_view.setVisible(True)
+        self._set_photo_strip_visible(True)
+        self._refresh_photo_match_ui()
+
+    def _resolve_auto_match_facade(self):
+        if self._photo_match_facade:
+            return self._photo_match_facade
+        current = self.list_facades.currentItem() if hasattr(self, 'list_facades') else None
+        if current is not None:
+            facade = current.data(Qt.ItemDataRole.UserRole)
+            if facade:
+                self._photo_match_facade = facade
+                return facade
+        results = getattr(self, '_latest_facade_results', None) or []
+        if results:
+            self._photo_match_facade = results[0]
+            return results[0]
+        return None
+
+    def _current_cloud_arrays(self):
+        cloud = self._active_cloud_name()
+        if not cloud:
+            raise ValueError('当前没有已加载的点云')
+        data = self.viewport.get_cloud_data(cloud) if hasattr(self.viewport, 'get_cloud_data') else None
+        if not data or data.get('pos') is None:
+            raise ValueError('无法读取当前点云数据')
+        import numpy as np
+
+        points = np.asarray(data['pos'], dtype=float).copy()
+        colors = data.get('color')
+        colors = None if colors is None else np.asarray(colors, dtype=float).copy()
+        return cloud, points, colors
+
+    def _latest_ply_path(self):
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            return None
+        try:
+            from services.dal.file_repo import FileRepo
+
+            asset = FileRepo.get_latest_raw_pointcloud(project_uuid)
+            path = getattr(asset, 'path', None)
+            if path and str(path).lower().endswith('.ply'):
+                return str(path)
+        except Exception:
+            return None
+        return None
+
+    def _run_auto_photo_match(self):
+        state = self.photo_match_service.state
+        if not state.photo_path:
+            QMessageBox.information(self, '自动匹配', '请先上传 2D 照片。')
+            return
+        facade = self._resolve_auto_match_facade()
+        if facade is None:
+            QMessageBox.information(
+                self,
+                '自动匹配',
+                '请先完成立面检测，并在右侧列表中点选要匹配的立面。',
+            )
+            return
+        if self._auto_match_busy:
+            return
+        try:
+            _cloud, points, colors = self._current_cloud_arrays()
+        except ValueError as exc:
+            QMessageBox.warning(self, '自动匹配', str(exc))
+            return
+        self._exit_photo_annotate_mode(silent=True)
+        self._auto_match_busy = True
+        self._auto_match_token += 1
+        token = self._auto_match_token
+        self.statusBar().showMessage(
+            f"正在自动匹配立面 #{int(facade.get('id', 0))}..."
+        )
+        self._refresh_photo_match_ui()
+        worker = AutoMatchWorker({
+            'photo_path': state.photo_path,
+            'facade': dict(facade),
+            'points': points,
+            'image_width': float(state.image_width),
+            'image_height': float(state.image_height),
+            'colors': colors,
+            'ply_path': self._latest_ply_path(),
+        })
+        worker.signals.finished.connect(
+            lambda result: self._on_auto_photo_match_finished(token, result)
+        )
+        worker.signals.failed.connect(
+            lambda error: self._on_auto_photo_match_failed(token, error)
+        )
+        self._auto_match_pool.start(worker)
+
+    def _on_auto_photo_match_finished(self, token, result):
+        if token != self._auto_match_token:
+            return
+        self._auto_match_busy = False
+        try:
+            pose = self.photo_match_service.apply_auto_match_result(result)
+        except ValueError as exc:
+            self.statusBar().showMessage('自动匹配失败')
+            QMessageBox.warning(self, '自动匹配', str(exc))
+            self._refresh_photo_match_ui()
+            return
+        self._refresh_photo_match_markers()
+        self._refresh_photo_match_ui()
+        auto_info = pose.get('auto_match') or {}
+        backend = auto_info.get('matcher_backend') or ''
+        mean_error = pose.get('reprojection_mean_px')
+        inliers = pose.get('inlier_count')
+        extra = f'，平均重投影误差 {float(mean_error):.2f} px' if mean_error is not None else ''
+        self.statusBar().showMessage('自动匹配完成', 5000)
+        QMessageBox.information(
+            self,
+            '自动匹配',
+            f"立面 #{int((self._photo_match_facade or {}).get('id', 0))} 匹配完成。\n"
+            f"匹配器：{backend or 'auto'}\n"
+            f"内点：{inliers}{extra}",
+        )
+
+    def _on_auto_photo_match_failed(self, token, error):
+        if token != self._auto_match_token:
+            return
+        self._auto_match_busy = False
+        self.statusBar().showMessage('自动匹配失败')
+        viz = getattr(error, 'match_visualization', None) or {}
+        if viz:
+            kpts = viz.get('kpts_photo') or []
+            if kpts:
+                self.photo_view.set_markers(
+                    [(float(pt[0]), float(pt[1])) for pt in kpts]
+                )
+        message = str(error)
+        if isinstance(error, ImportError) or 'torch' in message.lower():
+            message = (
+                '自动匹配依赖未安装或无法导入。\n'
+                '请先按 facadeDetection/requirements.txt 安装 torch、LightGlue / GlueStick。\n\n'
+                f'{error}'
+            )
+        QMessageBox.warning(self, '自动匹配', message)
         self._refresh_photo_match_ui()
 
     def _open_upload_photo_dialog(self):
@@ -900,7 +1258,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '上传 2D 照片', str(exc))
             return
         self.photo_view.set_image(image)
-        self.photo_view.setVisible(True)
+        self._sync_photo_strip()
+        QTimer.singleShot(0, self._sync_photo_strip)
         self._exit_photo_annotate_mode(silent=True)
         self._refresh_photo_match_ui()
 
@@ -912,7 +1271,11 @@ class MainWindow(QMainWindow):
         state.annotating = True
         state.next_is_photo = True
         self.photo_view.set_interactive(True)
-        self.viewport.enter_pick_mode(callback=self._on_cloud_match_point_picked)
+        self.viewport.enter_pick_mode(
+            callback=self._on_cloud_match_point_picked,
+            pick_radius=24,
+        )
+        self.statusBar().showMessage('标注模式：先在照片上点选，再在点云上点选对应位置', 6000)
         self._refresh_photo_match_ui()
 
     def _exit_photo_annotate_mode(self, silent=False):
@@ -939,16 +1302,19 @@ class MainWindow(QMainWindow):
             return
         self._refresh_photo_match_markers()
         self._refresh_photo_match_ui()
+        self.statusBar().showMessage('已在照片标注，请在 3D 点云上点击对应点', 5000)
 
     def _on_cloud_match_point_picked(self, picked):
         point = picked.get('point') if isinstance(picked, dict) else picked
         try:
             self.photo_match_service.add_cloud_point(point)
         except RuntimeError as exc:
-            print(f'标注点云失败: {exc}', flush=True)
+            self.statusBar().showMessage(str(exc), 4000)
             return
         self._refresh_photo_match_markers()
         self._refresh_photo_match_ui()
+        count = self.photo_match_service.complete_pair_count()
+        self.statusBar().showMessage(f'已在点云标注，当前完整点对 {count}', 4000)
 
     def _estimate_photo_camera_pose(self):
         try:
@@ -969,6 +1335,87 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, '估算相机内外参数', message)
         self._refresh_photo_match_ui()
 
+    def _map_photo_back_to_cloud(self):
+        state = self.photo_match_service.state
+        if not state.photo_path:
+            QMessageBox.information(self, '映射回3D点云', '请先上传 2D 照片。')
+            return
+        if state.pose is None or self.photo_match_service.complete_pair_count() < 4:
+            QMessageBox.information(
+                self, '映射回3D点云', '请先完成 2D-3D 匹配（手动或自动）。',
+            )
+            return
+        facade = self._resolve_auto_match_facade()
+        if facade is None:
+            QMessageBox.information(
+                self, '映射回3D点云', '请先在右侧列表点选要映射的立面。',
+            )
+            return
+        if self._map_back_busy:
+            return
+        try:
+            _cloud, points, colors = self._current_cloud_arrays()
+        except ValueError as exc:
+            QMessageBox.warning(self, '映射回3D点云', str(exc))
+            return
+        ply_path = self._latest_ply_path()
+        search_dir = str(Path(ply_path).parent) if ply_path else self._last_upload_directory
+        self._map_back_busy = True
+        self._map_back_token += 1
+        token = self._map_back_token
+        self.statusBar().showMessage('正在按扫描位姿映射照片到点云视图...')
+        self._refresh_photo_match_ui()
+        worker = MapBackWorker({
+            'photo_path': state.photo_path,
+            'points': points,
+            'colors': colors,
+            'correspondences': list(state.correspondences),
+            'facade': dict(facade),
+            'ply_path': ply_path,
+            'search_dir': search_dir,
+        })
+        worker.signals.finished.connect(
+            lambda result: self._on_map_back_finished(token, result)
+        )
+        worker.signals.failed.connect(
+            lambda error: self._on_map_back_failed(token, error)
+        )
+        self._map_back_pool.start(worker)
+
+    def _on_map_back_finished(self, token, result):
+        if token != self._map_back_token:
+            return
+        self._map_back_busy = False
+        try:
+            rectified = bgr_to_qimage(result['rectified_bgr'])
+            overlay = bgr_to_qimage(result['overlay_bgr'])
+        except Exception as exc:
+            QMessageBox.warning(self, '映射回3D点云', f'结果图像转换失败：{exc}')
+            self._refresh_photo_match_ui()
+            return
+        self.photo_view.set_image(rectified)
+        self.photo_view.set_markers([])
+        self.scan_view.set_image(overlay)
+        QTimer.singleShot(0, self._sync_photo_strip)
+        json_name = Path(result.get('json_path') or '').name
+        self.statusBar().showMessage('映射完成', 5000)
+        QMessageBox.information(
+            self,
+            '映射回3D点云',
+            f'已按 {json_name or "扫描 JSON"} 位姿渲染点云视图。\n'
+            f'照片摆正方法：{result.get("rectify_method")}\n'
+            f'映射内点：{result.get("inlier_count")}',
+        )
+        self._refresh_photo_match_ui()
+
+    def _on_map_back_failed(self, token, error):
+        if token != self._map_back_token:
+            return
+        self._map_back_busy = False
+        self.statusBar().showMessage('映射失败')
+        QMessageBox.warning(self, '映射回3D点云', str(error))
+        self._refresh_photo_match_ui()
+
     def _refresh_photo_match_markers(self):
         self.photo_view.set_markers(self.photo_match_service.photo_points())
         cloud_points = self.photo_match_service.cloud_points()
@@ -983,28 +1430,73 @@ class MainWindow(QMainWindow):
         has_photo = bool(state.photo_path)
         if not hasattr(self, 'lbl_photo_match_status'):
             return
-        self.btn_annotate_matches.setEnabled(has_photo and not state.annotating)
+        facade = self._resolve_auto_match_facade() if has_photo else None
+        can_auto = (
+            has_photo
+            and facade is not None
+            and not self._auto_match_busy
+            and not self._map_back_busy
+        )
+        if hasattr(self, 'btn_auto_photo_match'):
+            self.btn_auto_photo_match.setEnabled(can_auto)
+            self.btn_auto_photo_match.setText(
+                '自动匹配中...' if self._auto_match_busy else '自动匹配'
+            )
+        self.btn_annotate_matches.setEnabled(
+            has_photo and not state.annotating and not self._auto_match_busy and not self._map_back_busy
+        )
         self.btn_undo_photo_match.setEnabled(has_photo and bool(state.correspondences))
         self.btn_exit_photo_annotate.setEnabled(state.annotating)
-        self.btn_photo_cloud_match.setEnabled(complete >= 6)
+        self.btn_photo_cloud_match.setEnabled(
+            complete >= 6 and not self._auto_match_busy and not self._map_back_busy
+        )
+        can_map = (
+            has_photo
+            and state.pose is not None
+            and complete >= 4
+            and facade is not None
+            and not self._auto_match_busy
+            and not self._map_back_busy
+            and not state.annotating
+        )
+        if hasattr(self, 'btn_map_back_to_cloud'):
+            self.btn_map_back_to_cloud.setEnabled(can_map)
+            self.btn_map_back_to_cloud.setText(
+                '映射中...' if self._map_back_busy else '映射回3D点云'
+            )
+        facade_hint = ''
+        if facade is not None:
+            facade_hint = f"\n目标立面：#{int(facade.get('id', 0))}"
+        if self._auto_match_busy:
+            self.lbl_photo_match_status.setText('正在自动匹配，请稍候...')
+            return
+        if self._map_back_busy:
+            self.lbl_photo_match_status.setText('正在映射回 3D 点云视图，请稍候...')
+            return
         if not has_photo:
-            self.lbl_photo_match_status.setText('尚未上传照片')
+            self.lbl_photo_match_status.setText(
+                '尚未上传照片。自动匹配还需先检测立面并在右侧点选目标立面。'
+            )
             return
         name = Path(state.photo_path).name
         if state.annotating:
             next_hint = '请点击照片' if state.next_is_photo else '请点击 3D 点云'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}\n匹配点：{complete} 对（至少 6 对）\n{next_hint}'
+                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对（至少 6 对）\n{next_hint}'
             )
         elif state.pose:
             error = state.pose.get('reprojection_mean_px')
             extra = f'，误差 {float(error):.2f} px' if error is not None else ''
+            mode = '自动' if state.match_mode == 'auto' else '手动'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}\n匹配点：{complete} 对\n已完成位姿估计{extra}'
+                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对\n{mode}位姿估计已完成{extra}'
             )
         else:
+            extra = ''
+            if facade is None:
+                extra = '\n自动匹配未启用：请先完成立面检测，并在右侧列表点选目标立面'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}\n匹配点：{complete} 对（至少 6 对后估计内参与位姿）'
+                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对（手动至少 6 对，或点击自动匹配）{extra}'
             )
 
     def _open_upload_file_dialog(self):
@@ -1021,7 +1513,7 @@ class MainWindow(QMainWindow):
         uploaded_paths = self.project_overview_service.upload_files(file_paths, getattr(self.current_project, 'project_id', None))
         self._refresh_project_list()
         if self.current_project is not None:
-            self._activate_project(self.current_project)
+            self._activate_project(self.current_project, load_cloud=False)
     def _open_import_fls_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
             self,
@@ -1034,7 +1526,7 @@ class MainWindow(QMainWindow):
         self.project_overview_service.import_fls_directory(directory_path, getattr(self.current_project, 'project_id', None))
         self._refresh_project_list()
         if self.current_project is not None:
-            self._activate_project(self.current_project)
+            self._activate_project(self.current_project, load_cloud=False)
 
     def _open_project_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
@@ -1048,7 +1540,7 @@ class MainWindow(QMainWindow):
         self._last_upload_directory = directory_path
         project = self.project_overview_service.open_project(directory_path)
         self._refresh_project_list()
-        self._activate_project(project)
+        self._activate_project(project, load_cloud=False)
 
     def _create_project(self):
         from ui.dialogs.project_create_dialog import ProjectCreateDialog
@@ -1291,13 +1783,14 @@ class MainWindow(QMainWindow):
             return
 
         # Ensure per-project DB is active and latest raw point cloud is loaded
-        try:
-            self.project_overview_service.activate_project(project.project_id)
-        except Exception:
-            pass
         self._activate_project(project)
 
-    def _activate_project(self, project):
+    def _activate_project(self, project, load_cloud=True):
+        if load_cloud:
+            try:
+                self.project_overview_service.activate_project(project.project_id)
+            except Exception as exc:
+                print(f'打开项目点云失败: {exc}', flush=True)
         self._set_current_project(project)
         try:
             # propagate active project UUID to operation scheduler for DAL persistence
@@ -1323,17 +1816,8 @@ class MainWindow(QMainWindow):
             return
         if not snapshot:
             return
-        names = []
-        try:
-            names = self.viewport.get_cloud_names()
-        except Exception:
-            names = []
-        if not names:
-            return
-        stored_name = snapshot.get('cloud_name')
-        cloud_name = stored_name if stored_name in names else names[-1]
-        facades = snapshot.get('facades') or []
-        self.project_operation_service.restore_facade_results(cloud_name, facades)
+        self._apply_facade_snapshot(snapshot)
+        self._refresh_facade_cache_status()
 
     def _set_current_project(self, project):
         self.current_project = project
@@ -1409,6 +1893,37 @@ class MainWindow(QMainWindow):
         sizes[1] = max(1, total_width - target_width - sizes[other_index])
         self.operation_splitter.setSizes(sizes)
 
+    def _with_photo_strip_hidden(self, callback):
+        def wrapper():
+            self._set_photo_strip_visible(False)
+            return callback()
+        return wrapper
+
+    def _set_photo_strip_visible(self, visible: bool):
+        strip = getattr(self, 'photo_strip', None)
+        stage = getattr(self, 'viewport_stage', None)
+        if strip is None:
+            return
+        layout = stage.layout() if stage is not None else None
+        if layout is not None:
+            layout.setSpacing(8 if visible else 0)
+        strip.setVisible(visible)
+        if visible:
+            self._sync_photo_strip()
+            QTimer.singleShot(0, self._sync_photo_strip)
+        elif strip.height() != 0:
+            strip.setFixedHeight(0)
+
+    def _sync_photo_strip(self):
+        strip = getattr(self, 'photo_strip', None)
+        host = getattr(self, 'viewport_stage', None)
+        if strip is None or host is None or strip.isHidden() or host.width() <= 0:
+            return
+        available = max(240, host.width())
+        slot_width = max(160, int((available - 16) / 3))
+        height = max(110, min(slot_width // 2, 220))
+        strip.setFixedHeight(height)
+
     def _position_sidebar_expand_buttons(self):
         splitter_top_left = self.operation_splitter.mapTo(
             self.operation_page,
@@ -1449,6 +1964,14 @@ class MainWindow(QMainWindow):
             )
         ):
             QTimer.singleShot(0, self._position_sidebar_expand_buttons)
+        if (
+            watched is getattr(self, 'viewport_stage', None)
+            and event.type() in (
+                QEvent.Type.Resize,
+                QEvent.Type.Show,
+            )
+        ):
+            QTimer.singleShot(0, self._sync_photo_strip)
         return super().eventFilter(watched, event)
 
     def _schedule_page_header_resize(self, panel):

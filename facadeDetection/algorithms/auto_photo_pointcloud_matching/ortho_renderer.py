@@ -10,7 +10,7 @@ import base64
 import cv2
 import numpy as np
 
-from facadeDetection.algorithms.geometry import fit_plane_svd
+from algorithms.geometry import fit_plane_svd
 
 from .facade_render import (
     FacadeOrthorenderer,

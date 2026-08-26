@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from facadeDetection.algorithms.geometry import plane_axes
+from algorithms.geometry import plane_axes
 
 
 def compute_facade_bbox_corners_3d(facade, points=None):

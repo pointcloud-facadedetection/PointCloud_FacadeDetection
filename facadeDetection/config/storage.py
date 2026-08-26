@@ -14,21 +14,34 @@ class Storage:
     """
 
     BASE_DIR = Path(__file__).resolve().parents[1]
-    # 存储根目录优先级（按顺序）
+    REPO_ROOT = BASE_DIR.parent
+    if os.name == "nt":
+        LEGACY_DATA_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "PointCloudFacadeDetection"
+    else:
+        LEGACY_DATA_DIR = Path.home() / ".local" / "share" / "PointCloudFacadeDetection"
+
     _env_root = os.getenv("FACD_DATA_DIR")
     if _env_root:
         DATA_DIR = Path(_env_root)
     else:
-        repo_root = BASE_DIR.parent  # d:/PointCloud_FacadeDetection
-        DATA_DIR = repo_root / "data"
-        if not DATA_DIR.exists():
-            if os.name == "nt":
-                DATA_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "PointCloudFacadeDetection"
-            else:
-                DATA_DIR = Path.home() / ".local" / "share" / "PointCloudFacadeDetection"
-     # 全局轻量级索引数据库（项目列表）
+        repo_data = REPO_ROOT / "data"
+        repo_index = repo_data / "index.db"
+        legacy_index = LEGACY_DATA_DIR / "index.db"
+        # 仓库 data/ 可能只有立面缓存；历史项目列表在 AppData 的 index.db。
+        if legacy_index.exists() and (
+            not repo_index.exists() or repo_index.stat().st_size <= legacy_index.stat().st_size
+        ):
+            DATA_DIR = LEGACY_DATA_DIR
+        elif repo_index.exists():
+            DATA_DIR = repo_data
+        elif repo_data.exists() and not legacy_index.exists():
+            DATA_DIR = repo_data
+        else:
+            DATA_DIR = LEGACY_DATA_DIR
+    # 全局轻量级索引数据库（项目列表）
     INDEX_DB_FILE = DATA_DIR / "index.db"
     PROJECTS_ROOT = DATA_DIR / "projects"
+    LEGACY_PROJECTS_ROOT = LEGACY_DATA_DIR / "projects"
     PCFD_DIRNAME = "pcfd"
 
     # 项目根目录下的子文件夹
