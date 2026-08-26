@@ -23,7 +23,6 @@ uploads/
 *.ply
 *.fls
 *.png
-*.json
 *.pdf
 *.npz
 
