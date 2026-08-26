@@ -44,7 +44,7 @@ class FacadeQualityService:
                         ruler_size: float | None = None,
                         ruler_step: float | None = None,
                         profile=None, results_dir=None) -> Optional[dict]:
-        """质量评估计算。仅返回计算结果，不执行任何文件导出。"""
+        """质量评估计算（v2 修复版）。仅返回计算结果，不执行任何文件导出。"""
         started = time.perf_counter()
         facade_no = int(facade.get('display_no', facade.get('id', 0)))
 
@@ -211,7 +211,7 @@ class FacadeQualityService:
                 'plane_model': plane_model.tolist(),
                 'normal': plane_model[:3].tolist(),
                 'center': facade_ref['center'],
-                'measurement_method': 'rulermeasure_star_i_vertical_i_v2',
+                'measurement_method': 'rulermeasure_star_i_vertical_v2',  # v2标识
             })
             result.setdefault('thresholds', {}).update({
                 'flatness_limit_mm': float(params.flatness_limit_mm),
@@ -241,7 +241,6 @@ class FacadeQualityService:
                 result['profile_snapshot'] = profile.snapshot()
 
             # FIX: No export here. Export is deferred to dialog "show effect" button.
-            # Store raw points/colors for later heatmap generation if needed.
             result['__export_context'] = {
                 'results_dir': results_dir,
                 'facade_no': facade_no,

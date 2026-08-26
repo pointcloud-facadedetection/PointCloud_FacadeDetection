@@ -1,5 +1,5 @@
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtWidgets import QGroupBox, QHBoxLayout, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGroupBox, QHBoxLayout, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget, QSizePolicy
 
 
 class StationPanel(QWidget):
@@ -18,6 +18,9 @@ class StationPanel(QWidget):
         self.list = QListWidget()
         self.list.setObjectName('stationList')
         self.list.setWordWrap(False)
+        self.list.setUniformItemSizes(True)
+        self.list.setMinimumHeight(150)
+        self.list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # QListWidget emits QListWidgetItem*, while these public signals use
         # object for compatibility with service-layer payloads.  A lambda
         # performs the explicit Qt-to-Python signal adaptation; connecting the
@@ -28,6 +31,9 @@ class StationPanel(QWidget):
         buttons = QHBoxLayout()
         delete = QPushButton('删除站点')
         merge = QPushButton('合并显示')
+        for button in (delete, merge):
+            button.setMinimumHeight(34)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         delete.setProperty('buttonRole', 'danger')
         merge.setProperty('buttonRole', 'primary')
         delete.clicked.connect(self.delete_requested)

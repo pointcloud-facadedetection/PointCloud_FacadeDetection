@@ -17,16 +17,20 @@ from PySide6.QtWidgets import (
     QComboBox,
     QMessageBox,
     QGroupBox,
+    QGridLayout,
+    QFrame,
+    QScrollArea,
+    QHeaderView,
 )
+
 
 class FacadeQualityDialog(QDialog):
     """
-    立面质量评估对话框 v4：
-    - 展示总体指标（含geometry_valid/quality_valid区分，去重后统计）
-    - 展示按区间聚合的简表（含status列）
-    - 操作按钮：显示检测效果、恢复原始颜色、关闭
-    - 兼容成功结果、错误结果、空结果
-    - FIX: 使用 facade_no 替代 facade_id，统一标识
+    立面质量评估对话框 v5：
+    - 紧凑布局，适配常见屏幕分辨率
+    - 综合指标分块展示，避免单行超长
+    - 表格列宽自适应，支持水平滚动
+    - 仅保留核心评估标准与合格率摘要
     """
 
     def __init__(self, parent: Optional[QWidget], facade_label: str, quality_result: dict,
@@ -34,41 +38,123 @@ class FacadeQualityDialog(QDialog):
                  on_restore_colors: Optional[Callable[[], None]] = None,
                  project_name: str = ''):
         super().__init__(parent)
-        self.setWindowTitle(f"{project_name} - {facade_label} 质量评估结果" if project_name else f"{facade_label} 质量评估结果")
-        self.resize(1000, 700)
+        
+        title = f"{project_name} - {facade_label} 质量评估" if project_name else f"{facade_label} 质量评估"
+        self.setWindowTitle(title)
+        self.setMinimumSize(720, 520)
+        self.resize(900, 640)
+        self.setMaximumWidth(1200)
+        
         self.setStyleSheet("""
-            QDialog { background: #f3f5f8; }
-            QLabel#qualityHeader { color: #1f4f7a; font-size: 18px; font-weight: 700; }
-            QLabel#qualityMeta { background: white; border: 1px solid #dce2e8;
-                border-radius: 6px; padding: 12px; color: #46515d; }
-            QTableWidget { background: white; border: 1px solid #dce2e8;
-                gridline-color: #edf0f3; }
-            QHeaderView::section { background: #eaf0f6; padding: 7px; border: 0;
-                color: #29445d; font-weight: 600; }
-            QPushButton { min-height: 32px; padding: 0 14px; border-radius: 4px;
-                border: 1px solid #b8c7d6; background: white; }
-            QPushButton:hover { background: #eaf3fb; border-color: #3975a8; }
-            QPushButton:disabled { background: #e8e8e8; color: #999; border-color: #ccc; }
-            QGroupBox { border: 1px solid #dce2e8; border-radius: 6px; 
-                margin-top: 8px; padding-top: 8px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px;
-                color: #666; font-size: 11px; }
+            QDialog { background: #f8fafc; }
+            QLabel#qualityHeader { 
+                color: #1e293b; 
+                font-size: 16px; 
+                font-weight: 700; 
+            }
+            QLabel#summaryBanner { 
+                background: #ffffff; 
+                border: 1px solid #e2e8f0;
+                border-radius: 8px; 
+                padding: 12px 16px; 
+                color: #334155; 
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QTableWidget { 
+                background: white; 
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                gridline-color: #f1f5f9; 
+            }
+            QHeaderView::section { 
+                background: #f1f5f9; 
+                padding: 8px 6px; 
+                border: 0;
+                color: #475569; 
+                font-weight: 600; 
+                font-size: 11px;
+            }
+            QTableWidget::item { 
+                padding: 6px 4px; 
+                font-size: 12px;
+                color: #334155;
+            }
+            QPushButton { 
+                min-height: 32px; 
+                padding: 0 16px; 
+                border-radius: 6px;
+                border: 1px solid #cbd5e1; 
+                background: #ffffff;
+                color: #334155;
+                font-size: 12px;
+            }
+            QPushButton:hover { 
+                background: #f1f5f9; 
+                border-color: #94a3b8; 
+            }
+            QPushButton:disabled { 
+                background: #f1f5f9; 
+                color: #94a3b8; 
+                border-color: #e2e8f0; 
+            }
+            QPushButton#primaryBtn {
+                background: #3b82f6;
+                color: white;
+                border-color: #3b82f6;
+            }
+            QPushButton#primaryBtn:hover {
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            QGroupBox { 
+                border: 1px solid #e2e8f0; 
+                border-radius: 8px; 
+                margin-top: 8px; 
+                padding-top: 8px;
+                background: #ffffff;
+            }
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                left: 10px; 
+                padding: 0 6px;
+                color: #64748b; 
+                font-size: 11px; 
+                font-weight: 600;
+            }
+            QLabel.metricLabel {
+                color: #64748b;
+                font-size: 11px;
+            }
+            QLabel.metricValue {
+                color: #1e293b;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QComboBox {
+                min-height: 28px;
+                padding: 2px 8px;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                background: white;
+                font-size: 12px;
+            }
         """)
+        
         self._quality = quality_result or {}
         self._on_show_colors = on_show_colors
         self._on_restore_colors = on_restore_colors
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
 
-        # Title
+        # ── 标题 ──
         title = QLabel("质量评估结果")
         title.setObjectName('qualityHeader')
-        title.setStyleSheet('font-weight:600; color:#303641;')
         layout.addWidget(title)
 
-        # Status banner
+        # ── 状态横幅（错误时显示） ──
         ok = self._quality.get('ok', True)
         reason = self._quality.get('reason', '')
         message = self._quality.get('message', '')
@@ -76,49 +162,57 @@ class FacadeQualityDialog(QDialog):
         if not ok:
             status_box = QGroupBox("计算状态")
             status_layout = QVBoxLayout(status_box)
+            status_layout.setContentsMargins(12, 8, 12, 8)
             error_label = QLabel(f"⚠️ {message or reason or '质量计算未完成'}")
-            error_label.setStyleSheet('color: #c0392b; font-weight: 600; padding: 4px;')
+            error_label.setStyleSheet('color: #dc2626; font-weight: 600; padding: 4px; font-size: 12px;')
+            error_label.setWordWrap(True)
             status_layout.addWidget(error_label)
-
-            proj = self._quality.get('projection', {})
-            if proj:
-                diag = QLabel(
-                    f"投影范围：U={proj.get('u_range_m', 0):.3f}m, "
-                    f"V={proj.get('v_range_m', 0):.3f}m | "
-                    f"U轴=[{proj.get('u_min_m', 0):.2f}, {proj.get('u_max_m', 0):.2f}] | "
-                    f"V轴=[{proj.get('v_min_m', 0):.2f}, {proj.get('v_max_m', 0):.2f}]"
-                )
-                diag.setStyleSheet('color: #666; font-size: 11px;')
-                status_layout.addWidget(diag)
-
-            dir_ranges = self._quality.get('direction_ranges', {})
-            if dir_ranges:
-                dir_text = ' | '.join(
-                    f"{k}°: 沿={v.get('along_m', 0):.2f}m 横={v.get('across_m', 0):.2f}m"
-                    for k, v in dir_ranges.items()
-                )
-                dir_label = QLabel(f"方向范围：{dir_text}")
-                dir_label.setStyleSheet('color: #666; font-size: 11px;')
-                dir_label.setWordWrap(True)
-                status_layout.addWidget(dir_label)
-
             layout.addWidget(status_box)
 
-        # Overall metrics
+        # ── 核心摘要：仅保留评估标准与合格率 ──
         overall = self._quality.get('overall') or {}
+        profile = self._quality.get('profile_snapshot') or {}
+        
+        flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
+        vert_rate = float(overall.get('verticality_pass_rate', 0.0) or 0.0) * 100.0
+        quality_rate = float(overall.get('quality_pass_rate', 0.0) or 0.0) * 100.0
+        
+        standard_name = profile.get('standard_name', '未指定')
+        version = profile.get('version', '')
+        standard_text = f"{standard_name} {version}".strip()
+        
+        summary = QLabel(
+            f"当前评估标准：{standard_text}　|　"
+            f"平整度合格率：{flat_rate:.1f}%　|　"
+            f"垂直度合格率：{vert_rate:.1f}%　|　"
+            f"综合合格率：{quality_rate:.1f}%"
+        )
+        summary.setObjectName('summaryBanner')
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        # ── 详细指标网格（分块展示，避免单行过长） ──
+        metrics_frame = QFrame()
+        metrics_frame.setStyleSheet("""
+            QFrame { 
+                background: #ffffff; 
+                border: 1px solid #e2e8f0; 
+                border-radius: 8px; 
+            }
+        """)
+        metrics_layout = QGridLayout(metrics_frame)
+        metrics_layout.setContentsMargins(14, 12, 14, 12)
+        metrics_layout.setHorizontalSpacing(20)
+        metrics_layout.setVerticalSpacing(10)
+        
         gap = float(overall.get('flatness_max_gap_mm', 0.0) or 0.0)
         raw_gap = float(overall.get('flatness_raw_max_gap_mm', gap) or gap)
         vangle_raw = overall.get('verticality_max_angle_deg')
         vgap_raw = overall.get('verticality_deviation_mm_2m', overall.get('verticality_max_deviation_mm'))
         vangle = float(vangle_raw) if vangle_raw is not None and np.isfinite(vangle_raw) else None
         vgap = float(vgap_raw) if vgap_raw is not None and np.isfinite(vgap_raw) else None
-        flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
-        quality_rate = float(overall.get('quality_pass_rate', 0.0) or 0.0) * 100.0
-        vert_rate = float(overall.get('verticality_pass_rate', 0.0) or 0.0) * 100.0
         pts = int(overall.get('point_count') or 0)
-
-        # Window counts with new classification - support both old and new keys
-        # FIX: Use deduplicated counts if available, fallback to raw counts
+        
         n_candidates = int(overall.get('candidate_unique_count', 
                                        overall.get('candidate_window_count', 0)))
         n_geometry = int(overall.get('geometry_valid_unique_count',
@@ -127,74 +221,76 @@ class FacadeQualityDialog(QDialog):
                                     overall.get('quality_valid_window_count', 0)))
         n_failed = int(overall.get('failed_window_count', 0))
         n_intervals = len(self._quality.get('intervals', []))
+        
+        metrics = [
+            ('平整度有效最大间隙', f'{gap:.2f} mm'),
+            ('平整度原始最大间隙', f'{raw_gap:.2f} mm'),
+            ('垂直度最大偏差角', f'{vangle:.3f}°' if vangle is not None else '--'),
+            ('垂直度最大偏差', f'{vgap:.2f} mm' if vgap is not None else '--'),
+        ]
+        
+        for i, (label_text, value_text) in enumerate(metrics):
+            row, col = divmod(i, 5)
+            label = QLabel(label_text)
+            label.setProperty('class', 'metricLabel')
+            label.setStyleSheet('color: #64748b; font-size: 11px;')
+            value = QLabel(value_text)
+            value.setProperty('class', 'metricValue')
+            value.setStyleSheet('color: #1e293b; font-size: 12px; font-weight: 600;')
+            metrics_layout.addWidget(label, row, col * 2)
+            metrics_layout.addWidget(value, row, col * 2 + 1)
+        
+        layout.addWidget(metrics_frame)
 
-        profile = self._quality.get('profile_snapshot') or {}
-        standard = f"标准：{profile.get('standard_name', '未指定')} {profile.get('version', '')}"
-
-        summary = QLabel(
-            f"当前评估标准：{profile.get('standard_name', '未指定')}｜"
-            f"立面整体平整度平均合格率：{flat_rate:.1f} %｜"
-            f"立面整体垂直度平均合格率：{vert_rate:.1f} %"
-        )
-        summary.setStyleSheet('font-weight:700; padding:10px; background:#FFFFFF; border:1px solid #DCE2E8; border-radius:6px;')
-        layout.addWidget(summary)
-
-        meta_text = f"{standard}"
-        if vangle is not None:
-            meta_text += f"平整度有效最大间隙: {gap:.2f} mm    平整度原始最大间隙: {raw_gap:.2f} mm    垂直度最大偏差角: {vangle:.3f}°    "
-        else:
-            meta_text += f"平整度有效最大间隙: {gap:.2f} mm    平整度原始最大间隙: {raw_gap:.2f} mm    垂直度最大偏差角: --    "
-
-        if vgap is not None:
-            meta_text += f"垂直度2m最大偏差: {vgap:.2f} mm    "
-        else:
-            meta_text += "垂直度2m最大偏差: --    "
-
-        meta_text += (
-            f"平整度合格率: {flat_rate:.1f}%    "
-            f"质量合格率: {quality_rate:.1f}%    垂直度合格率: {vert_rate:.1f}%    点数: {pts}"
-            f"候选窗口: {n_candidates}    几何有效: {n_geometry}    "
-            f"质量有效: {n_quality}    失败: {n_failed}    区间数: {n_intervals}"
-        )
-
-        meta = QLabel(meta_text)
-        meta.setObjectName('qualityMeta')
-        layout.addWidget(meta)
-
-        # Only render pre-aggregated interval statistics. Never materialise or
-        # scan the potentially hundreds of thousands of window records here.
-        interval_widget = QWidget()
-        interval_layout = QVBoxLayout(interval_widget)
-        interval_layout.setContentsMargins(0, 0, 0, 0)
-
+        # ── 区间表格 ──
         interval_size = float(self._quality.get('interval_size_m', 0.0))
         interval_count = int(self._quality.get('interval_count', 0) or 0)
-        interval_layout.addWidget(QLabel(
-            f"区间：{interval_size:g}m，共{interval_count}个"
-        ))
+        
+        interval_header = QLabel(f"区间统计　|　区间尺寸：{interval_size:g}m　|　共 {interval_count} 个区间")
+        interval_header.setStyleSheet('color: #475569; font-size: 12px; font-weight: 600; margin-top: 4px;')
+        layout.addWidget(interval_header)
 
         self._table = table = QTableWidget(0, 8, self)
         table.setObjectName('tblQualityGrids')
         table.setHorizontalHeaderLabels([
-            "区间正确高度", "区间对应点数", "实际窗口数", "合格窗口数",
-            "平整度最大间隙(mm)", "区间平整度合格率(%)",
+            "区间高度", "点数", "窗口数", "合格数",
+            "平整度最大间隙(mm)", "平整度合格率(%)",
             "垂直度最大偏差(mm)", "垂直度合格率(%)"
         ])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setDefaultSectionSize(90)
+        table.horizontalHeader().setMinimumSectionSize(70)
+        table.setColumnWidth(0, 100)
+        table.setColumnWidth(1, 70)
+        table.setColumnWidth(2, 70)
+        table.setColumnWidth(3, 70)
+        table.setColumnWidth(4, 130)
+        table.setColumnWidth(5, 110)
+        table.setColumnWidth(6, 130)
+        table.setColumnWidth(7, 110)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
         self._refresh_intervals()
-        table.resizeColumnsToContents()
-        interval_layout.addWidget(table, 1)
-        layout.addWidget(interval_widget, 1)
+        layout.addWidget(table, 1)
 
-        # Buttons
+        # ── 底部按钮栏 ──
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         btn_row.addStretch(1)
+        
         self._mode_combo = QComboBox(self)
         self._mode_combo.addItem('平整度效果', 'flatness')
         self._mode_combo.addItem('平整度原始极值', 'flatness_raw')
         self._mode_combo.addItem('垂直度效果', 'verticality')
+        self._mode_combo.setMinimumWidth(130)
+        
         btn_show = QPushButton("显示检测效果")
+        btn_show.setObjectName('primaryBtn')
         btn_restore = QPushButton("恢复原始颜色")
         btn_close = QPushButton("关闭")
+        
         btn_row.addWidget(self._mode_combo)
         btn_row.addWidget(btn_show)
         btn_row.addWidget(btn_restore)
@@ -225,6 +321,12 @@ class FacadeQualityDialog(QDialog):
     def _refresh_intervals(self):
         intervals = self._quality.get('intervals') or []
         self._table.setRowCount(len(intervals))
+        def number(value, suffix=''):
+            try:
+                value = float(value)
+                return f'{value:.2f}{suffix}' if math.isfinite(value) else '--'
+            except (TypeError, ValueError):
+                return '--'
         for r, item in enumerate(intervals):
             vals = [
                 str(item.get('label') or (
@@ -234,12 +336,19 @@ class FacadeQualityDialog(QDialog):
                 str(item.get('point_count', 0)),
                 str(item.get('window_count', 0)),
                 str(item.get('valid_window_count', 0)),
-                f"{float(item.get('flatness_max_gap_mm', 0)):.2f}",
-                f"{float(item.get('flatness_pass_rate', 0))*100:.1f}",
-                f"{float(item.get('verticality_max_deviation_mm_2m', 0)):.2f}",
-                f"{float(item.get('verticality_pass_rate', 0))*100:.1f}",
+                 number(item.get('flatness_max_gap_mm')),
+                 number((float(item.get('flatness_pass_rate')) * 100)
+                        if item.get('flatness_pass_rate') is not None else None),
+                 number(item.get('verticality_max_deviation_mm_2m')),
+                 number((float(item.get('verticality_pass_rate')) * 100)
+                        if item.get('verticality_pass_rate') is not None else None),
             ]
             for c, value in enumerate(vals):
                 cell = QTableWidgetItem(value)
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(r, c, cell)
         self._table.resizeColumnsToContents()
+        # Ensure columns don't exceed reasonable widths after resize
+        for c in range(self._table.columnCount()):
+            w = self._table.columnWidth(c)
+            self._table.setColumnWidth(c, min(w, 160))

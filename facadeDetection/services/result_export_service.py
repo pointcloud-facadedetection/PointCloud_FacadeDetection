@@ -108,6 +108,9 @@ class ResultExportService:
         values_list = []
         
         for r in windows:
+            pass_key = 'verticality_pass' if mode == 'verticality' else 'flatness_pass'
+            if bool(r.get(pass_key, True)):
+                continue
             cx = r.get('center_xyz')
             if cx is not None and len(cx) == 3:
                 try:
@@ -152,8 +155,9 @@ class ResultExportService:
         limit_m = limit_mm / 1000.0
 
         # Generate unified heatmap colors: gray -> yellow -> orange -> red
-        abs_values_m = np.abs(values_m)
-        t = np.clip((abs_values_m - limit_m) / max(limit_m, 1e-9), 0.0, 1.0)
+        excess_m = np.maximum(np.abs(values_m) - limit_m, 0.0)
+        scale_m = max(float(np.nanpercentile(excess_m, 97)), 1e-9)
+        t = np.clip(excess_m / scale_m, 0.0, 1.0)
 
         colors = np.zeros((len(values_m), 3), dtype=float)
         
@@ -180,10 +184,11 @@ class ResultExportService:
 
         base = np.full((len(centers), 3), 0.75, dtype=float)
 
+        # defect_values and defect_limit are already supplied positionally;
+        # passing defect_values again by keyword raises a TypeError.
         raster = rasterize_facade(
             centers, base, plane_model, values_m, limit_m,
-            pixel_size=pixel_size, defect_values=values_m,
-            defect_colors=colors, vmin=limit_m
+            pixel_size=pixel_size, defect_colors=colors, vmin=limit_m
         )
 
         overlay = raster['overlay_rgba'].copy()

@@ -21,6 +21,49 @@ class PointCloudService:
         self.source_assets: Dict[str, dict] = {}
         self.decisions: Dict[str, DecisionSet] = {}
         self._decision_versions: Dict[str, int] = {}
+        # Runtime ownership is deliberately explicit.  The public service API
+        # remains unchanged, while all in-memory datasets are scoped to this
+        # project generation and can be disposed atomically on a switch.
+        self._project_uuid = None
+        self._project_generation = 0
+
+    @property
+    def project_generation(self) -> int:
+        return self._project_generation
+
+    def set_project(self, project_uuid):
+        """Bind the registry to a project; switching always drops old data."""
+        project_uuid = str(project_uuid) if project_uuid else None
+        # ``None`` is the unloaded state.  Restore may populate the registry
+        # before the UI binds the project id, so binding from None must not
+        # discard the freshly restored snapshot.
+        if self._project_uuid is not None and project_uuid != self._project_uuid:
+            self.clear_runtime()
+            self._project_uuid = project_uuid
+            self._project_generation += 1
+        else:
+            self._project_uuid = project_uuid
+
+    def clear_runtime(self):
+        """Release all point/index/decision arrays owned by the active project."""
+        for dataset in self.datasets.values():
+            dataset.raw.points = np.empty((0, 3), dtype=np.float32)
+            dataset.raw.colors = None
+            dataset.index.source_points = None
+            dataset.index.source_colors = None
+            dataset.index.source_raw_offsets = None
+            dataset.index.source_raw_indices = None
+            dataset.index._raw_to_voxel = None
+        self.datasets.clear()
+        self.source_assets.clear()
+        self.decisions.clear()
+        self._decision_versions.clear()
+
+    def close_project(self):
+        """Compatibility-friendly alias used by the project disposal pipeline."""
+        self.clear_runtime()
+        self._project_uuid = None
+        self._project_generation += 1
 
     def register_dataset(self, dataset_id: str, points, colors=None, metadata=None) -> PointCloudDataset:
         raw = RawPointStore.from_arrays(points, colors)
