@@ -6,7 +6,51 @@ FIX: Removed facade_id duplication, unified to facade_no.
 from __future__ import annotations
 
 import traceback
+import gc
 from PySide6.QtCore import QObject, Signal, QRunnable
+
+
+class LoadWorkerSignals(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class PointCloudLoadWorker(QRunnable):
+    """Run the legacy file pipeline off the GUI thread.
+
+    The callable must not update widgets.  Its result is committed by the
+    queued GUI callback only when the project generation is still current.
+    """
+    def __init__(self, operation, *, memory_budget_bytes=0):
+        super().__init__()
+        self.operation = operation
+        self.memory_budget_bytes = int(memory_budget_bytes or 0)
+        self.signals = LoadWorkerSignals()
+        self._cancelled = False
+        self.setAutoDelete(False)
+
+    def cancel(self):
+        self._cancelled = True
+
+    def is_cancelled(self):
+        return self._cancelled
+
+    def run(self):
+        try:
+            self.signals.progress.emit(2, '正在准备点云加载任务')
+            if self._cancelled:
+                return
+            result = self.operation(self)
+            if self._cancelled:
+                return
+            self.signals.progress.emit(100, '点云加载完成')
+            self.signals.finished.emit(result)
+        except Exception as exc:
+            self.signals.failed.emit(f'{type(exc).__name__}: {exc}')
+        finally:
+            # Release temporary numpy/Open3D objects as soon as the worker ends.
+            gc.collect()
 
 
 class QualityWorkerSignals(QObject):

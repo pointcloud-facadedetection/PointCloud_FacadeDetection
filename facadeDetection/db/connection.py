@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import os
 from functools import lru_cache
 from datetime import datetime
-from sqlalchemy import create_engine, event, select, Column, Integer, String, DateTime, UniqueConstraint
+from sqlalchemy import create_engine, event, select, Column, Integer, String, DateTime, UniqueConstraint, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from config.storage import Storage
@@ -98,6 +98,20 @@ def _project_engine(project_uuid: str):
     event.listen(engine, "connect", _apply_sqlite_pragmas)
     # Ensure schema (import models)
     GlobalBase.metadata.create_all(engine)
+    # create_all does not migrate existing project databases. Keep this small
+    # compatibility migration local and idempotent for deployed projects.
+    with engine.begin() as conn:
+        columns = {c['name'] for c in inspect(conn).get_columns('facades')}
+        additions = {
+            'quality_status': 'TEXT NOT NULL DEFAULT \'pending\'',
+            'quality_report_json': 'JSON',
+            'color_json': 'JSON',
+            'dataset_revision': 'TEXT',
+            'quality_completed_at': 'DATETIME',
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(text(f'ALTER TABLE facades ADD COLUMN {name} {definition}'))
     return engine
 
 
