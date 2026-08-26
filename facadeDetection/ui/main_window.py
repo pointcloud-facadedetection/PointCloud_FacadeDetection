@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -54,6 +55,7 @@ from services.pointcloud_service import PointCloudService
 from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService
+from services.result_export_service import ResultExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
@@ -464,12 +466,16 @@ class MainWindow(QMainWindow):
         self._report_webview_error = None
         self._quality_reports = []
         self._quality_result_cache = {}
+        # 质量结果窗口采用非阻塞打开方式；必须由主窗口持有引用，避免窗口被
+        # Python 垃圾回收，同时避免再次进入 QDialog.exec() 的嵌套事件循环。
+        self._quality_dialog = None
         # Quality jobs may hold a large raw-point working set.  The global Qt
         # pool can otherwise start several facade jobs simultaneously and
         # exhaust Windows commit memory while CPUs remain underutilised.
         self._quality_pool = QThreadPool(self)
         self._quality_pool.setMaxThreadCount(1)
         self._active_quality_worker = None
+        self._project_generation = 0
         self._setup_ui()
         self._create_resize_handles()
         self._connect_buttons()
@@ -645,8 +651,11 @@ class MainWindow(QMainWindow):
 
         width = self.width()
         height = self.height()
-        edge_size = 6
-        corner_size = 10
+        # Frameless windows have no native non-client resize frame.  Keep a
+        # generous hit target so the embedded Open3D child cannot make the
+        # system resize gesture effectively impossible to start.
+        edge_size = 9
+        corner_size = 14
         geometries = {
             'top': (
                 corner_size,
@@ -949,9 +958,16 @@ class MainWindow(QMainWindow):
         self.operation_splitter.setStretchFactor(0, 0)
         self.operation_splitter.setStretchFactor(1, 1)
         self.operation_splitter.setStretchFactor(2, 0)
-        # Keep both side panels usable at the default 1600px window width;
-        # the result rows contain an action control and must not be squeezed.
-        self.operation_splitter.setSizes([230, 850, 390])
+        # Sidebars are intentionally compact: the viewport is the primary
+        # workspace.  QSplitter keeps these as user-adjustable widths while
+        # the stretch factor lets the centre absorb window resizing.
+        self.operation_splitter.setSizes([220, 1040, 300])
+        self.operation_splitter.setCollapsible(0, False)
+        self.operation_splitter.setCollapsible(1, False)
+        self.operation_splitter.setCollapsible(2, False)
+        self.operation_splitter.splitterMoved.connect(
+            self._remember_operation_splitter_sizes
+        )
         body_layout.addWidget(self.operation_splitter, 1)
         return page
 
@@ -973,66 +989,216 @@ class MainWindow(QMainWindow):
         panel = self.right_dock.findChild(QWidget, 'rightDockPanel')
         if panel is None:
             return
-        lay = QVBoxLayout(panel)
+        
+        # Clear any existing layout
+        old_layout = panel.layout()
+        if old_layout is not None:
+            while old_layout.count():
+                item = old_layout.takeAt(0)
+                if item.widget():
+                    item.widget().setParent(None)
+        
+        # Main scroll area
+        scroll = QScrollArea()
+        scroll.setObjectName('rightPanelScroll')
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        container = QWidget()
+        container.setObjectName('rightPanelContainer')
+        lay = QVBoxLayout(container)
         lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setSpacing(10)
+        
+        # ── 检测结果 ──
         title = QLabel('检测结果')
-        title.setStyleSheet('font-weight:600; color:#303641;')
+        title.setStyleSheet('font-weight:700; color:#1e293b; font-size:14px;')
         lay.addWidget(title)
-        # summary label
+        
         self.lbl_facade_summary = QLabel('未检测')
         self.lbl_facade_summary.setObjectName('lblFacadeSummary')
-        self.lbl_facade_summary.setStyleSheet('color:#5b626d;')
-        self.lbl_facade_summary.setMinimumHeight(42)
+        self.lbl_facade_summary.setStyleSheet('color:#5b626d; font-size:12px;')
+        self.lbl_facade_summary.setMinimumHeight(28)
+        self.lbl_facade_summary.setWordWrap(True)
         self.lbl_facade_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.lbl_facade_summary)
+        
         self.btn_evaluate_selected = QPushButton('评估选中立面')
         self.btn_evaluate_selected.setToolTip('对右侧列表当前选中的立面执行质量评估')
         self.btn_evaluate_selected.clicked.connect(self._evaluate_selected_facade)
-        lay.addWidget(self.btn_evaluate_selected)
         self.btn_evaluate_selected.setMinimumHeight(34)
-        # 条目点击只选中/高亮，质量计算由条目右侧独立按钮触发。
+        self.btn_evaluate_selected.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self.btn_evaluate_selected)
+        
+        # 立面列表
         from PySide6.QtWidgets import QListWidget
         self.list_facades = QListWidget()
         self.list_facades.setObjectName('lstFacades')
-        self.list_facades.setSpacing(5)
+        self.list_facades.setSpacing(4)
         self.list_facades.setUniformItemSizes(False)
-        lay.addWidget(self.list_facades, 1)
         self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
-
-        # Keep facade review information above a dedicated, bounded quality
-        # configuration area.  Widgets are snapshotted before a worker starts.
+        lay.addWidget(self.list_facades, 3)
+        
+        # ── 质量检测参数 ──
         config = QFrame()
         config.setObjectName('qualityParameterPanel')
         config.setFrameShape(QFrame.Shape.StyledPanel)
+        config.setStyleSheet("""
+            #qualityParameterPanel {
+                background: #fafbfc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+        """)
         config_layout = QVBoxLayout(config)
-        config_layout.setContentsMargins(6, 6, 6, 6)
-        config_layout.addWidget(QLabel('质量检测参数'))
-        form = QFormLayout()
-        self.quality_length_spin = self._quality_double(2.0, .1, 20.0, .01)
-        self.quality_step_spin = self._quality_double(.05, .005, 2.0, .005)
-        self.quality_width_spin = self._quality_double(.055, .005, 1.0, .005)
-        self.quality_select_band_spin = self._quality_double(.01, .001, .2, .001)
-        self.quality_hole_band_spin = self._quality_double(.02, .001, .5, .001)
-        self.quality_sor_check = QCheckBox('启用 SOR 离群剔除')
-        self.quality_sor_check.setChecked(True)
-        self.quality_sor_sigma_spin = self._quality_double(4.0, 1.0, 20.0, .5)
+        config_layout.setContentsMargins(10, 10, 10, 10)
+        config_layout.setSpacing(10)
+        
+        param_title = QLabel('质量检测参数')
+        param_title.setStyleSheet('font-weight:700; color:#1e293b; font-size:13px;')
+        config_layout.addWidget(param_title)
+        
+        # ── 普通参数：单列紧凑布局 ──
+        normal_group = QFrame()
+        normal_group.setStyleSheet("""
+            QFrame { background: transparent; }
+            QLabel { color: #475569; font-size: 11px; padding-right: 4px; }
+        """)
+        normal_layout = QVBoxLayout(normal_group)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(5)
+        
+        self.quality_length_spin = self._quality_double(2.0, 0.0, 100.0, .001)
+        self.quality_step_spin = self._quality_double(.05, 0.0, 100.0, .001)
+        self.quality_width_spin = self._quality_double(.055, 0.0, 100.0, .001)
+        self.quality_select_band_spin = self._quality_double(.01, 0.0, 100.0, .001)
+        self.quality_hole_band_spin = self._quality_double(.02, 0.0, 100.0, .001)
+        self.quality_bin_size_spin = self._quality_double(.04, 0.0, 100.0, .001)
+        self.quality_top_q_spin = self._quality_double(1.0, 0.0, 100.0, .001)
+        self.quality_max_hole_ratio_spin = self._quality_double(.20, 0.0, 1.0, .001)
         self.quality_min_points_spin = QSpinBox()
         self.quality_min_points_spin.setRange(3, 100000)
         self.quality_min_points_spin.setValue(30)
-        form.addRow('靠尺长度 (m)', self.quality_length_spin)
-        form.addRow('滑移步距 (m)', self.quality_step_spin)
-        form.addRow('靠尺宽度 (m)', self.quality_width_spin)
-        form.addRow('表面带宽 (m)', self.quality_select_band_spin)
-        form.addRow('空洞带宽 (m)', self.quality_hole_band_spin)
-        form.addRow(self.quality_sor_check)
-        form.addRow('SOR 阈值 σ', self.quality_sor_sigma_spin)
-        form.addRow('最小点数', self.quality_min_points_spin)
-        config_layout.addLayout(form)
+        
+        normal_params = (
+            ('靠尺长度 (m)', self.quality_length_spin),
+            ('滑移步距 (m)', self.quality_step_spin),
+            ('靠尺宽度 (m)', self.quality_width_spin),
+            ('表面带宽 (m)', self.quality_select_band_spin),
+            ('空洞带宽 (m)', self.quality_hole_band_spin),
+            ('分段长度 (m)', self.quality_bin_size_spin),
+            ('段代表分位数', self.quality_top_q_spin),
+            ('最大空洞占比', self.quality_max_hole_ratio_spin),
+            ('最小点数', self.quality_min_points_spin),
+        )
+        
+        for label_text, widget in normal_params:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            row.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(82)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(lbl)
+            if isinstance(widget, QDoubleSpinBox):
+                widget.setFixedWidth(90)
+                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            elif isinstance(widget, QSpinBox):
+                widget.setFixedWidth(90)
+                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(widget)
+            row.addStretch(1)
+            normal_layout.addLayout(row)
+        
+        config_layout.addWidget(normal_group)
+        
+        # ── 分隔线 ──
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setStyleSheet('color: #e2e8f0;')
+        config_layout.addWidget(line)
+        
+        # ── SOR参数：独立分组，单列布局 ──
+        sor_title = QLabel('SOR 离群剔除参数')
+        sor_title.setStyleSheet('font-weight:700; color:#475569; font-size:12px;')
+        config_layout.addWidget(sor_title)
+        
+        sor_group = QFrame()
+        sor_group.setStyleSheet("""
+            QFrame { background: transparent; }
+            QLabel { color: #475569; font-size: 11px; padding-right: 4px; }
+        """)
+        sor_layout = QVBoxLayout(sor_group)
+        sor_layout.setContentsMargins(0, 0, 0, 0)
+        sor_layout.setSpacing(5)
+        
+        self.quality_sor_sigma_spin = self._quality_double(4.0, 0.0, 100.0, .001)
+        self.quality_sor_k_spin = QSpinBox()
+        self.quality_sor_k_spin.setRange(1, 128)
+        self.quality_sor_k_spin.setValue(8)
+        self.quality_sor_method_combo = QComboBox()
+        self.quality_sor_method_combo.addItem('local', 'local')
+        self.quality_sor_method_combo.addItem('grid', 'grid')
+        self.quality_sor_method_combo.addItem('exact', 'exact')
+        self.quality_sor_w_weight_spin = self._quality_double(50.0, 0.0, 100.0, .001)
+        
+        sor_params = (
+            ('SOR 阈值 σ', self.quality_sor_sigma_spin),
+            ('SOR 邻居数 k', self.quality_sor_k_spin),
+            ('SOR 方法', self.quality_sor_method_combo),
+            ('SOR 高度权重', self.quality_sor_w_weight_spin),
+        )
+        
+        for label_text, widget in sor_params:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            row.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(82)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(lbl)
+            if isinstance(widget, QDoubleSpinBox):
+                widget.setFixedWidth(90)
+                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            elif isinstance(widget, QSpinBox):
+                widget.setFixedWidth(90)
+                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            elif isinstance(widget, QComboBox):
+                widget.setFixedWidth(90)
+            row.addWidget(widget)
+            row.addStretch(1)
+            sor_layout.addLayout(row)
+        
+        # SOR启用开关
+        check_row = QHBoxLayout()
+        check_row.setContentsMargins(0, 4, 0, 0)
+        self.quality_sor_check = QCheckBox('启用 SOR 离群剔除')
+        self.quality_sor_check.setChecked(True)
+        self.quality_sor_check.setStyleSheet('font-weight:600; color:#334155; font-size:11px;')
+        check_row.addWidget(self.quality_sor_check)
+        check_row.addStretch(1)
+        sor_layout.addLayout(check_row)
+        
+        config_layout.addWidget(sor_group)
+        
+        # 恢复标准参数按钮
         reset = QPushButton('恢复标准参数')
+        reset.setMinimumHeight(30)
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self._reset_quality_parameters)
         config_layout.addWidget(reset)
-        lay.addWidget(config)
+        
+        lay.addWidget(config, 0)
+        lay.addStretch(0)
+        
+        scroll.setWidget(container)
+        
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        panel_layout.addWidget(scroll)
 
     @staticmethod
     def _quality_double(value, minimum, maximum, step):
@@ -1052,8 +1218,16 @@ class MainWindow(QMainWindow):
         self.quality_width_spin.setValue(profile.ruler_width_m)
         self.quality_select_band_spin.setValue(profile.select_band_m)
         self.quality_hole_band_spin.setValue(profile.hole_band_m)
+        self.quality_bin_size_spin.setValue(profile.bin_size_m)
+        self.quality_top_q_spin.setValue(profile.top_q)
         self.quality_sor_check.setChecked(profile.sor_enabled)
         self.quality_sor_sigma_spin.setValue(profile.sor_sigma)
+        self.quality_sor_k_spin.setValue(profile.sor_k)
+        method_index = self.quality_sor_method_combo.findData(profile.sor_method)
+        if method_index >= 0:
+            self.quality_sor_method_combo.setCurrentIndex(method_index)
+        self.quality_sor_w_weight_spin.setValue(profile.sor_w_weight)
+        self.quality_max_hole_ratio_spin.setValue(profile.max_hole_ratio)
         self.quality_min_points_spin.setValue(profile.min_points)
 
     def _quality_profile_snapshot(self, profile):
@@ -1066,14 +1240,18 @@ class MainWindow(QMainWindow):
             ruler_width_m=self.quality_width_spin.value(),
             select_band_m=self.quality_select_band_spin.value(),
             hole_band_m=self.quality_hole_band_spin.value(),
+            bin_size_m=self.quality_bin_size_spin.value(),
+            top_q=self.quality_top_q_spin.value(),
             sor_enabled=self.quality_sor_check.isChecked(),
             sor_sigma=self.quality_sor_sigma_spin.value(),
+            sor_k=self.quality_sor_k_spin.value(),
+            sor_method=str(self.quality_sor_method_combo.currentData() or 'local'),
+            sor_w_weight=self.quality_sor_w_weight_spin.value(),
+            max_hole_ratio=self.quality_max_hole_ratio_spin.value(),
             min_points=self.quality_min_points_spin.value())
 
     def _show_facade_results(self, results: list[dict]):
         self._quality_result_cache.clear()
-        # Detection is a data operation; this GUI-thread callback is the single
-        # authoritative point at which the proxy facade colors are committed.
         try:
             cloud = (self.pointcloud_service.resolve_processing_cloud()
                      if self.pointcloud_service is not None else None)
@@ -1081,8 +1259,7 @@ class MainWindow(QMainWindow):
                 self.render_service.highlight_facades(cloud, results or [])
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
-        # Detection can be reloaded/merged more than once; the panel is a
-        # stable review list, not an append-only event log.
+        
         unique = {}
         for facade in results or []:
             fid = int(facade.get('id', len(unique)))
@@ -1099,43 +1276,64 @@ class MainWindow(QMainWindow):
             return
         self.list_facades.clear()
         for display_no, f in enumerate(results, 1):
-            # Keep algorithm id zero-based for persistence/log correlation;
-            # display_no is the human-facing one-based label.
             f['display_no'] = display_no
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, f)
+            item.setSizeHint(QSize(0, 40))
             self.list_facades.addItem(item)
+            
             row = QWidget()
+            row.setStyleSheet("""
+                QWidget { background: transparent; }
+                QLabel { font-size: 12px; color: #334155; }
+            """)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 2, 4, 2)
-            row_layout.setSpacing(5)
-            info = QLabel(f"立面 {display_no}   点数 {int(f.get('point_count') or 0):,}")
+            row_layout.setContentsMargins(8, 6, 8, 6)
+            row_layout.setSpacing(8)
+            
+            info = QLabel(f"立面{display_no}　点数 {int(f.get('point_count') or 0):,}")
             info.setToolTip(f"业务索引 facade_id={int(f.get('id', 0))}")
+            info.setStyleSheet('font-size: 12px; color: #334155;')
             row_layout.addWidget(info, 1)
-            # Use exactly the same discrete palette as the 3D renderer.
+            
             color = self.render_service.facade_color_for(f, display_no)
-            swatch = QLabel()
+            swatch = QFrame()
             swatch.setFixedSize(18, 18)
-            swatch.setStyleSheet('background-color: rgb(%d,%d,%d); border:1px solid #555;' %
-                                 tuple(int(max(0, min(1, x)) * 255) for x in color))
+            swatch.setStyleSheet(
+                'background-color: rgb(%d,%d,%d); border: 1px solid #94a3b8; border-radius: 3px;' %
+                tuple(int(max(0, min(1, x)) * 255) for x in color)
+            )
             swatch.setToolTip('该立面在视口中的显示颜色')
             row_layout.addWidget(swatch)
-            # Keep the compact row, but preserve the mandatory manual review
-            # gate: this control never starts quality computation directly.
+            
             status = self._facade_review_status(f)
             action_button = QPushButton(
                 '完整' if status == 'complete' else '确认完整')
-            action_button.setFixedWidth(76)
+            action_button.setFixedWidth(72)
+            action_button.setMinimumHeight(26)
+            action_button.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid #cbd5e1;
+                    background: #ffffff;
+                    color: #475569;
+                }
+                QPushButton:hover {
+                    background: #f1f5f9;
+                    border-color: #94a3b8;
+                }
+            """)
             action_button.setToolTip('点击切换完整/不完整；仅完整立面允许质量计算')
             action_button.clicked.connect(
                 lambda _=False, obj=f, button=action_button:
                 self._toggle_facade_review_status(obj, button))
             row_layout.addWidget(action_button)
-            row.setMinimumHeight(32)
-            row.setMaximumHeight(38)
+            
+            row.setMaximumHeight(48)
             self.list_facades.setItemWidget(item, row)
 
-        # cache for dialog use
         self._latest_facade_results = results
         self.project_operation_service._last_facade_results = results
 
@@ -1236,6 +1434,15 @@ class MainWindow(QMainWindow):
                 self.render_service.apply_quality_colors(
                     cloud, display_quality,
                     index_service=self.facade_service._index_service)
+                context = display_quality.get('__export_context') or {}
+                exported = ResultExportService().export_heatmap(
+                    context.get('results_dir'), facade_no,
+                    context.get('points'), context.get('colors'), display_quality)
+                if exported and exported.get('heatmap'):
+                    self.statusBar().showMessage(
+                        f'热力图已保存：{exported["heatmap"]}', 6000)
+                else:
+                    self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
             except Exception as e:
                 print(f'[PCFD] ui.show_effect_error facade_id={facade_id} error={e}', flush=True)
 
@@ -1256,12 +1463,32 @@ class MainWindow(QMainWindow):
             quality = {}
 
         try:
+            # 不使用 exec()：质量计算完成后这里本来就在 GUI 线程中，exec() 会
+            # 再启动一个嵌套事件循环。主窗口又包含 Open3D 原生子窗口，在
+            # Windows 上拖动该模态窗口时可能形成 Qt/原生窗口消息循环互等，
+            # 最终表现为整个进程锁死。open() 保留模态输入限制，但不阻塞主
+            # GUI 事件循环，因此窗口拖动、重绘和 Open3D 消息均可正常处理。
+            previous = self._quality_dialog
+            if previous is not None and previous.isVisible():
+                previous.close()
+
             dlg = FacadeQualityDialog(self, label, quality,
                                       project_name=project_name,
-                                      on_show_colors=_show_effect, 
+                                      on_show_colors=_show_effect,
                                       on_restore_colors=_restore)
-            dlg.exec()
-            print(f'[PCFD] ui.dialog_closed facade_id={facade_id}', flush=True)
+            self._quality_dialog = dlg
+
+            def _dialog_finished(result_code, dialog=dlg):
+                if self._quality_dialog is dialog:
+                    self._quality_dialog = None
+                print(
+                    f'[PCFD] ui.dialog_closed facade_id={facade_id} '
+                    f'result={result_code}',
+                    flush=True,
+                )
+
+            dlg.finished.connect(_dialog_finished)
+            dlg.open()
         except Exception as e:
             print(f'[PCFD] ui.dialog_exception facade_id={facade_id} error={e}', flush=True)
             import traceback
@@ -1929,6 +2156,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
+        self._prepare_project_activation(self.current_project.project_id)
         try:
             uploaded_paths = self.project_overview_service.upload_files(
                 file_paths, self.current_project.project_id)
@@ -1949,6 +2177,7 @@ class MainWindow(QMainWindow):
         if not directory_path:
             return
         self._last_upload_directory = directory_path
+        self._prepare_project_activation(getattr(self.current_project, 'project_id', None))
         self.project_overview_service.import_fls_directory(directory_path, getattr(self.current_project, 'project_id', None))
         self._refresh_project_list()
         if self.current_project is not None:
@@ -1964,6 +2193,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = directory_path
+        self._prepare_project_activation(None)
         project = self.project_overview_service.open_project(directory_path)
         self._refresh_project_list()
         self._activate_project(project)
@@ -1975,6 +2205,7 @@ class MainWindow(QMainWindow):
         result_code = dlg.exec()
         if result_code != int(QDialog.DialogCode.Accepted):
             return
+        self._prepare_project_activation(None)
         payload = dlg.values()
         project = self.project_overview_service.create_project(
             name=payload.get('name', ''),
@@ -2019,6 +2250,7 @@ class MainWindow(QMainWindow):
             return
 
         selected_index = labels.index(selected_label)
+        self._prepare_project_activation(projects[selected_index].project_id)
         self._activate_project(projects[selected_index])
 
     def _open_report_pdf(self):
@@ -2285,6 +2517,9 @@ class MainWindow(QMainWindow):
         if choice != QMessageBox.StandardButton.Yes:
             return
 
+        if (self.current_project is not None and
+                self.current_project.project_id == project_id):
+            self._prepare_project_activation(None)
         self.project_overview_service.remove_project(project_id)
         if (
             self.current_project is not None
@@ -2316,6 +2551,7 @@ class MainWindow(QMainWindow):
             return
 
         # Ensure per-project DB is active and latest raw point cloud is loaded
+        self._prepare_project_activation(project.project_id)
         try:
             self.project_overview_service.activate_project(project.project_id)
         except Exception:
@@ -2325,16 +2561,14 @@ class MainWindow(QMainWindow):
     def _activate_project(self, project):
         # Historical facade geometry is not a formal result.  Never carry it
         # across projects or restore detection-only cache entries.
-        try:
-            self.project_operation_service.clear_processing_state()
-        except Exception:
-            pass
-        self._quality_result_cache.clear()
-        self._quality_reports.clear()
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
         self._set_current_project(project)
+        try:
+            self.pointcloud_service.set_project(getattr(project, 'project_id', None))
+        except Exception:
+            pass
         try:
             self.station_service.set_project(getattr(project, 'project_id', None))
             self._refresh_station_panel()
@@ -2361,6 +2595,79 @@ class MainWindow(QMainWindow):
             if key == 'project_operation'
         )
         self.set_current_page(operation_index)
+
+    def _prepare_project_activation(self, project_id):
+        """Dispose the old session before a restore/import loads new arrays."""
+        current_id = getattr(self.current_project, 'project_id', None)
+        if current_id == project_id and project_id is not None:
+            # Re-importing the current project still needs a clean registry.
+            self._dispose_project_runtime()
+        else:
+            self._dispose_project_runtime()
+        self._project_generation += 1
+
+    def _dispose_project_runtime(self):
+        """Single GUI-thread disposal gate for project switches and close."""
+        try:
+            self.project_operation_service.invalidate_async_jobs()
+        except Exception:
+            pass
+        self._active_quality_worker = None
+        self._quality_result_cache.clear()
+        self._quality_reports.clear()
+        try:
+            self.project_operation_service.clear_processing_state()
+        except Exception:
+            pass
+        try:
+            self.render_service.clear_runtime()
+        except Exception:
+            pass
+        try:
+            self.pointcloud_service.close_project()
+        except Exception:
+            pass
+        try:
+            self.viewport.clear()
+        except Exception:
+            pass
+        if hasattr(self, 'list_facades'):
+            self.list_facades.clear()
+            self.lbl_facade_summary.setText('未检测')
+        if hasattr(self, 'station_list'):
+            self.station_list.blockSignals(True)
+            self.station_list.clear()
+            self.station_list.blockSignals(False)
+
+    def closeEvent(self, event):
+        """Dispose project/runtime resources before destroying the Qt window."""
+        if getattr(self, '_closing', False):
+            event.accept()
+            return
+        self._closing = True
+        # Prevent queued Open3D polling/color work from reaching GLFW while it
+        # is being torn down.
+        timer = getattr(self.viewport, '_timer', None)
+        if timer is not None:
+            timer.stop()
+        quality_dialog = getattr(self, '_quality_dialog', None)
+        if quality_dialog is not None:
+            quality_dialog.close()
+            self._quality_dialog = None
+        self._dispose_project_runtime()
+        try:
+            self._quality_pool.clear()
+            # Do not block the GUI event loop for seconds while a large
+            # quality calculation is winding down.  Request invalidation was
+            # performed above; stale completion signals are token-guarded.
+            self._quality_pool.waitForDone(100)
+        except Exception:
+            pass
+        try:
+            self.viewport.destroy()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _set_current_project(self, project):
         self.current_project = project
@@ -2433,9 +2740,18 @@ class MainWindow(QMainWindow):
         other_index = 2 if side == 'left' else 0
         sizes[side_index] = target_width
         sizes[1] = max(1, total_width - target_width - sizes[other_index])
-        sizes[side_index] = target_width
-        sizes[1] = max(1, total_width - target_width - sizes[other_index])
         self.operation_splitter.setSizes(sizes)
+
+    def _remember_operation_splitter_sizes(self, _pos, _index):
+        """Keep the user's manually chosen sidebar widths for later restores."""
+        if not hasattr(self, 'operation_splitter'):
+            return
+        sizes = self.operation_splitter.sizes()
+        if len(sizes) >= 3:
+            if not self._sidebar_collapsed['left']:
+                self.left_dock.setProperty('expandedWidth', sizes[0])
+            if not self._sidebar_collapsed['right']:
+                self.right_dock.setProperty('expandedWidth', sizes[2])
 
     def _update_sidebar_toggle_button(self, side, button=None):
         button = button or (

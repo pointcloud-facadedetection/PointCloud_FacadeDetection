@@ -64,6 +64,13 @@ class ProjectOperationService:
         except Exception:
             pass
 
+    def invalidate_async_jobs(self):
+        """Invalidate completion callbacks without blocking the GUI thread."""
+        self._quality_request_token = getattr(self, '_quality_request_token', 0) + 1
+        thread = getattr(self, '_denoise_thread', None)
+        if thread is not None and thread.isRunning():
+            thread.requestInterruption()
+
     def clear_processing_state(self):
         """Drop transient facade/ROI state; never remove raw/source data."""
         self._last_facade_results = None
@@ -77,6 +84,7 @@ class ProjectOperationService:
                 render.clear_selected_facade()
             except Exception:
                 pass
+        self._clear_roi_visuals()
 
     def _apply_global_color_direct(self, color):
         try:

@@ -53,6 +53,26 @@ class ViewportRenderService:
             if str(name).startswith('pcfd.station.'):
                 self.viewport.remove_cloud(name)
 
+    def clear_runtime(self):
+        """Drop renderer-side references that belong to a project session."""
+        self._pick_mode = False
+        self._picked_points.clear()
+        self._selected_facade_id = None
+        self._facades_cache.clear()
+        if hasattr(self.viewport, 'exit_pick_mode'):
+            try:
+                self.viewport.exit_pick_mode()
+            except Exception:
+                pass
+        if hasattr(self.viewport, 'exit_roi_selection'):
+            try:
+                self.viewport.exit_roi_selection()
+            except Exception:
+                pass
+
+    def close_project(self):
+        self.clear_runtime()
+
     def show_station_cloud(self, station_id, name, points, colors=None):
         cloud_name = f'pcfd.station.{station_id}.{name}'
         self.show_point_cloud(cloud_name, points, colors)
@@ -621,8 +641,8 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
-            # Start from dark neutral base
-            colors = np.tile(np.asarray((0.06, 0.08, 0.11), dtype=np.float32).reshape(1, 3), (n, 1))
+            # Use a light neutral base so red/orange defects remain visible.
+            colors = np.tile(np.asarray((0.72, 0.78, 0.86), dtype=np.float32).reshape(1, 3), (n, 1))
             mode = quality_result.get('heatmap_mode', 'flatness')
             windows = quality_result.get('windows')
 
@@ -644,7 +664,10 @@ class ViewportRenderService:
             }.get(mode, 'flatness_gap_mm')
             values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
 
-            valid = np.isfinite(centers).all(axis=1) & np.isfinite(values)
+            pass_key = 'verticality_pass' if mode == 'verticality' else 'flatness_pass'
+            failed = np.asarray([not bool(r.get(pass_key, True)) for r in windows], dtype=bool)
+
+            valid = np.isfinite(centers).all(axis=1) & np.isfinite(values) & failed
             if not np.any(valid):
                 return
 
@@ -726,10 +749,10 @@ class ViewportRenderService:
 
             finite = values_arr[valid_rows]
             
-            # Unified heatmap coloring: gray -> yellow -> orange -> red
-            scale = max(float(np.nanpercentile(np.abs(finite), 97)) if len(finite) else limit,
-                        limit * 0.75, 1e-6)
-            t = np.clip(np.abs(finite) / scale, 0, 1)
+            # Scale only the excess over the applicable limit.
+            excess = np.maximum(np.abs(finite) - limit, 0.0)
+            scale = max(float(np.nanpercentile(excess, 97)) if len(excess) else 0.0, 1e-6)
+            t = np.clip(excess / scale, 0, 1)
             
             heat_colors = np.zeros((len(t), 3), dtype=np.float32)
             
