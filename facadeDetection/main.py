@@ -12,11 +12,12 @@ def main():
     apply_application_theme(app)
     # 窗口创建前初始化索引数据库，保证项目列表与最新持久化结构可用。
     init_index_db()
-    # Open3D 原生窗口嵌入 Qt 时会短暂触发“最后一个窗口关闭”。
     app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
     # 默认最大化，同时保留 MainWindow 的常规尺寸供用户退出最大化后使用。
-    window.showMaximized()
+    window.show()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, window.showMaximized)
     app.setQuitOnLastWindowClosed(True)
     sys.exit(app.exec())
 

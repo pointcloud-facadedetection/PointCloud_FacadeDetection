@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from typing import Iterable, Optional
+from datetime import datetime
+import json
+import numpy as np
 
 from sqlalchemy import select
 
@@ -9,6 +12,118 @@ from models import Facade, Heatmap, QualityMetric, Project, ResultScene
 
 
 class ResultsRepo:
+    @staticmethod
+    def commit_quality_success(project_uuid: str, facade_id: int, quality: dict,
+                                *, display_no=None, facade_data=None, color=None,
+                                dataset_revision=None) -> None:
+        """Atomically persist a successful report without persisting point clouds."""
+        if not isinstance(quality, dict) or not quality.get('ok', True):
+            raise ValueError('只能持久化成功的质量结果')
+
+        def serializable(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, (np.floating, np.integer)):
+                return value.item()
+            if isinstance(value, dict):
+                return {str(k): serializable(v) for k, v in value.items()
+                        if not str(k).startswith('__')}
+            if isinstance(value, (list, tuple)):
+                return [serializable(v) for v in value]
+            return value
+
+        report = serializable(quality)
+        report.pop('__export_context', None)
+        # 在开启事务之前进行验证，以防止格式错误的算法输出
+        json.dumps(report, ensure_ascii=False)
+        with project_session(project_uuid) as s:
+            # 只有明确标记为数据库 ID 的 ID 才能指向现有行。
+            facade = None
+            if isinstance(facade_data, dict) and facade_data.get('facade_db_id'):
+                facade = s.execute(select(Facade).where(
+                    Facade.id == int(facade_data['facade_db_id']),
+                    Facade.is_deleted == 0,
+                )).scalar_one_or_none()
+            # 检测 ID 仅在算法内部有效，在场景重建后可能与数据库主键不一致。
+            # 仅将持久化的显示标签作为兼容性备选方案使用
+            if facade is None and display_no is not None:
+                facade = s.execute(select(Facade).where(
+                    # save_detected_facades stores the algorithm's zero-based
+                    # ordinal in the legacy label (Facade 0, Facade 1, ...).
+                    Facade.label == f'Facade {int(display_no) - 1}',
+                    Facade.is_deleted == 0,
+                ).order_by(Facade.id.desc())).scalars().first()
+            # 序号与项目中持久化的立面行进行匹配
+            if facade is None and display_no is not None:
+                project = s.execute(select(Project).where(
+                    Project.uuid == project_uuid)).scalar_one_or_none()
+                if project is not None:
+                    rows = s.execute(select(Facade).where(
+                        Facade.project_id == project.id,
+                        Facade.is_deleted == 0,
+                    ).order_by(Facade.id)).scalars().all()
+                    ordinal = int(display_no) - 1
+                    if 0 <= ordinal < len(rows):
+                        facade = rows[ordinal]
+
+            if facade is None and isinstance(facade_data, dict):
+                project = s.execute(select(Project).where(
+                    Project.uuid == project_uuid)).scalar_one_or_none()
+                scene = s.execute(select(ResultScene).where(
+                    ResultScene.project_id == project.id,
+                    ResultScene.is_active.is_(True),
+                )).scalar_one_or_none() if project is not None else None
+                if project is not None:
+                    if scene is None:
+                        scene = ResultScene(
+                            project_id=project.id,
+                            name='Scene 1',
+                            is_active=True,
+                        )
+                        s.add(scene)
+                        s.flush()
+                    geometry = {key: facade_data.get(key) for key in (
+                        'plane_model', 'normal', 'center', 'inlier_indices',
+                        'proxy_indices', 'measurement_indices', 'voxel_ids',
+                        'cloud_name', '__index_space')
+                        if facade_data.get(key) is not None}
+                    facade = Facade(
+                        project_id=project.id, scene_id=scene.id,
+                        label=f'Facade {int(display_no or 1)}',
+                        plane_json=geometry,
+                        bbox_json=facade_data.get('bbox_2d'),
+                        area=float(facade_data.get('area', 0.0) or 0.0),
+                        orientation=facade_data.get('type_label') or facade_data.get('type'),
+                    )
+                    s.add(facade)
+                    s.flush()
+            if facade is None:
+                raise ValueError(
+                    f'立面不存在: facade_id={facade_id}, display_no={display_no}')
+            facade.quality_report_json = report
+            facade.quality_status = 'complete'
+            facade.quality_completed_at = datetime.now()
+            if dataset_revision is not None:
+                facade.dataset_revision = str(dataset_revision)
+            if color is not None:
+                facade.color_json = serializable(color)
+            # Replace metrics for repeat evaluations instead of accumulating rows.
+            for metric in list(facade.metrics):
+                s.delete(metric)
+            overall = report.get('overall') or {}
+            thresholds = report.get('thresholds')
+            values = {
+                'flatness_std': (overall.get('flatness_std'), 'mm'),
+                'flatness_max': (overall.get('flatness_max'), 'mm'),
+                'verticality': (overall.get('verticality'), 'deg'),
+            }
+            for name, (value, unit) in values.items():
+                if value is not None:
+                    s.add(QualityMetric(facade_id=facade.id, metric_name=name,
+                                        value=float(value), unit=unit,
+                                        thresholds_json=thresholds))
+            s.flush()
+
     @staticmethod
     def update_facade_review_status(project_uuid: str, facade_id: int, status: str) -> None:
         """Persist the operator's review state without creating a new result."""

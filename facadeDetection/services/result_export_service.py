@@ -112,10 +112,13 @@ class ResultExportService:
             if bool(r.get(pass_key, True)):
                 continue
             cx = r.get('center_xyz')
+            # A window is drawable only when its geometry and measurement are
+            # both valid.  Append them together so rasterize_facade never gets
+            # two differently filtered arrays.
             if cx is not None and len(cx) == 3:
                 try:
                     if all(np.isfinite(float(x)) for x in cx):
-                        centers_list.append([float(x) for x in cx])
+                        center = [float(x) for x in cx]
                     else:
                         continue
                 except (TypeError, ValueError):
@@ -136,13 +139,13 @@ class ResultExportService:
                     continue
             except (TypeError, ValueError):
                 continue
-            
+            centers_list.append(center)
             values_list.append(val)
 
         centers = np.asarray(centers_list, dtype=float).reshape(-1, 3)
         values = np.asarray(values_list, dtype=float)
 
-        if len(centers) == 0 or len(values) == 0:
+        if len(centers) == 0 or len(values) == 0 or len(centers) != len(values):
             raise ValueError('质量结果没有有效窗口，无法导出热力图')
 
         # Get limit

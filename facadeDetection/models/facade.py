@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, Index
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, Index, Boolean
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import relationship
 
@@ -26,6 +26,13 @@ class Facade(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     is_deleted = Column(Integer, default=0, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
+    # Runtime geometry stays in the point-cloud index; these fields contain only
+    # the durable decision metadata and the serializable quality report.
+    quality_status = Column(String, default="pending", nullable=False)
+    quality_report_json = Column(JSON, nullable=True)
+    color_json = Column(JSON, nullable=True)
+    dataset_revision = Column(String, nullable=True)
+    quality_completed_at = Column(DateTime, nullable=True)
 
     scene = relationship("ResultScene", back_populates="facades")
     metrics = relationship("QualityMetric", back_populates="facade", cascade="all, delete-orphan")

@@ -18,13 +18,10 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
@@ -35,7 +32,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QToolButton,
-    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -60,7 +56,8 @@ from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
-from utils.workers import QualityWorker
+from services.dal.results_repo import ResultsRepo
+from utils.workers import QualityWorker, PointCloudLoadWorker
 
 
 PAGE_DEFINITIONS = (
@@ -474,6 +471,10 @@ class MainWindow(QMainWindow):
         # exhaust Windows commit memory while CPUs remain underutilised.
         self._quality_pool = QThreadPool(self)
         self._quality_pool.setMaxThreadCount(1)
+        self._load_pool = QThreadPool(self)
+        self._load_pool.setMaxThreadCount(1)
+        self._active_load_worker = None
+        self._load_cancel_button = None
         self._active_quality_worker = None
         self._project_generation = 0
         self._setup_ui()
@@ -1529,6 +1530,15 @@ class MainWindow(QMainWindow):
         facade_copy['id'] = facade_id
         facade_copy['display_no'] = facade_no
 
+        # A completed historical result is already a valid report. Reopen it
+        # directly; never spend CPU or memory recomputing it on every project
+        # activation. Revision mismatches are deliberately handled by the
+        # normal worker path, which will reject stale geometry safely.
+        historical_quality = facade_copy.get('quality_report')
+        if facade_copy.get('quality_status') == 'complete' and isinstance(historical_quality, dict):
+            self._show_quality_dialog(cloud, facade_copy, historical_quality)
+            return
+
         print(f'[PCFD] ui.evaluate_start facade_id={facade_id} facade_no={facade_no} '
               f'cloud={cloud}', flush=True)
 
@@ -1639,6 +1649,24 @@ class MainWindow(QMainWindow):
         print(f'[PCFD] ui.quality_success facade_id={facade_no} '
               f'windows={window_count} valid={valid_count} '
               f'intervals={len(quality.get("intervals", []))}', flush=True)
+        # Persist only after the algorithm has produced a valid report. The
+        # repository transaction is the commit point for the completed state.
+        try:
+            project_uuid = getattr(self.current_project, 'project_id', None)
+            dataset = self.facade_service._index_service._get_dataset(cloud)
+            ResultsRepo.commit_quality_success(
+                project_uuid, int(f.get('id', 0)), quality,
+                display_no=facade_no,
+                facade_data=f,
+                dataset_revision=getattr(dataset, 'revision', None),
+                color=self.render_service.facade_color_for(f, facade_no),
+            )
+            f['quality_status'] = 'complete'
+            f['quality_report'] = quality
+        except Exception as exc:
+            print(f'[PCFD] quality.persist_failed facade_id={facade_no} error={exc!r}', flush=True)
+            QMessageBox.warning(self, '质量评估', f'算法已完成，但结果保存失败：{exc}')
+            return
         QTimer.singleShot(0, lambda: self._show_quality_dialog(cloud, f, quality))
 
     def _export_quality_report(self):
@@ -2157,17 +2185,8 @@ class MainWindow(QMainWindow):
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
         self._prepare_project_activation(self.current_project.project_id)
-        try:
-            uploaded_paths = self.project_overview_service.upload_files(
-                file_paths, self.current_project.project_id)
-        except Exception as exc:
-            QMessageBox.warning(self, '直接上传文件', f'上传失败：{exc}')
-            return
-        if not uploaded_paths:
-            QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
-            return
-        self._refresh_project_list()
-        self._activate_project(self.current_project)
+        self._start_load('upload', self.current_project.project_id,
+                         file_paths=file_paths)
     def _open_import_fls_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
             self,
@@ -2178,10 +2197,9 @@ class MainWindow(QMainWindow):
             return
         self._last_upload_directory = directory_path
         self._prepare_project_activation(getattr(self.current_project, 'project_id', None))
-        self.project_overview_service.import_fls_directory(directory_path, getattr(self.current_project, 'project_id', None))
-        self._refresh_project_list()
-        if self.current_project is not None:
-            self._activate_project(self.current_project)
+        project_id = getattr(self.current_project, 'project_id', None)
+        if project_id:
+            self._start_load('fls', project_id, directory=directory_path)
 
     def _open_project_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
@@ -2194,6 +2212,8 @@ class MainWindow(QMainWindow):
 
         self._last_upload_directory = directory_path
         self._prepare_project_activation(None)
+        # open_project currently includes Open3D rendering and must remain on
+        # the GUI thread. Do not send this legacy combined pipeline to a worker.
         project = self.project_overview_service.open_project(directory_path)
         self._refresh_project_list()
         self._activate_project(project)
@@ -2552,11 +2572,69 @@ class MainWindow(QMainWindow):
 
         # Ensure per-project DB is active and latest raw point cloud is loaded
         self._prepare_project_activation(project.project_id)
+        self._start_load('activate', project.project_id, project=project)
+
+    def _start_load(self, operation, project_id, *, file_paths=None,
+                    directory=None, project=None):
+        """Run the combined legacy pipeline on GUI thread.
+
+        FileService currently registers Open3D geometry as part of loading.
+        Running it in QRunnable raises Open3D's GUI-thread guard. Keep the
+        worker API for the future split pipeline, but never dispatch this
+        combined operation to a worker.
+        """
         try:
-            self.project_overview_service.activate_project(project.project_id)
-        except Exception:
-            pass
-        self._activate_project(project)
+            self.statusBar().showMessage('正在加载点云，请稍候...')
+            if operation == 'activate':
+                self.project_overview_service.activate_project(project_id)
+                self._activate_project(project)
+            elif operation == 'upload':
+                uploaded = self.project_overview_service.upload_files(file_paths, project_id)
+                if uploaded:
+                    self._activate_project(self.current_project)
+                else:
+                    QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
+            elif operation == 'fls':
+                payload = self.project_overview_service.import_fls_directory(directory, project_id)
+                if payload.get('success'):
+                    self._activate_project(self.current_project)
+                else:
+                    QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
+            self._refresh_project_list()
+        except Exception as exc:
+            self._on_load_failed(self._project_generation, str(exc))
+        finally:
+            self.statusBar().clearMessage()
+
+    def _on_load_failed(self, generation, error):
+        if generation != self._project_generation:
+            return
+        self._active_load_worker = None
+        self.statusBar().showMessage('点云加载失败', 5000)
+        QMessageBox.warning(self, '点云加载', error)
+
+    def _on_load_finished(self, generation, operation, project_id, project, result):
+        if generation != self._project_generation:
+            return
+        self._active_load_worker = None
+        self.statusBar().clearMessage()
+        if operation == 'activate' and project is not None:
+            self._refresh_project_list()
+            self._activate_project(project)
+        elif operation == 'upload':
+            uploaded = result.get('uploaded') or []
+            if uploaded:
+                self._refresh_project_list()
+                self._activate_project(self.current_project)
+            else:
+                QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
+        elif operation == 'fls':
+            payload = result.get('result') or {}
+            if payload.get('success'):
+                self._refresh_project_list()
+                self._activate_project(self.current_project)
+            else:
+                QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
 
     def _activate_project(self, project):
         # Historical facade geometry is not a formal result.  Never carry it

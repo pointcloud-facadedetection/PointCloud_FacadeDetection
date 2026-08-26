@@ -13,6 +13,7 @@ from db.connection import project_session
 from sqlalchemy import select
 from services.viewport_render_service import ViewportRenderService
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
+from utils.workers import PointCloudLoadWorker
 
 
 @dataclass
@@ -31,6 +32,27 @@ class ProjectOverviewService:
         self.render_service = render_service
         self.db = db
         self._file_service: Optional[FileService] = None
+
+    def create_load_worker(self, operation: str, project_uuid: str,
+                           *, file_paths=None, directory=None):
+        def run(worker):
+            if operation == 'activate':
+                worker.signals.progress.emit(10, '正在读取项目资源')
+                self.activate_project(project_uuid)
+                return {'operation': operation, 'project_uuid': project_uuid}
+            if operation == 'upload':
+                paths = list(file_paths or [])
+                worker.signals.progress.emit(10, f'准备加载 {len(paths)} 个文件')
+                result = self.upload_files(paths, project_uuid)
+                return {'operation': operation, 'project_uuid': project_uuid,
+                        'uploaded': result}
+            if operation == 'fls':
+                worker.signals.progress.emit(10, '正在转换 FLS 目录')
+                result = self.import_fls_directory(directory, project_uuid)
+                return {'operation': operation, 'project_uuid': project_uuid,
+                        'result': result}
+            raise ValueError(f'未知加载操作: {operation}')
+        return PointCloudLoadWorker(run)
 
     # -------------- 项目管理 --------------
     def list_projects(self) -> list[ProjectCard]:
@@ -184,7 +206,8 @@ class ProjectOverviewService:
             for row in rows:
                 metrics = s.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
                 geometry = row.plane_json or {}
-                result.append({'id': row.id, 'type': row.label, 'type_label': row.label,
+                result.append({'id': row.id, 'facade_db_id': row.id,
+                               'type': row.label, 'type_label': row.label,
                                'area': row.area or 0.0, 'plane': row.plane_json,
                                'bbox': row.bbox_json,
                                # Historical results must remain valid quality
@@ -193,9 +216,13 @@ class ProjectOverviewService:
                                    'plane_model', 'normal', 'center', 'inlier_indices',
                                    'proxy_indices', 'measurement_indices', 'voxel_ids',
                                    'cloud_name', '__index_space') if key in geometry},
-                               'quality_metrics': [{'name': m.metric_name, 'value': m.value,
+                                'quality_metrics': [{'name': m.metric_name, 'value': m.value,
                                                     'unit': m.unit, 'pass': m.pass_flag}
-                                                   for m in metrics]})
+                                                    for m in metrics],
+                               'quality_status': row.quality_status,
+                               'quality_report': row.quality_report_json,
+                               'color': row.color_json,
+                               'dataset_revision': row.dataset_revision})
             log_event(project_id, 'results.loaded', facades=len(result))
             return result
 
