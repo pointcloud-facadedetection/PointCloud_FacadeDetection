@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d
 import copy
-import cv2
 from collections import deque
 
 log = logging.getLogger("facadeDetection.pointcloud")
@@ -327,19 +326,46 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
         sk = keys[order]
         starts = np.flatnonzero(np.r_[True, np.any(sk[1:] != sk[:-1], axis=1)])
         ends = np.r_[starts[1:], len(order)]
-        for start, end in zip(starts, ends):
-            group = ids[order[start:end]]
-            center = np.mean(pts[group], axis=0)
-            rep = group[np.argmin(np.sum((pts[group] - center) ** 2, axis=1))]
-            proxy_parts.append(pts[rep]); range_parts.append(rng[rep]); source_parts.append(group)
-            if col is not None: color_parts.append(col[rep])
+        group_counts = ends - starts
+        group_ids = np.repeat(np.arange(len(starts), dtype=np.int32), group_counts)
+        sorted_global = ids[order]
+        sorted_pts = pts[sorted_global]
+        centers = np.column_stack([
+            np.add.reduceat(sorted_pts[:, axis], starts) / group_counts
+            for axis in range(3)
+        ])
+        dist2 = np.sum((sorted_pts - centers[group_ids]) ** 2, axis=1)
+        # 按体素组稳定选择一个代表点。这里避免依赖浮点相等与
+        # np.unique 返回位置组合，确保代表点数量始终等于体素组数。
+        rep_rows = np.fromiter(
+            (start + int(np.argmin(dist2[start:end]))
+             for start, end in zip(starts, ends)),
+            dtype=np.int64,
+            count=len(starts),
+        )
+        reps = sorted_global[rep_rows]
+        proxy_parts.append(pts[reps])
+        range_parts.append(rng[reps])
+        # CSR 的每个 offset 对应一个 Proxy 点，而不是一个距离壳层。
+        # 体素内成员按代理顺序保存，保证 proxy[i] 映射到
+        # indices[offsets[i]:offsets[i + 1]]。
+        source_parts.extend(
+            sorted_global[start:end] for start, end in zip(starts, ends)
+        )
+        if col is not None:
+            color_parts.append(col[reps])
         lo = float(hi)
         if lo >= crop: break
-    proxy = np.asarray(proxy_parts, dtype=np.float32).reshape(-1, 3)
+    # 每个距离壳层的点数通常不同，不能用 np.asarray 将其直接拼成
+    # 规则数组；vstack 才是这里所需的“按行合并”。
+    proxy = np.vstack(proxy_parts).astype(np.float32, copy=False)
     offsets = np.zeros(len(source_parts) + 1, dtype=np.int64)
     offsets[1:] = np.cumsum([len(x) for x in source_parts], dtype=np.int64)
     indices = np.concatenate(source_parts).astype(np.int32, copy=False) if source_parts else np.empty(0, np.int32)
-    return proxy, (np.asarray(color_parts, np.float32) if col is not None else None), offsets, indices, np.asarray(range_parts, np.float32)
+    proxy_colors = (np.vstack(color_parts).astype(np.float32, copy=False)
+                    if col is not None else None)
+    proxy_ranges = np.concatenate(range_parts).astype(np.float32, copy=False)
+    return proxy, proxy_colors, offsets, indices, proxy_ranges
 
 
 def fit_plane_svd(points):
