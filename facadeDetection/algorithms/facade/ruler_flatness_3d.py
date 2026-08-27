@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
-RULER_KERNEL_VERSION = "ruler-flatness-3d-2.0"
 
 
 def make_frame(normal, points, ruler_dir=None):
@@ -311,8 +310,7 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
         "n_used": int(np.sum(surf)),
         "n_sor_removed": int(np.sum(~keep)),
         "n_solid_bins": int(solid_mask.sum()),
-        "hole_length": float(np.diff(holes, axis=1).sum()) if holes.size else 0.,
-        "kernel_version": RULER_KERNEL_VERSION
+        "hole_length": float(np.diff(holes, axis=1).sum()) if holes.size else 0.
     }
     
     return Surface(
@@ -384,8 +382,7 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
         "hole_length": hole_length,
         "hole_ratio": hole_ratio,
         "coverage_valid": coverage_valid,
-        "covered_source_ids": ts.copy(),
-        "kernel_version": RULER_KERNEL_VERSION
+        "covered_source_ids": ts.copy()
     }
 
 

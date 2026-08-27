@@ -5,7 +5,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 import open3d as o3d
 
 import numpy as np
@@ -20,7 +20,7 @@ from config.storage import Storage
 # Reuse the existing converter implementation as the official reference
 from utils.convert_fls2ply import convert_fls_to_ply, EXE_PATH as DEFAULT_FLS_EXE
 from utils.dist_reader import read_dist
-from algorithms.geometry import adaptive_outlier_indices, stratified_downsample, stratified_proxy_build
+from algorithms.geometry import stratified_proxy_build
 
 
 class FileService:
@@ -110,7 +110,6 @@ class FileService:
                                   (50., .05), (80., .045), (100., .04))
                 metadata = dict(dataset_metadata or {})
                 metadata.update({
-                    'pipeline_version': 'range-adaptive-v2',
                     'source_id': source_id,
                     'source_raw_count': int(len(pts)),
                     'proxy_source_offsets': proxy_offsets.tolist(),
@@ -296,7 +295,6 @@ class FileService:
                 shells_used = ((10., .10), (20., .08), (35., .06),
                               (50., .05), (80., .045), (100., .04))
                 metadata = {
-                    'pipeline_version': 'range-adaptive-v2',
                     'source_id': source_id,
                     'source_raw_count': int(len(source_pts)),
                     'proxy_source_offsets': proxy_offsets.tolist(),
@@ -399,7 +397,7 @@ class FileService:
         arr = np.asarray(img)
         if arr.ndim == 2:               # grayscale -> RGB
             arr = np.stack([arr, arr, arr], axis=-1)
-        arr = arr.astype(np.float64)
+        arr = arr.astype(np.float32, copy=False)
         if arr.max() > 1.0:
             arr = arr / 255.0
         return arr

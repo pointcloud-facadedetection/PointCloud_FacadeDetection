@@ -32,6 +32,10 @@ class PointCloudScene:
             return
         data = self.point_data[name]
         pos, colors = display_arrays(data)
+        # Open3D copies these buffers into its geometry. Do not retain a
+        # second normalized/converted representation in the scene layer.
+        pos = np.asarray(pos, dtype=np.float32, order='C')
+        colors = np.asarray(colors, dtype=np.float32, order='C')
         pcd = make_point_cloud(pos, colors)
         self.clouds[name] = pcd
         self.adapter.add_geometry(name, pcd, reset_bounding_box=reset_bounding_box)

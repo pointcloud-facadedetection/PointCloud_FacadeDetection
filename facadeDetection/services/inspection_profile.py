@@ -44,12 +44,54 @@ class InspectionProfile:
 class InspectionProfileService:
     """标准注册表；后续可将注册表替换为数据库，不影响算法接口。"""
     PRESETS = (
-        InspectionProfile("structure_main", "主体", "v2.0", "structure", 8.0, 10.0),
-        InspectionProfile("plaster_normal", "普通抹灰", "v2.0", "plaster", 4.0, 4.0),
-        InspectionProfile("plaster_advanced", "高级抹灰", "v2.0", "plaster", 3.0, 3.0),
-        InspectionProfile("tile_finish", "饰面砖", "v2.0", "tile", 4.0, 3.0),
-        InspectionProfile("coating_normal", "普通涂饰", "v2.0", "coating", 4.0, 4.0),
-        InspectionProfile("coating_advanced", "高级涂饰", "v2.0", "coating", 3.0, 3.0),
+        InspectionProfile(
+            standard_id="structure_main",
+            standard_name="主体",
+            version="GB 50204",
+            wall_type="structure",
+            flatness_limit_mm=8.0,
+            verticality_limit_mm=10.0,
+        ),
+        InspectionProfile(
+            standard_id="plaster_normal",
+            standard_name="普通抹灰",
+            version="GB 50210",
+            wall_type="plaster",
+            flatness_limit_mm=4.0,
+            verticality_limit_mm=4.0,
+        ),
+        InspectionProfile(
+            standard_id="plaster_advanced",
+            standard_name="高级抹灰",
+            version="GB 50210",
+            wall_type="plaster",
+            flatness_limit_mm=3.0,
+            verticality_limit_mm=3.0,
+        ),
+        InspectionProfile(
+            standard_id="tile_finish",
+            standard_name="饰面砖",
+            version="GB 50210",
+            wall_type="tile",
+            flatness_limit_mm=4.0,
+            verticality_limit_mm=3.0,
+        ),
+        InspectionProfile(
+            standard_id="coating_normal",
+            standard_name="普通涂饰",
+            version="GB 50210",
+            wall_type="coating",
+            flatness_limit_mm=4.0,
+            verticality_limit_mm=4.0,
+        ),
+        InspectionProfile(
+            standard_id="coating_advanced",
+            standard_name="高级涂饰",
+            version="GB 50210",
+            wall_type="coating",
+            flatness_limit_mm=3.0,
+            verticality_limit_mm=3.0,
+        ),
     )
 
     @classmethod
