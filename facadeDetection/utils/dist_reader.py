@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import numpy as np
-
+import mmap
 
 @dataclass
 class DistData:
@@ -39,9 +39,23 @@ def _origins(metadata) -> np.ndarray:
     return arr.reshape(1, 3) if arr.size == 3 else arr.reshape(-1, 3)
 
 
-def _read_values(path: Path) -> np.ndarray:
+def _read_values(path: Path, expected_count: int | None = None) -> np.ndarray:
     # .dist 的实现版本可能是文本，也可能是 float32/float64 原始数组。
-    raw = path.read_bytes()
+    # Binary distance files can be hundreds of MB. Avoid an additional bytes
+    # copy; mmap is released as soon as the converted array is returned.
+    with path.open('rb') as stream:
+        size = stream.seek(0, 2)
+        stream.seek(0)
+        if size and size % 4 == 0 and (expected_count is None or size // 4 == expected_count):
+            try:
+                with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                    if mapped[:64].find(b'\x00') >= 0:
+                        values = np.frombuffer(mapped, dtype='<f4').astype(np.float32)
+                        return values.copy()
+            except (ValueError, OSError):
+                pass
+        stream.seek(0)
+        raw = stream.read()
     try:
         text = raw.decode("utf-8")
         values = np.fromstring(text.replace(",", " "), sep=" ")
@@ -60,7 +74,9 @@ def _read_values(path: Path) -> np.ndarray:
 
 def read_dist(path: str | Path | None, points: np.ndarray, metadata=None) -> DistData:
     """读取并校验距离数组；失败时按真实测站坐标安全回退计算。"""
-    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    # Keep the distance pipeline in float32; this halves the working set for
+    # large scans while remaining well below inspection tolerances.
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     origins = _origins(metadata)
     warnings = []
     values = None
@@ -69,7 +85,7 @@ def read_dist(path: str | Path | None, points: np.ndarray, metadata=None) -> Dis
     if path and Path(path).exists():
         p = Path(path)
         try:
-            values = _read_values(p)
+            values = _read_values(p, expected_count=len(pts))
             sidecar = p.with_suffix(p.suffix + ".json")
             if sidecar.exists():
                 info = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -90,5 +106,11 @@ def read_dist(path: str | Path | None, points: np.ndarray, metadata=None) -> Dis
             warnings.append(f".dist 不可用，已重新计算: {exc}")
             values = None
     if values is None:
-        values = np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1) if len(pts) else np.empty(0)
-    return DistData(values.astype(np.float32), origins.astype(np.float32), source, "m", warnings)
+        if len(pts):
+            values = np.full(len(pts), np.inf, dtype=np.float32)
+            for origin in origins.astype(np.float32, copy=False):
+                delta = pts - origin
+                values = np.minimum(values, np.sqrt(np.einsum('ij,ij->i', delta, delta)))
+        else:
+            values = np.empty(0, dtype=np.float32)
+    return DistData(np.asarray(values, dtype=np.float32), origins.astype(np.float32), source, "m", warnings)

@@ -475,6 +475,7 @@ class MainWindow(QMainWindow):
         self._load_pool.setMaxThreadCount(1)
         self._active_load_worker = None
         self._load_cancel_button = None
+        self._load_in_progress = False
         self._active_quality_worker = None
         self._project_generation = 0
         self._setup_ui()
@@ -2604,6 +2605,15 @@ class MainWindow(QMainWindow):
         worker API for the future split pipeline, but never dispatch this
         combined operation to a worker.
         """
+        if getattr(self, '_closing', False):
+            return
+        # This pipeline intentionally commits Open3D only on the GUI thread.
+        # Reject re-entry rather than allowing two imports to multiply the
+        # resident source/proxy arrays and exhaust Windows commit memory.
+        if getattr(self, '_load_in_progress', False):
+            QMessageBox.information(self, '点云加载', '已有加载任务正在执行，请稍候。')
+            return
+        self._load_in_progress = True
         try:
             self.statusBar().showMessage('正在加载点云，请稍候...')
             if operation == 'activate':
@@ -2625,6 +2635,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._on_load_failed(self._project_generation, str(exc))
         finally:
+            self._load_in_progress = False
             self.statusBar().clearMessage()
 
     def _on_load_failed(self, generation, error):
@@ -2707,6 +2718,7 @@ class MainWindow(QMainWindow):
 
     def _dispose_project_runtime(self):
         """Single GUI-thread disposal gate for project switches and close."""
+        self._load_in_progress = False
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:
@@ -2760,6 +2772,11 @@ class MainWindow(QMainWindow):
             # quality calculation is winding down.  Request invalidation was
             # performed above; stale completion signals are token-guarded.
             self._quality_pool.waitForDone(100)
+        except Exception:
+            pass
+        try:
+            self._load_pool.clear()
+            self._load_pool.waitForDone(100)
         except Exception:
             pass
         try:

@@ -33,6 +33,10 @@ class PointCloudLoadWorker(QRunnable):
     def cancel(self):
         self._cancelled = True
 
+    def check_cancelled(self):
+        if self._cancelled:
+            raise RuntimeError('点云加载任务已取消')
+
     def is_cancelled(self):
         return self._cancelled
 

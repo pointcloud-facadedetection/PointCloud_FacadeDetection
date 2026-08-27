@@ -38,16 +38,19 @@ class ProjectOverviewService:
         def run(worker):
             if operation == 'activate':
                 worker.signals.progress.emit(10, '正在读取项目资源')
+                worker.check_cancelled()
                 self.activate_project(project_uuid)
                 return {'operation': operation, 'project_uuid': project_uuid}
             if operation == 'upload':
                 paths = list(file_paths or [])
                 worker.signals.progress.emit(10, f'准备加载 {len(paths)} 个文件')
+                worker.check_cancelled()
                 result = self.upload_files(paths, project_uuid)
                 return {'operation': operation, 'project_uuid': project_uuid,
                         'uploaded': result}
             if operation == 'fls':
                 worker.signals.progress.emit(10, '正在转换 FLS 目录')
+                worker.check_cancelled()
                 result = self.import_fls_directory(directory, project_uuid)
                 return {'operation': operation, 'project_uuid': project_uuid,
                         'result': result}

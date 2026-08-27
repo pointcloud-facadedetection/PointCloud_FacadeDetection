@@ -6,7 +6,7 @@ import time
 import os
 import numpy as np
 
-from .ruler_flatness_3d import prepare_surface, ruler_at, RULER_KERNEL_VERSION
+from .ruler_flatness_3d import prepare_surface, ruler_at, fit_line
 
 _EMPTY_SOURCE_IDS = np.empty(0, dtype=np.int64)
 
@@ -115,41 +115,62 @@ def _build_strips_directional(along, across, w, raw_ids, angle, params,
             'along_max': float(a_max + params.ruler_length_m / 2),
         })
 
+    if not strips:
+        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted
+
+    # FIX v3: When common_uv is provided, project ALL common_uv points to this direction
+    # and assign them to the appropriate strips based on their across coordinate.
+    if common_uv is not None and len(strips) > 0 and u_axis is not None and d3 is not None:
+        uv = np.asarray(common_uv, dtype=float)
+        # Project common_uv (in base u,v coordinates) to current direction's (along, across)
+        along_c = uv[:, 0] * float(u_axis @ d3) + uv[:, 1] * float(v_axis @ d3)
+        across_c = uv[:, 0] * float(u_axis @ q3) + uv[:, 1] * float(v_axis @ q3)
+
+        # Determine which strip each point belongs to
+        strip_idx_for_uv = np.floor((across_c - (q_min + half_width)) / strip_step).astype(np.int64)
+
+        # Basic validity: within strip bounds
+        valid = ((strip_idx_for_uv >= 0) & 
+                 (strip_idx_for_uv < len(strip_centers)) &
+                 (np.abs(across_c - strip_centers[np.clip(strip_idx_for_uv, 0, len(strip_centers)-1)]) <= half_width + 1e-9))
+
+        # Build active strip set and along range lookup
+        active_strips = {s['center_index']: s for s in strips}
+
+        # Check along range for each point based on its assigned strip
+        for strip_idx_val, strip in active_strips.items():
+            mask = (strip_idx_for_uv == strip_idx_val) & valid
+            if not np.any(mask):
+                continue
+            a_c = along_c[mask]
+            a_valid = (a_c >= strip['along_min']) & (a_c <= strip['along_max'])
+            # Update validity for points in this strip
+            valid_indices = np.flatnonzero(mask)
+            valid[valid_indices[~a_valid]] = False
+
+        # Keep only points assigned to active strips
+        selected_ids = np.flatnonzero(valid)
+        if len(selected_ids) > 0:
+            final_strip_idx = strip_idx_for_uv[selected_ids]
+            # Filter to only active strips
+            active_mask = np.isin(final_strip_idx, list(active_strips.keys()))
+            if np.any(active_mask):
+                centres_grid = np.column_stack((along_c[selected_ids[active_mask]], 
+                                                across_c[selected_ids[active_mask]]))
+                strip_idx = final_strip_idx[active_mask]
+                return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted
+
+    # Fallback: generate scan grid independently for each strip (when no common_uv)
     centres = []
     strip_indices = []
     for strip in strips:
-        if common_uv is None:
-            lo = max(float(strip['along_min']), float(along_sorted.min()))
-            hi = min(float(strip['along_max']), float(along_sorted.max()))
-            scan = _scan_grid(lo, hi, params.scan_step_m, params.ruler_length_m)
-            if scan.size:
-                centres.extend((float(a), float(strip['across_center'])) for a in scan)
-                strip_indices.extend([strip['center_index']] * len(scan))
-        else:
-            uv = np.asarray(common_uv, dtype=float)
-            along_c = uv[:, 0] * float(u_axis @ d3) + uv[:, 1] * float(v_axis @ d3)
-            across_c = uv[:, 0] * float(u_axis @ q3) + uv[:, 1] * float(v_axis @ q3)
-            if strip is not strips[0]:
-                continue
-            centers_strip = np.rint((across_c - (q_min + half_width)) / strip_step).astype(np.int64)
-            valid_strip = ((centers_strip >= 0) & (centers_strip < len(strip_centers)) &
-                           (np.abs(across_c - (q_min + half_width + centers_strip * strip_step)) <= half_width + 1e-9))
-            active = np.zeros(len(strip_centers), dtype=bool)
-            active[[s['center_index'] for s in strips]] = True
-            valid_strip &= active[np.clip(centers_strip, 0, len(strip_centers) - 1)]
-            strip_min = np.full(len(strip_centers), np.inf, dtype=float)
-            strip_max = np.full(len(strip_centers), -np.inf, dtype=float)
-            for item in strips:
-                strip_min[item['center_index']] = item['along_min']
-                strip_max[item['center_index']] = item['along_max']
-            safe_idx = np.clip(centers_strip, 0, len(strip_centers) - 1)
-            valid_strip &= (along_c >= strip_min[safe_idx]) & (along_c <= strip_max[safe_idx])
-            selected_ids = np.flatnonzero(valid_strip)
-            centres_grid = np.column_stack((along_c[selected_ids], across_c[selected_ids]))
-            strip_idx = centers_strip[selected_ids]
-            break
-    if common_uv is not None:
-        return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted
+        lo = max(float(strip['along_min']), float(along_sorted.min()))
+        hi = min(float(strip['along_max']), float(along_sorted.max()))
+        scan = _scan_grid(lo, hi, params.scan_step_m, params.ruler_length_m)
+        if scan.size:
+            centres.extend((float(a), float(strip['across_center'])) for a in scan)
+            strip_indices.extend([strip['center_index']] * len(scan))
+
     centres_grid = np.asarray(centres, dtype=float).reshape(-1, 2)
     strip_idx = np.asarray(strip_indices, dtype=np.int64)
     return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted
@@ -230,10 +251,10 @@ def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0, step):
     return (ku, kv), snap_u, snap_v, snap_xyz, distance
 
 
-def _aggregate_star_rows_v2(windows_by_direction, origin, u_axis, v_axis, u0, v0, params):
+def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis, u0, v0, params):
     """Aggregate four directional ruler results onto one facade base grid.
     
-    FIX v2: 正确的"米字形"聚合逻辑
+    "米字形"聚合逻辑
     工程定义：在同一物理位置（snapped to base grid cell），
     四个方向各放置一根2m靠尺，取四个方向中的最大 gap 作为该位置的平整度。
     """
@@ -638,11 +659,13 @@ def _compute_verticality_corrected(points, raw_ids, plane_model, u_axis, v_axis,
     pass_rows = [r['verticality_pass'] for r in finite_rows]
     
     elapsed = time.perf_counter() - started
-    print(f'[PCFD] verticality_corrected.summary '
-          f'cells_total={total_cells} cells_processed={processed} rows={len(rows)} '
+    print(f'[PCFD] verticality.summary '
+          f'windows_total={len(v_centers) * len(u_centers)} '
+          f'valid_windows={len(rows)} '
+          f'rows={len(finite_rows)} '
           f'max_deviation_mm={max((r["verticality_deviation_mm_2m"] for r in finite_rows), default=np.nan):.3f} '
           f'seconds={elapsed:.2f}', flush=True)
-    
+
     return {
         'ok': bool(rows),
         'reason': '' if rows else 'no_verticality_rows',
@@ -653,10 +676,6 @@ def _compute_verticality_corrected(points, raw_ids, plane_model, u_axis, v_axis,
         'rows': rows,
     }
 
-
-# =============================================================================
-# Main entry point
-# =============================================================================
 
 def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, params=None):
     params = params or RulerQualityParameters()
@@ -807,7 +826,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         angle_f = float(angle)
         windows_by_direction[angle_f] = direction_results.get(angle_f, [])
     
-    rows = _aggregate_star_rows_v2(
+    rows = _aggregate_star_rows(
         windows_by_direction, origin, u_axis, v_axis,
         u_min_full, v_min_full, params)
 
@@ -903,8 +922,6 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
 
     return {
         'ok': True,
-        'schema_version': 'facade-quality/13',
-        'kernel_version': RULER_KERNEL_VERSION,
         'parameters': params.snapshot(),
         'windows': rows,
         'intervals': intervals,
