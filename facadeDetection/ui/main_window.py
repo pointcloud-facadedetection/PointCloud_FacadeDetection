@@ -421,7 +421,7 @@ class MainWindow(QMainWindow):
         self.btn_upload_photo = QPushButton('上传2D照片')
         self.btn_rectify_photo_perspective = QPushButton('调正照片视角')
         self.btn_upload_scan_pose = QPushButton('上传扫描仪位姿')
-        self.btn_init_cloud_angle = QPushButton('初始化点云角度')
+        self.btn_init_cloud_angle = QPushButton('切到对面视角')
         self.btn_auto_photo_match = QPushButton('自动匹配')
         self.btn_annotate_matches = QPushButton('进入标注模式')
         self.btn_undo_photo_match = QPushButton('撤销点对')
@@ -1349,40 +1349,18 @@ class MainWindow(QMainWindow):
         self._refresh_photo_match_ui()
 
     def _init_cloud_angle_from_scan_pose(self):
-        state = self.photo_match_service.state
-        if not state.scan_pose_path:
-            QMessageBox.information(self, '初始化点云角度', '请先上传扫描仪位姿文件。')
-            return
         if self._auto_match_busy or self._map_back_busy:
             return
         try:
-            _cloud, points, _colors = self._current_cloud_arrays()
+            self._current_cloud_arrays()
         except ValueError as exc:
             QMessageBox.warning(self, '初始化点云角度', str(exc))
             return
-        import numpy as np
-
-        facade = self._resolve_auto_match_facade()
-        if facade is not None and facade.get('center') is not None:
-            lookat = np.asarray(facade['center'], dtype=float).reshape(3)
-        else:
-            lookat = np.mean(points, axis=0)
-        try:
-            camera = self.photo_match_service.build_viewport_camera(lookat)
-        except (ValueError, FileNotFoundError) as exc:
-            QMessageBox.warning(self, '初始化点云角度', str(exc))
-            return
-        self._print_scan_pose_debug('viewport camera from scan pose', camera)
-        applied = self.viewport.apply_scan_pose_view(
-            camera['eye'],
-            camera['lookat'],
-            camera['up'],
-        )
+        applied = self.viewport.apply_opposite_current_view()
         if not applied:
-            QMessageBox.warning(self, '初始化点云角度', '视口相机设置失败，请确认点云已加载。')
+            QMessageBox.warning(self, '初始化点云角度', '视口反向设置失败，请确认点云已加载。')
             return
-        json_name = Path(state.scan_pose_path).name
-        self.statusBar().showMessage(f'已按 {json_name} 初始化点云视角', 5000)
+        self.statusBar().showMessage('已切换到当前点云视角的对面角度', 5000)
         self._refresh_photo_match_ui()
 
     def _scan_pose_status_hint(self) -> str:
@@ -1583,7 +1561,6 @@ class MainWindow(QMainWindow):
         state = self.photo_match_service.state
         complete = self.photo_match_service.complete_pair_count()
         has_photo = bool(state.photo_path)
-        has_scan_pose = bool(state.scan_pose_path)
         has_cloud = bool(self._active_cloud_name())
         if not hasattr(self, 'lbl_photo_match_status'):
             return
@@ -1609,8 +1586,7 @@ class MainWindow(QMainWindow):
             )
         if hasattr(self, 'btn_init_cloud_angle'):
             self.btn_init_cloud_angle.setEnabled(
-                has_scan_pose
-                and has_cloud
+                has_cloud
                 and not self._auto_match_busy
                 and not self._map_back_busy
             )

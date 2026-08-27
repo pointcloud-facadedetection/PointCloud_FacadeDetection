@@ -460,6 +460,30 @@ class Open3DViewport(BaseViewport):
         except Exception:
             return False
 
+    def apply_opposite_current_view(self):
+        """把当前视角翻到对面方向，保持当前观察中心、up 和 zoom。"""
+        if not self._init_success:
+            return False
+        try:
+            ctr = self._adapter.get_view_control()
+            if ctr is None:
+                return False
+            lookat = np.asarray(ctr.get_lookat(), dtype=np.float64)
+            front = np.asarray(ctr.get_front(), dtype=np.float64)
+            up = np.asarray(ctr.get_up(), dtype=np.float64)
+            zoom = float(ctr.get_zoom())
+            if np.linalg.norm(front) < 1e-12 or np.linalg.norm(up) < 1e-12:
+                return False
+            ctr.set_lookat(lookat)
+            ctr.set_front(-front / (np.linalg.norm(front) + 1e-12))
+            ctr.set_up(up / (np.linalg.norm(up) + 1e-12))
+            ctr.set_zoom(zoom)
+            if self._overlay is not None:
+                self._overlay.update()
+            return True
+        except Exception:
+            return False
+
     def get_picked_point(self):
         return self._interactor.last_picked_point
 
