@@ -5,7 +5,10 @@ from config.settings import Config
 
 
 class ViewportInteractor:
-    PICK_SAMPLE_POINTS = 1_000_000
+    # 首轮只需找屏幕邻域候选；随后会在原始索引附近精细搜索。
+    # 25 万点可显著降低交互延迟，同时保持建筑点云的拾取精度。
+    PICK_SAMPLE_POINTS = 250_000
+    PICK_REFINE_STEPS = 64
 
     def __init__(self, adapter, camera, scene):
         self.adapter = adapter
@@ -33,12 +36,14 @@ class ViewportInteractor:
         self._last_pick_key = None
         self._last_pick_ts = 0.0
         self._cached_pan_scale = None
+        self._pick_projection_cache = {}
 
     # ------------------------------------------------------------------
     # 选择模式状态管理
     # ------------------------------------------------------------------
     def set_pick_enabled(self, enabled: bool, radius: int | None = None, cloud_name: str | None = None):
         self.pick_enabled = bool(enabled)
+        self._invalidate_pick_projection_cache()
         if radius is not None:
             try:
                 self.pick_radius = int(radius)
@@ -46,6 +51,9 @@ class ViewportInteractor:
                 pass
         if cloud_name is not None:
             self.pick_cloud = cloud_name
+
+    def _invalidate_pick_projection_cache(self):
+        self._pick_projection_cache.clear()
 
     def set_selection_enabled(self, enabled, cloud_name=None):
         """
@@ -130,6 +138,8 @@ class ViewportInteractor:
             dx = pos.x() - self._pan_start.x()
             dy = pos.y() - self._pan_start.y()
             self._pan_start = QPoint(pos)
+            if dx or dy:
+                self._invalidate_pick_projection_cache()
             ctr = self.adapter.get_view_control()
             if ctr is not None:
                 try:
@@ -164,6 +174,8 @@ class ViewportInteractor:
             dx = pos.x() - self._rotate_start.x()
             dy = pos.y() - self._rotate_start.y()
             self._rotate_start = QPoint(pos)
+            if dx or dy:
+                self._invalidate_pick_projection_cache()
             ctr = self.adapter.get_view_control()
             if ctr is not None:
                 try:
@@ -310,6 +322,7 @@ class ViewportInteractor:
         return idx
 
     def pick_nearest_point(self, pos, cloud_name=None):
+        started = time.perf_counter()
         best = None
         best_dist = float(self.pick_radius)
         best_any = None
@@ -328,19 +341,48 @@ class ViewportInteractor:
 
             count = len(points)
             step = max(1, (count + self.PICK_SAMPLE_POINTS - 1) // self.PICK_SAMPLE_POINTS)
-            sampled = points[::step]
-            projected = self.camera.project_points(sampled)
-            if projected is None:
-                continue
+            cache_key = (name, id(points), count, step)
+            cached = self._pick_projection_cache.get(cache_key)
+            cache_hit = cached is not None
+            if cached is None:
+                sampled = points[::step]
+                projected = self.camera.project_points(sampled)
+                if projected is None:
+                    continue
+                screen, valid = projected
+                self._pick_projection_cache = {
+                    cache_key: (screen, valid)
+                }
+            else:
+                screen, valid = cached
 
-            screen, valid = projected
             dist = np.hypot(screen[:, 0] - pos.x(), screen[:, 1] - pos.y())
             dist[~valid] = np.inf
             idx = int(np.argmin(dist))
             if np.isfinite(dist[idx]):
+                point_index = min(idx * step, count - 1)
                 d = float(dist[idx])
+
+                # 粗采样只用于定位候选区；对原始索引附近的小窗口再投影，
+                # 避免降低采样量后红点偏离鼠标点击位置。
+                radius = self.PICK_REFINE_STEPS * step
+                lo = max(0, point_index - radius)
+                hi = min(count, point_index + radius + 1)
+                refined = self.camera.project_points(points[lo:hi])
+                if refined is not None:
+                    refined_screen, refined_valid = refined
+                    refined_dist = np.hypot(
+                        refined_screen[:, 0] - pos.x(),
+                        refined_screen[:, 1] - pos.y(),
+                    )
+                    refined_dist[~refined_valid] = np.inf
+                    refined_idx = int(np.argmin(refined_dist))
+                    if np.isfinite(refined_dist[refined_idx]):
+                        point_index = lo + refined_idx
+                        d = float(refined_dist[refined_idx])
+
                 if d < best_any_dist:
-                    point_index_any = idx * step
+                    point_index_any = point_index
                     best_any_dist = d
                     best_any = {
                         "cloud_name": name,
@@ -348,13 +390,18 @@ class ViewportInteractor:
                         "point": points[point_index_any].astype(float).tolist(),
                     }
                 if d < best_dist:
-                    point_index = idx * step
                     best_dist = d
                     best = {
                         "cloud_name": name,
                         "index": point_index,
                         "point": points[point_index].astype(float).tolist(),
                     }
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                print(
+                    f'[Pick] search points={count} sampled={len(screen)} '
+                    f'cache={cache_hit} elapsed={elapsed_ms:.1f}ms',
+                    flush=True,
+                )
         return best or best_any
 
     def handle_wheel(self, event):
@@ -373,6 +420,7 @@ class ViewportInteractor:
 
             steps = round(delta / 120.0)
             factor = float(self._wheel_scale ** steps)
+            self._invalidate_pick_projection_cache()
 
             ctr = self.adapter.get_view_control()
             if ctr is None:

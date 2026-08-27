@@ -1,0 +1,15 @@
+2026-08-27 20:49:52,826 INFO [results.loaded] facades=0
+2026-08-27 20:50:35,032 INFO [station.switch] station_id=1
+2026-08-27 20:50:35,169 INFO [results.loaded] facades=0
+2026-08-27 20:56:46,861 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-27 20:57:17,141 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-27 20:57:30,609 INFO [station.switch] station_id=1
+2026-08-27 20:57:30,695 INFO [results.loaded] facades=0
+2026-08-27 21:07:38,882 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-27 21:07:59,229 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-27 21:08:06,774 INFO [station.switch] station_id=1
+2026-08-27 21:08:06,871 INFO [results.loaded] facades=0
+2026-08-27 21:13:33,371 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-27 21:13:53,616 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-27 21:14:02,075 INFO [station.switch] station_id=1
+2026-08-27 21:14:02,160 INFO [results.loaded] facades=0

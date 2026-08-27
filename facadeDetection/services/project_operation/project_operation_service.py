@@ -601,7 +601,75 @@ class ProjectOperationService:
         self._notify('calculate_detail')
 
     def align_2d_3d(self):
+        """进入/退出三维点云手动标点模式。"""
         self._notify('align_2d_3d')
+        cloud = self._active_cloud_name()
+        if not cloud:
+            try:
+                QMessageBox.information(None, '二维-三维对齐', '请先加载点云数据。')
+            except Exception:
+                print('请先加载点云数据。', flush=True)
+            return
+
+        render = self._get_render_service()
+        viewport = self._viewport
+        if render is None and not hasattr(viewport, 'enter_pick_mode'):
+            print('[Pick] 当前视口不支持点选', flush=True)
+            return
+
+        if render is not None and render.is_pick_mode():
+            render.exit_pick_mode()
+            count = render.picked_count()
+            try:
+                QMessageBox.information(
+                    None,
+                    '二维-三维对齐',
+                    f'已退出标点模式，当前共 {count} 个三维标注点。',
+                )
+            except Exception:
+                print(f'[Pick] 退出标点模式，点数={count}', flush=True)
+            return
+
+        if render is not None:
+            render.clear_pick_markers()
+
+        def _on_pick(picked):
+            if not picked:
+                return
+            point = picked.get('point')
+            if point is None:
+                return
+            xyz = np.asarray(point, dtype=float).reshape(3)
+            if render is not None:
+                render.add_pick_marker(xyz)
+                count = render.picked_count()
+            else:
+                count = 0
+            print(
+                f'[Pick] 标注点 #{count}: '
+                f'X={xyz[0]:.6f}, Y={xyz[1]:.6f}, Z={xyz[2]:.6f} '
+                f'(点云索引={picked.get("index")})',
+                flush=True,
+            )
+
+        pick_radius = 32
+        try:
+            if render is not None:
+                render.enter_pick_mode(
+                    callback=_on_pick,
+                    cloud_name=cloud,
+                    pick_radius=pick_radius,
+                )
+            elif hasattr(viewport, 'enter_pick_mode'):
+                viewport.enter_pick_mode(
+                    cloud_name=cloud,
+                    pick_radius=pick_radius,
+                    callback=_on_pick,
+                )
+        except Exception as exc:
+            print(f'[Pick] 进入标点模式失败: {exc}', flush=True)
+            return
+        print('[Pick] 进入三维标点模式，左键点击加点', flush=True)
 
     # ---------------- Internal: click-to-select facade ----------------
     def _enable_facade_click_select(self, cloud_name: str, facades: list[dict]):

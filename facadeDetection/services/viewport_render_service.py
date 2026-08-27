@@ -151,6 +151,11 @@ class ViewportRenderService:
         self._pick_mode = False
 
     def is_pick_mode(self) -> bool:
+        if hasattr(self.viewport, 'pick_enabled'):
+            try:
+                return bool(self.viewport.pick_enabled)
+            except Exception:
+                pass
         return self._pick_mode
 
     def add_pick_marker(self, point):
@@ -158,6 +163,9 @@ class ViewportRenderService:
         self._picked_points.append(point)
         if hasattr(self.viewport, 'update_pick_markers'):
             self.viewport.update_pick_markers(src_points=self._picked_points)
+
+    def picked_count(self) -> int:
+        return len(self._picked_points)
 
     def clear_pick_markers(self):
         """清除所有拾取标记并重置记录。"""
