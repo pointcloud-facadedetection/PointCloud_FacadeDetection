@@ -77,9 +77,26 @@ class CameraController:
         if ctr is None:
             return
         try:
-            ctr.set_lookat(np.asarray(center, dtype=float))
-            ctr.set_front(np.asarray(center, dtype=float) - np.asarray(eye, dtype=float))
-            ctr.set_up(np.asarray(up, dtype=float))
+            center = np.asarray(center, dtype=float).reshape(3)
+            eye = np.asarray(eye, dtype=float).reshape(3)
+            front = center - eye
+            if np.linalg.norm(front) < 1e-12:
+                return
+            front = front / (np.linalg.norm(front) + 1e-12)
+            up = np.asarray(up, dtype=float).reshape(3)
+            up = up - front * float(np.dot(front, up))
+            if np.linalg.norm(up) < 1e-12:
+                candidates = (
+                    np.array([0.0, 0.0, 1.0], dtype=float),
+                    np.array([0.0, 1.0, 0.0], dtype=float),
+                    np.array([1.0, 0.0, 0.0], dtype=float),
+                )
+                up = min(candidates, key=lambda axis: abs(float(np.dot(axis, front))))
+                up = up - front * float(np.dot(front, up))
+            up = up / (np.linalg.norm(up) + 1e-12)
+            ctr.set_lookat(center)
+            ctr.set_front(front)
+            ctr.set_up(up)
         except Exception:
             pass
 

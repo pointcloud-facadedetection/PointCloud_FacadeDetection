@@ -97,6 +97,7 @@ REPORT_EMPTY_TITLE = '请选择PDF上传'
 PHOTO_FILE_FILTER = (
     '图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp);;所有文件 (*)'
 )
+SCAN_POSE_FILE_FILTER = '扫描位姿 JSON (*.json);;所有文件 (*)'
 
 
 class MainWindow(QMainWindow):
@@ -320,7 +321,7 @@ class MainWindow(QMainWindow):
         strip_layout.setSpacing(8)
         self.photo_view = PhotoViewWidget(self.photo_strip, placeholder='尚未上传 2D 照片')
         self.photo_view.point_clicked.connect(self._on_photo_match_point_clicked)
-        self.scan_view = PhotoViewWidget(self.photo_strip, placeholder='备用 1')
+        self.scan_view = PhotoViewWidget(self.photo_strip, placeholder='调正后的照片')
         self.scan_view.set_interactive(False)
         self.spare_view = PhotoViewWidget(self.photo_strip, placeholder='备用 2')
         self.spare_view.set_interactive(False)
@@ -418,6 +419,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(hint)
 
         self.btn_upload_photo = QPushButton('上传2D照片')
+        self.btn_rectify_photo_perspective = QPushButton('调正照片视角')
+        self.btn_upload_scan_pose = QPushButton('上传扫描仪位姿')
+        self.btn_init_cloud_angle = QPushButton('初始化点云角度')
         self.btn_auto_photo_match = QPushButton('自动匹配')
         self.btn_annotate_matches = QPushButton('进入标注模式')
         self.btn_undo_photo_match = QPushButton('撤销点对')
@@ -426,6 +430,9 @@ class MainWindow(QMainWindow):
         self.btn_map_back_to_cloud = QPushButton('映射回3D点云')
         for button in (
             self.btn_upload_photo,
+            self.btn_rectify_photo_perspective,
+            self.btn_upload_scan_pose,
+            self.btn_init_cloud_angle,
             self.btn_auto_photo_match,
             self.btn_annotate_matches,
             self.btn_undo_photo_match,
@@ -472,6 +479,9 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.facade_detection_panel)
 
         self.btn_upload_photo.clicked.connect(self._open_upload_photo_dialog)
+        self.btn_rectify_photo_perspective.clicked.connect(self._rectify_photo_perspective)
+        self.btn_upload_scan_pose.clicked.connect(self._open_upload_scan_pose_dialog)
+        self.btn_init_cloud_angle.clicked.connect(self._init_cloud_angle_from_scan_pose)
         self.btn_auto_photo_match.clicked.connect(self._run_auto_photo_match)
         self.btn_annotate_matches.clicked.connect(self._enter_photo_annotate_mode)
         self.btn_undo_photo_match.clicked.connect(self._undo_photo_match_pair)
@@ -1258,10 +1268,135 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '上传 2D 照片', str(exc))
             return
         self.photo_view.set_image(image)
+        self.scan_view.clear_image()
         self._sync_photo_strip()
         QTimer.singleShot(0, self._sync_photo_strip)
         self._exit_photo_annotate_mode(silent=True)
         self._refresh_photo_match_ui()
+
+    def _rectify_photo_perspective(self):
+        state = self.photo_match_service.state
+        if not state.photo_path:
+            QMessageBox.information(self, '调正照片视角', '请先上传 2D 照片。')
+            return
+        if self._auto_match_busy or self._map_back_busy:
+            return
+        self.statusBar().showMessage('正在调正照片视角...')
+        try:
+            result = self.photo_match_service.rectify_perspective()
+            rectified = bgr_to_qimage(result['rectified_bgr'])
+        except Exception as exc:
+            self.statusBar().showMessage('照片调正失败')
+            QMessageBox.warning(self, '调正照片视角', str(exc))
+            self._refresh_photo_match_ui()
+            return
+        self.photo_view.set_image(rectified)
+        self.photo_view.set_markers([])
+        self.scan_view.set_image(rectified)
+        self._refresh_photo_match_markers()
+        QTimer.singleShot(0, self._sync_photo_strip)
+        method = result.get('method', 'unknown')
+        self.statusBar().showMessage(f'照片视角已调正（{method}），请在摆正照片上标注', 5000)
+        self._refresh_photo_match_ui()
+
+    def _print_scan_pose_debug(self, title: str, payload: dict) -> None:
+        try:
+            import numpy as np
+
+            print(f'\n[ScanPose] {title}', flush=True)
+            print(f'[ScanPose] json_path: {payload.get("json_path")}', flush=True)
+            transform = payload.get('transform_to_global')
+            if transform is not None:
+                matrix = np.asarray(transform, dtype=float).reshape(4, 4)
+                print('[ScanPose] transformToGlobal (scanner -> global):', flush=True)
+                print(np.array2string(matrix, precision=8, suppress_small=False), flush=True)
+            inverse = payload.get('global_to_scanner')
+            if inverse is not None:
+                matrix = np.asarray(inverse, dtype=float).reshape(4, 4)
+                print('[ScanPose] inverse/global_to_scanner (global -> scanner):', flush=True)
+                print(np.array2string(matrix, precision=8, suppress_small=False), flush=True)
+            for key in ('eye', 'lookat', 'up', 'front', 'origin'):
+                value = payload.get(key)
+                if value is not None:
+                    arr = np.asarray(value, dtype=float).reshape(-1)
+                    print(
+                        f'[ScanPose] {key}: '
+                        f'{np.array2string(arr, precision=8, suppress_small=False)}',
+                        flush=True,
+                    )
+        except Exception as exc:
+            print(f'[ScanPose] debug output failed: {exc}', flush=True)
+
+    def _open_upload_scan_pose_dialog(self):
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            '选择扫描仪位姿 JSON',
+            self._last_upload_directory,
+            SCAN_POSE_FILE_FILTER,
+        )
+        if not file_path:
+            return
+        self._last_upload_directory = str(Path(file_path).parent)
+        try:
+            meta = self.photo_match_service.load_scan_pose(file_path)
+        except (ValueError, FileNotFoundError) as exc:
+            QMessageBox.warning(self, '上传扫描仪位姿', str(exc))
+            return
+        self._print_scan_pose_debug('loaded scan pose JSON', meta)
+        self.statusBar().showMessage(
+            f"扫描位姿已加载：{Path(file_path).name}", 5000,
+        )
+        self._refresh_photo_match_ui()
+
+    def _init_cloud_angle_from_scan_pose(self):
+        state = self.photo_match_service.state
+        if not state.scan_pose_path:
+            QMessageBox.information(self, '初始化点云角度', '请先上传扫描仪位姿文件。')
+            return
+        if self._auto_match_busy or self._map_back_busy:
+            return
+        try:
+            _cloud, points, _colors = self._current_cloud_arrays()
+        except ValueError as exc:
+            QMessageBox.warning(self, '初始化点云角度', str(exc))
+            return
+        import numpy as np
+
+        facade = self._resolve_auto_match_facade()
+        if facade is not None and facade.get('center') is not None:
+            lookat = np.asarray(facade['center'], dtype=float).reshape(3)
+        else:
+            lookat = np.mean(points, axis=0)
+        try:
+            camera = self.photo_match_service.build_viewport_camera(lookat)
+        except (ValueError, FileNotFoundError) as exc:
+            QMessageBox.warning(self, '初始化点云角度', str(exc))
+            return
+        self._print_scan_pose_debug('viewport camera from scan pose', camera)
+        applied = self.viewport.apply_scan_pose_view(
+            camera['eye'],
+            camera['lookat'],
+            camera['up'],
+        )
+        if not applied:
+            QMessageBox.warning(self, '初始化点云角度', '视口相机设置失败，请确认点云已加载。')
+            return
+        json_name = Path(state.scan_pose_path).name
+        self.statusBar().showMessage(f'已按 {json_name} 初始化点云视角', 5000)
+        self._refresh_photo_match_ui()
+
+    def _scan_pose_status_hint(self) -> str:
+        state = self.photo_match_service.state
+        if not state.scan_pose_path:
+            return ''
+        name = Path(state.scan_pose_path).name
+        origin = (state.scan_pose_meta or {}).get('origin')
+        if origin:
+            return (
+                f'\n扫描位姿：{name} '
+                f'({origin[0]:.1f}, {origin[1]:.1f}, {origin[2]:.1f})'
+            )
+        return f'\n扫描位姿：{name}'
 
     def _enter_photo_annotate_mode(self):
         state = self.photo_match_service.state
@@ -1332,6 +1467,25 @@ class MainWindow(QMainWindow):
         )
         if mean_error is not None:
             message += f'平均重投影误差：{float(mean_error):.2f} px'
+        try:
+            reverse = self.photo_match_service.reverse_mapping_check()
+        except ValueError as exc:
+            reverse = None
+            message += f'\n反向映射检查：未执行（{exc}）'
+        if reverse:
+            back_mean = reverse.get('mean_distance_error_m')
+            back_max = reverse.get('max_distance_error_m')
+            reproj_mean = reverse.get('mean_reprojection_error_px')
+            message += (
+                '\n反向映射检查：'
+                f'{reverse.get("valid_count", 0)}/{reverse.get("point_count", 0)} 点有效'
+            )
+            if back_mean is not None:
+                message += f'\n3D 平面反投影平均误差：{float(back_mean):.4f} m'
+            if back_max is not None:
+                message += f'\n3D 平面反投影最大误差：{float(back_max):.4f} m'
+            if reproj_mean is not None:
+                message += f'\n正向重投影平均误差：{float(reproj_mean):.2f} px'
         QMessageBox.information(self, '估算相机内外参数', message)
         self._refresh_photo_match_ui()
 
@@ -1373,6 +1527,7 @@ class MainWindow(QMainWindow):
             'facade': dict(facade),
             'ply_path': ply_path,
             'search_dir': search_dir,
+            'photo_points_are_rectified': state.annotation_space == 'rectified',
         })
         worker.signals.finished.connect(
             lambda result: self._on_map_back_finished(token, result)
@@ -1428,6 +1583,8 @@ class MainWindow(QMainWindow):
         state = self.photo_match_service.state
         complete = self.photo_match_service.complete_pair_count()
         has_photo = bool(state.photo_path)
+        has_scan_pose = bool(state.scan_pose_path)
+        has_cloud = bool(self._active_cloud_name())
         if not hasattr(self, 'lbl_photo_match_status'):
             return
         facade = self._resolve_auto_match_facade() if has_photo else None
@@ -1441,6 +1598,21 @@ class MainWindow(QMainWindow):
             self.btn_auto_photo_match.setEnabled(can_auto)
             self.btn_auto_photo_match.setText(
                 '自动匹配中...' if self._auto_match_busy else '自动匹配'
+            )
+        if hasattr(self, 'btn_rectify_photo_perspective'):
+            self.btn_rectify_photo_perspective.setEnabled(
+                has_photo and not self._auto_match_busy and not self._map_back_busy
+            )
+        if hasattr(self, 'btn_upload_scan_pose'):
+            self.btn_upload_scan_pose.setEnabled(
+                not self._auto_match_busy and not self._map_back_busy
+            )
+        if hasattr(self, 'btn_init_cloud_angle'):
+            self.btn_init_cloud_angle.setEnabled(
+                has_scan_pose
+                and has_cloud
+                and not self._auto_match_busy
+                and not self._map_back_busy
             )
         self.btn_annotate_matches.setEnabled(
             has_photo and not state.annotating and not self._auto_match_busy and not self._map_back_busy
@@ -1474,29 +1646,42 @@ class MainWindow(QMainWindow):
             self.lbl_photo_match_status.setText('正在映射回 3D 点云视图，请稍候...')
             return
         if not has_photo:
+            scan_hint = self._scan_pose_status_hint()
             self.lbl_photo_match_status.setText(
                 '尚未上传照片。自动匹配还需先检测立面并在右侧点选目标立面。'
+                + scan_hint
             )
             return
         name = Path(state.photo_path).name
+        display_name = f'{name}（摆正照片标注）' if state.annotation_space == 'rectified' else name
+        scan_hint = self._scan_pose_status_hint()
         if state.annotating:
             next_hint = '请点击照片' if state.next_is_photo else '请点击 3D 点云'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对（至少 6 对）\n{next_hint}'
+                f'已上传：{display_name}{facade_hint}\n匹配点：{complete} 对（至少 6 对）\n{next_hint}{scan_hint}'
             )
         elif state.pose:
             error = state.pose.get('reprojection_mean_px')
             extra = f'，误差 {float(error):.2f} px' if error is not None else ''
             mode = '自动' if state.match_mode == 'auto' else '手动'
+            rectify_hint = ''
+            if state.rectified:
+                method = state.rectified.get('method', 'unknown')
+                rectify_hint = f'\n视角已调正（{method}）'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对\n{mode}位姿估计已完成{extra}'
+                f'已上传：{display_name}{facade_hint}\n匹配点：{complete} 对\n{mode}位姿估计已完成{extra}{rectify_hint}{scan_hint}'
             )
         else:
             extra = ''
             if facade is None:
                 extra = '\n自动匹配未启用：请先完成立面检测，并在右侧列表点选目标立面'
+            rectify_hint = ''
+            if state.rectified:
+                method = state.rectified.get('method', 'unknown')
+                rect_w, rect_h = state.rectified.get('rectified_size', (0, 0))
+                rectify_hint = f'\n视角已调正：{rect_w}×{rect_h}，方法 {method}；请在摆正照片上标注'
             self.lbl_photo_match_status.setText(
-                f'已上传：{name}{facade_hint}\n匹配点：{complete} 对（手动至少 6 对，或点击自动匹配）{extra}'
+                f'已上传：{display_name}{facade_hint}\n匹配点：{complete} 对（手动至少 6 对，或点击自动匹配）{extra}{rectify_hint}{scan_hint}'
             )
 
     def _open_upload_file_dialog(self):

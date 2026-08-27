@@ -192,6 +192,7 @@ def map_photo_onto_scan_view(
     ply_path=None,
     search_dir=None,
     overlay_alpha=0.55,
+    photo_points_are_rectified=False,
 ):
     """
     1. 用上传目录 JSON 中的扫描位姿渲染点云 2D 图
@@ -235,7 +236,10 @@ def map_photo_onto_scan_view(
     if len(photo_xy) < 4:
         raise ValueError('匹配点不足 4 对，无法估计映射单应矩阵')
 
-    rect_xy = _apply_homography(photo_xy, h_rect)
+    if photo_points_are_rectified:
+        rect_xy = photo_xy
+    else:
+        rect_xy = _apply_homography(photo_xy, h_rect)
     scan_xy, depth = project_points(cloud_xyz, camera)
     keep = (depth > 1e-4) & np.isfinite(scan_xy).all(axis=1) & np.isfinite(rect_xy).all(axis=1)
     if int(np.sum(keep)) < 4:

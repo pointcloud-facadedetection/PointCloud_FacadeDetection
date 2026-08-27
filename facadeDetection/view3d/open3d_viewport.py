@@ -441,6 +441,25 @@ class Open3DViewport(BaseViewport):
         except Exception:
             return None
 
+    def apply_scan_pose_view(self, eye, lookat, up, zoom=0.6):
+        """按扫描仪位姿设置视口相机（eye 为测站位置，lookat 为观察目标）。"""
+        if not self._init_success:
+            return False
+        try:
+            self._camera.set_look_at(
+                np.asarray(lookat, dtype=np.float64),
+                np.asarray(eye, dtype=np.float64),
+                np.asarray(up, dtype=np.float64),
+            )
+            ctr = self._adapter.get_view_control()
+            if ctr is not None and zoom is not None:
+                ctr.set_zoom(float(zoom))
+            if self._overlay is not None:
+                self._overlay.update()
+            return True
+        except Exception:
+            return False
+
     def get_picked_point(self):
         return self._interactor.last_picked_point
 

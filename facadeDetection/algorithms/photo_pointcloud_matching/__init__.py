@@ -1,4 +1,4 @@
-"""2D 照片与 3D 点云匹配算法。"""
+"""2D 照片与 3D 点云匹配算法（PnP、热力图等）。"""
 
 from .pnp_solver import (
     estimate_camera_matrix,
