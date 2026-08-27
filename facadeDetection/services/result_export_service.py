@@ -49,7 +49,7 @@ class ResultExportService:
             n_valid = 0
             for w in windows:
                 if heatmap_mode == 'verticality':
-                    fgm = w.get('verticality_deviation_mm_2m', np.nan)
+                    fgm = w.get('verticality_deviation_mm', np.nan)
                 elif heatmap_mode == 'flatness_raw':
                     fgm = w.get('flatness_raw_max_gap_mm', np.nan)
                 else:
@@ -71,7 +71,7 @@ class ResultExportService:
                 quality.get('parameters', {}).get(
                     'verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm',
                     quality.get('thresholds', {}).get('verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm', 4.0)),
-                float(overall.get('verticality_deviation_mm_2m' if heatmap_mode == 'verticality' else 'flatness_raw_max_gap_mm' if heatmap_mode == 'flatness_raw' else 'flatness_max_gap_mm', 4.0)))
+                float(overall.get('verticality_deviation_mm' if heatmap_mode == 'verticality' else 'flatness_raw_max_gap_mm' if heatmap_mode == 'flatness_raw' else 'flatness_max_gap_mm', 4.0)))
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
                   f'heatmap={heatmap_path.name if heatmap_path else None}', flush=True)
@@ -127,7 +127,7 @@ class ResultExportService:
                 continue
 
             if mode == 'verticality':
-                val = r.get('verticality_deviation_mm_2m', np.nan)
+                val = r.get('verticality_deviation_mm', np.nan)
             elif mode == 'flatness_raw':
                 val = r.get('flatness_raw_max_gap_mm', np.nan)
             else:
