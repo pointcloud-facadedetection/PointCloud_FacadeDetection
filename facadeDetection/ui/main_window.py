@@ -1258,6 +1258,17 @@ class MainWindow(QMainWindow):
                      if self.pointcloud_service is not None else None)
             if cloud and self.render_service is not None:
                 self.render_service.highlight_facades(cloud, results or [])
+                # The cloud must be loaded before replaying persisted heatmaps.
+                # This is intentionally after discrete facade coloring so the
+                # heatmap is the final visual layer.
+                for historical in results or []:
+                    report = historical.get('quality_report')
+                    if (historical.get('quality_status') == 'complete'
+                            and isinstance(report, dict)
+                            and report.get('__global_indices') is not None):
+                        self.render_service.apply_quality_colors(
+                            cloud, report,
+                            index_service=self.facade_service._index_service)
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
         
@@ -1653,12 +1664,22 @@ class MainWindow(QMainWindow):
         # repository transaction is the commit point for the completed state.
         try:
             project_uuid = getattr(self.current_project, 'project_id', None)
+            if not project_uuid:
+                raise RuntimeError('当前项目已失效，无法保存质量结果')
+            # results_dir belongs to the evaluation request, but the finished
+            # callback must not read a local variable from _evaluate_facade.
+            # Resolve it here so asynchronous completion has an independent,
+            # valid persistence context.
+            results_dir = Storage.ensure_project_dirs(project_uuid)['results']
             dataset = self.facade_service._index_service._get_dataset(cloud)
+            artifact_path = ResultsRepo.persist_quality_artifact(
+                results_dir, int(f.get('id', 0)), quality)
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
                 facade_data=f,
                 dataset_revision=getattr(dataset, 'revision', None),
+                quality_artifact_path=artifact_path,
                 color=self.render_service.facade_color_for(f, facade_no),
             )
             f['quality_status'] = 'complete'

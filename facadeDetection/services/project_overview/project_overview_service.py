@@ -200,13 +200,14 @@ class ProjectOverviewService:
             log_event(project_id, 'stations.sync_failed_after_restore', error=str(exc))
 
     def load_historical_facades(self, project_id: str) -> list[dict]:
+        from config.storage import Storage
         with project_session(project_id) as s:
             rows = s.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.id)).scalars().all()
             result = []
             for row in rows:
                 metrics = s.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
                 geometry = row.plane_json or {}
-                result.append({'id': row.id, 'facade_db_id': row.id,
+                item = {'id': row.id, 'facade_db_id': row.id,
                                'type': row.label, 'type_label': row.label,
                                'area': row.area or 0.0, 'plane': row.plane_json,
                                'bbox': row.bbox_json,
@@ -222,7 +223,19 @@ class ProjectOverviewService:
                                'quality_status': row.quality_status,
                                'quality_report': row.quality_report_json,
                                'color': row.color_json,
-                               'dataset_revision': row.dataset_revision})
+                                'dataset_revision': row.dataset_revision}
+                artifact = (row.quality_report_json or {}).get('quality_artifact_path')
+                if artifact:
+                    path = Path(artifact)
+                    if not path.is_absolute():
+                        path = Path(Storage.ensure_project_dirs(project_id)['results']) / path
+                    from services.dal.results_repo import ResultsRepo
+                    ids = ResultsRepo.load_quality_artifact(path)
+                    if len(ids):
+                        item['quality_report'] = dict(item.get('quality_report') or {})
+                        item['quality_report']['__global_indices'] = ids
+                        item['quality_report']['__index_space'] = 'facade_local_to_raw_global'
+                result.append(item)
             log_event(project_id, 'results.loaded', facades=len(result))
             return result
 
