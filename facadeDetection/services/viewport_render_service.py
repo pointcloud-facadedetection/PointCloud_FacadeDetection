@@ -660,7 +660,7 @@ class ViewportRenderService:
             
             values_key = {
                 'flatness_raw': 'flatness_raw_max_gap_mm',
-                'verticality': 'verticality_deviation_mm_2m',
+                'verticality': 'verticality_deviation_mm',
             }.get(mode, 'flatness_gap_mm')
             values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
 
