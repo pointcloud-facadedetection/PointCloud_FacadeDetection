@@ -1258,18 +1258,11 @@ class MainWindow(QMainWindow):
             cloud = (self.pointcloud_service.resolve_processing_cloud()
                      if self.pointcloud_service is not None else None)
             if cloud and self.render_service is not None:
-                self.render_service.highlight_facades(cloud, results or [])
-                # The cloud must be loaded before replaying persisted heatmaps.
-                # This is intentionally after discrete facade coloring so the
-                # heatmap is the final visual layer.
-                for historical in results or []:
-                    report = historical.get('quality_report')
-                    if (historical.get('quality_status') == 'complete'
-                            and isinstance(report, dict)
-                            and report.get('__global_indices') is not None):
-                        self.render_service.apply_quality_colors(
-                            cloud, report,
-                            index_service=self.facade_service._index_service)
+                if hasattr(self.render_service, 'render_quality_reports'):
+                    self.render_service.render_quality_reports(
+                        cloud, results or [], index_service=self.facade_service._index_service)
+                else:
+                    self.render_service.highlight_facades(cloud, results or [])
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
         
