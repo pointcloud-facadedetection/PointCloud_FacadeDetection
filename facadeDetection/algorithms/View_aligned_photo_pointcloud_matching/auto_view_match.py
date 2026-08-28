@@ -7,66 +7,93 @@ import numpy as np
 
 from .manual_match import MIN_MATCH_PAIRS, estimate_match_matrix
 
+_MAX_PROCESSING_SIDE = 1600
+_MAX_KEYPOINTS = 4096
+_MATCH_CONFIDENCE = 0.10
+_LIGHTGLUE_ENGINE = None
 
-def _prepare_gray(image, max_side: int = 2200):
-    array = np.asarray(image)
-    if array.ndim == 3:
-        gray = cv2.cvtColor(array, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = array.astype(np.uint8, copy=False)
-    height, width = gray.shape[:2]
-    scale = min(1.0, float(max_side) / max(height, width))
+
+def _resize_for_matching(image):
+    array = np.asarray(image, dtype=np.uint8)
+    height, width = array.shape[:2]
+    scale = min(1.0, float(_MAX_PROCESSING_SIDE) / max(height, width))
     if scale < 1.0:
-        gray = cv2.resize(
-            gray,
+        array = cv2.resize(
+            array,
             (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
             interpolation=cv2.INTER_AREA,
         )
-    enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    edges = cv2.Canny(enhanced, 45, 140)
-    edges = cv2.dilate(edges, np.ones((2, 2), dtype=np.uint8), iterations=1)
-    matched_image = cv2.addWeighted(enhanced, 0.65, edges, 0.35, 0.0)
-    return matched_image, scale
+    return array, scale
+
+
+def _get_lightglue_engine():
+    """延迟加载 SuperPoint + LightGlue，并复用模型实例。"""
+    global _LIGHTGLUE_ENGINE
+    if _LIGHTGLUE_ENGINE is not None:
+        return _LIGHTGLUE_ENGINE
+    try:
+        import torch
+        from lightglue import LightGlue, SuperPoint
+    except ImportError as exc:
+        raise RuntimeError(
+            '缺少 SuperPoint + LightGlue 依赖，请在项目根目录执行：\n'
+            'pip install -r facadeDetection/requirements.txt'
+        ) from exc
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    extractor = SuperPoint(max_num_keypoints=_MAX_KEYPOINTS).eval().to(device)
+    matcher = (
+        LightGlue(features='superpoint', filter_threshold=0.0)
+        .eval()
+        .to(device)
+    )
+    _LIGHTGLUE_ENGINE = (torch, extractor, matcher, device)
+    return _LIGHTGLUE_ENGINE
+
+
+def _image_tensor(image, torch, device):
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return (
+        torch.from_numpy(np.ascontiguousarray(rgb))
+        .permute(2, 0, 1)
+        .float()
+        .div_(255.0)
+        .to(device)
+    )
 
 
 def _feature_matches(photo_bgr, view_bgr):
-    photo_gray, photo_scale = _prepare_gray(photo_bgr)
-    view_gray, view_scale = _prepare_gray(view_bgr)
-    if not hasattr(cv2, 'SIFT_create'):
-        raise ValueError('当前 OpenCV 不支持 SIFT，无法执行自动匹配')
+    photo_image, photo_scale = _resize_for_matching(photo_bgr)
+    view_image, view_scale = _resize_for_matching(view_bgr)
+    torch, extractor, matcher, device = _get_lightglue_engine()
+    view_tensor = _image_tensor(view_image, torch, device)
+    photo_tensor = _image_tensor(photo_image, torch, device)
+    with torch.inference_mode():
+        view_features = extractor.extract(view_tensor)
+        photo_features = extractor.extract(photo_tensor)
+        matched = matcher({
+            'image0': view_features,
+            'image1': photo_features,
+        })
 
-    detector = cv2.SIFT_create(nfeatures=12000, contrastThreshold=0.02)
-    photo_keys, photo_desc = detector.detectAndCompute(photo_gray, None)
-    view_keys, view_desc = detector.detectAndCompute(view_gray, None)
-    if photo_desc is None or view_desc is None:
-        empty = np.empty((0, 2), dtype=np.float64)
-        return empty, empty.copy(), 0
-
-    matcher = cv2.BFMatcher(cv2.NORM_L2)
-    forward = matcher.knnMatch(view_desc, photo_desc, k=2)
-    reverse = matcher.knnMatch(photo_desc, view_desc, k=2)
-    reverse_best = {
-        pair[0].queryIdx: pair[0].trainIdx
-        for pair in reverse
-        if len(pair) == 2 and pair[0].distance < 0.78 * pair[1].distance
-    }
-    good = [
-        pair[0]
-        for pair in forward
-        if (
-            len(pair) == 2
-            and pair[0].distance < 0.78 * pair[1].distance
-            and reverse_best.get(pair[0].trainIdx) == pair[0].queryIdx
-        )
-    ]
+    view_keys = view_features['keypoints'][0].detach().cpu().numpy()
+    photo_keys = photo_features['keypoints'][0].detach().cpu().numpy()
+    pairs = matched['matches'][0].detach().cpu().numpy()
+    scores = matched['scores'][0].detach().cpu().numpy()
+    keep_confident = scores >= _MATCH_CONFIDENCE
+    pairs = pairs[keep_confident]
     view_xy = np.asarray(
-        [view_keys[item.queryIdx].pt for item in good], dtype=np.float64
+        view_keys[pairs[:, 0]] if len(pairs) else [],
+        dtype=np.float64,
     ).reshape(-1, 2) / view_scale
     photo_xy = np.asarray(
-        [photo_keys[item.trainIdx].pt for item in good], dtype=np.float64
+        photo_keys[pairs[:, 1]] if len(pairs) else [],
+        dtype=np.float64,
     ).reshape(-1, 2) / photo_scale
+    confident_count = len(pairs)
 
-    if len(good) >= 4:
+    if confident_count >= 4:
         homography, mask = cv2.findHomography(
             view_xy,
             photo_xy,
@@ -77,8 +104,13 @@ def _feature_matches(photo_bgr, view_bgr):
         )
         if homography is not None and mask is not None:
             keep = mask.reshape(-1).astype(bool)
-            return view_xy[keep], photo_xy[keep], len(good)
-    return view_xy, photo_xy, len(good)
+            return (
+                view_xy[keep],
+                photo_xy[keep],
+                confident_count,
+                str(device),
+            )
+    return view_xy, photo_xy, confident_count, str(device)
 
 
 def _depth_at(depth: np.ndarray, x: float, y: float, radius: int = 10):
@@ -175,6 +207,7 @@ def match_photo_to_cloud_view(
     view_camera_matrix,
     view_extrinsic,
     cloud_points=None,
+    pixel_point_index=None,
 ) -> dict:
     """通过当前点云渲染视图生成照片像素与世界三维点对应关系。"""
     photo = np.asarray(photo_bgr, dtype=np.uint8)
@@ -187,9 +220,16 @@ def match_photo_to_cloud_view(
     if view.shape[:2] != depth.shape:
         raise ValueError('点云截图与深度图尺寸不一致')
 
-    view_points, photo_points, ratio_match_count = _feature_matches(photo, view)
+    (
+        view_points,
+        photo_points,
+        ratio_match_count,
+        inference_device,
+    ) = _feature_matches(photo, view)
     lines = [
-        f'[AutoMatch][2D-2D] 几何一致匹配共 {len(view_points)} 对：'
+        f'[AutoMatch][SuperPoint+LightGlue][{inference_device}] '
+        f'置信度匹配 {ratio_match_count} 对，'
+        f'几何一致匹配 {len(view_points)} 对：'
     ]
     for sequence, (view_xy, photo_xy) in enumerate(
         zip(view_points, photo_points),
@@ -203,15 +243,22 @@ def match_photo_to_cloud_view(
 
     inverse_extrinsic = np.linalg.inv(extrinsic)
     cloud = None
-    point_index_map = None
+    point_index_map = (
+        np.asarray(pixel_point_index, dtype=np.int32)
+        if pixel_point_index is not None
+        else None
+    )
+    if point_index_map is not None and point_index_map.shape != depth.shape:
+        raise ValueError('像素点索引图与点云截图尺寸不一致')
     if cloud_points is not None:
         cloud = np.asarray(cloud_points)
-        point_index_map = _build_pixel_point_index(
-            cloud,
-            intrinsic,
-            extrinsic,
-            depth.shape,
-        )
+        if point_index_map is None:
+            point_index_map = _build_pixel_point_index(
+                cloud,
+                intrinsic,
+                extrinsic,
+                depth.shape,
+            )
     correspondences = []
     object_points = []
     image_points = []
@@ -261,6 +308,9 @@ def match_photo_to_cloud_view(
     result = {
         'correspondences': correspondences,
         'feature_match_count': int(ratio_match_count),
+        'feature_algorithm': 'SuperPoint + LightGlue',
+        'inference_device': inference_device,
+        'match_confidence': float(_MATCH_CONFIDENCE),
         'geometric_match_count': int(len(view_points)),
         'depth_match_count': int(len(correspondences)),
         'point_count': int(len(correspondences)),

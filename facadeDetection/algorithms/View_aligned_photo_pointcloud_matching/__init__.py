@@ -20,6 +20,11 @@ from .manual_match import (
     remap_cloud_points_to_photo,
 )
 from .auto_view_match import match_photo_to_cloud_view
+from .perspective_camera import (
+    default_projection_params,
+    projection_camera,
+    render_projection,
+)
 
 __all__ = [
     'PHOTO_SUFFIXES',
@@ -34,4 +39,7 @@ __all__ = [
     'estimate_match_matrix',
     'remap_cloud_points_to_photo',
     'match_photo_to_cloud_view',
+    'default_projection_params',
+    'projection_camera',
+    'render_projection',
 ]

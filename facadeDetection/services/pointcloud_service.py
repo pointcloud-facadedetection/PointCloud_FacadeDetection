@@ -323,7 +323,36 @@ class PointCloudService:
                 pts, ranges,
                 std_ratio=float(kwargs.get("std_ratio", 2.5)),
                 n_shells=int(kwargs.get("n_shells", 8)),
+                trim_far=bool(kwargs.get("trim_far", True)),
+                far_bin_width=float(kwargs.get("far_bin_width", 5.0)),
+                far_min_fraction=float(kwargs.get("far_min_fraction", 0.002)),
+                absolute_max_range=float(
+                    kwargs.get("absolute_max_range", 250.0)
+                ),
             )
+
+            # 仅压缩代理显示点；keep_proxy 仍指向原代理行，后续 CSR
+            # 会据此保留到源点云的映射，不修改原始 PLY。
+            display_voxel = float(kwargs.get("display_voxel_size", 0.0))
+            if display_voxel > 0 and len(keep_proxy) > 0:
+                candidate = pts[keep_proxy]
+                origin = np.min(candidate, axis=0)
+                keys = np.floor(
+                    (candidate - origin) / display_voxel
+                ).astype(np.int64)
+                order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+                sorted_keys = keys[order]
+                first = np.empty(len(order), dtype=bool)
+                first[0] = True
+                first[1:] = np.any(
+                    sorted_keys[1:] != sorted_keys[:-1], axis=1
+                )
+                keep_proxy = keep_proxy[order[first]]
+                print(
+                    f'[PCFD] denoise.proxy_downsample '
+                    f'voxel={display_voxel:.3f}m keep={len(keep_proxy)}',
+                    flush=True,
+                )
             print(f"[PCFD] denoise.adaptive proxy={n_before} keep={len(keep_proxy)} "
                   f"removed={n_before - len(keep_proxy)}", flush=True)
 

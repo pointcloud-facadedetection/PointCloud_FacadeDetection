@@ -162,7 +162,7 @@ class ProjectOperationService:
         except Exception as e:
             print(f"颜色更改失败: {e}", flush=True)
 
-    def denoise(self):
+    def denoise(self, **denoise_options):
         self._notify('denoise')
         try:
             if self._pointcloud_service is None:
@@ -178,7 +178,13 @@ class ProjectOperationService:
                 def run(self):
                     try:
                         print('[PCFD] denoise.worker_start', flush=True)
-                        self.finished.emit(service.denoise(method='adaptive', update_viewport=False))
+                        self.finished.emit(
+                            service.denoise(
+                                method='adaptive',
+                                update_viewport=False,
+                                **denoise_options,
+                            )
+                        )
                     except Exception as exc:
                         import traceback
                         traceback.print_exc()
@@ -242,6 +248,9 @@ class ProjectOperationService:
                 # downstream snapshot consumer; never mutate worker output.
                 print(f"去噪完成: cloud={stats.get('name')} "
                       f"proxy={len(points)} raw={stats.get('raw_count', 0)}", flush=True)
+                callback = getattr(self, 'denoise_completed_callback', None)
+                if callable(callback):
+                    callback(stats)
             else:
                 print('去噪未产生结果。', flush=True)
         finally:
@@ -250,6 +259,9 @@ class ProjectOperationService:
     @Slot(str)
     def _on_denoise_failed(self, message):
         print(f"去噪失败: {message}", flush=True)
+        callback = getattr(self, 'denoise_completed_callback', None)
+        if callable(callback):
+            callback(None)
         self._finish_denoise_state()
 
     @Slot()
