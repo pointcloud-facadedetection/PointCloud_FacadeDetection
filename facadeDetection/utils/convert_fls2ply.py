@@ -1,30 +1,29 @@
-import os
-import sys
+from __future__ import annotations
+
+import importlib
 import json
-import re
-import subprocess
+import os
 import shutil
+import sys
 import time
-import signal
-from pathlib import Path
-from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
-import numpy as np
+try:
+    from utils.logging_utils import trace
+except Exception:  # pragma: no cover - keep converter usable as a standalone script
+    def trace(stage: str, **fields):
+        msg = f"[PCFD] {stage}"
+        if fields:
+            msg += " " + " ".join(f"{key}={value}" for key, value in fields.items())
+        print(msg, flush=True)
 
-import open3d as o3d
-HAS_OPEN3D = True
+# 默认 pybind 模块所在目录（可通过环境变量 FLS_CONVERTER_DLL_DIR 覆盖）。
+DEFAULT_DLL_DIR = str(Path(__file__).resolve().parents[3] / "FlsConverter_package" / "FlsConverter")
 
-# ============================================================================
-# 配置常量（保留全局引用）
-# ============================================================================
-EXE_PATH = r"D:\\ElevationDetect\\FlsRead\\x64\\Debug\\FlSRead.exe"
-DEFAULT_OUTPUT = r"D:\\ElevationDetect\\faro\\output"
 
-# ============================================================================
-# 数据结构
-# ============================================================================
 @dataclass
 class ScanMeta:
     scan_name: str = ""
@@ -43,7 +42,7 @@ class ScanMeta:
     scan_axis: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scan_angle_rad: float = 0.0
     transform_to_global: List[List[float]] = field(default_factory=lambda: [
-        [1,0,0,0], [0,1,0,0], [0,0,1,0], [0,0,0,1]
+        [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]
     ])
     gps: Dict = field(default_factory=dict)
     compass: Dict = field(default_factory=dict)
@@ -51,6 +50,12 @@ class ScanMeta:
     ply_path: str = ""
     json_path: str = ""
     point_count: int = 0
+    has_color: bool = False
+    has_intensity: bool = False
+    has_distance: bool = False
+    scan_origin: Optional[List[float]] = None
+    scan_origins: Optional[List[List[float]]] = None
+
 
 @dataclass
 class ConversionResult:
@@ -62,44 +67,99 @@ class ConversionResult:
     stderr_log: List[str] = field(default_factory=list)
     message: str = ""
     elapsed_sec: float = 0.0
+    scan_count: int = 0
+    exported_count: int = 0
 
-# ============================================================================
-# 内部私有工具函数（原类方法剥离）
-# ============================================================================
+
+def _emit(lines: List[str], line: str, callback: Optional[Callable[[str], None]] = None) -> None:
+    lines.append(line)
+    if callback:
+        callback(line)
+    else:
+        print(line, flush=True)
+
+
+def _load_pybind_converter(dll_dir: str | None = None):
+    dll_path = Path(dll_dir or os.getenv("FLS_CONVERTER_DLL_DIR", DEFAULT_DLL_DIR))
+    if not dll_path.exists():
+        raise FileNotFoundError(
+            f"FlsConverter DLL 目录不存在: {dll_path}. "
+            "请设置环境变量 FLS_CONVERTER_DLL_DIR 指向 pybind 包目录。"
+        )
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(str(dll_path))
+    os.environ["PATH"] = str(dll_path) + os.pathsep + os.environ.get("PATH", "")
+    if str(dll_path) not in sys.path:
+        sys.path.insert(0, str(dll_path))
+    return importlib.import_module("FlsConverter")
+
+
 def _load_scan_meta(json_path: Path, ply_path: Path, point_count: int) -> ScanMeta:
     meta = ScanMeta()
     meta.ply_path = str(ply_path.resolve())
     meta.json_path = str(json_path.resolve()) if json_path.exists() else ""
-    meta.point_count = point_count
-
-    if json_path.exists():
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            meta.scan_name = data.get("scanName", "")
-            meta.scanner_type = data.get("scannerType", "")
-            meta.scanner_serial = data.get("scannerSerial", "")
-            meta.num_cols = data.get("numCols", 0)
-            meta.num_rows = data.get("numRows", 0)
-            meta.total_num_rows = data.get("totalNumRows", 0)
-            meta.row_start_angle_rad = data.get("rowStartAngle_rad", 0.0)
-            meta.row_end_angle_rad = data.get("rowEndAngle_rad", 0.0)
-            meta.col_end_angle_rad = data.get("colEndAngle_rad", 0.0)
-            meta.scanner_range_m = data.get("scannerRange_m", 0.0)
-            meta.dist_offset_m = data.get("distOffset_m", 0.0)
-            meta.dist_factor = data.get("distFactor", 0.0)
-            meta.scan_time = data.get("scanTime", "")
-            meta.scan_axis = data.get("scanAxis", [0.0, 0.0, 0.0])
-            meta.scan_angle_rad = data.get("scanAngle_rad", 0.0)
-            meta.transform_to_global = data.get("transformToGlobal", meta.transform_to_global)
-            meta.gps = data.get("gps", {})
-            meta.compass = data.get("compass", {})
-            meta.sensor_usage = data.get("sensorUsage", {})
-        except Exception as e:
-            print(f"[WARN] 解析 JSON 失败 {json_path}: {e}")
+    meta.point_count = int(point_count or 0)
+    if not json_path.exists():
+        return meta
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        meta.scan_name = data.get("scanName", data.get("scan_name", meta.scan_name))
+        meta.scanner_type = data.get("scannerType", "")
+        meta.scanner_serial = data.get("scannerSerial", "")
+        meta.num_cols = data.get("numCols", 0)
+        meta.num_rows = data.get("numRows", 0)
+        meta.total_num_rows = data.get("totalNumRows", 0)
+        meta.row_start_angle_rad = data.get("rowStartAngle_rad", 0.0)
+        meta.row_end_angle_rad = data.get("rowEndAngle_rad", 0.0)
+        meta.col_end_angle_rad = data.get("colEndAngle_rad", 0.0)
+        meta.scanner_range_m = data.get("scannerRange_m", 0.0)
+        meta.dist_offset_m = data.get("distOffset_m", 0.0)
+        meta.dist_factor = data.get("distFactor", 0.0)
+        meta.scan_time = data.get("scanTime", "")
+        meta.scan_axis = data.get("scanAxis", meta.scan_axis)
+        meta.scan_angle_rad = data.get("scanAngle_rad", 0.0)
+        meta.transform_to_global = data.get("transformToGlobal", data.get("transform_to_global", meta.transform_to_global))
+        meta.gps = data.get("gps", {})
+        meta.compass = data.get("compass", {})
+        meta.sensor_usage = data.get("sensorUsage", {})
+        origin = data.get("scan_origin", data.get("scanOrigin"))
+        if origin is None and meta.transform_to_global:
+            try:
+                origin = [
+                    float(meta.transform_to_global[0][3]),
+                    float(meta.transform_to_global[1][3]),
+                    float(meta.transform_to_global[2][3]),
+                ]
+            except Exception:
+                origin = None
+        if origin is not None:
+            meta.scan_origin = list(origin)
+        origins = data.get("scan_origins", data.get("scanOrigins"))
+        if origins is not None:
+            meta.scan_origins = origins
+    except Exception as exc:
+        trace("fls.convert.metadata_warning", json=json_path, error=exc)
     return meta
 
-def _write_project_index(project_dir: Path, result: ConversionResult):
+
+def _meta_from_pybind_scan(scan, meta_dir: Path) -> ScanMeta:
+    ply_path = Path(str(getattr(scan, "ply_path", ""))).resolve()
+    json_attr = str(getattr(scan, "json_path", "") or "")
+    json_path = Path(json_attr).resolve() if json_attr else ply_path.with_suffix(".json")
+    meta = _load_scan_meta(json_path, ply_path, int(getattr(scan, "point_count", 0) or 0))
+    meta.scan_name = str(getattr(scan, "scan_name", "") or meta.scan_name or ply_path.stem)
+    meta.has_color = bool(getattr(scan, "has_color", False))
+    meta.has_intensity = bool(getattr(scan, "has_intensity", False))
+    meta.has_distance = bool(getattr(scan, "has_distance", False))
+    if json_path.exists():
+        dest_json = meta_dir / json_path.name
+        if json_path.resolve() != dest_json.resolve():
+            shutil.copy2(json_path, dest_json)
+        meta.json_path = str(dest_json.resolve())
+    return meta
+
+
+def _write_project_index(project_dir: Path, result: ConversionResult) -> None:
     index = {
         "project_name": project_dir.name,
         "created_at": datetime.now().isoformat(),
@@ -108,6 +168,7 @@ def _write_project_index(project_dir: Path, result: ConversionResult):
         "total_scans": len(result.scans),
         "total_points": sum(s.point_count for s in result.scans),
         "elapsed_sec": round(result.elapsed_sec, 2),
+        "converter": "pybind:FlsConverter",
         "scans": [
             {
                 "scan_name": s.scan_name,
@@ -120,179 +181,112 @@ def _write_project_index(project_dir: Path, result: ConversionResult):
                 "has_gps": s.gps.get("hasGps", False),
                 "gps_lat": s.gps.get("latitude", 0.0),
                 "gps_lon": s.gps.get("longitude", 0.0),
+                "has_color": s.has_color,
+                "has_intensity": s.has_intensity,
+                "has_distance": s.has_distance,
                 "transform_to_global": s.transform_to_global,
             }
             for s in result.scans
         ],
     }
     index_path = project_dir / "project.json"
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] 项目索引已写入: {index_path}")
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    trace("fls.convert.index_written", path=index_path)
 
-def _kill_process_tree(proc: subprocess.Popen) -> None:
-    """在 Windows 上终止转换器及其可能创建的子进程。"""
-    if proc.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    else:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            proc.kill()
 
-# ============================================================================
-# 对外暴露的转换主函数（关键字传参）
-# ============================================================================
 def convert_fls_to_ply(
     *,
     fls_folder: str,
     output_dir: str,
     project_name: Optional[str] = None,
-    exe_path: str = EXE_PATH,
-    timeout_sec: int = 3600,
     on_stdout: Optional[Callable[[str], None]] = None,
-    on_stderr: Optional[Callable[[str], None]] = None,
+    merge_scans: bool = True,
+    use_gps: bool = True,
+    dll_dir: Optional[str] = None,
 ) -> ConversionResult:
     """
-    执行 FLS -> PLY/JSON 转换的简化工具函数。
-    保留原有的 subprocess 调用逻辑与输出解析，不做业务耦合。
+    使用 pybind11 封装的 FlsConverter 执行 FLS -> PLY/JSON 转换。
+
+    参数：
+        fls_folder: FLS 文件夹或文件的路径
+        output_dir: 输出根目录
+        project_name: 项目名称（可选，默认为 fls_folder 的名称）
+        on_stdout: 标准输出回调函数（每行日志回调）
+        merge_scans: 是否合并所有扫描为单个 PLY/DIST 文件
+        use_gps: 是否使用 GPS 信息对齐扫描
+        dll_dir: 指向包含 FlsConverter.pyd 及依赖 DLL 的目录（可选，默认使用 DEFAULT_DLL_DIR）
+
+    返回：
+        ConversionResult 对象
     """
-    exe = Path(exe_path)
-    if not exe.exists():
-        raise FileNotFoundError(f"FlSRead.exe 未找到: {exe}")
-
-    result = ConversionResult()
-    result.fls_path = str(Path(fls_folder).resolve())
-
-    fls_path = Path(fls_folder)
+    result = ConversionResult(fls_path=str(Path(fls_folder).resolve()))
+    fls_path = Path(fls_folder).resolve()
     if not fls_path.exists():
-        result.message = f"FLS 路径不存在: {fls_folder}"
+        result.message = f"FLS 路径不存在: {fls_path}"
         return result
 
     if project_name is None:
         project_name = fls_path.stem if fls_path.is_file() else fls_path.name
 
-    # 项目目录结构
-    project_dir = Path(output_dir) / project_name
+    project_dir = Path(output_dir).resolve() / project_name
     ply_dir = project_dir / "pointclouds"
     meta_dir = project_dir / "metadata"
     ply_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
+    result.output_dir = str(project_dir)
 
-    result.output_dir = str(project_dir.resolve())
-    cmd = [str(exe), str(fls_path.resolve()), str(ply_dir.resolve())]
+    trace("fls.convert.begin", source=fls_path, output=ply_dir, merge_scans=merge_scans, use_gps=use_gps)
+    _emit(result.stdout_log, f"[PCFD] fls.convert.begin source={fls_path} output={ply_dir}", on_stdout)
+    start = time.perf_counter()
 
-    stdout_lines: List[str] = []
-    stderr_lines: List[str] = []
-    scan_metas: List[ScanMeta] = []
-
-    print(f"[INFO] 启动转换...")
-    print(f"[INFO] EXE: {exe}")
-    print(f"[INFO] FLS: {fls_path}")
-    print(f"[INFO] OUT: {ply_dir}")
-
-    start_time = time.time()
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            # 不要分别串行读取 stdout/stderr：任一管道写满都会造成死锁。
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(exe.parent),
+        fls = _load_pybind_converter(dll_dir)
+        py_result = fls.convert(
+            fls_folder=str(fls_path),
+            output_dir=str(ply_dir),
+            merge_scans=merge_scans,
+            use_gps=use_gps,
         )
-
-        output, _ = proc.communicate(timeout=timeout_sec)
-        for line in (output or "").splitlines():
-            stdout_lines.append(line)
-            if on_stdout:
-                on_stdout(line)
-            else:
-                print(f"[PROCESS] {line}")
-        returncode = proc.returncode
-
-    except subprocess.TimeoutExpired:
-        _kill_process_tree(proc)
-        try:
-            proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        result.message = f"转换超时（>{timeout_sec}秒）"
-        result.stdout_log = stdout_lines
-        result.stderr_log = stderr_lines
-        return result
-    except Exception as e:
-        if proc.poll() is None:
-            _kill_process_tree(proc)
-            try:
-                proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        result.message = f"子进程异常: {e}"
-        result.stdout_log = stdout_lines
-        result.stderr_log = stderr_lines
-        return result
-
-    elapsed = time.time() - start_time
-    result.elapsed_sec = elapsed
-    result.stdout_log = stdout_lines
-    result.stderr_log = stderr_lines
-
-    # 解析控制台输出提取扫描信息
-    scan_count = 0
-    exported_count = 0
-    scan_name_pattern = re.compile(r"\[OK\] Exported: (.+?) \((\d+) points")
-    found_pattern = re.compile(r"\[INFO\] Found (\d+) scan\(s\)")
-
-    for line in stdout_lines:
-        m = found_pattern.search(line)
-        if m:
-            scan_count = int(m.group(1))
-        m = scan_name_pattern.search(line)
-        if m:
-            exported_count += 1
-            ply_file = Path(m.group(1))
-            pts = int(m.group(2))
-            json_file = ply_file.with_suffix(".json")
-            meta = _load_scan_meta(json_file, ply_file, pts)
-            scan_metas.append(meta)
-            if json_file.exists():
-                dest_json = meta_dir / json_file.name
-                shutil.copy2(str(json_file), str(dest_json))
-    result.scans = scan_metas
-
-    print(f"[INFO] FlSRead.exe 退出码: {returncode}, 耗时: {elapsed:.1f} 秒", flush=True)
-    if returncode != 0:
+    except Exception as exc:
+        result.elapsed_sec = time.perf_counter() - start
         result.success = False
-        result.message = f"FlSRead.exe 返回非零退出码: {returncode} (0x{returncode:08X})"
-        if returncode == 3221225781 or returncode == -1073741515:
-            result.message += (
-                "\n[HINT] STATUS_DLL_NOT_FOUND: 缺少运行时依赖\n"
-                "[HINT] 请确保已安装以下组件：\n"
-                "  1. SCENE Redistributable Package（位于 SDK bin/ 目录）\n"
-                "  2. vcredist_x64_2022（位于 SDK bin/ 目录）"
-            )
-        elif returncode == 3221225477 or returncode == -1073741819:
-            result.message += "\n[HINT] STATUS_ACCESS_VIOLATION: 访问冲突，可能是 FARO API 调用异常"
-    elif exported_count > 0:
-        result.success = True
+        result.message = f"FlsConverter 调用失败: {exc}"
+        trace("fls.convert.failed", error=exc, seconds=f"{result.elapsed_sec:.2f}")
+        return result
+
+    result.elapsed_sec = float(getattr(py_result, "elapsed_sec", time.perf_counter() - start) or 0.0)
+    result.success = bool(getattr(py_result, "success", False))
+    result.scan_count = int(getattr(py_result, "scan_count", 0) or 0)
+    result.exported_count = int(getattr(py_result, "exported_count", 0) or 0)
+    result.scans = [_meta_from_pybind_scan(scan, meta_dir) for scan in list(getattr(py_result, "scans", []) or [])]
+
+    # 补偿可能缺失的计数
+    if not result.exported_count:
+        result.exported_count = len(result.scans)
+    if not result.scan_count:
+        result.scan_count = len(result.scans)
+
+    for scan in result.scans:
+        line = f"[PCFD] fls.convert.scan name={scan.scan_name} points={scan.point_count} ply={scan.ply_path}"
+        _emit(result.stdout_log, line, on_stdout)
+        trace("fls.convert.scan", name=scan.scan_name, points=scan.point_count, ply=scan.ply_path)
+
+    if result.success and result.exported_count > 0:
         result.message = (
-            f"成功导出 {exported_count}/{scan_count} 个扫描，"
-            f"总点数 {sum(s.point_count for s in scan_metas):,}，"
-            f"耗时 {elapsed:.1f} 秒"
+            f"成功导出 {result.exported_count}/{result.scan_count} 个扫描，"
+            f"总点数 {sum(s.point_count for s in result.scans):,}，耗时 {result.elapsed_sec:.1f} 秒"
         )
-    else:
-        result.success = False
-        result.message = "未找到扫描数据，请检查 FLS 路径是否正确"
-
-    if result.success:
         _write_project_index(project_dir, result)
+    elif not result.message:
+        result.success = False
+        result.message = "未生成 PLY，请检查 FLS 路径或 FlsConverter 输出"
+
+    trace(
+        "fls.convert.done",
+        success=result.success,
+        scan_count=result.scan_count,
+        exported_count=result.exported_count,
+        seconds=f"{result.elapsed_sec:.2f}",
+    )
+    _emit(result.stdout_log, f"[PCFD] fls.convert.done success={result.success} exported={result.exported_count}", on_stdout)
     return result

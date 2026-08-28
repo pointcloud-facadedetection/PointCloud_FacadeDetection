@@ -13,6 +13,8 @@ class Config:
     DETECT_DIST_TOL_MM = 20.0
     # Minimum effective facade area in square meters
     MIN_FACADE_AREA = 5.0
+    # 工业现场默认只进入业务流的最大立面数量：按最终点数降序选取。
+    MAX_FACADE_COUNT = 15
 
     # 垂直立面法向 Z 分量阈值（|nz| < 此值视为垂直候选）
     VERTICAL_NZ_THR: float = 0.30
@@ -125,6 +127,8 @@ class Config:
     }
 
     HIGHLIGHT_COLOR = [0.2, 0.8, 0.2]
+    FACADE_BASE_COLOR = [0.75, 0.75, 0.75]
+    QUALITY_HEATMAP_BASE_COLOR = [0.72, 0.78, 0.86]
 
     # --- Quality evaluation constants ---
     QUALITY_PASS = 0
