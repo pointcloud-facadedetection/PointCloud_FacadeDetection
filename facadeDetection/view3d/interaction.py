@@ -45,6 +45,8 @@ class ViewportInteractor:
             except Exception:
                 pass
         if cloud_name is not None:
+            if cloud_name != self.pick_cloud:
+                self._invalidate_pick_projection_cache()
             self.pick_cloud = cloud_name
 
     def set_selection_enabled(self, enabled, cloud_name=None):
@@ -322,8 +324,6 @@ class ViewportInteractor:
     def pick_nearest_point(self, pos, cloud_name=None):
         best = None
         best_dist = float(self.pick_radius)
-        best_any = None
-        best_any_dist = float("inf")
         if cloud_name:
             items = [(cloud_name, self.scene.get_cloud_data(cloud_name))]
         else:

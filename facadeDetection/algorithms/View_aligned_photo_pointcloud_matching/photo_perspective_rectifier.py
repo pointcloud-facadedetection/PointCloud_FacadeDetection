@@ -1,4 +1,8 @@
-"""按 gpt_whole_v4 的最小畸变竖直消失点算法摆正整栋建筑。"""
+"""将建筑立面照片校正为近似正投影视图。
+
+主流程同时估计立面的横向和竖向消失点，将两组平行结构送到无穷远，
+再恢复为互相正交的图像轴。旧的竖直矫正仅作为检测失败时的回退。
+"""
 
 from __future__ import annotations
 
@@ -12,10 +16,11 @@ from .photo_loader import read_bgr_image
 
 
 class PhotoPerspectiveRectifier:
-    """只校正竖直透视，保留左右立面原有观察关系。"""
+    """基于双消失点的建筑立面正投影校正器。"""
 
     MIN_LINE_LENGTH_RATIO = 0.025
     MAX_VERTICAL_ANGLE_DEVIATION_DEG = 45.0
+    MAX_HORIZONTAL_ANGLE_DEVIATION_DEG = 38.0
     ROI_X_MIN = 0.10
     ROI_X_MAX = 0.95
     ROI_Y_MIN = 0.00
@@ -27,16 +32,12 @@ class PhotoPerspectiveRectifier:
     ANCHOR_Y_MAX_RATIO = 0.72
     STRUCTURE_LOW_Q = 0.01
     STRUCTURE_HIGH_Q = 0.99
-    CROP_MARGIN_X_RATIO = 0.08
-    CROP_MARGIN_TOP_RATIO = 0.015
-    CROP_MARGIN_BOTTOM_RATIO = 0.05
-    TOP_SAFE_MARGIN_FULL_RATIO = 0.008
-    TOP_SAFE_MARGIN_MIN_PX = 25
+    CROP_MARGIN_X_RATIO = 0.12
+    CROP_MARGIN_Y_RATIO = 0.08
     MASK_LEFT_QUANTILE = 0.94
     MASK_RIGHT_QUANTILE = 0.06
-    CROP_INSET_PX = 2
-    CROP_INSET_TOP_PX = 0
-    CROP_INSET_BOTTOM_PX = 2
+    CROP_INSET_PX = 0
+    WARP_BOUNDS_PADDING_PX = 4
     ASPECT_SEARCH_STEPS = 61
     ASPECT_CENTER_PENALTY = 0.03
 
@@ -148,6 +149,47 @@ class PhotoPerspectiveRectifier:
         if len(vertical) < 2:
             raise RuntimeError('竖向结构线太少，无法稳定估计竖直消失点。')
         return vertical
+
+    def _detect_horizontal_lines(self, image: np.ndarray) -> list[dict]:
+        """检测目标立面中近似横向的楼板、窗框和檐口结构。"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        detected = cv2.createLineSegmentDetector(
+            cv2.LSD_REFINE_STD
+        ).detect(gray)[0]
+        if detected is None:
+            raise RuntimeError('未检测到横向结构线。')
+
+        h, w = image.shape[:2]
+        min_length = min(h, w) * self.MIN_LINE_LENGTH_RATIO
+        horizontal = []
+        for seg in detected[:, 0, :]:
+            x1, y1, x2, y2 = map(float, seg)
+            dx, dy = x2 - x1, y2 - y1
+            length = math.hypot(dx, dy)
+            if length < min_length:
+                continue
+            mid_x, mid_y = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+            if not (
+                self.ROI_X_MIN * w <= mid_x <= self.ROI_X_MAX * w
+                and self.ROI_Y_MIN * h <= mid_y <= self.ROI_Y_MAX * h
+            ):
+                continue
+            angle = math.degrees(math.atan2(dy, dx)) % 180.0
+            deviation = min(angle, 180.0 - angle)
+            if deviation > self.MAX_HORIZONTAL_ANGLE_DEVIATION_DEG:
+                continue
+            horizontal.append({
+                'segment': np.array([x1, y1, x2, y2], dtype=np.float64),
+                'line': self._segment_to_line(x1, y1, x2, y2),
+                'length': float(length),
+                'angle': float(angle),
+                'mid_x': float(mid_x),
+                'mid_y': float(mid_y),
+            })
+        if len(horizontal) < 2:
+            raise RuntimeError('横向结构线太少，无法估计立面横向消失点。')
+        return horizontal
 
     def _estimate_vertical_vp(self, lines: list[dict], image_shape, seed=0):
         h, w = image_shape[:2]
@@ -316,14 +358,17 @@ class PhotoPerspectiveRectifier:
         if len(warped_border) == 0:
             raise RuntimeError('矫正后的图像边界无效。')
 
-        # 与 gpt_whole_v4 一致，忽略 near-infinity 的极端边界样本。
-        min_xy = np.quantile(warped_border, 0.001, axis=0)
-        max_xy = np.quantile(warped_border, 0.999, axis=0)
-        span = max_xy - min_xy
+        raw_min_xy = np.min(warped_border, axis=0)
+        raw_max_xy = np.max(warped_border, axis=0)
+        span = raw_max_xy - raw_min_xy
         if np.any(span <= 1):
             raise RuntimeError('矫正后的输出范围退化。')
         max_side = self.target_max_dim if self.target_max_dim > 0 else max(span)
         scale = min(1.0, float(max_side) / float(max(span)))
+        padding = float(max(0, self.WARP_BOUNDS_PADDING_PX)) / max(scale, 1e-12)
+        min_xy = np.floor(raw_min_xy - padding)
+        max_xy = np.ceil(raw_max_xy + padding)
+        span = max_xy - min_xy
         translate = np.array([
             [scale, 0.0, -scale * min_xy[0]],
             [0.0, scale, -scale * min_xy[1]],
@@ -368,28 +413,23 @@ class PhotoPerspectiveRectifier:
         if len(dst_points) < 4:
             return 0, 0, width, height
 
-        x_low = float(np.quantile(dst_points[:, 0], self.STRUCTURE_LOW_Q))
-        x_high = float(np.quantile(dst_points[:, 0], self.STRUCTURE_HIGH_Q))
-        y_top = float(np.min(dst_points[:, 1]))
-        y_bottom = float(
-            np.quantile(dst_points[:, 1], self.STRUCTURE_HIGH_Q)
-        )
-        span_x = max(x_high - x_low, 1.0)
-        span_y = max(y_bottom - y_top, 1.0)
-        top_margin = max(
-            self.CROP_MARGIN_TOP_RATIO * span_y,
-            self.TOP_SAFE_MARGIN_FULL_RATIO * height,
-            float(self.TOP_SAFE_MARGIN_MIN_PX),
-        )
-        bottom_margin = self.CROP_MARGIN_BOTTOM_RATIO * span_y
-        y0 = int(math.floor(y_top - top_margin))
-        y1 = int(math.ceil(y_bottom + bottom_margin))
-        y0 = max(0, min(y0, height - 1))
-        y1 = max(y0 + 1, min(y1, height))
+        qlo = np.quantile(dst_points, self.STRUCTURE_LOW_Q, axis=0)
+        qhi = np.quantile(dst_points, self.STRUCTURE_HIGH_Q, axis=0)
+        span = np.maximum(qhi - qlo, 1.0)
+
+        # 左右裁剪边界的 mask 扫描只在主体结构覆盖的行范围内进行，避免把
+        # 顶部/底部因透视形变而明显收窄的极端行也计入统计——否则那些行会把
+        # 左右裁剪线拉得过紧，导致建筑物左右边界被过度裁掉。
+        # 最终输出仍然保留完整高度（上下不裁剪）。
+        scan_y0 = int(math.floor(qlo[1] - self.CROP_MARGIN_Y_RATIO * span[1]))
+        scan_y1 = int(math.ceil(qhi[1] + self.CROP_MARGIN_Y_RATIO * span[1]))
+        scan_y0 = max(0, min(scan_y0, height - 1))
+        scan_y1 = max(scan_y0 + 1, min(scan_y1, height))
+        y0, y1 = 0, height
 
         valid = mask > 0
         lefts, rights = [], []
-        for y in range(y0, y1):
+        for y in range(scan_y0, scan_y1):
             xs = np.where(valid[y])[0]
             if len(xs) > 0:
                 lefts.append(xs[0])
@@ -399,12 +439,8 @@ class PhotoPerspectiveRectifier:
 
         x0_mask = int(math.ceil(np.quantile(lefts, self.MASK_LEFT_QUANTILE)))
         x1_mask = int(math.floor(np.quantile(rights, self.MASK_RIGHT_QUANTILE))) + 1
-        x0_struct = int(
-            math.floor(x_low - self.CROP_MARGIN_X_RATIO * span_x)
-        )
-        x1_struct = int(
-            math.ceil(x_high + self.CROP_MARGIN_X_RATIO * span_x)
-        )
+        x0_struct = int(math.floor(qlo[0] - self.CROP_MARGIN_X_RATIO * span[0]))
+        x1_struct = int(math.ceil(qhi[0] + self.CROP_MARGIN_X_RATIO * span[0]))
         core_x0 = int(math.floor(np.quantile(dst_points[:, 0], 0.05)))
         core_x1 = int(math.ceil(np.quantile(dst_points[:, 0], 0.95)))
 
@@ -419,8 +455,8 @@ class PhotoPerspectiveRectifier:
 
         x0 += self.CROP_INSET_PX
         x1 -= self.CROP_INSET_PX
-        y0 += self.CROP_INSET_TOP_PX
-        y1 -= self.CROP_INSET_BOTTOM_PX
+        y0 += self.CROP_INSET_PX
+        y1 -= self.CROP_INSET_PX
         x0 = max(0, min(x0, width - 1))
         x1 = max(x0 + 1, min(x1, width))
         y0 = max(0, min(y0, height - 1))
@@ -525,20 +561,11 @@ class PhotoPerspectiveRectifier:
         main_lines, clusters = self._select_main_building_cluster(lines, inliers, bgr.shape)
         h_base, info = self._build_minimal_vertical_homography(bgr.shape, vp, main_lines)
         warped, mask, h_full = self._make_full_warp(bgr, h_base)
-        crop_box = self._building_aware_crop_box(mask, h_full, main_lines)
-        if self.keep_original_aspect_ratio:
-            original_ratio = bgr.shape[1] / max(bgr.shape[0], 1)
-            crop_box = self._adjust_crop_box_to_aspect(
-                mask,
-                crop_box,
-                original_ratio,
-            )
-        cropped, crop_mask, h_crop = self._crop_with_box(
-            warped,
-            mask,
-            h_full,
-            crop_box,
-        )
+        # 不再做任何方向的裁剪（上下、左右都不裁），直接使用完整的矫正画布，
+        # 占满整个照片显示框，避免任何裁剪策略把有效画面内容裁掉。
+        height, width = mask.shape[:2]
+        crop_box = (0, 0, width, height)
+        cropped, crop_mask, h_crop = warped, mask, h_full
         cropped, h_crop = self._resize_if_needed(cropped, h_crop, self.target_max_dim)
 
         self.last_method = 'vertical_vp_v4'

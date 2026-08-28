@@ -270,6 +270,23 @@ class PointCloudService:
                        if parts else np.empty(0, dtype=np.int32))
         return new_offsets, new_indices
 
+    def _save_denoise_cache(self, metadata: dict, points, colors) -> None:
+        """去噪成功后把 proxy 点云缓存到项目 cache 目录，供下次打开项目直接加载。"""
+        if not self._project_uuid:
+            return
+        source_path = (metadata or {}).get('source_ply_path')
+        if not source_path:
+            source_asset = self.get_source_asset((metadata or {}).get('source_id'))
+            source_path = (source_asset or {}).get('metadata', {}).get('ply_path')
+        if not source_path:
+            print("[PCFD] denoise_cache.skip reason=source_ply_path_unknown", flush=True)
+            return
+        try:
+            from services import denoise_cache
+            denoise_cache.save(self._project_uuid, source_path, points, colors, metadata)
+        except Exception as exc:
+            print(f"[PCFD] denoise_cache.save_failed reason={exc}", flush=True)
+
     def denoise(self, method: str = "adaptive", voxel_size: float = 0.05,
                 update_viewport: bool = True, **kwargs) -> Optional[Dict]:
         """
@@ -430,9 +447,17 @@ class PointCloudService:
                 print(f"[PCFD] denoise.dataset_rebuilt proxy={n_after} "
                       f"source_raw={len(new_indices)}", flush=True)
 
+                self._save_denoise_cache(new_meta, new_pts, new_cols)
+
             else:
                 # 标准数据：只更新 raw_count
                 raw_count = dataset.index.raw_count_for_proxy(keep_proxy)
+
+                standard_meta = dict(dataset.metadata or {})
+                standard_meta['denoise_history'] = standard_meta.get('denoise_history', []) + [{
+                    'before': n_before, 'after': n_after, 'method': method,
+                }]
+                self._save_denoise_cache(standard_meta, new_pts, new_cols)
 
         if not update_viewport:
             return {
