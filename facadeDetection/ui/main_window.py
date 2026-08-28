@@ -63,6 +63,7 @@ from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService
 from services.result_export_service import ResultExportService
+from config.settings import Config
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
@@ -1603,16 +1604,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '调整点云视角', '当前点云为空。')
             return
         points = np.asarray(points, dtype=np.float64)
-        lookat = (
-            np.nanmin(points, axis=0) + np.nanmax(points, axis=0)
-        ) * 0.5
+        finite_points = points[np.isfinite(points).all(axis=1)]
+        if len(finite_points) == 0:
+            QMessageBox.warning(self, '调整点云视角', '当前点云不包含有效坐标。')
+            return
+        # 与 liying_ruiqi_dev 保持一致：观察点取点云平均中心。
+        # 包围盒中心容易被少量远端离群点拉偏，导致建筑主体缩在视口一角。
+        lookat = np.mean(finite_points, axis=0)
         try:
             camera = self.photo_match_service.build_viewport_camera(lookat)
             applied = self.viewport.apply_scan_pose_view(
                 camera['eye'],
                 camera['lookat'],
                 camera['up'],
-                zoom=0.55,
+                zoom=float(getattr(Config, 'INITIAL_VIEW_ZOOM', 0.45)),
             )
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, '调整点云视角', str(exc))
