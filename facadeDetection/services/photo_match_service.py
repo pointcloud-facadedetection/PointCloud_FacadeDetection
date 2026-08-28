@@ -76,7 +76,7 @@ class PhotoMatchService:
         return image
 
     def rectify_perspective(self) -> dict:
-        """用横、竖双消失点将目标建筑立面恢复为近似正投影视图。"""
+        """按最小畸变竖直消失点算法摆正整栋建筑。"""
         if not self.state.photo_path:
             raise ValueError('请先上传 2D 照片')
         result = rectify_photo_perspective(self.state.photo_path)

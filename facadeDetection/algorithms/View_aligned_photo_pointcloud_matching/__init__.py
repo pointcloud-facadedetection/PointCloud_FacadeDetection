@@ -6,7 +6,7 @@ from .photo_loader import (
     read_bgr_image,
     validate_photo_path,
 )
-from .orthographic_photo_rectifier import (
+from .photo_perspective_rectifier import (
     PhotoPerspectiveRectifier,
     rectify_photo_perspective,
 )
