@@ -44,7 +44,7 @@ class FacadeQualityService:
                         ruler_size: float | None = None,
                         ruler_step: float | None = None,
                         profile=None, results_dir=None) -> Optional[dict]:
-        """质量评估计算（v2 修复版）。仅返回计算结果，不执行任何文件导出。"""
+        """质量评估计算,仅返回计算结果，不执行任何文件导出。"""
         started = time.perf_counter()
         facade_no = int(facade.get('display_no', facade.get('id', 0)))
 
@@ -207,16 +207,31 @@ class FacadeQualityService:
 
             result['interval_size_m'] = gsize
 
-            result.setdefault('overall', {}).update({
+            # FIX: Ensure overall contains all required fields with correct names
+            result.setdefault('overall', {})
+            result['overall'].update({
                 'plane_model': plane_model.tolist(),
                 'normal': plane_model[:3].tolist(),
                 'center': facade_ref['center'],
-                'measurement_method': 'rulermeasure_star_i_vertical_v2',  # v2标识
+                'measurement_method': 'rulermeasure_star_v3_true_center',
             })
-            result.setdefault('thresholds', {}).update({
+
+            result.setdefault('thresholds', {})
+            result['thresholds'].update({
                 'flatness_limit_mm': float(params.flatness_limit_mm),
                 'verticality_limit_mm': float(params.verticality_limit_mm),
             })
+
+            vert_data = result.get('verticality', {})
+            overall = result.get('overall', {})
+
+            overall['verticality_pass'] = vert_data.get('verticality_pass', False)
+            overall['verticality_pass_rate'] = vert_data.get('verticality_pass_rate', 0.0)
+
+            if 'verticality_deviation_mm' not in overall:
+                overall['verticality_deviation_mm'] = np.nan
+            if 'verticality_max_angle_deg' not in overall:
+                overall['verticality_max_angle_deg'] = np.nan
 
             algo_elapsed = time.perf_counter() - algo_started
             n_windows = len(result.get('windows', []))
@@ -240,7 +255,7 @@ class FacadeQualityService:
             if profile is not None:
                 result['profile_snapshot'] = profile.snapshot()
 
-            # FIX: No export here. Export is deferred to dialog "show effect" button.
+            # Export context
             result['__export_context'] = {
                 'results_dir': results_dir,
                 'facade_no': facade_no,

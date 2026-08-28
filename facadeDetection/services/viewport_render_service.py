@@ -641,8 +641,15 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
-            # Use a light neutral base so red/orange defects remain visible.
-            colors = np.tile(np.asarray((0.72, 0.78, 0.86), dtype=np.float32).reshape(1, 3), (n, 1))
+            # 从当前颜色层开始叠加热力：项目加载后若已有立面离散色，未命中
+            # 质量窗口或无法映射的点保持其所属立面默认色；新增/噪点保持默认色。
+            existing = data.get('colors')
+            if existing is None:
+                existing = data.get('color')
+            if existing is not None and len(existing) == n:
+                colors = np.asarray(existing, dtype=np.float32).reshape(n, 3).copy()
+            else:
+                colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
             mode = quality_result.get('heatmap_mode', 'flatness')
             windows = quality_result.get('windows')
 
@@ -787,6 +794,36 @@ class ViewportRenderService:
 
         except Exception as e:
             print(f'立面质量着色失败: {e}', flush=True)
+
+    def compatible_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None) -> list[tuple[dict, dict]]:
+        """返回可安全用于当前代理点云的质量报告，旧 revision/缺索引结果不回放。"""
+        valid: list[tuple[dict, dict]] = []
+        try:
+            dataset = index_service._get_dataset(cloud_name) if index_service is not None else None
+            revision = getattr(dataset, 'revision', None)
+            for facade in facades or []:
+                report = facade.get('quality_report')
+                if facade.get('quality_status') != 'complete' or not isinstance(report, dict):
+                    continue
+                if report.get('__global_indices') is None or not isinstance(report.get('windows'), list):
+                    continue
+                result_revision = facade.get('dataset_revision') or report.get('dataset_revision')
+                if revision is not None and result_revision is not None and str(result_revision) != str(revision):
+                    continue
+                valid.append((facade, report))
+        except Exception as exc:
+            print(f'[PCFD] quality.compat_check_failed error={exc!r}', flush=True)
+        return valid
+
+    def render_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None) -> bool:
+        """先恢复立面离散色，再按当前数据集兼容的质量结果叠加热力。"""
+        self.highlight_facades(cloud_name, facades or [])
+        reports = self.compatible_quality_reports(cloud_name, facades or [], index_service=index_service)
+        if not reports:
+            return False
+        for _facade, report in reports:
+            self.apply_quality_colors(cloud_name, report, index_service=index_service)
+        return True
 
     def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
         try:
