@@ -91,6 +91,24 @@ class Open3DAdapter:
             return None
         return self.vis.capture_screen_float_buffer(do_render=True)
 
+    def capture_color_depth_camera(self, point_size=5.0):
+        """在同一渲染帧捕获彩色图、相机深度和针孔相机参数。"""
+        if not self._assert_owner():
+            return None
+        render_option = self.vis.get_render_option()
+        old_point_size = float(render_option.point_size)
+        try:
+            render_option.point_size = float(point_size)
+            self.vis.poll_events()
+            self.vis.update_renderer()
+            color = self.vis.capture_screen_float_buffer(do_render=True)
+            depth = self.vis.capture_depth_float_buffer(do_render=False)
+            camera = self.vis.get_view_control().convert_to_pinhole_camera_parameters()
+            return color, depth, camera
+        finally:
+            render_option.point_size = old_point_size
+            self.vis.update_renderer()
+
     def destroy(self):
         if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
             raise RuntimeError('Open3D window must be destroyed on the GUI thread')

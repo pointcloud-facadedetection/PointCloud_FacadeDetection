@@ -9,9 +9,18 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -40,10 +49,12 @@ import numpy as np
 from qtwebview2 import QtWebView2Widget
 
 from .widgets.flow_layout import FlowLayout
+from .widgets.photo_view_widget import PhotoViewWidget
 from .widgets.station_panel import StationPanel
 from .widgets.pointcloud_controls import PointCloudControls
 from .widgets.facade_panel import FacadePanel
 from services.inspection_review import InspectionReviewService
+from services.photo_match_service import PhotoMatchService, bgr_to_qimage
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
@@ -110,6 +121,10 @@ UPLOAD_FILE_FILTER = (
 
 REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
 REPORT_EMPTY_TITLE = '请选择PDF上传'
+PHOTO_FILE_FILTER = (
+    '图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp);;所有文件 (*)'
+)
+SCAN_POSE_FILE_FILTER = '扫描位姿 JSON (*.json);;所有文件 (*)'
 APPLICATION_TITLE = '点云外立面智能检测平台'
 
 # 每个页面只突出一个主要操作，避免顶部十余个按钮全部使用主色。
@@ -447,6 +462,10 @@ class MainWindow(QMainWindow):
         self.project_operation_service.set_station_service(self.station_service)
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
+        self.photo_match_service = PhotoMatchService()
+        self._photo_match_display_image = None
+        self._saved_match_view = None
+        self._saved_match_view_path = None
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
@@ -952,7 +971,15 @@ class MainWindow(QMainWindow):
         viewport_layout.addWidget(config_bar)
         self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
         self._on_standard_changed(0)
-        viewport_layout.addWidget(self.viewport.get_widget(), 1)
+
+        self.viewport_stage = QWidget()
+        self.viewport_stage.setObjectName('viewportStage')
+        stage_layout = QHBoxLayout(self.viewport_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(8)
+
+        stage_layout.addWidget(self.viewport.get_widget(), 1)
+        viewport_layout.addWidget(self.viewport_stage, 1)
 
         self.operation_splitter.addWidget(self.left_dock)
         self.operation_splitter.addWidget(viewport_panel)
@@ -1201,6 +1228,52 @@ class MainWindow(QMainWindow):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(0)
         panel_layout.addWidget(scroll)
+        self.right_results_scroll = scroll
+
+        self.photo_match_right_panel = QScrollArea()
+        self.photo_match_right_panel.setObjectName('photoMatchRightPanel')
+        self.photo_match_right_panel.setWidgetResizable(True)
+        self.photo_match_right_panel.setFrameShape(QFrame.Shape.NoFrame)
+        self.photo_match_right_panel.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        match_container = QWidget()
+        match_layout = QVBoxLayout(match_container)
+        match_layout.setContentsMargins(8, 8, 8, 8)
+        match_layout.setSpacing(8)
+
+        match_title = QLabel('二维视口')
+        match_title.setProperty('uiRole', 'sectionTitle')
+        match_layout.addWidget(match_title)
+
+        photo_title = QLabel('上传的 2D 照片')
+        photo_title.setProperty('uiRole', 'supportingText')
+        match_layout.addWidget(photo_title)
+        self.photo_view = PhotoViewWidget(
+            match_container,
+            placeholder='请先上传 2D 照片',
+        )
+        self.photo_view.setMinimumHeight(280)
+        self.photo_view.point_clicked.connect(
+            self._on_photo_match_point_clicked
+        )
+        match_layout.addWidget(self.photo_view)
+
+        cloud_view_title = QLabel('保存的点云视图')
+        cloud_view_title.setProperty('uiRole', 'supportingText')
+        match_layout.addWidget(cloud_view_title)
+        self.cloud_match_view = PhotoViewWidget(
+            match_container,
+            placeholder='请先保存点云当前视角',
+        )
+        self.cloud_match_view.setMinimumHeight(280)
+        self.cloud_match_view.set_interactive(False)
+        match_layout.addWidget(self.cloud_match_view)
+        match_layout.addStretch(1)
+
+        self.photo_match_right_panel.setWidget(match_container)
+        self.photo_match_right_panel.hide()
+        panel_layout.addWidget(self.photo_match_right_panel)
 
     @staticmethod
     def _quality_double(value, minimum, maximum, step):
@@ -1413,6 +1486,468 @@ class MainWindow(QMainWindow):
             return names[-1] if names else None
         except Exception:
             return None
+
+    def _toggle_photo_match_workspace(self):
+        opening = not self.photo_match_panel.isVisible()
+        if opening:
+            self.station_panel.hide()
+            self.pointcloud_controls.hide()
+            self.photo_match_panel.show()
+            self.right_results_scroll.hide()
+            self.photo_match_right_panel.show()
+            if self._sidebar_collapsed.get('left'):
+                self._expand_sidebar('left', self.left_dock)
+            else:
+                self.left_dock.show()
+            if self._sidebar_collapsed.get('right'):
+                self._expand_sidebar('right', self.right_dock)
+            else:
+                self.right_dock.show()
+            self.statusBar().showMessage(
+                '已进入 2D-3D 匹配工作区',
+                4000,
+            )
+        else:
+            self._leave_photo_match_workspace()
+        self._refresh_photo_match_controls()
+
+    def _leave_photo_match_workspace(self):
+        if self.photo_match_service.state.annotating:
+            try:
+                self.photo_match_service.exit_annotation(force=True)
+            except Exception:
+                pass
+        self.render_service.exit_pick_mode()
+        self.photo_view.set_interactive(False)
+        self.photo_match_panel.hide()
+        self.photo_match_right_panel.hide()
+        self.right_results_scroll.show()
+        self.station_panel.show()
+        self.pointcloud_controls.show()
+
+    def _upload_match_photo(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            '上传 2D 照片',
+            self._last_upload_directory,
+            PHOTO_FILE_FILTER,
+        )
+        if not file_path:
+            return
+        try:
+            image = self.photo_match_service.load_photo(file_path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, '上传 2D 照片', str(exc))
+            return
+        self._last_upload_directory = str(Path(file_path).parent)
+        self._photo_match_display_image = image
+        # 新上传的照片使摆正结果失效，自动匹配需要重新回退到用原图。
+        self._photo_raw_image = image
+        self._photo_rectified_image = None
+        self.photo_view.set_image(image)
+        self.photo_view.set_markers([])
+        self.photo_view.set_remap_markers([])
+        self._refresh_manual_match_markers()
+        self._refresh_photo_match_controls()
+
+    def _rectify_match_photo(self):
+        try:
+            result = self.photo_match_service.rectify_perspective()
+            image = bgr_to_qimage(result['rectified_bgr'])
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, '摆正照片', str(exc))
+            return
+        self._photo_match_display_image = image
+        self._photo_rectified_image = image
+        self.photo_view.set_image(image)
+        self.photo_view.set_markers([])
+        self.photo_view.set_remap_markers([])
+        self._refresh_photo_match_controls()
+        QMessageBox.information(
+            self,
+            '摆正照片',
+            f"照片摆正完成：{result.get('method', 'unknown')}",
+        )
+
+    def _upload_scan_pose(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            '上传扫描仪位姿',
+            self._last_upload_directory,
+            SCAN_POSE_FILE_FILTER,
+        )
+        if not file_path:
+            return
+        try:
+            meta = self.photo_match_service.load_scan_pose(file_path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, '上传扫描仪位姿', str(exc))
+            return
+        self._last_upload_directory = str(Path(file_path).parent)
+        self._refresh_photo_match_controls()
+        origin = meta.get('origin') or []
+        origin_text = ', '.join(f'{float(value):.3f}' for value in origin)
+        self.statusBar().showMessage(
+            f'扫描仪位姿已加载：({origin_text})',
+            5000,
+        )
+
+    def _apply_scan_pose_view(self):
+        cloud_name = self._active_cloud_name()
+        if not cloud_name:
+            QMessageBox.information(self, '调整点云视角', '请先加载点云。')
+            return
+        data = self.viewport.get_cloud_data(cloud_name)
+        points = None if not data else data.get('pos')
+        if points is None or len(points) == 0:
+            QMessageBox.warning(self, '调整点云视角', '当前点云为空。')
+            return
+        points = np.asarray(points, dtype=np.float64)
+        lookat = (
+            np.nanmin(points, axis=0) + np.nanmax(points, axis=0)
+        ) * 0.5
+        try:
+            camera = self.photo_match_service.build_viewport_camera(lookat)
+            applied = self.viewport.apply_scan_pose_view(
+                camera['eye'],
+                camera['lookat'],
+                camera['up'],
+                zoom=0.55,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, '调整点云视角', str(exc))
+            return
+        if not applied:
+            QMessageBox.warning(self, '调整点云视角', '视口相机设置失败。')
+            return
+        self._saved_match_view = None
+        self._saved_match_view_path = None
+        self._refresh_photo_match_controls()
+        self.statusBar().showMessage('已按扫描仪位姿调整点云视角', 5000)
+
+    def _enter_manual_match_mode(self):
+        if not self._active_cloud_name():
+            QMessageBox.information(self, '进入标注模式', '请先加载点云。')
+            return
+        try:
+            self.photo_match_service.enter_annotation()
+        except ValueError as exc:
+            QMessageBox.information(self, '进入标注模式', str(exc))
+            return
+        self.render_service.clear_pick_markers()
+        self._refresh_manual_match_markers()
+        self._sync_manual_match_phase()
+        self._refresh_photo_match_controls()
+
+    def _sync_manual_match_phase(self):
+        state = self.photo_match_service.state
+        if not state.annotating:
+            self.render_service.exit_pick_mode()
+            self.photo_view.set_interactive(False)
+            return
+        if state.next_is_photo:
+            self.render_service.exit_pick_mode()
+            self.photo_view.set_interactive(True)
+            self.statusBar().showMessage('请在照片上点击一个匹配点')
+        else:
+            self.photo_view.set_interactive(False)
+            self.render_service.enter_pick_mode(
+                callback=self._on_manual_cloud_point_picked,
+                cloud_name=self._active_cloud_name(),
+                pick_radius=32,
+            )
+            self.statusBar().showMessage('请在三维点云上点击对应点')
+
+    def _on_photo_match_point_clicked(self, pixel_x, pixel_y):
+        try:
+            self.photo_match_service.add_photo_point(pixel_x, pixel_y)
+        except RuntimeError as exc:
+            QMessageBox.information(self, '照片标点', str(exc))
+            return
+        print(
+            f'[2D-3D] 照片点: x={pixel_x:.3f}, y={pixel_y:.3f}',
+            flush=True,
+        )
+        self._refresh_manual_match_markers()
+        self._sync_manual_match_phase()
+        self._refresh_photo_match_controls()
+
+    def _on_manual_cloud_point_picked(self, picked):
+        point = picked.get('point') if isinstance(picked, dict) else picked
+        try:
+            self.photo_match_service.add_cloud_point(point)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self.statusBar().showMessage(str(exc), 5000)
+            return
+        xyz = np.asarray(point, dtype=np.float64).reshape(3)
+        count = self.photo_match_service.complete_pair_count()
+        print(
+            f'[2D-3D] 点对 #{count} 三维点: '
+            f'X={xyz[0]:.6f}, Y={xyz[1]:.6f}, Z={xyz[2]:.6f}',
+            flush=True,
+        )
+        self._refresh_manual_match_markers()
+        self._sync_manual_match_phase()
+        self._refresh_photo_match_controls()
+
+    def _undo_manual_match_point(self):
+        self.photo_match_service.undo_last()
+        self._refresh_manual_match_markers()
+        self._sync_manual_match_phase()
+        self._refresh_photo_match_controls()
+
+    def _exit_manual_match_mode(self):
+        try:
+            count = self.photo_match_service.exit_annotation()
+        except ValueError as exc:
+            QMessageBox.information(self, '退出标注', str(exc))
+            return
+        self._sync_manual_match_phase()
+        self._refresh_photo_match_controls()
+        self.statusBar().showMessage(
+            f'已退出标注，共完成 {count} 对匹配点',
+            5000,
+        )
+
+    def _estimate_manual_match_matrix(self):
+        try:
+            result = self.photo_match_service.solve_pose()
+        except ValueError as exc:
+            QMessageBox.warning(self, '粗略估计匹配矩阵', str(exc))
+            return
+        matrix = np.asarray(
+            result.get('match_matrix') or result.get('projection_matrix'),
+            dtype=np.float64,
+        ).reshape(3, 4)
+        matrix_text = np.array2string(
+            matrix,
+            precision=5,
+            suppress_small=True,
+        )
+        print(f'[2D-3D] 匹配矩阵 P=K[R|t]:\n{matrix_text}', flush=True)
+        self._refresh_photo_match_controls()
+        QMessageBox.information(
+            self,
+            '粗略估计匹配矩阵',
+            (
+                '匹配矩阵估计完成。\n'
+                f"有效内点：{result.get('inlier_count', 0)}/"
+                f"{result.get('point_count', 0)}\n"
+                f"平均重投影误差："
+                f"{float(result.get('reprojection_mean_px', 0.0)):.2f} px\n\n"
+                f'P =\n{matrix_text}'
+            ),
+        )
+
+    def _save_cloud_match_view(self):
+        if not self._active_cloud_name():
+            QMessageBox.information(self, '保存点云视角', '请先加载点云。')
+            return
+        if not self.photo_match_service.state.photo_path:
+            QMessageBox.information(self, '保存点云视角', '请先上传 2D 照片。')
+            return
+
+        self.render_service.exit_pick_mode()
+        self.render_service.clear_pick_markers()
+        try:
+            captured = self.viewport.capture_match_view(
+                cloud_name=self._active_cloud_name()
+            )
+            photo_path = Path(self.photo_match_service.state.photo_path)
+            view_path = photo_path.with_name(
+                f'{photo_path.stem}_pointcloud_view.png'
+            )
+            view_image = bgr_to_qimage(captured['view_bgr'])
+            if not view_image.save(str(view_path)):
+                raise OSError(f'无法保存当前点云视图：{view_path}')
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.warning(self, '保存点云视角', str(exc))
+            return
+
+        self._saved_match_view = captured
+        self._saved_match_view_path = str(view_path)
+        self.cloud_match_view.set_image(view_image)
+        self._refresh_photo_match_controls()
+        QMessageBox.information(
+            self,
+            '保存点云视角',
+            f'当前点云彩色图、深度图和相机参数已保存。\n{view_path}',
+        )
+
+    def _auto_match_current_view(self):
+        if not self._active_cloud_name():
+            QMessageBox.information(self, '自动匹配', '请先加载点云。')
+            return
+        # 若照片已摆正，自动匹配必须使用摆正后的照片（而不是原图）与保存的
+        # 点云视角图片做特征匹配；未摆正时才回退到原图。这里显式按摆正状态
+        # 选择图源，不依赖照片显示框当前恰好展示的是哪一张。
+        state = self.photo_match_service.state
+        use_rectified = bool(state.rectified) and self._photo_rectified_image is not None \
+            and not self._photo_rectified_image.isNull()
+        image = self._photo_rectified_image if use_rectified else self._photo_raw_image
+        if image is None or image.isNull():
+            QMessageBox.information(self, '自动匹配', '请先上传 2D 照片。')
+            return
+        if self._saved_match_view is None:
+            QMessageBox.information(
+                self,
+                '自动匹配',
+                '请先调整点云视角，然后按“保存点云此视角图片”。',
+            )
+            return
+
+        photo_source_label = '摆正后的照片' if use_rectified else '原始照片'
+        self.render_service.exit_pick_mode()
+        self.render_service.clear_pick_markers()
+        self.photo_view.set_markers([])
+        self.photo_view.set_remap_markers([])
+        self.btn_auto_match_view.setEnabled(False)
+        self.photo_match_status.setText(f'正在使用{photo_source_label}与已保存的点云视图自动匹配…')
+        QApplication.processEvents()
+        try:
+            rgb_image = image.convertToFormat(QImage.Format.Format_RGB888)
+            height, width = rgb_image.height(), rgb_image.width()
+            rows = np.frombuffer(
+                rgb_image.constBits(),
+                dtype=np.uint8,
+                count=rgb_image.sizeInBytes(),
+            ).reshape(height, rgb_image.bytesPerLine())
+            rgb = rows[:, :width * 3].reshape(height, width, 3).copy()
+            result = self.photo_match_service.auto_match_current_view(
+                rgb[:, :, ::-1],
+                self._saved_match_view,
+            )
+            result['view_image_path'] = self._saved_match_view_path
+        except (KeyError, OSError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+            self._refresh_photo_match_controls()
+            QMessageBox.warning(self, '自动匹配', str(exc))
+            return
+
+        self._refresh_manual_match_markers()
+        self._refresh_photo_match_controls()
+        matrix_data = result.get('match_matrix') or result.get(
+            'projection_matrix'
+        )
+        if not result.get('pose_estimated') or matrix_data is None:
+            count = int(result.get('depth_match_count', 0))
+            needed = max(0, 6 - count)
+            QMessageBox.information(
+                self,
+                '自动匹配点已保存',
+                (
+                    f'自动识别并保存了 {count} 对有效 2D-3D 匹配点。\n'
+                    f'请进入手动标注模式，再补充至少 {needed} 对；'
+                    '退出标注后可统一估算匹配矩阵。'
+                ),
+            )
+            return
+        matrix = np.asarray(
+            matrix_data,
+            dtype=np.float64,
+        ).reshape(3, 4)
+        matrix_text = np.array2string(matrix, precision=5, suppress_small=True)
+        print(f'[2D-3D] 自动匹配矩阵 P=K[R|t]:\n{matrix_text}', flush=True)
+        QMessageBox.information(
+            self,
+            '自动匹配完成',
+            (
+                f"2D 特征匹配：{result.get('feature_match_count', 0)}\n"
+                f"几何一致匹配：{result.get('geometric_match_count', 0)}\n"
+                f"有效 2D-3D 内点：{result.get('inlier_count', 0)}/"
+                f"{result.get('depth_match_count', 0)}\n"
+                f"平均重投影误差："
+                f"{float(result.get('reprojection_mean_px', 0.0)):.2f} px\n"
+                f"照片来源：{photo_source_label}\n"
+                f"点云视图：{self._saved_match_view_path}"
+            ),
+        )
+
+    def _remap_manual_match_points(self):
+        try:
+            result = (
+                self.photo_match_service.remap_cloud_annotations_to_photo()
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, '重映射', str(exc))
+            return
+        self._refresh_manual_match_markers()
+        mean_error = result.get('mean_reprojection_error_px')
+        message = (
+            f"已将 {result.get('in_image_count', 0)}/"
+            f"{result.get('point_count', 0)} 个三维点重映射到照片。"
+        )
+        if mean_error is not None:
+            message += f'\n平均偏差：{float(mean_error):.2f} px'
+        QMessageBox.information(self, '重映射', message)
+
+    def _refresh_manual_match_markers(self):
+        state = self.photo_match_service.state
+        self.photo_view.set_markers(
+            self.photo_match_service.photo_points()
+        )
+        self.photo_view.set_remap_markers(
+            state.remapped_photo_points
+        )
+        self.viewport.update_pick_markers(
+            src_points=self.photo_match_service.cloud_points()
+        )
+
+    def _refresh_photo_match_controls(self):
+        state = self.photo_match_service.state
+        complete = self.photo_match_service.complete_pair_count()
+        has_photo = bool(state.photo_path)
+        has_cloud = bool(self._active_cloud_name())
+
+        self.btn_rectify_photo.setEnabled(has_photo and not state.annotating)
+        self.btn_apply_scan_pose.setEnabled(
+            bool(state.scan_pose_path) and has_cloud and not state.annotating
+        )
+        self.btn_save_cloud_match_view.setEnabled(
+            has_photo and has_cloud and not state.annotating
+        )
+        self.btn_auto_match_view.setEnabled(
+            has_photo
+            and has_cloud
+            and self._saved_match_view is not None
+            and not state.annotating
+        )
+        self.btn_start_manual_match.setEnabled(
+            has_photo and has_cloud and not state.annotating
+        )
+        self.btn_undo_match_point.setEnabled(
+            state.annotating and bool(state.correspondences)
+        )
+        self.btn_exit_manual_match.setEnabled(
+            self.photo_match_service.can_exit_annotation()
+        )
+        self.btn_estimate_match_matrix.setEnabled(
+            self.photo_match_service.can_estimate_match_matrix()
+        )
+        self.btn_remap_match_points.setEnabled(
+            state.pose is not None and not state.annotating
+        )
+        if not has_photo:
+            status = '尚未上传照片'
+        elif state.annotating:
+            next_step = (
+                '请点击照片'
+                if state.next_is_photo
+                else '请点击三维点云'
+            )
+            status = f'已完成 {complete} 对；{next_step}'
+            if complete < 6:
+                status += f'（还需 {6 - complete} 对）'
+        elif state.pose is not None:
+            error = float(state.pose.get('reprojection_mean_px', 0.0))
+            mode = '自动' if state.match_mode == 'auto' else '手动'
+            status = f'{mode}矩阵已估计；{complete} 对，误差 {error:.2f} px'
+        else:
+            status = f'已上传照片；当前 {complete} 对匹配点'
+        if self._saved_match_view_path:
+            status += f'\n已保存点云视图：{Path(self._saved_match_view_path).name}'
+        if state.scan_pose_path:
+            status += f'\n位姿：{Path(state.scan_pose_path).name}'
+        self.photo_match_status.setText(status)
 
     def _quality_cache_key(self, cloud, facade, profile, grid_size):
         facade_id = int((facade or {}).get('id', 0))
@@ -1978,6 +2513,7 @@ class MainWindow(QMainWindow):
             self.station_list.itemChanged.connect(self._on_station_item_changed)
             station.delete_requested.connect(self._delete_stations)
             station.merge_requested.connect(self._merge_stations)
+            self.station_panel = station
             content.addWidget(station, 3)
             controls = PointCloudControls()
             controls.reset_view_requested.connect(self.project_operation_service.reset_view)
@@ -1985,10 +2521,91 @@ class MainWindow(QMainWindow):
             controls.point_size_changed.connect(self.viewport.set_all_point_size)
             self.pointcloud_controls = controls
             content.addWidget(controls, 1)
+            self.photo_match_panel = self._create_photo_match_panel()
+            self.photo_match_panel.hide()
+            content.addWidget(self.photo_match_panel, 1)
         sidebar.setMinimumWidth(200 if side == 'left' else 260)
         sidebar.setMaximumWidth(280 if side == 'left' else 380)
         sidebar.setProperty('expandedWidth', 230 if side == 'left' else 320)
         return sidebar
+
+    def _create_photo_match_panel(self):
+        panel = QWidget()
+        panel.setObjectName('photoMatchPanel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        title = QLabel('2D-3D 照片与点云匹配')
+        title.setProperty('uiRole', 'sectionTitle')
+        layout.addWidget(title)
+
+        hint = QLabel(
+            '自动匹配：调整点云视角后先保存该视图，再执行自动匹配。'
+            '手动标注至少完成 6 对后可估计匹配矩阵。'
+        )
+        hint.setWordWrap(True)
+        hint.setProperty('uiRole', 'supportingText')
+        layout.addWidget(hint)
+
+        self.btn_upload_photo = QPushButton('上传 2D 照片')
+        self.btn_rectify_photo = QPushButton('摆正照片')
+        self.btn_upload_scan_pose = QPushButton('上传扫描仪位姿')
+        self.btn_apply_scan_pose = QPushButton('调整点云视角')
+        self.btn_save_cloud_match_view = QPushButton('保存点云此视角图片')
+        self.btn_auto_match_view = QPushButton('使用已保存视图自动匹配')
+        self.btn_start_manual_match = QPushButton('进入标注模式')
+        self.btn_undo_match_point = QPushButton('撤销上一个标注点')
+        self.btn_exit_manual_match = QPushButton('退出标注')
+        self.btn_estimate_match_matrix = QPushButton('粗略估计匹配矩阵')
+        self.btn_remap_match_points = QPushButton('重映射 3D 标注点')
+
+        for button in (
+            self.btn_upload_photo,
+            self.btn_rectify_photo,
+            self.btn_upload_scan_pose,
+            self.btn_apply_scan_pose,
+            self.btn_save_cloud_match_view,
+            self.btn_auto_match_view,
+            self.btn_start_manual_match,
+            self.btn_undo_match_point,
+            self.btn_exit_manual_match,
+            self.btn_estimate_match_matrix,
+            self.btn_remap_match_points,
+        ):
+            button.setMinimumHeight(32)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            layout.addWidget(button)
+
+        self.photo_match_status = QLabel('尚未上传照片')
+        self.photo_match_status.setWordWrap(True)
+        self.photo_match_status.setProperty('uiRole', 'supportingText')
+        layout.addWidget(self.photo_match_status)
+        layout.addStretch(1)
+
+        self.btn_upload_photo.clicked.connect(self._upload_match_photo)
+        self.btn_rectify_photo.clicked.connect(self._rectify_match_photo)
+        self.btn_upload_scan_pose.clicked.connect(self._upload_scan_pose)
+        self.btn_apply_scan_pose.clicked.connect(self._apply_scan_pose_view)
+        self.btn_save_cloud_match_view.clicked.connect(
+            self._save_cloud_match_view
+        )
+        self.btn_auto_match_view.clicked.connect(self._auto_match_current_view)
+        self.btn_start_manual_match.clicked.connect(
+            self._enter_manual_match_mode
+        )
+        self.btn_undo_match_point.clicked.connect(self._undo_manual_match_point)
+        self.btn_exit_manual_match.clicked.connect(
+            self._exit_manual_match_mode
+        )
+        self.btn_estimate_match_matrix.clicked.connect(
+            self._estimate_manual_match_matrix
+        )
+        self.btn_remap_match_points.clicked.connect(
+            self._remap_manual_match_points
+        )
+        self._refresh_photo_match_controls()
+        return panel
 
     def _refresh_station_panel(self):
         if not hasattr(self, 'station_list'):
@@ -2162,7 +2779,7 @@ class MainWindow(QMainWindow):
             'btn_calculate_detail': (
                 self.project_operation_service.calculate_detail
             ),
-            'btn_align_2d_3d': self.project_operation_service.align_2d_3d,
+            'btn_align_2d_3d': self._toggle_photo_match_workspace,
         }
         report_actions = {
             'btn_open_report_pdf': self._open_report_pdf,

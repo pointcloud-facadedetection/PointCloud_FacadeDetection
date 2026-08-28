@@ -5,10 +5,8 @@ from config.settings import Config
 
 
 class ViewportInteractor:
-    # 首轮只需找屏幕邻域候选；随后会在原始索引附近精细搜索。
-    # 25 万点可显著降低交互延迟，同时保持建筑点云的拾取精度。
+    # 使用显示点云的均匀子集控制投影耗时；只接受拾取半径内的点。
     PICK_SAMPLE_POINTS = 250_000
-    PICK_REFINE_STEPS = 64
 
     def __init__(self, adapter, camera, scene):
         self.adapter = adapter
@@ -43,17 +41,21 @@ class ViewportInteractor:
     # ------------------------------------------------------------------
     def set_pick_enabled(self, enabled: bool, radius: int | None = None, cloud_name: str | None = None):
         self.pick_enabled = bool(enabled)
-        self._invalidate_pick_projection_cache()
         if radius is not None:
             try:
                 self.pick_radius = int(radius)
             except Exception:
                 pass
         if cloud_name is not None:
+            if cloud_name != self.pick_cloud:
+                self._invalidate_pick_projection_cache()
             self.pick_cloud = cloud_name
 
     def _invalidate_pick_projection_cache(self):
         self._pick_projection_cache.clear()
+
+    def invalidate_pick_projection_cache(self):
+        self._invalidate_pick_projection_cache()
 
     def set_selection_enabled(self, enabled, cloud_name=None):
         """
@@ -325,8 +327,6 @@ class ViewportInteractor:
         started = time.perf_counter()
         best = None
         best_dist = float(self.pick_radius)
-        best_any = None
-        best_any_dist = float("inf")
         if cloud_name:
             items = [(cloud_name, self.scene.get_cloud_data(cloud_name))]
         else:
@@ -363,32 +363,6 @@ class ViewportInteractor:
                 point_index = min(idx * step, count - 1)
                 d = float(dist[idx])
 
-                # 粗采样只用于定位候选区；对原始索引附近的小窗口再投影，
-                # 避免降低采样量后红点偏离鼠标点击位置。
-                radius = self.PICK_REFINE_STEPS * step
-                lo = max(0, point_index - radius)
-                hi = min(count, point_index + radius + 1)
-                refined = self.camera.project_points(points[lo:hi])
-                if refined is not None:
-                    refined_screen, refined_valid = refined
-                    refined_dist = np.hypot(
-                        refined_screen[:, 0] - pos.x(),
-                        refined_screen[:, 1] - pos.y(),
-                    )
-                    refined_dist[~refined_valid] = np.inf
-                    refined_idx = int(np.argmin(refined_dist))
-                    if np.isfinite(refined_dist[refined_idx]):
-                        point_index = lo + refined_idx
-                        d = float(refined_dist[refined_idx])
-
-                if d < best_any_dist:
-                    point_index_any = point_index
-                    best_any_dist = d
-                    best_any = {
-                        "cloud_name": name,
-                        "index": point_index_any,
-                        "point": points[point_index_any].astype(float).tolist(),
-                    }
                 if d < best_dist:
                     best_dist = d
                     best = {
@@ -402,7 +376,7 @@ class ViewportInteractor:
                     f'cache={cache_hit} elapsed={elapsed_ms:.1f}ms',
                     flush=True,
                 )
-        return best or best_any
+        return best
 
     def handle_wheel(self, event):
         if self.selection_enabled:

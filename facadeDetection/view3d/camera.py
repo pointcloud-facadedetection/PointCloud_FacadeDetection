@@ -109,6 +109,22 @@ class CameraController:
         except Exception:
             return False
 
+    def ensure_pinhole_projection(self, field_of_view: float = 35.0) -> bool:
+        """确保当前视图可导出针孔参数，供精确拾取和深度反投影使用。"""
+        ctr = self.adapter.get_view_control()
+        if ctr is None:
+            return False
+        try:
+            current = float(ctr.get_field_of_view())
+            target = max(10.0, min(float(field_of_view), 90.0))
+            if current <= 5.5:
+                ctr.change_field_of_view(target - current)
+                self.adapter.poll()
+            ctr.convert_to_pinhole_camera_parameters()
+            return True
+        except Exception:
+            return False
+
     # 屏幕坐标反投影到平面3D点（ROI BBox核心）
     def unproject_to_plane(self, screen_x, screen_y, plane_model, lookat=None):
         """
@@ -241,80 +257,45 @@ class CameraController:
         
     def project_points(self, points):
         """
-        将3D点投影到视口屏幕坐标系
+        使用 Open3D 当前渲染相机将 3D 点投影到 Qt 视口坐标。
+
+        Open3D 正交视图不能导出针孔参数；调用方应先通过
+        ``ensure_pinhole_projection`` 切换到可精确投影的透视视图。
         """
         ctr = self.adapter.get_view_control()
         if ctr is None or self.viewport_widget is None:
             return None
 
         try:
-            if not self.is_orthographic():
-                # 透视投影路径
-                params = ctr.convert_to_pinhole_camera_parameters()
-                intrinsic = params.intrinsic.intrinsic_matrix
-                extrinsic = params.extrinsic
-                pts = np.asarray(points, dtype=np.float64)
-                hom = np.c_[pts, np.ones(len(pts))]
-                cam = (extrinsic @ hom.T).T
-                z = cam[:, 2]
-                valid = z > 1e-9
-                uvw = (intrinsic @ cam[:, :3].T).T
-                screen = np.zeros((len(pts), 3), dtype=np.float64)
-                screen[valid, 0] = uvw[valid, 0] / z[valid]
-                screen[valid, 1] = uvw[valid, 1] / z[valid]
-                screen[valid, 2] = z[valid]
-                dpr = self._device_pixel_ratio()
-                if dpr and dpr != 1.0:
-                    screen[:, 0] /= dpr
-                    screen[:, 1] /= dpr
-                return screen, valid
-        except Exception:
-            pass
-
-        # 正交投影路径
-        try:
-            w, h, dpr = self._viewport_metrics()
-            lookat = np.asarray(self._safe_get(ctr, 'get_lookat', [0, 0, 0]), dtype=float)
-            front = np.asarray(self._safe_get(ctr, 'get_front', [0, 0, -1]), dtype=float)
-            up = np.asarray(self._safe_get(ctr, 'get_up', [0, 1, 0]), dtype=float)
-            
-            # 归一化
-            front = front / (np.linalg.norm(front) + 1e-12)
-            up = up - front * float(np.dot(front, up))
-            up = up / (np.linalg.norm(up) + 1e-12)
-            right = np.cross(front, up)
-            right = right / (np.linalg.norm(right) + 1e-12)
-
-            # 使用正确的world_per_pixel
-            wpp = self.get_world_per_pixel()
-            if wpp is None or wpp <= 0:
-                # fallback到旧公式
-                try:
-                    zoom = float(self._safe_get(ctr, 'get_zoom', 0.6))
-                except Exception:
-                    zoom = 0.6
-                scene_scale = self._estimate_scene_scale()
-                scene_factor = max(0.2, min(scene_scale / 10.0, 3.0))
-                pan_base = float(getattr(Config, 'PAN_BASE_SPEED', 0.06))
-                zoom_factor = 0.6 / max(zoom, 0.02)
-                wpp = pan_base * zoom_factor * scene_factor / max(1.0, dpr)
-                wpp = max(wpp, 1e-6)
-                print(f"[project_points] 警告: 使用fallback wpp={wpp:.6f}", flush=True)
-
             pts = np.asarray(points, dtype=np.float64)
-            d = pts - lookat.reshape(1, 3)
-            u = d @ right.reshape(3,)
-            v = d @ up.reshape(3,)
-            z = d @ front.reshape(3,)
-            
+            if pts.ndim != 2 or pts.shape[1] != 3:
+                return None
+
+            params = ctr.convert_to_pinhole_camera_parameters()
+            intrinsic = np.asarray(params.intrinsic.intrinsic_matrix, dtype=np.float64)
+            extrinsic = np.asarray(params.extrinsic, dtype=np.float64)
+            rotation = extrinsic[:3, :3]
+            translation = extrinsic[:3, 3]
+            cam = pts @ rotation.T + translation
+            z = cam[:, 2]
+
             screen = np.zeros((len(pts), 3), dtype=np.float64)
-            screen[:, 0] = (w * 0.5) + (u / wpp)
-            screen[:, 1] = (h * 0.5) - (v / wpp)
+            valid = np.isfinite(cam).all(axis=1) & (z > 1e-9)
+            screen[valid, 0] = (
+                intrinsic[0, 0] * cam[valid, 0] / z[valid]
+                + intrinsic[0, 2]
+            )
+            screen[valid, 1] = (
+                intrinsic[1, 1] * cam[valid, 1] / z[valid]
+                + intrinsic[1, 2]
+            )
             screen[:, 2] = z
-            valid = np.isfinite(screen[:, 0]) & np.isfinite(screen[:, 1])
-            
+
+            # Open3D 相机内参采用帧缓冲物理像素，Qt 事件采用逻辑像素。
+            dpr = self._device_pixel_ratio()
+            if dpr > 0 and dpr != 1.0:
+                screen[:, :2] /= dpr
             return screen, valid
-            
         except Exception:
             return None
 

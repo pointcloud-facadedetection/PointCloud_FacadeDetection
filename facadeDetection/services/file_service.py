@@ -74,85 +74,136 @@ class FileService:
         if kind == FileKind.raw_pointcloud:
             started = time.perf_counter()
             print(f"[PCFD] load.begin path={load_path}", flush=True)
-            pts, cols = self._load_point_cloud(str(load_path))
-            print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
 
             # 直接上传 PLY + 同名 .dist 时，预处理发生在 register_dataset 之前。
             # 未提供 .dist 的普通 PLY 继续走旧路径，保证历史导入行为不变。
             dist_file = Path(distance_path).resolve() if distance_path else load_path.with_suffix('.dist')
             dist_exists = dist_file.exists()
-            print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
-            if dist_exists and self.pointcloud_service is not None:
-                dist = read_dist(dist_file, pts, dataset_metadata or {})
-                print(
-                    f"[PCFD] load.dist loaded source={dist.source} "
-                    f"points={len(pts)} origins={len(dist.scan_origins)} "
-                    f"warnings={dist.warnings}", flush=True)
 
-                # 加载阶段仅执行距离分层下采样，不执行自适应去噪；
-                # 去噪由用户手动点击按钮触发。
-                elevations = None
-                if len(dist.scan_origins):
-                    from algorithms.geometry import estimate_elevation_angles
-                    elevations = estimate_elevation_angles(pts, dist.scan_origins)
+            # 若该项目此前已对该点云执行过去噪并缓存，优先直接加载缓存的
+            # 去噪结果，跳过分层降采样与去噪计算，也无需用户重新点击"去噪"。
+            cached = None
+            if project_uuid and self.pointcloud_service is not None:
+                try:
+                    from services import denoise_cache
+                    cached = denoise_cache.load(project_uuid, str(load_path))
+                except Exception:
+                    cached = None
+            cached_has_mapping = bool(cached and (cached.get('metadata') or {}).get('proxy_source_offsets'))
 
-                proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges = stratified_proxy_build(
-                    pts, cols,
-                    dist.ranges_m,
-                    scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
-                    elevations=elevations)
-
-                source_id = (dataset_metadata or {}).get(
+            if cached is not None and cached_has_mapping:
+                # 分层代理点云的去噪缓存：raw 展开仍依赖原始点云，因此仍需读取，
+                # 但跳过 stratified_proxy_build 与去噪本身。
+                pts, cols = self._load_point_cloud(str(load_path))
+                print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+                metadata = dict(cached['metadata'])
+                source_id = metadata.get('source_id') or (dataset_metadata or {}).get(
                     'source_id', f"{project_uuid or 'local'}:source:{load_path.stem}")
+                metadata['source_id'] = source_id
+                metadata.setdefault('source_ply_path', str(load_path))
 
-                # metadata 中记录实际使用的 shells 参数
-                shells_used = ((10., .10), (20., .08), (35., .06),
-                                  (50., .05), (80., .045), (100., .04))
-                metadata = dict(dataset_metadata or {})
-                metadata.update({
-                    'source_id': source_id,
-                    'source_raw_count': int(len(pts)),
-                    'proxy_source_offsets': proxy_offsets.tolist(),
-                    'proxy_source_indices': proxy_indices.tolist(),
-                    'ranges': proc_ranges.tolist(),
-                    'scan_origins': dist.scan_origins.tolist(),
-                    'distance_source': dist.source,
-                    'distance_warnings': dist.warnings,
-                    'preprocess': {
-                    'input_count': int(len(pts)),
-                        'output_count': int(len(proc_pts)),
-                        'shells': [[float(h), float(v)] for h, v in shells_used],
-                    },
-                    'adaptive_detection': {
-                        'enabled': True, 'range_coeff': .0012,
-                        'normal_relax_deg_per_m': .15,
-                        'normal_angle_max_deg': 15., 'irls_iters': 2,
-                    },
-                })
-
-                # === 先注册 source asset，再注册 dataset ===
                 self.pointcloud_service.register_source_asset(
                     source_id, pts, cols,
                     {'ply_path': str(load_path), 'dist_path': str(dist_file)})
 
                 dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
                 dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, proc_pts, proc_cols, metadata=metadata)
-
+                    dataset_id, cached['points'], cached['colors'], metadata=metadata)
                 pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
-                print(f"[PCFD] load.range_adaptive dist={dist_file.name} "
-                      f"source={len(pts)} proxy={len(pts_ds)}",
-                      flush=True)
+                print(f"[PCFD] load.denoise_cache_hit proxy={len(pts_ds)} "
+                      f"source={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
 
-            elif self.pointcloud_service is not None:
+            elif cached is not None and self.pointcloud_service is not None:
+                # 普通点云（无 .dist）的去噪缓存本身就是完整的 proxy/raw 点集，
+                # 无需再读取原始文件。
+                metadata = dict(dataset_metadata or {})
+                metadata.update(cached['metadata'])
+                metadata.setdefault('source_ply_path', str(load_path))
                 dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
                 dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, pts, cols, metadata=dataset_metadata)
+                    dataset_id, cached['points'], cached['colors'], metadata=metadata)
                 pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
-                print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} "
+                print(f"[PCFD] load.denoise_cache_hit proxy={len(pts_ds)} "
                       f"seconds={time.perf_counter()-started:.2f}", flush=True)
+
             else:
-                pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
+                pts, cols = self._load_point_cloud(str(load_path))
+                print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+                print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
+                if dist_exists and self.pointcloud_service is not None:
+                    dist = read_dist(dist_file, pts, dataset_metadata or {})
+                    print(
+                        f"[PCFD] load.dist loaded source={dist.source} "
+                        f"points={len(pts)} origins={len(dist.scan_origins)} "
+                        f"warnings={dist.warnings}", flush=True)
+
+                    # 加载阶段仅执行距离分层下采样，不执行自适应去噪；
+                    # 去噪由用户手动点击按钮触发。
+                    elevations = None
+                    if len(dist.scan_origins):
+                        from algorithms.geometry import estimate_elevation_angles
+                        elevations = estimate_elevation_angles(pts, dist.scan_origins)
+
+                    proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges = stratified_proxy_build(
+                        pts, cols,
+                        dist.ranges_m,
+                        scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
+                        elevations=elevations)
+
+                    source_id = (dataset_metadata or {}).get(
+                        'source_id', f"{project_uuid or 'local'}:source:{load_path.stem}")
+
+                    # metadata 中记录实际使用的 shells 参数
+                    shells_used = ((10., .10), (20., .08), (35., .06),
+                                      (50., .05), (80., .045), (100., .04))
+                    metadata = dict(dataset_metadata or {})
+                    metadata.update({
+                        'source_id': source_id,
+                        'source_ply_path': str(load_path),
+                        'source_raw_count': int(len(pts)),
+                        'proxy_source_offsets': proxy_offsets.tolist(),
+                        'proxy_source_indices': proxy_indices.tolist(),
+                        'ranges': proc_ranges.tolist(),
+                        'scan_origins': dist.scan_origins.tolist(),
+                        'distance_source': dist.source,
+                        'distance_warnings': dist.warnings,
+                        'preprocess': {
+                        'input_count': int(len(pts)),
+                            'output_count': int(len(proc_pts)),
+                            'shells': [[float(h), float(v)] for h, v in shells_used],
+                        },
+                        'adaptive_detection': {
+                            'enabled': True, 'range_coeff': .0012,
+                            'normal_relax_deg_per_m': .15,
+                            'normal_angle_max_deg': 15., 'irls_iters': 2,
+                        },
+                    })
+
+                    # === 先注册 source asset，再注册 dataset ===
+                    self.pointcloud_service.register_source_asset(
+                        source_id, pts, cols,
+                        {'ply_path': str(load_path), 'dist_path': str(dist_file)})
+
+                    dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
+                    dataset = self.pointcloud_service.register_dataset(
+                        dataset_id, proc_pts, proc_cols, metadata=metadata)
+
+                    pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
+                    print(f"[PCFD] load.range_adaptive dist={dist_file.name} "
+                          f"source={len(pts)} proxy={len(pts_ds)}",
+                          flush=True)
+
+                elif self.pointcloud_service is not None:
+                    metadata = dict(dataset_metadata or {})
+                    metadata.setdefault('source_ply_path', str(load_path))
+                    dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
+                    dataset = self.pointcloud_service.register_dataset(
+                        dataset_id, pts, cols, metadata=metadata)
+                    pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
+                    print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} "
+                          f"seconds={time.perf_counter()-started:.2f}", flush=True)
+                else:
+                    pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
 
             name = asset.original_name if asset else src.name
             self.render_service.show_point_cloud(name=name, points=pts_ds, colors=cols_ds)

@@ -577,6 +577,25 @@ class Open3DViewport(BaseViewport):
     def get_picked_point(self):
         return self._interactor.last_picked_point
 
+    def apply_scan_pose_view(self, eye, lookat, up, zoom=0.6):
+        """按扫描仪位姿设置视口相机。"""
+        if not self._init_success:
+            return False
+        try:
+            self._camera.set_look_at(
+                np.asarray(lookat, dtype=np.float64),
+                np.asarray(eye, dtype=np.float64),
+                np.asarray(up, dtype=np.float64),
+            )
+            control = self._adapter.get_view_control()
+            if control is not None and zoom is not None:
+                control.set_zoom(float(zoom))
+            if self._overlay is not None:
+                self._overlay.update()
+            return True
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # ROI 视觉辅助：2D 红框 + 3D 包围盒
     # ------------------------------------------------------------------
@@ -721,6 +740,13 @@ class Open3DViewport(BaseViewport):
                 self._roi_controller.cancel()
         except Exception:
             pass
+        if not self._camera.ensure_pinhole_projection():
+            print(
+                '[Pick] 无法切换到可拾取的透视相机模式',
+                flush=True,
+            )
+            return
+        self._interactor.invalidate_pick_projection_cache()
         self.set_selection_enabled(False)
         self.set_pick_enabled(True, radius=pick_radius, cloud_name=cloud_name)
         try:
@@ -822,6 +848,56 @@ class Open3DViewport(BaseViewport):
         height, width, _ = arr.shape
         qimg = QImage(arr.data, width, height, arr.strides[0], QImage.Format_RGB888).copy()
         qimg.save(path)
+
+    def capture_match_view(self, cloud_name=None):
+        """捕获自动匹配所需的当前点云彩色图、深度图和相机参数。"""
+        if not self._camera.ensure_pinhole_projection():
+            raise RuntimeError('当前正交视图无法转换为匹配所需的透视相机')
+        self._interactor.invalidate_pick_projection_cache()
+        captured = self._adapter.capture_color_depth_camera(point_size=5.0)
+        if captured is None:
+            raise RuntimeError('无法捕获当前点云视图')
+        color, depth, camera = captured
+        rgb = (np.asarray(color) * 255.0).clip(0, 255).astype(np.uint8)
+        depth_array = np.asarray(depth, dtype=np.float64).copy()
+        if rgb.ndim != 3 or rgb.shape[2] < 3 or depth_array.ndim != 2:
+            raise RuntimeError('Open3D 返回的视图图像格式无效')
+        camera_matrix = np.asarray(
+            camera.intrinsic.intrinsic_matrix,
+            dtype=np.float64,
+        ).copy()
+
+        # 原生 Open3D 帧缓冲可能仍保持创建窗口时的尺寸。按嵌入式三维显示框
+        # 的宽高比居中裁剪，确保保存文件不包含显示框之外的缓冲区域。
+        view_width = max(1, int(self._container.width()))
+        view_height = max(1, int(self._container.height()))
+        target_aspect = view_width / view_height
+        source_height, source_width = rgb.shape[:2]
+        source_aspect = source_width / max(source_height, 1)
+        if abs(source_aspect - target_aspect) > 1e-3:
+            if source_aspect > target_aspect:
+                crop_width = max(1, int(round(source_height * target_aspect)))
+                x0 = max(0, (source_width - crop_width) // 2)
+                rgb = rgb[:, x0:x0 + crop_width]
+                depth_array = depth_array[:, x0:x0 + crop_width]
+                camera_matrix[0, 2] -= x0
+            else:
+                crop_height = max(1, int(round(source_width / target_aspect)))
+                y0 = max(0, (source_height - crop_height) // 2)
+                rgb = rgb[y0:y0 + crop_height]
+                depth_array = depth_array[y0:y0 + crop_height]
+                camera_matrix[1, 2] -= y0
+        result = {
+            'view_bgr': np.ascontiguousarray(rgb[:, :, :3][:, :, ::-1]),
+            'depth_image': depth_array,
+            'camera_matrix': camera_matrix,
+            'extrinsic': np.asarray(camera.extrinsic, dtype=np.float64).copy(),
+        }
+        data = self.get_cloud_data(cloud_name) if cloud_name else None
+        if data is not None and data.get('pos') is not None:
+            # 保留对当前显示点云的只读引用，算法据此建立像素→点索引图。
+            result['cloud_points'] = np.asarray(data['pos'])
+        return result
 
     def _marker_radius_for_points(self, pts: np.ndarray | None, pixel_radius: float = 6.0):
         try:
