@@ -44,6 +44,21 @@ class FacadeDetectionService:
         dataset = service.get_dataset(dataset_id) if service and dataset_id else None
         return data, dataset
 
+    @staticmethod
+    def _select_top_facades(facades: list[dict]) -> list[dict]:
+        """按最终立面点数稳定选取前 N 个，不改变单个立面的业务索引字段。"""
+        limit = int(getattr(Config, 'MAX_FACADE_COUNT', 15) or 0)
+        if limit <= 0 or len(facades or []) <= limit:
+            return facades or []
+        return sorted(
+            facades or [],
+            key=lambda f: (
+                -int(f.get('point_count', 0) or 0),
+                -float(f.get('area', 0.0) or 0.0),
+                int(f.get('id', 0) or 0),
+            ),
+        )[:limit]
+
     def detect(self, cloud_name: str, project_uuid: Optional[str] = None) -> list[dict]:
         """全局立面检测"""
         started = time.perf_counter()
@@ -91,6 +106,8 @@ class FacadeDetectionService:
         )
 
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
+        detected_count = len(facades)
+        facades = self._select_top_facades(facades)
 
         # 索引归一化：facade 的 inlier_indices 当前是 proxy 局部索引
         # 需要映射到 proxy_global，再映射到 raw（若需要）
@@ -113,6 +130,8 @@ class FacadeDetectionService:
             facade['quality_ready'] = facade['review_status'] == 'complete'
 
         trace("facade.detect.done", cloud=cloud_name, facades=len(facades),
+              detected=detected_count,
+              dropped=max(0, detected_count - len(facades)),
               proxy_points=len(proxy_pts), seconds=f"{time.perf_counter()-started:.2f}")
 
         # Detection is a working-set operation.  It must not create a
@@ -214,8 +233,12 @@ class FacadeDetectionService:
                 np.asarray(f.get('inlier_indices', []), dtype=np.int64).tolist()
             )]
 
+        detected_count = len(facades)
+        facades = self._select_top_facades(facades)
+
         trace("facade.roi.algorithm_done", proxy_points=len(roi_pos),
-              facades=len(facades), scope=roi_scope,
+              facades=len(facades), detected=detected_count,
+              dropped=max(0, detected_count - len(facades)), scope=roi_scope,
               seconds=f"{time.perf_counter()-started:.2f}")
 
         # 索引归一化
