@@ -3,7 +3,6 @@ from datetime import datetime
 
 from PySide6.QtCore import (
     QEvent,
-    QPoint,
     QPointF,
     QRectF,
     QSize,
@@ -433,45 +432,6 @@ class TechnicalCanvas(QWidget):
         )
 
 
-class _MatchLinkOverlay(QWidget):
-    """在照片、二维投影和三维视口之间绘制同号匹配连线。"""
-
-    _COLORS = (
-        QColor(255, 90, 90, 185),
-        QColor(255, 180, 50, 185),
-        QColor(75, 205, 255, 185),
-        QColor(100, 225, 120, 185),
-        QColor(220, 100, 255, 185),
-    )
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self._links = []
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.hide()
-
-    def set_links(self, links):
-        self._links = list(links or [])
-        self.setGeometry(self.parentWidget().rect())
-        self.setVisible(bool(self._links))
-        if self._links:
-            self.raise_()
-        self.update()
-
-    def paintEvent(self, event):
-        _ = event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for index, (photo, projection, cloud, _label) in enumerate(self._links):
-            color = self._COLORS[index % len(self._COLORS)]
-            painter.setPen(QPen(color, 2, Qt.PenStyle.SolidLine))
-            painter.drawLine(photo, projection)
-            painter.drawLine(projection, cloud)
-        painter.end()
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -520,9 +480,6 @@ class MainWindow(QMainWindow):
         self._match_denoise_busy = False
         self._view_export_worker = None
         self._live_projection_view = None
-        self._reprojection_display_indices = None
-        self._projection_marker_points = []
-        self._projected_3d_labels = []
         self._projection_sliders = {}
         self._projection_value_labels = {}
         self._projection_controls_updating = False
@@ -574,10 +531,6 @@ class MainWindow(QMainWindow):
         self._station_selection_timer.timeout.connect(self._flush_station_selection)
         self._project_generation = 0
         self._setup_ui()
-        self._match_link_overlay = _MatchLinkOverlay(self)
-        self.viewport.marker_projection_callback = (
-            self._on_3d_marker_projection_changed
-        )
         self._create_resize_handles()
         self._connect_buttons()
         # Hook: display facade stats in the right dock when results ready
@@ -1346,7 +1299,6 @@ class MainWindow(QMainWindow):
         self.photo_view.point_clicked.connect(
             self._on_photo_match_point_clicked
         )
-        self.photo_view.view_changed.connect(self._update_reprojection_links)
         match_layout.addWidget(self.photo_view)
 
         cloud_view_title = QLabel('针孔投影二维视图')
@@ -1358,9 +1310,6 @@ class MainWindow(QMainWindow):
         )
         self.cloud_match_view.setMinimumHeight(280)
         self.cloud_match_view.set_interactive(False)
-        self.cloud_match_view.view_changed.connect(
-            self._update_reprojection_links
-        )
         match_layout.addWidget(self.cloud_match_view)
 
         projection_hint = QLabel('投影参数（拖动滑块实时更新）')
@@ -1881,8 +1830,6 @@ class MainWindow(QMainWindow):
             return
         self._live_projection_view = rendered
         self.cloud_match_view.set_image(image)
-        if self.photo_match_service.state.remapped_photo_points:
-            self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
 
     def _apply_scan_pose_view(self):
@@ -2095,24 +2042,13 @@ class MainWindow(QMainWindow):
             data = self.viewport.get_cloud_data(cloud_name)
             if not data or data.get('pos') is None:
                 raise ValueError('当前点云为空')
-            state = self.photo_match_service.state
-            if state.scan_pose_path:
-                if not state.projection_params:
-                    params = self.photo_match_service.initialize_projection(
-                        data['pos']
-                    )
-                    self._set_projection_controls(params)
-                captured = self.photo_match_service.render_projection_view(
-                    data['pos'],
-                    data.get('color'),
-                    self._projection_params_from_controls(),
-                    crop_subject=True,
-                    image_size=self._projection_image_size(),
-                )
-            else:
-                # 未上传扫描仪位姿时直接复用当前三维视口相机，因此打开
-                # 二维-三维对齐模块后即可投影，不要求先执行视角调整。
-                captured = self.viewport.capture_match_view(cloud_name)
+            captured = self.photo_match_service.render_projection_view(
+                data['pos'],
+                data.get('color'),
+                self._projection_params_from_controls(),
+                crop_subject=True,
+                image_size=self._projection_image_size(),
+            )
             view_image = bgr_to_qimage(captured['view_bgr'])
         except (KeyError, OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, '投影到二维视图', str(exc))
@@ -2123,8 +2059,6 @@ class MainWindow(QMainWindow):
         self._saved_match_view = None
         self._saved_match_view_path = None
         self.cloud_match_view.set_image(view_image)
-        if self.photo_match_service.state.remapped_photo_points:
-            self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
         self.statusBar().showMessage(
             '点云已投影到右侧二维视图', 5000
@@ -2242,7 +2176,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 '自动匹配',
-                '请先按“投影到二维视图”生成右侧二维投影。',
+                '请先调整点云视角，然后按“投影到二维视图”。',
             )
             return
 
@@ -2324,21 +2258,6 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, '重映射', str(exc))
             return
-        valid_indices = [
-            index
-            for index, point in enumerate(
-                self.photo_match_service.state.remapped_photo_points
-            )
-            if point is not None
-        ]
-        if len(valid_indices) > 10:
-            selected = np.random.default_rng().choice(
-                valid_indices,
-                size=10,
-                replace=False,
-            )
-            valid_indices = sorted(int(value) for value in selected)
-        self._reprojection_display_indices = valid_indices
         self._refresh_manual_match_markers()
         mean_error = result.get('mean_reprojection_error_px')
         message = (
@@ -2347,152 +2266,19 @@ class MainWindow(QMainWindow):
         )
         if mean_error is not None:
             message += f'\n平均偏差：{float(mean_error):.2f} px'
-        if len(valid_indices) == 10 and result.get('in_image_count', 0) > 10:
-            message += '\n匹配点超过 10 对，已随机显示其中 10 对。'
         QMessageBox.information(self, '重映射', message)
-
-    def _project_cloud_points_to_match_view(self, points):
-        captured = self._live_projection_view
-        if captured is None:
-            return [None] * len(points)
-        intrinsic = np.asarray(captured['camera_matrix'], dtype=np.float64)
-        extrinsic = np.asarray(captured['extrinsic'], dtype=np.float64)
-        cloud = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        camera = cloud @ extrinsic[:3, :3].T + extrinsic[:3, 3]
-        depth = camera[:, 2]
-        width = int(captured['view_bgr'].shape[1])
-        height = int(captured['view_bgr'].shape[0])
-        result = []
-        for point, z in zip(camera, depth):
-            if not np.isfinite(point).all() or z <= 1e-8:
-                result.append(None)
-                continue
-            x = intrinsic[0, 0] * point[0] / z + intrinsic[0, 2]
-            y = intrinsic[1, 1] * point[1] / z + intrinsic[1, 2]
-            if 0 <= x < width and 0 <= y < height:
-                result.append((float(x), float(y)))
-            else:
-                result.append(None)
-        return result
-
-    def _on_3d_marker_projection_changed(self, labels):
-        self._projected_3d_labels = list(labels or [])
-        self._update_reprojection_links()
-
-    def _widget_point_in_window(self, widget, point):
-        if point is None:
-            return None
-        local = widget.pixel_to_widget(point[0], point[1])
-        if local is None:
-            return None
-        global_point = widget.mapToGlobal(
-            QPoint(int(round(local.x())), int(round(local.y())))
-        )
-        mapped = self.mapFromGlobal(global_point)
-        return QPointF(float(mapped.x()), float(mapped.y()))
-
-    def _update_reprojection_links(self):
-        overlay = getattr(self, '_match_link_overlay', None)
-        indices = self._reprojection_display_indices
-        if overlay is None or not indices:
-            if overlay is not None:
-                overlay.set_links([])
-            return
-        pairs = [
-            pair
-            for pair in self.photo_match_service.state.correspondences
-            if pair.photo is not None and pair.cloud is not None
-        ]
-        projection_by_label = dict(self._projection_marker_points)
-        cloud_by_label = {
-            int(label): (float(x), float(y))
-            for x, y, label in self._projected_3d_labels
-        }
-        container = getattr(self.viewport, '_container', None)
-        links = []
-        for index in indices:
-            if index >= len(pairs):
-                continue
-            label = index + 1
-            photo = self._widget_point_in_window(
-                self.photo_view,
-                pairs[index].photo,
-            )
-            projection = self._widget_point_in_window(
-                self.cloud_match_view,
-                projection_by_label.get(label),
-            )
-            cloud_screen = cloud_by_label.get(label)
-            cloud = None
-            if cloud_screen is not None and container is not None:
-                global_point = container.mapToGlobal(
-                    QPoint(
-                        int(round(cloud_screen[0])),
-                        int(round(cloud_screen[1])),
-                    )
-                )
-                mapped = self.mapFromGlobal(global_point)
-                cloud = QPointF(float(mapped.x()), float(mapped.y()))
-            if photo is not None and projection is not None and cloud is not None:
-                links.append((photo, projection, cloud, label))
-        overlay.set_links(links)
 
     def _refresh_manual_match_markers(self):
         state = self.photo_match_service.state
-        pairs = [
-            pair
-            for pair in state.correspondences
-            if pair.photo is not None and pair.cloud is not None
-        ]
-        if not state.remapped_photo_points:
-            self._reprojection_display_indices = None
-        indices = self._reprojection_display_indices
-        if indices is None:
-            self.photo_view.set_markers(self.photo_match_service.photo_points())
-            self.photo_view.set_remap_markers([])
-            self.cloud_match_view.set_markers([])
-            self._projection_marker_points = []
-            self.viewport.update_pick_markers(
-                src_points=self.photo_match_service.cloud_points()
-            )
-            self._update_reprojection_links()
-            return
-
-        indices = [index for index in indices if index < len(pairs)]
-        labels = [index + 1 for index in indices]
-        photo_points = [pairs[index].photo for index in indices]
-        cloud_points = [pairs[index].cloud for index in indices]
-        remapped = [
-            state.remapped_photo_points[index]
-            if index < len(state.remapped_photo_points)
-            else None
-            for index in indices
-        ]
-        projected = self._project_cloud_points_to_match_view(cloud_points)
-        self._projection_marker_points = [
-            (label, point)
-            for label, point in zip(labels, projected)
-            if point is not None
-        ]
-        self.photo_view.set_markers(photo_points, labels)
-        self.photo_view.set_remap_markers(remapped, labels)
-        self.cloud_match_view.set_markers(
-            [
-                point
-                for point in projected
-                if point is not None
-            ],
-            [
-                label
-                for label, point in zip(labels, projected)
-                if point is not None
-            ],
+        self.photo_view.set_markers(
+            self.photo_match_service.photo_points()
+        )
+        self.photo_view.set_remap_markers(
+            state.remapped_photo_points
         )
         self.viewport.update_pick_markers(
-            src_points=cloud_points,
-            labels=labels,
+            src_points=self.photo_match_service.cloud_points()
         )
-        self._update_reprojection_links()
 
     def _refresh_photo_match_controls(self):
         state = self.photo_match_service.state
@@ -2515,12 +2301,9 @@ class MainWindow(QMainWindow):
             self.btn_auto_fit_projection.setEnabled(
                 bool(state.scan_pose_path) and has_cloud and not state.annotating
             )
-        for slider in self._projection_sliders.values():
-            slider.setEnabled(
-                bool(state.scan_pose_path) and has_cloud and not state.annotating
-            )
         self.btn_save_cloud_match_view.setEnabled(
             has_cloud
+            and bool(state.projection_params)
             and not state.annotating
         )
         if hasattr(self, 'btn_export_cloud_view_images'):
@@ -3295,8 +3078,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         hint = QLabel(
-            '自动匹配：打开模块后可直接把当前三维视口投影到二维视图；'
-            '也可上传扫描仪位姿并调整投影参数后再匹配。'
+            '自动匹配：调整点云视角后先投影到二维视图，再执行自动匹配。'
             '手动标注至少完成 6 对后可估计匹配矩阵。'
         )
         hint.setWordWrap(True)
@@ -4535,10 +4317,6 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_resize_handles()
-        overlay = getattr(self, '_match_link_overlay', None)
-        if overlay is not None:
-            overlay.setGeometry(self.rect())
-            self._update_reprojection_links()
 
     def eventFilter(self, watched, event):
         if (

@@ -45,9 +45,7 @@ class PhotoMatchState:
     scan_pose_path: Optional[str] = None
     scan_pose_meta: Optional[dict] = None
     annotation_space: str = 'raw'
-    remapped_photo_points: list[Optional[tuple[float, float]]] = field(
-        default_factory=list
-    )
+    remapped_photo_points: list[tuple[float, float]] = field(default_factory=list)
     projection_params: dict = field(default_factory=dict)
 
 
@@ -319,8 +317,6 @@ class PhotoMatchService:
         for pixel, valid in zip(result['image_points'], result['valid_mask']):
             if valid and np.isfinite(pixel).all():
                 photo_xy.append((float(pixel[0]), float(pixel[1])))
-            else:
-                photo_xy.append(None)
         self.state.remapped_photo_points = photo_xy
 
         annotated = np.asarray(self.photo_points(), dtype=np.float64).reshape(-1, 2)
