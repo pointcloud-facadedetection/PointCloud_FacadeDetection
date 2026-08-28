@@ -143,32 +143,8 @@ class ViewportInteractor:
             if dx or dy:
                 self._invalidate_pick_projection_cache()
             ctr = self.adapter.get_view_control()
-            if ctr is not None:
-                try:
-                    # 优先使用 ViewControl.translate(像素位移)，方向随鼠标
-                    if hasattr(ctr, 'translate'):
-                        ctr.translate(int(-dx), int(dy))
-                    else:
-                        # 像素->世界：手工平移 lookat（右手坐标系）
-                        scale = self._cached_pan_scale if self._cached_pan_scale is not None else self._compute_pan_scale(ctr)
-                        try:
-                            import numpy as _np
-                            look = _np.asarray(ctr.get_lookat(), dtype=float)
-                            front = _np.asarray(ctr.get_front(), dtype=float)
-                            up = _np.asarray(ctr.get_up(), dtype=float)
-                            front = front / ( _np.linalg.norm(front) + 1e-12 )
-                            up = up - front * float(_np.dot(front, up))
-                            up = up / ( _np.linalg.norm(up) + 1e-12 )
-                            right = _np.cross(front, up)
-                            right = right / ( _np.linalg.norm(right) + 1e-12 )
-                            move = (-dx * scale) * right + (dy * scale) * up
-                            ctr.set_lookat(look + move)
-                            ctr.set_front(front)
-                            ctr.set_up(up)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+            if ctr is not None and (dx or dy):
+                self._pan_camera(ctr, dx, dy)
             return True
 
         # 左键拖拽旋转
@@ -181,7 +157,11 @@ class ViewportInteractor:
             ctr = self.adapter.get_view_control()
             if ctr is not None:
                 try:
-                    ctr.rotate(int(dx * self._left_rotate_scale), int(dy * self._left_rotate_scale))
+                    # 采用“拖动物体”手感：点云跟随鼠标拖动方向旋转。
+                    ctr.rotate(
+                        int(-dx * self._left_rotate_scale),
+                        int(-dy * self._left_rotate_scale),
+                    )
                 except Exception:
                     # Fallback：使用 translate 做少量平移模拟
                     try:
@@ -401,21 +381,18 @@ class ViewportInteractor:
                 return False
 
             try:
-                if hasattr(ctr, "scale"):
-                    ctr.scale(factor)
-                else:
-                    raise AttributeError()
+                # 统一使用 zoom，避免不同 Open3D 版本中 scale() 方向相反。
+                # 滚轮向上：放大；滚轮向下：缩小。
+                z = float(ctr.get_zoom())
+                new_z = max(min(z / factor, 2.5), 0.02)
+                ctr.set_zoom(new_z)
+                self.adapter.poll()
             except Exception:
                 try:
-                    z = ctr.get_zoom()
-                    new_z = max(min(z / factor, 2.5), 0.02)
-                    ctr.set_zoom(new_z)
+                    sign = -1.0 if steps > 0 else 1.0
+                    ctr.camera_local_translate(0.0, 0.0, sign * 0.02)
                 except Exception:
-                    try:
-                        sign = -1.0 if steps > 0 else 1.0
-                        ctr.camera_local_translate(0.0, 0.0, sign * 0.02)
-                    except Exception:
-                        pass
+                    pass
             return True
         except Exception:
             return False
@@ -453,6 +430,33 @@ class ViewportInteractor:
         scene_factor = max(0.2, min(scene_scale / 10.0, 3.0))
         scale = self._right_pan_scale * zoom_factor * scene_factor / max(1.0, dpr)
         return float(scale)
+
+    def _pan_camera(self, ctr, dx, dy):
+        """按屏幕拖动量平移相机目标点，不依赖 Open3D 版本特定的 translate API。"""
+        try:
+            look = np.asarray(ctr.get_lookat(), dtype=float).reshape(3)
+            front = np.asarray(ctr.get_front(), dtype=float).reshape(3)
+            up = np.asarray(ctr.get_up(), dtype=float).reshape(3)
+
+            front /= np.linalg.norm(front) + 1e-12
+            up -= front * float(np.dot(front, up))
+            up /= np.linalg.norm(up) + 1e-12
+            right = np.cross(front, up)
+            right /= np.linalg.norm(right) + 1e-12
+
+            scale = (
+                self._cached_pan_scale
+                if self._cached_pan_scale is not None
+                else self._compute_pan_scale(ctr)
+            )
+            move = (-float(dx) * scale) * right + (float(dy) * scale) * up
+            ctr.set_lookat(look + move)
+            ctr.set_front(front)
+            ctr.set_up(up)
+            self.adapter.poll()
+            return True
+        except Exception:
+            return False
 
     def _estimate_scene_scale(self):
         if not self.scene.point_data:
