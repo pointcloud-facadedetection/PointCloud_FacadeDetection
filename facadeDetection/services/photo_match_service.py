@@ -18,6 +18,8 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
     estimate_match_matrix,
     match_photo_to_cloud_view,
     remap_cloud_points_to_photo,
+    default_projection_params,
+    render_projection,
 )
 
 
@@ -43,7 +45,10 @@ class PhotoMatchState:
     scan_pose_path: Optional[str] = None
     scan_pose_meta: Optional[dict] = None
     annotation_space: str = 'raw'
-    remapped_photo_points: list[tuple[float, float]] = field(default_factory=list)
+    remapped_photo_points: list[Optional[tuple[float, float]]] = field(
+        default_factory=list
+    )
+    projection_params: dict = field(default_factory=dict)
 
 
 class PhotoMatchService:
@@ -123,6 +128,7 @@ class PhotoMatchService:
         meta = validate_scan_pose_json(path)
         self.state.scan_pose_path = str(path)
         self.state.scan_pose_meta = meta
+        self.state.projection_params = {}
         return meta
 
     def build_viewport_camera(self, lookat) -> dict:
@@ -130,6 +136,43 @@ class PhotoMatchService:
         if not self.state.scan_pose_path:
             raise ValueError('请先上传扫描仪位姿文件')
         return build_scan_viewport_camera(self.state.scan_pose_path, lookat)
+
+    def initialize_projection(self, points) -> dict:
+        """根据扫描仪位姿和点云主体初始化针孔投影参数。"""
+        meta = self.state.scan_pose_meta or {}
+        transform = meta.get('transform_to_global')
+        if transform is None:
+            raise ValueError('扫描仪位姿缺少 transformToGlobal，无法生成针孔投影')
+        params = default_projection_params(points, transform)
+        self.state.projection_params = dict(params)
+        return dict(params)
+
+    def render_projection_view(
+        self,
+        points,
+        colors,
+        params=None,
+        *,
+        crop_subject=False,
+        image_size=(1024, 576),
+    ) -> dict:
+        """渲染右侧针孔投影预览或用于匹配的主体裁剪图。"""
+        meta = self.state.scan_pose_meta or {}
+        transform = meta.get('transform_to_global')
+        if transform is None:
+            raise ValueError('请先上传含 transformToGlobal 的扫描仪位姿')
+        values = dict(params or self.state.projection_params)
+        if not values:
+            values = self.initialize_projection(points)
+        self.state.projection_params = dict(values)
+        return render_projection(
+            points,
+            colors,
+            transform,
+            values,
+            image_size=image_size,
+            crop_subject=crop_subject,
+        )
 
     def complete_pair_count(self) -> int:
         return sum(
@@ -276,6 +319,8 @@ class PhotoMatchService:
         for pixel, valid in zip(result['image_points'], result['valid_mask']):
             if valid and np.isfinite(pixel).all():
                 photo_xy.append((float(pixel[0]), float(pixel[1])))
+            else:
+                photo_xy.append(None)
         self.state.remapped_photo_points = photo_xy
 
         annotated = np.asarray(self.photo_points(), dtype=np.float64).reshape(-1, 2)
@@ -418,6 +463,7 @@ class PhotoMatchService:
             view_camera_matrix=captured_view['camera_matrix'],
             view_extrinsic=captured_view['extrinsic'],
             cloud_points=captured_view.get('cloud_points'),
+            pixel_point_index=captured_view.get('pixel_point_index'),
         )
         result['annotation_space'] = self.state.annotation_space
         self.apply_auto_match_result(result)

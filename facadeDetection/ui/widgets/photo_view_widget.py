@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 
 class PhotoViewWidget(QLabel):
     point_clicked = Signal(float, float)
+    view_changed = Signal()
 
     _MIN_ZOOM = 1.0
     _MAX_ZOOM = 8.0
@@ -27,7 +28,9 @@ class PhotoViewWidget(QLabel):
         self._scaled = QPixmap()
         self._draw_rect = QRectF()
         self._markers: list[tuple[float, float]] = []
+        self._marker_labels: list[int] = []
         self._remap_markers: list[tuple[float, float]] = []
+        self._remap_marker_labels: list[int] = []
         self._interactive = False
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
@@ -60,19 +63,50 @@ class PhotoViewWidget(QLabel):
         self._scaled = QPixmap()
         self._draw_rect = QRectF()
         self._markers = []
+        self._marker_labels = []
         self._remap_markers = []
+        self._remap_marker_labels = []
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
         self.setText(self._placeholder)
         self.update()
 
-    def set_markers(self, points):
-        self._markers = [(float(x), float(y)) for x, y in points]
+    def set_markers(self, points, labels=None):
+        values = list(points or [])
+        self._markers = [(float(x), float(y)) for x, y in values]
+        self._marker_labels = (
+            [int(value) for value in labels]
+            if labels is not None
+            else list(range(1, len(values) + 1))
+        )
         self.update()
 
-    def set_remap_markers(self, points):
-        self._remap_markers = [(float(x), float(y)) for x, y in (points or [])]
+    def set_remap_markers(self, points, labels=None):
+        values = list(points or [])
+        valid = [
+            (index, point)
+            for index, point in enumerate(values)
+            if point is not None
+        ]
+        self._remap_markers = [
+            (float(point[0]), float(point[1]))
+            for _, point in valid
+        ]
+        source_labels = (
+            [int(value) for value in labels]
+            if labels is not None
+            else list(range(1, len(values) + 1))
+        )
+        self._remap_marker_labels = [
+            source_labels[index]
+            for index, _ in valid
+            if index < len(source_labels)
+        ]
         self.update()
+
+    def pixel_to_widget(self, px: float, py: float) -> QPointF | None:
+        """返回图像像素在控件内的显示坐标，供跨视图连线使用。"""
+        return self._pixel_to_display(float(px), float(py))
 
     def has_image(self) -> bool:
         return not self._source.isNull()
@@ -81,6 +115,7 @@ class PhotoViewWidget(QLabel):
         super().resizeEvent(event)
         if not self._source.isNull():
             self._rebuild_scaled()
+            self.view_changed.emit()
 
     def wheelEvent(self, event):
         if self._source.isNull() or self._draw_rect.width() <= 0:
@@ -106,6 +141,7 @@ class PhotoViewWidget(QLabel):
                 self._rebuild_scaled()
         event.accept()
         self.update()
+        self.view_changed.emit()
 
     def mousePressEvent(self, event):
         if self._source.isNull():
@@ -136,6 +172,7 @@ class PhotoViewWidget(QLabel):
             self._offset += delta
             self._rebuild_scaled()
             self.update()
+            self.view_changed.emit()
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -163,10 +200,17 @@ class PhotoViewWidget(QLabel):
         font.setPixelSize(11)
         font.setBold(True)
         painter.setFont(font)
-        for index, (px, py) in enumerate(self._markers, start=1):
+        marker_display = {}
+        for index, (px, py) in enumerate(self._markers):
             display = self._pixel_to_display(px, py)
             if display is None:
                 continue
+            label = (
+                self._marker_labels[index]
+                if index < len(self._marker_labels)
+                else index + 1
+            )
+            marker_display[label] = display
             painter.setPen(QPen(QColor(255, 255, 255), 1))
             painter.setBrush(QColor(220, 40, 40))
             painter.drawEllipse(display, 8, 8)
@@ -174,12 +218,21 @@ class PhotoViewWidget(QLabel):
             painter.drawText(
                 QRectF(display.x() - 8, display.y() - 8, 16, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                str(index),
+                str(label),
             )
-        for index, (px, py) in enumerate(self._remap_markers, start=1):
+        for index, (px, py) in enumerate(self._remap_markers):
             display = self._pixel_to_display(px, py)
             if display is None:
                 continue
+            label = (
+                self._remap_marker_labels[index]
+                if index < len(self._remap_marker_labels)
+                else index + 1
+            )
+            original = marker_display.get(label)
+            if original is not None:
+                painter.setPen(QPen(QColor(255, 190, 40, 190), 2))
+                painter.drawLine(original, display)
             painter.setPen(QPen(QColor(40, 220, 220), 2))
             painter.setBrush(QColor(40, 180, 180, 80))
             painter.drawEllipse(display, 10, 10)
@@ -187,7 +240,7 @@ class PhotoViewWidget(QLabel):
             painter.drawText(
                 QRectF(display.x() - 8, display.y() - 8, 16, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                str(index),
+                str(label),
             )
 
     def _rebuild_scaled(self):

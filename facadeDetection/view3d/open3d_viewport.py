@@ -87,6 +87,167 @@ class _QWindowEventBridge(QObject):
         return False
 
 
+class _PickCaptureOverlay(QWidget):
+    """盖在原生 Open3D 窗口上，捕获点击以便 3D 标点，同时转发旋转/平移/缩放。"""
+
+    def __init__(self, viewport, container):
+        flags = int(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        super().__init__(None, Qt.WindowFlags(flags))
+        self._window_flags = Qt.WindowFlags(flags)
+        self._viewport = viewport
+        self._container = container
+        self._pick_labels = []
+        self._active = False
+        self._pick_active = False
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        # Windows 会把创建时的 WA_TransparentForMouseEvents 映射成原生
+        # click-through 样式，窗口显示后再设为 False 并不总会恢复命中测试。
+        # 非标点状态直接隐藏窗口即可，无需启用鼠标穿透。
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+    def sync_geometry(self):
+        if self._container is None or not self._active:
+            return
+        owner = self._container.window()
+        app_active = (
+            QApplication.applicationState()
+            == Qt.ApplicationState.ApplicationActive
+        )
+        owner_ready = (
+            owner is not None
+            and owner.isVisible()
+            and not owner.isMinimized()
+            and self._container.isVisible()
+            and self._container.width() > 1
+            and self._container.height() > 1
+        )
+        if not app_active or not owner_ready:
+            self._release_input()
+            self.hide()
+            return
+        # 到 activate 时 container 已加入主窗口，此时才能取得正确 owner。
+        # 绑定 owner 后，覆盖层会随主窗口最小化和关闭。
+        if self.parentWidget() is not owner:
+            self.setParent(owner, self._window_flags)
+        top_left = self._container.mapToGlobal(QPoint(0, 0))
+        self.setGeometry(
+            top_left.x(), top_left.y(),
+            self._container.width(), self._container.height(),
+        )
+        was_hidden = not self.isVisible()
+        if was_hidden:
+            self.show()
+        self.raise_()
+
+    def activate(self, picking=False):
+        self._active = True
+        self._pick_active = bool(picking)
+        self.sync_geometry()
+        # 覆盖层仅覆盖三维显示框，无需 grabMouse/grabKeyboard。全局抓取会
+        # 让侧栏的“撤销标注”“退出标注”等按钮无法接收点击。
+        self._release_input()
+        if self._pick_active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.activateWindow()
+            self.setFocus()
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_pick_active(self, enabled):
+        self.activate(picking=enabled)
+
+    def deactivate(self):
+        self._active = False
+        self._pick_active = False
+        self._release_input()
+        self.unsetCursor()
+        self.hide()
+
+    def _grab_input(self):
+        try:
+            self.grabMouse()
+        except Exception:
+            pass
+        try:
+            self.grabKeyboard()
+        except Exception:
+            pass
+
+    def _release_input(self):
+        try:
+            self.releaseMouse()
+        except Exception:
+            pass
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor(255, 220, 80), 1))
+        painter.drawText(
+            12, 22,
+            '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
+        )
+        for index, item in enumerate(self._pick_labels, start=1):
+            x, y = item[:2]
+            label = item[2] if len(item) > 2 else index
+            painter.setPen(QPen(QColor(255, 255, 255), 1))
+            painter.setBrush(QColor(220, 40, 40))
+            painter.drawEllipse(QPoint(int(x), int(y)), 8, 8)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(
+                int(x) - 8,
+                int(y) - 12,
+                16,
+                16,
+                Qt.AlignCenter,
+                str(label),
+            )
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if self._pick_active:
+            print(
+                f'[Pick] overlay.press x={event.position().x():.1f} '
+                f'y={event.position().y():.1f} button={event.button()}',
+                flush=True,
+            )
+        self._viewport._interactor.handle_mouse_press(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        self._viewport._interactor.handle_mouse_move(event)
+        try:
+            self._viewport._refresh_pick_overlay_labels()
+        except Exception:
+            pass
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        handled = self._viewport._interactor.handle_mouse_release(event)
+        if self._pick_active:
+            print(f'[Pick] overlay.release handled={bool(handled)}', flush=True)
+        self.update()
+        event.accept()
+
+    def wheelEvent(self, event):
+        self._viewport._interactor.handle_wheel(event)
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            try:
+                self._viewport.exit_pick_mode()
+            except Exception:
+                pass
+        event.accept()
+
+
 class _RenderQueue(QObject):
     color = Signal(str, object)
     points = Signal(str, object, object)
@@ -113,7 +274,9 @@ class Open3DViewport(BaseViewport):
         self._window_title = "PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
-        self._pick_labels = []
+        self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
+        self._pick_marker_labels = []
+        self.marker_projection_callback = None
         self._init_success = False
         self._overlay = None
         self._roi_controller = None
@@ -301,6 +464,15 @@ class Open3DViewport(BaseViewport):
             layout.addWidget(self._container)
 
             self._roi_controller = ROISelectionController(self, container_widget=self._container)
+            self._pick_capture_overlay = _PickCaptureOverlay(self, self._container)
+            # Windows 外部 Open3D 窗口不会稳定转发右键事件；普通浏览模式也
+            # 保持透明捕获层可见，确保旋转、平移和滚轮缩放都由 interactor 处理。
+            QTimer.singleShot(
+                0,
+                lambda: self._pick_capture_overlay.activate(picking=False)
+                if self._pick_capture_overlay is not None
+                else None,
+            )
 
             # 在 QWindow 上安装事件桥，确保右键平移与拖拽事件送达 interactor
             try:
@@ -396,6 +568,9 @@ class Open3DViewport(BaseViewport):
                 # 关闭点选/框选（由 Overlay 控制）
                 self._interactor.pick_enabled = False
                 self._interactor.selection_enabled = False
+                capture = getattr(self, '_pick_capture_overlay', None)
+                if capture is not None:
+                    capture.deactivate()
             elif mode == self.InteractionMode.PICK:
                 setattr(self._interactor, 'input_locked', False)
                 self._interactor.selection_enabled = False
@@ -404,6 +579,9 @@ class Open3DViewport(BaseViewport):
                 setattr(self._interactor, 'input_locked', False)
                 self._interactor.pick_enabled = False
                 self._interactor.selection_enabled = False
+                capture = getattr(self, '_pick_capture_overlay', None)
+                if capture is not None:
+                    capture.activate(picking=False)
         except Exception:
             pass
 
@@ -422,6 +600,12 @@ class Open3DViewport(BaseViewport):
                 if sequence == self._render_sequences.get(name):
                     self.update_cloud_color(name, colors)
             self._adapter.poll()
+        except Exception:
+            pass
+        try:
+            overlay = getattr(self, '_pick_capture_overlay', None)
+            if overlay is not None and getattr(overlay, '_active', False):
+                overlay.sync_geometry()
         except Exception:
             pass
 
@@ -846,12 +1030,24 @@ class Open3DViewport(BaseViewport):
             self.set_mode(self.InteractionMode.NAVIGATE)
         except Exception:
             pass
-        self._registration_pick_state = None
+        self._set_pick_capture_active(False)
 
-    def update_pick_markers(self, src_points=None, tgt_points=None):
+    def _set_pick_capture_active(self, enabled: bool):
+        overlay = getattr(self, '_pick_capture_overlay', None)
+        if overlay is None:
+            return
+        overlay.set_pick_active(enabled)
+
+    def update_pick_markers(self, src_points=None, tgt_points=None, labels=None):
         self.clear_pick_markers()
         src = np.asarray(src_points if src_points is not None else [], dtype=np.float64).reshape(-1, 3)
         tgt = np.asarray(tgt_points if tgt_points is not None else [], dtype=np.float64).reshape(-1, 3)
+        self._pick_marker_xyz = src.copy() if len(src) else np.zeros((0, 3), dtype=np.float64)
+        self._pick_marker_labels = (
+            [int(value) for value in labels]
+            if labels is not None
+            else list(range(1, len(src) + 1))
+        )
 
         r_src = self._marker_radius_for_points(src) if len(src) else None
         r_tgt = self._marker_radius_for_points(tgt) if len(tgt) else None
@@ -880,12 +1076,52 @@ class Open3DViewport(BaseViewport):
                 self._pick_lines.append(name)
             except Exception:
                 pass
+        try:
+            self._adapter.poll()
+        except Exception:
+            pass
+        self._refresh_pick_overlay_labels()
+
+    def _refresh_pick_overlay_labels(self):
+        overlay = getattr(self, '_pick_capture_overlay', None)
+        if overlay is None:
+            return
+        pts = getattr(self, '_pick_marker_xyz', None)
+        labels = []
+        if pts is not None and len(pts) > 0:
+            projected = self.project_points(pts)
+            if projected is not None:
+                screen, valid = projected
+                for index, (point, is_valid) in enumerate(zip(screen, valid)):
+                    if is_valid:
+                        label = (
+                            self._pick_marker_labels[index]
+                            if index < len(self._pick_marker_labels)
+                            else index + 1
+                        )
+                        labels.append(
+                            (float(point[0]), float(point[1]), int(label))
+                        )
+        overlay._pick_labels = labels
+        overlay.update()
+        callback = self.marker_projection_callback
+        if callback is not None:
+            try:
+                callback(labels)
+            except Exception:
+                pass
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
             self._adapter.remove_geometry(name)
         self._pick_markers = []
         self._pick_lines = []
+        self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
+        self._pick_marker_labels = []
+        overlay = getattr(self, '_pick_capture_overlay', None)
+        if overlay is not None:
+            overlay._pick_labels = []
+            overlay.update()
 
     def save_screenshot(self, path):
         image = self._adapter.capture_screen()

@@ -57,6 +57,69 @@ class PointCloudLoadWorker(QRunnable):
             gc.collect()
 
 
+class ViewExportWorkerSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class ViewExportWorker(QRunnable):
+    """在后台用原始点云渲染并保存多模态当前视图。"""
+
+    def __init__(
+        self,
+        points,
+        colors,
+        camera_matrix,
+        extrinsic,
+        image_size,
+        pinhole_camera_matrix,
+        pinhole_extrinsic,
+        pinhole_image_size,
+        output_dir,
+        stem,
+    ):
+        super().__init__()
+        self.points = points
+        self.colors = colors
+        self.camera_matrix = camera_matrix
+        self.extrinsic = extrinsic
+        self.image_size = image_size
+        self.pinhole_camera_matrix = pinhole_camera_matrix
+        self.pinhole_extrinsic = pinhole_extrinsic
+        self.pinhole_image_size = pinhole_image_size
+        self.output_dir = output_dir
+        self.stem = stem
+        self.signals = ViewExportWorkerSignals()
+        self.setAutoDelete(False)
+
+    def run(self):
+        try:
+            from algorithms.View_aligned_photo_pointcloud_matching.view_image_export import (
+                build_export_images,
+                render_original_view,
+                save_export_images,
+            )
+            raw, depth = render_original_view(
+                self.points,
+                self.colors,
+                self.camera_matrix,
+                self.extrinsic,
+                self.image_size,
+            )
+            pinhole, _pinhole_depth = render_original_view(
+                self.points,
+                self.colors,
+                self.pinhole_camera_matrix,
+                self.pinhole_extrinsic,
+                self.pinhole_image_size,
+            )
+            images = build_export_images(raw, depth, pinhole)
+            paths = save_export_images(images, self.output_dir, self.stem)
+            self.signals.finished.emit(paths)
+        except Exception as exc:
+            self.signals.failed.emit(f'{type(exc).__name__}: {exc}')
+
+
 class QualityWorkerSignals(QObject):
     """Signals for quality worker.
 
