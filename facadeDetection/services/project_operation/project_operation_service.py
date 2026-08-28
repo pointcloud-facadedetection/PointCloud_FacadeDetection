@@ -563,13 +563,23 @@ class ProjectOperationService:
                 print('无已注册的代理处理点云。', flush=True)
                 return
             if not self._last_facade_results:
-                print('尚无检测结果用于热力着色', flush=True)
+                try:
+                    QMessageBox.information(None, '质量检测', '还未进行质量检测。')
+                except Exception:
+                    print('还未进行质量检测。', flush=True)
                 return
             render = self._get_render_service()
             if render is not None:
-                render.render_flatness_heatmap(
-                    cloud_name, self._last_facade_results,
-                    index_service=getattr(self._facade_service, '_index_service', None))
+                ok = False
+                if hasattr(render, 'render_quality_reports'):
+                    ok = render.render_quality_reports(
+                        cloud_name, self._last_facade_results,
+                        index_service=getattr(self._facade_service, '_index_service', None))
+                if not ok:
+                    try:
+                        QMessageBox.information(None, '质量检测', '还未进行质量检测。')
+                    except Exception:
+                        print('还未进行质量检测。', flush=True)
         except Exception as e:
             print(f'质量检测渲染失败: {e}', flush=True)
 

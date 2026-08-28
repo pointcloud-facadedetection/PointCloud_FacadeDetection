@@ -26,11 +26,10 @@ from PySide6.QtWidgets import (
 
 class FacadeQualityDialog(QDialog):
     """
-    立面质量评估对话框 v5：
-    - 紧凑布局，适配常见屏幕分辨率
-    - 综合指标分块展示，避免单行超长
-    - 表格列宽自适应，支持水平滚动
-    - 仅保留核心评估标准与合格率摘要
+    立面质量评估对话框 v6（修复版）：
+    - 修复垂直度字段读取问题
+    - 修复 interval 垂直度统计显示
+    - 确保所有字段正确映射
     """
 
     def __init__(self, parent: Optional[QWidget], facade_label: str, quality_result: dict,
@@ -38,13 +37,13 @@ class FacadeQualityDialog(QDialog):
                  on_restore_colors: Optional[Callable[[], None]] = None,
                  project_name: str = ''):
         super().__init__(parent)
-        
+
         title = f"{project_name} - {facade_label} 质量评估" if project_name else f"{facade_label} 质量评估"
         self.setWindowTitle(title)
         self.setMinimumSize(720, 520)
         self.resize(900, 640)
         self.setMaximumWidth(1200)
-        
+
         self.setStyleSheet("""
             QDialog { background: #f8fafc; }
             QLabel#qualityHeader { 
@@ -140,7 +139,7 @@ class FacadeQualityDialog(QDialog):
                 font-size: 12px;
             }
         """)
-        
+
         self._quality = quality_result or {}
         self._on_show_colors = on_show_colors
         self._on_restore_colors = on_restore_colors
@@ -169,18 +168,19 @@ class FacadeQualityDialog(QDialog):
             status_layout.addWidget(error_label)
             layout.addWidget(status_box)
 
-        # ── 核心摘要：仅保留评估标准与合格率 ──
+        # ── 核心摘要：评估标准与合格率 ──
         overall = self._quality.get('overall') or {}
         profile = self._quality.get('profile_snapshot') or {}
-        
+
+        # FIX: Safely get rates with proper defaults
         flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
         vert_rate = float(overall.get('verticality_pass_rate', 0.0) or 0.0) * 100.0
         quality_rate = float(overall.get('quality_pass_rate', 0.0) or 0.0) * 100.0
-        
+
         standard_name = profile.get('standard_name', '未指定')
         version = profile.get('version', '')
         standard_text = f"{standard_name} {version}".strip()
-        
+
         summary = QLabel(
             f"当前评估标准：{standard_text}　|　"
             f"平整度合格率：{flat_rate:.1f}%　|　"
@@ -191,7 +191,7 @@ class FacadeQualityDialog(QDialog):
         summary.setWordWrap(True)
         layout.addWidget(summary)
 
-        # ── 详细指标网格（分块展示，避免单行过长） ──
+        # ── 详细指标网格 ──
         metrics_frame = QFrame()
         metrics_frame.setStyleSheet("""
             QFrame { 
@@ -204,33 +204,44 @@ class FacadeQualityDialog(QDialog):
         metrics_layout.setContentsMargins(14, 12, 14, 12)
         metrics_layout.setHorizontalSpacing(20)
         metrics_layout.setVerticalSpacing(10)
-        
+
+        # FIX: Safely extract all metrics with proper fallbacks
         gap = float(overall.get('flatness_max_gap_mm', 0.0) or 0.0)
         raw_gap = float(overall.get('flatness_raw_max_gap_mm', gap) or gap)
-        vangle_raw = overall.get('verticality_max_angle_deg')
-        vgap_raw = overall.get('verticality_deviation_mm_2m', overall.get('verticality_max_deviation_mm'))
-        vangle = float(vangle_raw) if vangle_raw is not None and np.isfinite(vangle_raw) else None
-        vgap = float(vgap_raw) if vgap_raw is not None and np.isfinite(vgap_raw) else None
+
+        # FIX: Try multiple field names for verticality angle
+        vangle_raw = (overall.get('verticality_max_angle_deg') 
+                      or overall.get('verticality_angle_deg'))
+        vangle = float(vangle_raw) if vangle_raw is not None and np.isfinite(float(vangle_raw)) else None
+
+        # FIX: Try multiple field names for verticality deviation
+        vgap_raw = (overall.get('verticality_deviation_mm_2m')
+                    or overall.get('verticality_deviation_mm')
+                    or overall.get('verticality_max_deviation_mm')
+                    or overall.get('verticality_max_deviation'))
+        vgap = float(vgap_raw) if vgap_raw is not None and np.isfinite(float(vgap_raw)) else None
+
         pts = int(overall.get('point_count') or 0)
-        
-        n_candidates = int(overall.get('candidate_unique_count', 
-                                       overall.get('candidate_window_count', 0)))
-        n_geometry = int(overall.get('geometry_valid_unique_count',
-                                     overall.get('geometry_valid_window_count', 0)))
-        n_quality = int(overall.get('quality_valid_unique_count',
-                                    overall.get('quality_valid_window_count', 0)))
+
+        n_candidates = int(overall.get('candidate_window_count', 0))
+        n_geometry = int(overall.get('geometry_valid_window_count', 0))
+        n_quality = int(overall.get('quality_valid_window_count', 0))
         n_failed = int(overall.get('failed_window_count', 0))
         n_intervals = len(self._quality.get('intervals', []))
-        
+
         metrics = [
             ('平整度有效最大间隙', f'{gap:.2f} mm'),
             ('平整度原始最大间隙', f'{raw_gap:.2f} mm'),
             ('垂直度最大偏差角', f'{vangle:.3f}°' if vangle is not None else '--'),
             ('垂直度最大偏差', f'{vgap:.2f} mm' if vgap is not None else '--'),
+            ('检测窗口总数', f'{n_candidates}'),
+            ('几何有效窗口', f'{n_geometry}'),
+            ('质量合格窗口', f'{n_quality}'),
+            ('失败窗口', f'{n_failed}'),
         ]
-        
+
         for i, (label_text, value_text) in enumerate(metrics):
-            row, col = divmod(i, 5)
+            row, col = divmod(i, 4)
             label = QLabel(label_text)
             label.setProperty('class', 'metricLabel')
             label.setStyleSheet('color: #64748b; font-size: 11px;')
@@ -239,13 +250,13 @@ class FacadeQualityDialog(QDialog):
             value.setStyleSheet('color: #1e293b; font-size: 12px; font-weight: 600;')
             metrics_layout.addWidget(label, row, col * 2)
             metrics_layout.addWidget(value, row, col * 2 + 1)
-        
+
         layout.addWidget(metrics_frame)
 
         # ── 区间表格 ──
         interval_size = float(self._quality.get('interval_size_m', 0.0))
         interval_count = int(self._quality.get('interval_count', 0) or 0)
-        
+
         interval_header = QLabel(f"区间统计　|　区间尺寸：{interval_size:g}m　|　共 {interval_count} 个区间")
         interval_header.setStyleSheet('color: #475569; font-size: 12px; font-weight: 600; margin-top: 4px;')
         layout.addWidget(interval_header)
@@ -271,7 +282,7 @@ class FacadeQualityDialog(QDialog):
         table.setColumnWidth(7, 110)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        
+
         self._refresh_intervals()
         layout.addWidget(table, 1)
 
@@ -279,18 +290,18 @@ class FacadeQualityDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         btn_row.addStretch(1)
-        
+
         self._mode_combo = QComboBox(self)
         self._mode_combo.addItem('平整度效果', 'flatness')
         self._mode_combo.addItem('平整度原始极值', 'flatness_raw')
         self._mode_combo.addItem('垂直度效果', 'verticality')
         self._mode_combo.setMinimumWidth(130)
-        
+
         btn_show = QPushButton("显示检测效果")
         btn_show.setObjectName('primaryBtn')
         btn_restore = QPushButton("恢复原始颜色")
         btn_close = QPushButton("关闭")
-        
+
         btn_row.addWidget(self._mode_combo)
         btn_row.addWidget(btn_show)
         btn_row.addWidget(btn_restore)
@@ -321,13 +332,24 @@ class FacadeQualityDialog(QDialog):
     def _refresh_intervals(self):
         intervals = self._quality.get('intervals') or []
         self._table.setRowCount(len(intervals))
+
         def number(value, suffix=''):
             try:
+                if value is None:
+                    return '--'
                 value = float(value)
                 return f'{value:.2f}{suffix}' if math.isfinite(value) else '--'
             except (TypeError, ValueError):
                 return '--'
+
         for r, item in enumerate(intervals):
+            # FIX: Safely get verticality values with proper fallbacks
+            vert_max = item.get('verticality_max_deviation_mm_2m')
+            if vert_max is None or (isinstance(vert_max, float) and not math.isfinite(vert_max)):
+                vert_max = item.get('verticality_max_deviation_mm')
+
+            vert_rate = item.get('verticality_pass_rate')
+
             vals = [
                 str(item.get('label') or (
                     f"{float(item.get('v_min_m', 0.0)):.2f}–"
@@ -336,17 +358,17 @@ class FacadeQualityDialog(QDialog):
                 str(item.get('point_count', 0)),
                 str(item.get('window_count', 0)),
                 str(item.get('valid_window_count', 0)),
-                 number(item.get('flatness_max_gap_mm')),
-                 number((float(item.get('flatness_pass_rate')) * 100)
-                        if item.get('flatness_pass_rate') is not None else None),
-                 number(item.get('verticality_max_deviation_mm_2m')),
-                 number((float(item.get('verticality_pass_rate')) * 100)
-                        if item.get('verticality_pass_rate') is not None else None),
+                number(item.get('flatness_max_gap_mm')),
+                number((float(item.get('flatness_pass_rate')) * 100)
+                       if item.get('flatness_pass_rate') is not None else None),
+                number(vert_max),
+                number((float(vert_rate) * 100) if vert_rate is not None else None),
             ]
             for c, value in enumerate(vals):
                 cell = QTableWidgetItem(value)
                 cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(r, c, cell)
+
         self._table.resizeColumnsToContents()
         # Ensure columns don't exceed reasonable widths after resize
         for c in range(self._table.columnCount()):
