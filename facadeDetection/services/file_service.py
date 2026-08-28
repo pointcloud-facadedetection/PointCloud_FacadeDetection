@@ -18,8 +18,9 @@ from services.dal.file_repo import FileRepo
 from config.storage import Storage
 
 # Reuse the existing converter implementation as the official reference
-from utils.convert_fls2ply import convert_fls_to_ply, EXE_PATH as DEFAULT_FLS_EXE
+from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
+from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
 
 
@@ -203,12 +204,14 @@ class FileService:
         通过基于子进程的转换器将 FARO FLS 目录转换为 PLY 格式进行导入，随后通过
         相同的 upload_files 管道保存并渲染生成的 PLY 文件，以确保一致性。
         """
-        print("[FLS] 目录读取中...", flush=True)
+        trace('fls.import.begin', path=dir_path, project_uuid=project_uuid)
+        log_event(project_uuid, 'fls.import.begin', path=dir_path)
         Storage.ensure_base_dirs()
         src = Path(dir_path).resolve()
         if not src.exists() or not src.is_dir():
             msg = f"FLS 目录不存在: {src}"
-            print(f"[FLS] {msg}", flush=True)
+            trace('fls.import.invalid_path', path=src)
+            log_event(project_uuid, 'fls.import.failed', reason=msg)
             return {"success": False, "message": msg, "ply_paths": [], "output_dir": ""}
 
         if project_uuid:
@@ -219,17 +222,17 @@ class FileService:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         project_name = src.name
-        exe_path = os.getenv("FLSREAD_EXE", DEFAULT_FLS_EXE)
 
         # Run conversion
         try:
             result = convert_fls_to_ply(
                 fls_folder=str(src), output_dir=str(out_dir),
-                project_name=project_name, exe_path=exe_path, timeout_sec=3600
+                project_name=project_name
             )
         except Exception as e:
             msg = f"FLS 转换器调用失败: {e}"
-            print(f"[FLS] {msg}", flush=True)
+            trace('fls.import.convert_failed', error=e)
+            log_event(project_uuid, 'fls.import.failed', reason=msg)
             return {"success": False, "message": msg, "ply_paths": [], "output_dir": str(out_dir)}
 
         # Collect PLY and station metadata
@@ -245,6 +248,8 @@ class FileService:
                     stations_meta = json.load(f)
 
         if not ply_paths:
+            trace('fls.import.no_ply', output=search_dir)
+            log_event(project_uuid, 'fls.import.failed', reason='未生成 PLY', output=str(search_dir))
             return {"success": False, "message": "未生成 PLY"}
 
         # 导入并注册
@@ -268,13 +273,12 @@ class FileService:
 
                 dist_path = Path(p).with_suffix('.dist')
                 dist_exists = dist_path.exists()
-                print(f"[FLS] load.dist status={('found' if dist_exists else 'not_found')} path={dist_path}", flush=True)
+                trace('fls.import.dist', status=('found' if dist_exists else 'not_found'), path=dist_path)
 
                 dist = read_dist(dist_path if dist_exists else None, source_pts, scan_meta)
-                print(
-                    f"[FLS] load.dist loaded source={dist.source} "
-                    f"points={len(source_pts)} origins={len(dist.scan_origins)} "
-                    f"warnings={dist.warnings}", flush=True)
+                trace('fls.import.dist_loaded', source=dist.source,
+                      points=len(source_pts), origins=len(dist.scan_origins),
+                      warnings=dist.warnings)
 
                 # FLS 加载阶段仅做距离分层下采样，不自动去噪
                 elevations = None
@@ -343,8 +347,8 @@ class FileService:
                             'is_processing_cloud': True,
                             'proxy_ids': np.arange(len(dataset.proxy_points), dtype=np.int32),
                         })
-                    print(f'[PCFD] cloud.bound cloud={Path(p).name} '
-                          f'dataset={dataset_id} proxy={len(dataset.proxy_points)}', flush=True)
+                    trace('fls.import.dataset_bound', cloud=Path(p).name,
+                          dataset=dataset_id, proxy=len(dataset.proxy_points))
                 else:
                     proc_pts, proc_cols = voxel_downsample(proc_pts, proc_cols, voxel_size=0.05)
                     self.render_service.show_point_cloud(
@@ -359,9 +363,12 @@ class FileService:
                 success_count += 1
 
             except Exception as e:
-                print(f"[FLS] 导入 PLY 失败: {p} -> {e}", flush=True)
+                trace('fls.import.ply_failed', path=p, error=e)
+                log_event(project_uuid, 'fls.import.ply_failed', path=p, error=str(e))
 
-        print(f"[FLS] 目录读取成功: {success_count}/{len(ply_paths)} uploaded", flush=True)
+        trace('fls.import.done', uploaded=success_count, total=len(ply_paths), output=search_dir)
+        log_event(project_uuid, 'fls.import.done', uploaded=success_count,
+                  total=len(ply_paths), output=str(search_dir))
         return {
             "success": success_count > 0,
             "message": getattr(result, 'message', ''),
