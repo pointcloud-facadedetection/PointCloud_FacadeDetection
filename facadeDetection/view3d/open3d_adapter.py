@@ -6,6 +6,8 @@ import threading
 class Open3DAdapter:
     MIN_POINT_SIZE = 0.01
     MAX_POINT_SIZE = 1.0
+    MIN_POINT_PIXEL_SIZE = 0.5
+    MAX_POINT_PIXEL_SIZE = 5.0
 
     def __init__(self):
         self.vis = None
@@ -43,7 +45,7 @@ class Open3DAdapter:
         opt = self.vis.get_render_option()
         # Match the Corporate Clean viewport token (#111827).
         opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
-        opt.point_size = self.MIN_POINT_SIZE
+        opt.point_size = self.MIN_POINT_PIXEL_SIZE
         opt.show_coordinate_frame = True
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
@@ -76,10 +78,14 @@ class Open3DAdapter:
 
     def set_point_size(self, size):
         if self._assert_owner():
-            # point_size 本身就是 Open3D 视口使用的像素尺寸，不再额外
-            # 映射到 1..20，避免滑块值被放大后显示过粗。
+            # Map the normalized application value to Open3D's pixel range;
+            # values below one pixel otherwise render indistinguishably.
             value = max(self.MIN_POINT_SIZE, min(float(size), self.MAX_POINT_SIZE))
-            self.vis.get_render_option().point_size = value
+            ratio = ((value - self.MIN_POINT_SIZE) /
+                     (self.MAX_POINT_SIZE - self.MIN_POINT_SIZE))
+            pixel_size = (self.MIN_POINT_PIXEL_SIZE + ratio *
+                          (self.MAX_POINT_PIXEL_SIZE - self.MIN_POINT_PIXEL_SIZE))
+            self.vis.get_render_option().point_size = pixel_size
             self.vis.update_renderer()
 
     def poll(self):

@@ -465,6 +465,7 @@ class MainWindow(QMainWindow):
         self._report_navigation_index = 0
         self._report_webview_error = None
         self._quality_reports = []
+        self._heatmap_mode = 'flatness'
         self._quality_result_cache = {}
         # 质量结果窗口采用非阻塞打开方式；必须由主窗口持有引用，避免窗口被
         # Python 垃圾回收，同时避免再次进入 QDialog.exec() 的嵌套事件循环。
@@ -1043,6 +1044,15 @@ class MainWindow(QMainWindow):
         self.btn_evaluate_selected.setMinimumHeight(34)
         self.btn_evaluate_selected.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self.btn_evaluate_selected)
+
+        self.btn_heatmap_toggle = QPushButton('热力切换显示')
+        self.btn_heatmap_toggle.setObjectName('btn_heatmap_toggle')
+        self.btn_heatmap_toggle.setToolTip('在平整度热力与垂直度热力之间切换')
+        self.btn_heatmap_toggle.setMinimumHeight(34)
+        self.btn_heatmap_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_heatmap_toggle.clicked.connect(self._toggle_heatmap_display)
+        self.btn_heatmap_toggle.setEnabled(False)
+        lay.addWidget(self.btn_heatmap_toggle)
         
         # 立面列表
         from PySide6.QtWidgets import QListWidget
@@ -1269,11 +1279,9 @@ class MainWindow(QMainWindow):
             cloud = (self.pointcloud_service.resolve_processing_cloud()
                      if self.pointcloud_service is not None else None)
             if cloud and self.render_service is not None:
-                if hasattr(self.render_service, 'render_quality_reports'):
-                    self.render_service.render_quality_reports(
-                        cloud, results or [], index_service=self.facade_service._index_service)
-                else:
-                    self.render_service.highlight_facades(cloud, results or [])
+                # Loading a project restores facade colors only. Quality heatmap
+                # rendering is an explicit action from the quality button.
+                self.render_service.highlight_facades(cloud, results or [])
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
         
@@ -1290,6 +1298,7 @@ class MainWindow(QMainWindow):
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
         if not results:
             self.list_facades.clear()
+            self._refresh_heatmap_button_state()
             return
         self.list_facades.clear()
         for display_no, f in enumerate(results, 1):
@@ -1353,6 +1362,40 @@ class MainWindow(QMainWindow):
 
         self._latest_facade_results = results
         self.project_operation_service._last_facade_results = results
+        self._refresh_heatmap_button_state()
+
+    def _compatible_quality_results(self):
+        results = getattr(self.project_operation_service, '_last_facade_results', None) or []
+        cloud = self._active_cloud_name()
+        if not cloud or self.render_service is None:
+            return []
+        return self.render_service.compatible_quality_reports(
+            cloud, results, index_service=self.facade_service._index_service)
+
+    def _refresh_heatmap_button_state(self):
+        button = getattr(self, 'btn_heatmap_toggle', None)
+        if button is None:
+            return
+        enabled = bool(self._compatible_quality_results())
+        button.setEnabled(enabled)
+        mode = getattr(self, '_heatmap_mode', 'flatness')
+        current = '平整度' if mode == 'flatness' else '垂直度'
+        next_mode = '垂直度' if mode == 'flatness' else '平整度'
+        button.setText(f'热力切换显示（当前：{current}）')
+        button.setToolTip(f'点击切换至{next_mode}热力映射')
+
+    def _toggle_heatmap_display(self):
+        if not self._compatible_quality_results():
+            self._refresh_heatmap_button_state()
+            return
+        self._heatmap_mode = ('verticality' if self._heatmap_mode == 'flatness'
+                              else 'flatness')
+        cloud = self._active_cloud_name()
+        self.render_service.render_quality_reports(
+            cloud, getattr(self.project_operation_service, '_last_facade_results', None) or [],
+            index_service=self.facade_service._index_service,
+            heatmap_mode=self._heatmap_mode)
+        self._refresh_heatmap_button_state()
 
     def _set_facade_preview_status(self, facade, button, status):
         # review_status is the only canonical runtime field.  Keep the
@@ -1444,6 +1487,30 @@ class MainWindow(QMainWindow):
 
         print(f'[PCFD] ui.show_dialog facade_id={facade_id} facade_no={facade_no}', flush=True)
 
+        def _export_context(display_quality):
+            context = display_quality.get('__export_context') or {}
+            if context.get('points') is not None and context.get('results_dir'):
+                return context
+            # Historical reports intentionally do not persist large point arrays.
+            # Rebuild the export input from the active processing dataset.
+            try:
+                dataset = self.facade_service._index_service._get_dataset(cloud)
+                raw_indices = np.asarray(
+                    display_quality.get('__global_indices', []), dtype=np.int64)
+                points = np.asarray(dataset.processed_raw_points)[raw_indices]
+                source_colors = dataset.index.get_source_colors()
+                colors = (source_colors[raw_indices]
+                          if source_colors is not None else None)
+                project_uuid = getattr(self.current_project, 'project_id', None)
+                results_dir = (Storage.ensure_project_dirs(project_uuid)['results']
+                               if project_uuid else None)
+                return {'results_dir': results_dir, 'points': points,
+                        'colors': colors}
+            except Exception as exc:
+                print(f'[PCFD] export_context_failed facade_id={facade_id} '
+                      f'error={exc!r}', flush=True)
+                return context
+
         def _show_effect(mode='flatness'):
             try:
                 display_quality = dict(quality) if isinstance(quality, dict) else {}
@@ -1451,7 +1518,7 @@ class MainWindow(QMainWindow):
                 self.render_service.apply_quality_colors(
                     cloud, display_quality,
                     index_service=self.facade_service._index_service)
-                context = display_quality.get('__export_context') or {}
+                context = _export_context(display_quality)
                 exported = ResultExportService().export_heatmap(
                     context.get('results_dir'), facade_no,
                     context.get('points'), context.get('colors'), display_quality)
@@ -1533,11 +1600,10 @@ class MainWindow(QMainWindow):
         if not project_uuid:
             QMessageBox.warning(self, '质量评估', '请先选择项目。')
             return
-        try:
-            results_dir = Storage.ensure_project_dirs(project_uuid)['results']
-        except Exception as exc:
-            QMessageBox.critical(self, '结果目录', f'无法创建项目 results 目录：{exc}')
-            return
+        # Quality PNG export is written to the active project's results folder.
+        # The folder is created here, while actual export remains user-triggered
+        # from the result dialog.
+        results_dir = Storage.ensure_project_dirs(project_uuid)['results']
 
         # FIX: Ensure facade dict has stable id and display_no
         facade_copy = dict(f)
@@ -1675,10 +1741,10 @@ class MainWindow(QMainWindow):
             # callback must not read a local variable from _evaluate_facade.
             # Resolve it here so asynchronous completion has an independent,
             # valid persistence context.
-            results_dir = Storage.ensure_project_dirs(project_uuid)['results']
             dataset = self.facade_service._index_service._get_dataset(cloud)
-            artifact_path = ResultsRepo.persist_quality_artifact(
-                results_dir, int(f.get('id', 0)), quality)
+            # Quality reports are self-contained; no results-domain NPZ is
+            # needed for replay. Keep export context separate from persistence.
+            artifact_path = None
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
@@ -1689,6 +1755,16 @@ class MainWindow(QMainWindow):
             )
             f['quality_status'] = 'complete'
             f['quality_report'] = quality
+            # The worker receives a copy; update the canonical facade list so
+            # the heatmap toggle becomes available immediately after success.
+            for current in (getattr(self.project_operation_service,
+                                    '_last_facade_results', None) or []):
+                if int(current.get('id', -1)) == int(f.get('id', -2)):
+                    current.update({'quality_status': 'complete',
+                                    'quality_report': quality,
+                                    'dataset_revision': getattr(dataset, 'revision', None)})
+                    break
+            self._refresh_heatmap_button_state()
         except Exception as exc:
             print(f'[PCFD] quality.persist_failed facade_id={facade_no} error={exc!r}', flush=True)
             QMessageBox.warning(self, '质量评估', f'算法已完成，但结果保存失败：{exc}')
@@ -2787,6 +2863,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
+            self._refresh_heatmap_button_state()
         project_uuid = getattr(project, 'project_id', None)
         if not project_uuid:
             raise ValueError('项目标识为空，无法恢复项目')
@@ -2867,6 +2944,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
+            self._refresh_heatmap_button_state()
         if hasattr(self, 'station_list'):
             self.station_list.blockSignals(True)
             self.station_list.clear()
