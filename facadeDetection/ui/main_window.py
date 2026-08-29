@@ -6,11 +6,13 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     QThreadPool,
+    Slot,
     QTimer,
     Qt,
 )
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -57,7 +59,7 @@ from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
 from services.dal.results_repo import ResultsRepo
-from utils.workers import QualityWorker, PointCloudLoadWorker
+from utils.workers import QualityWorker, PointCloudLoadWorker, RegistrationWorker
 
 
 PAGE_DEFINITIONS = (
@@ -443,7 +445,8 @@ class MainWindow(QMainWindow):
             pointcloud_service=self.pointcloud_service,
             render_service=self.render_service,
         )
-        self.station_service = PointCloudStationService(self.render_service)
+        self.station_service = PointCloudStationService(
+            self.render_service, pointcloud_service=self.pointcloud_service)
         self.project_operation_service.set_station_service(self.station_service)
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
@@ -471,12 +474,20 @@ class MainWindow(QMainWindow):
         # exhaust Windows commit memory while CPUs remain underutilised.
         self._quality_pool = QThreadPool(self)
         self._quality_pool.setMaxThreadCount(1)
+        self._registration_pool = QThreadPool(self)
+        self._registration_pool.setMaxThreadCount(1)
         self._load_pool = QThreadPool(self)
         self._load_pool.setMaxThreadCount(1)
         self._active_load_worker = None
         self._load_cancel_button = None
         self._load_in_progress = False
         self._active_quality_worker = None
+        self._registration_worker = None
+        self._pending_station_selection = {}
+        self._station_selection_timer = QTimer(self)
+        self._station_selection_timer.setSingleShot(True)
+        self._station_selection_timer.setInterval(160)
+        self._station_selection_timer.timeout.connect(self._flush_station_selection)
         self._project_generation = 0
         self._setup_ui()
         self._create_resize_handles()
@@ -1967,8 +1978,10 @@ class MainWindow(QMainWindow):
             station = StationPanel()
             self.station_list = station.list
             self.station_list.setToolTip('单击站点切换视图；复选框用于多选')
-            self.station_list.itemClicked.connect(self._on_station_clicked)
+            # StationListWidget emits station clicks only from the item body;
+            # checkbox changes therefore never replace the current viewport.
             self.station_list.itemChanged.connect(self._on_station_item_changed)
+            station.station_clicked.connect(self._on_station_clicked)
             station.delete_requested.connect(self._delete_stations)
             station.merge_requested.connect(self._merge_stations)
             content.addWidget(station, 3)
@@ -1983,7 +1996,7 @@ class MainWindow(QMainWindow):
         sidebar.setProperty('expandedWidth', 230 if side == 'left' else 320)
         return sidebar
 
-    def _refresh_station_panel(self):
+    def _refresh_station_panel(self, active_station_id=None):
         if not hasattr(self, 'station_list'):
             return
         self.station_list.blockSignals(True)
@@ -2001,12 +2014,29 @@ class MainWindow(QMainWindow):
                 item.setForeground(Qt.GlobalColor.red)
             self.station_list.addItem(item)
         self.station_list.blockSignals(False)
+        active_station_id = (active_station_id if active_station_id is not None
+                             else getattr(self.station_service, '_active_station_id', None))
+        if active_station_id is not None:
+            for row in range(self.station_list.count()):
+                item = self.station_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == active_station_id:
+                    self.station_list.setCurrentItem(item)
+                    break
 
     def _on_station_item_changed(self, item):
         try:
-            self.station_service.set_selected(
-                item.data(Qt.ItemDataRole.UserRole),
+            self._pending_station_selection[item.data(Qt.ItemDataRole.UserRole)] = (
                 item.checkState() == Qt.CheckState.Checked)
+            self._station_selection_timer.start()
+        except Exception as exc:
+            self.statusBar().showMessage(f'保存站点选择失败：{exc}', 5000)
+
+    def _flush_station_selection(self):
+        pending = self._pending_station_selection
+        self._pending_station_selection = {}
+        try:
+            for station_id, selected in pending.items():
+                self.station_service.set_selected(station_id, selected)
         except Exception as exc:
             self.statusBar().showMessage(f'保存站点选择失败：{exc}', 5000)
 
@@ -2020,12 +2050,13 @@ class MainWindow(QMainWindow):
         try:
             self.station_service.delete_selected()
             self._refresh_station_panel()
-            self.station_service.restore_view()
         except Exception as exc:
             QMessageBox.warning(self, '删除站点', str(exc))
 
     def _merge_stations(self):
         try:
+            self._station_selection_timer.stop()
+            self._flush_station_selection()
             self.station_service.merge_selected()
             self._refresh_station_panel()
         except Exception as exc:
@@ -2177,12 +2208,82 @@ class MainWindow(QMainWindow):
         )
 
     def _run_station_registration(self):
+        if getattr(self, '_registration_worker', None) is not None:
+            QMessageBox.information(self, '点云配准', '已有配准任务正在执行，请稍候。')
+            return
         try:
-            self.project_operation_service.registration()
+            self.station_service.refresh()
+            rows = [x for x in self.station_service.list_stations() if x.is_selected]
+            if len(rows) < 2:
+                raise ValueError('点云配准至少需要选择两个 PLY 站点')
+            generation = self._project_generation
+            project_uuid = getattr(self.current_project, 'project_id', None)
+            station_ids = tuple(row.id for row in rows)
+
+            def run_registration():
+                payload = self.station_service.register_selected(update_viewport=False)
+                payload['_project_generation'] = generation
+                payload['_project_uuid'] = project_uuid
+                payload['_station_ids_snapshot'] = station_ids
+                return payload
+
+            worker = RegistrationWorker(run_registration)
+            self._registration_worker = worker
+            worker.signals.finished.connect(self._on_registration_finished)
+            worker.signals.failed.connect(self._on_registration_failed)
+            self.statusBar().showMessage('正在执行 ICP 精配准，请稍候...')
+            self._set_registration_buttons_enabled(False)
+            self._registration_pool.start(worker)
+        except Exception as exc:
+            QMessageBox.warning(self, '点云配准', str(exc))
+
+    def _set_registration_buttons_enabled(self, enabled):
+        button = self.header_buttons.get('btn_registration')
+        if button is not None:
+            button.setEnabled(enabled)
+
+    @Slot(object)
+    def _on_registration_finished(self, payload):
+        generation = payload.pop('_project_generation', None)
+        project_uuid = payload.pop('_project_uuid', None)
+        station_snapshot = tuple(payload.pop('_station_ids_snapshot', ()))
+        current_uuid = getattr(self.current_project, 'project_id', None)
+        if (getattr(self, '_closing', False) or generation != self._project_generation or
+                project_uuid != current_uuid or
+                station_snapshot != tuple(x.id for x in self.station_service.list_stations()
+                                           if x.is_selected)):
+            self._discard_registration_result(payload)
+            self._registration_worker = None
+            self._set_registration_buttons_enabled(True)
+            return
+        try:
+            self.station_service.commit_registration(payload)
             self._refresh_station_panel()
             self.statusBar().showMessage('点云配准完成，已显示注册合并结果。', 5000)
         except Exception as exc:
-            QMessageBox.warning(self, '点云配准', str(exc))
+            QMessageBox.warning(self, '点云配准', f'配准结果提交失败：{exc}')
+        finally:
+            self._registration_worker = None
+            self._set_registration_buttons_enabled(True)
+
+    @Slot(str)
+    def _on_registration_failed(self, message):
+        self._registration_worker = None
+        self._set_registration_buttons_enabled(True)
+        self.statusBar().showMessage('点云配准失败', 5000)
+        QMessageBox.warning(self, '点云配准', message)
+
+    @staticmethod
+    def _discard_registration_result(payload):
+        path = payload.get('result_path') if isinstance(payload, dict) else None
+        if not path:
+            return
+        result = Path(path)
+        if result.name.startswith('registration_') and result.exists():
+            try:
+                result.unlink()
+            except OSError:
+                pass
 
     def _open_upload_file_dialog(self):
         file_paths, _selected_filter = QFileDialog.getOpenFileNames(
@@ -2505,24 +2606,22 @@ class MainWindow(QMainWindow):
             )
 
     def _edit_project(self, project_id):
+        from ui.dialogs.project_create_dialog import ProjectCreateDialog
+
         project = self.project_overview_service.get_project(project_id)
         if project is None:
             QMessageBox.warning(self, '编辑项目', '项目不存在或已被删除。')
             return
 
-        new_name, accepted = self._prompt_project_name(
-            '编辑项目',
-            project.name,
-        )
-        if not accepted:
+        dlg = ProjectCreateDialog(self, project=project)
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
             return
 
         try:
-            updated_project = self.project_overview_service.rename_project(
-                project_id,
-                new_name,
+            updated_project = self.project_overview_service.update_project(
+                project_id, **dlg.values()
             )
-        except ValueError as error:
+        except (ValueError, OSError) as error:
             QMessageBox.warning(self, '编辑项目', str(error))
             return
 
@@ -2543,8 +2642,8 @@ class MainWindow(QMainWindow):
             self,
             '删除项目',
             (
-                f'确定从项目列表中删除“{project.name}”吗？\n'
-                '此操作不会删除本地项目文件。'
+                f'确定永久删除“{project.name}”吗？\n'
+                '项目文件夹、点云、检测结果和数据库数据都会被删除，且无法恢复。'
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2555,7 +2654,11 @@ class MainWindow(QMainWindow):
         if (self.current_project is not None and
                 self.current_project.project_id == project_id):
             self._prepare_project_activation(None)
-        self.project_overview_service.remove_project(project_id)
+        try:
+            self.project_overview_service.remove_project(project_id)
+        except Exception as error:
+            QMessageBox.critical(self, '删除项目失败', str(error))
+            return
         if (
             self.current_project is not None
             and self.current_project.project_id == project_id
@@ -2610,18 +2713,35 @@ class MainWindow(QMainWindow):
         try:
             self.statusBar().showMessage('正在加载点云，请稍候...')
             if operation == 'activate':
-                self.project_overview_service.activate_project(project_id)
                 self._activate_project(project)
             elif operation == 'upload':
+                before_ids = {row.id for row in self.station_service.list_stations()}
                 uploaded = self.project_overview_service.upload_files(file_paths, project_id)
                 if uploaded:
                     self._activate_project(self.current_project)
+                    # Upload is an explicit user mutation: do not restore the
+                    # previous project view over the newly imported station.
+                    stations = self.station_service.list_stations()
+                    new_station = next(
+                        (row for row in reversed(stations) if row.id not in before_ids),
+                        None,
+                    )
+                    if new_station is not None:
+                        self.station_service.show_single(new_station)
+                        self._refresh_station_panel(new_station.id)
                 else:
                     QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
             elif operation == 'fls':
+                before_ids = {row.id for row in self.station_service.list_stations()}
                 payload = self.project_overview_service.import_fls_directory(directory, project_id)
                 if payload.get('success'):
                     self._activate_project(self.current_project)
+                    new_station = next(
+                        (row for row in reversed(self.station_service.list_stations())
+                         if row.id not in before_ids), None)
+                    if new_station is not None:
+                        self.station_service.show_single(new_station)
+                        self._refresh_station_panel(new_station.id)
                 else:
                     QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
             self._refresh_project_list()
@@ -2667,24 +2787,33 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
-        self._set_current_project(project)
+        project_uuid = getattr(project, 'project_id', None)
+        if not project_uuid:
+            raise ValueError('项目标识为空，无法恢复项目')
+        # All entry points (open directory, project picker, upload and FLS)
+        # use the same strict activation transaction.  Do this before changing
+        # current_project so a failed restore cannot leave a false active UI.
+        self.project_overview_service.activate_project(project_uuid)
         try:
-            self.pointcloud_service.set_project(getattr(project, 'project_id', None))
-        except Exception:
-            pass
-        try:
-            self.station_service.set_project(getattr(project, 'project_id', None))
+            self.pointcloud_service.set_project(project_uuid)
+            self.station_service.set_project(project_uuid)
             self._refresh_station_panel()
+            if not self.station_service.list_stations():
+                self.render_service.clear_scene_display()
+                self._set_current_project(project)
+                self.statusBar().showMessage('项目已打开，但未发现可用 PLY 站点。', 5000)
+                return
             self.station_service.restore_view()
         except Exception as exc:
-            self.statusBar().showMessage(f'站点恢复失败：{exc}', 5000)
+            self.render_service.clear_scene_display()
+            raise RuntimeError(f'站点恢复失败：{exc}') from exc
+        self._set_current_project(project)
         try:
             # propagate active project UUID to operation scheduler for DAL persistence
-            self.project_operation_service.set_active_project_uuid(getattr(project, 'project_id', None))
+            self.project_operation_service.set_active_project_uuid(project_uuid)
         except Exception:
             pass
         try:
-            project_uuid = getattr(project, 'project_id', None)
             if project_uuid:
                 historical = self.project_overview_service.load_historical_facades(project_uuid)
                 if historical:
@@ -2754,13 +2883,21 @@ class MainWindow(QMainWindow):
         timer = getattr(self.viewport, '_timer', None)
         if timer is not None:
             timer.stop()
+        # Stop accepting new queued work before any scene or native-window
+        # teardown. This prevents GLFW calls after Visualizer destruction.
+        for pool_name in ('_quality_pool', '_load_pool', '_registration_pool'):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                try:
+                    pool.clear()
+                except Exception:
+                    pass
         quality_dialog = getattr(self, '_quality_dialog', None)
         if quality_dialog is not None:
             quality_dialog.close()
             self._quality_dialog = None
         self._dispose_project_runtime()
         try:
-            self._quality_pool.clear()
             # Do not block the GUI event loop for seconds while a large
             # quality calculation is winding down.  Request invalidation was
             # performed above; stale completion signals are token-guarded.
@@ -2768,8 +2905,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self._load_pool.clear()
             self._load_pool.waitForDone(100)
+        except Exception:
+            pass
+        try:
+            self._registration_pool.waitForDone(100)
         except Exception:
             pass
         try:
@@ -2777,6 +2917,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
+        # The custom frameless close button does not always close the last
+        # native child window on Windows. Explicitly terminate the Qt event
+        # loop after closeEvent has accepted the window close.
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _set_current_project(self, project):
         self.current_project = project
