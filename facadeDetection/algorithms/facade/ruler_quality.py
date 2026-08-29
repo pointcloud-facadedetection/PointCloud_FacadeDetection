@@ -6,7 +6,10 @@ import time
 import os
 import numpy as np
 
-from .ruler_flatness_3d import prepare_surface, ruler_at, fit_line
+from .ruler_flatness_3d import (
+    prepare_surface, ruler_at, fit_line,
+    sor_mask_local, sor_mask_grid, sor_mask_exact,
+)
 
 _EMPTY_SOURCE_IDS = np.empty(0, dtype=np.int64)
 
@@ -347,12 +350,172 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
     return rows
 
 
+
+# =============================================================================
+# 垂直度并行化 Worker（模块顶层，确保 Windows spawn 可 pickle）
+# =============================================================================
+def _verticality_strip_worker(args):
+    """处理单个横向 strip 的所有竖直窗口。
+    
+    数据清洗流程与平整度对齐：
+        SOR 去噪 → select_band 表面筛选 → hole_band 孔洞检测 → 鲁棒拟合
+    返回 (uj, rows_list)。
+    """
+    (uj, u_c,
+     surf_u, surf_v, surf_ids,
+     v_centers, v_lo_bounds, v_hi_bounds,
+     horizontal_axis, vertical_axis, origin,
+     u_axis, v_axis, base_u_min, base_v_min, v_step,
+     half_width, min_points, ruler_length_m, verticality_limit_mm,
+     sor_enabled, sor_k, sor_sigma, sor_w_weight, sor_method,
+     select_band, hole_band) = args
+
+    # ---- 在全局有序的 surf_u 上快速定位 strip ----
+    lo_idx = np.searchsorted(surf_u, u_c - half_width, side='left')
+    hi_idx = np.searchsorted(surf_u, u_c + half_width, side='right')
+
+    if hi_idx - lo_idx < min_points:
+        return uj, []
+
+    # 提取 strip 数据
+    strip_u = surf_u[lo_idx:hi_idx]
+    strip_v = surf_v[lo_idx:hi_idx]
+    strip_ids_local = surf_ids[lo_idx:hi_idx]
+
+    # Strip 内按 V (vertical) 排序，用于沿竖直方向滑动窗口
+    v_order = np.argsort(strip_v, kind='quicksort')
+    strip_v = strip_v[v_order]
+    strip_u = strip_u[v_order]
+    strip_ids_local = strip_ids_local[v_order]
+
+    # 向量化计算所有 v 窗口边界
+    v_win_lo = np.searchsorted(strip_v, v_lo_bounds, side='left')
+    v_win_hi = np.searchsorted(strip_v, v_hi_bounds, side='right')
+    n_win_points = v_win_hi - v_win_lo
+    
+    valid_mask = n_win_points >= min_points
+    if not np.any(valid_mask):
+        return uj, []
+
+    # ---- 逐窗口独立拟合（带统一数据清洗）----
+    rows = []
+    for vi in np.flatnonzero(valid_mask):
+        wlo = v_win_lo[vi]
+        whi = v_win_hi[vi]
+        n_win = whi - wlo
+
+        win_u = strip_u[wlo:whi]  # H (horizontal)
+        win_v = strip_v[wlo:whi]  # V (vertical)
+        win_ids = strip_ids_local[wlo:whi]
+
+        # ================================================================
+        #  统一数据清洗层
+        # ================================================================
+        
+        # 1) SOR 去噪
+        keep = np.ones(n_win, dtype=bool)
+        if sor_enabled and n_win > 16:
+            if sor_method == 'local':
+                keep = sor_mask_local(win_v, win_u, sor_k, sor_sigma)
+            elif sor_method == 'grid':
+                keep = sor_mask_grid(win_v, win_u, sor_k, sor_sigma, w_weight=sor_w_weight)
+            elif sor_method == 'exact':
+                keep = sor_mask_exact(win_v, win_u, sor_k, sor_sigma, w_weight=sor_w_weight)
+            else:
+                keep = sor_mask_local(win_v, win_u, sor_k, sor_sigma)
+            
+            if np.sum(keep) < 3:
+                keep[:] = True
+        # 2) 表面点筛选（select_band 等价）
+        try:
+            a_ref, b_ref = fit_line(win_v[keep], win_u[keep])
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+        
+        residual = win_u - (a_ref * win_v + b_ref)
+        surf = keep & (np.abs(residual) <= select_band)
+        if np.sum(surf) < 3:
+            surf = keep  # fallback：放宽到 keep 点
+
+        # 3) 孔洞检测（hole_band）
+        effective_hole_band = max(hole_band, select_band)
+        v0 = float(win_v.min())
+        bin_size = max(v_step * 0.5, 0.02)
+        bins = np.floor((win_v - v0) / bin_size).astype(np.int64)
+        solid_mask = np.zeros(int(bins.max()) + 1, dtype=bool)
+        solid_mask[bins[keep & (np.abs(residual) <= effective_hole_band)]] = True
+        
+        solid_bins = np.flatnonzero(solid_mask)
+        final_mask = surf & np.isin(bins, solid_bins)
+        if np.sum(final_mask) < 3:
+            continue
+
+        # Window-Level 鲁棒拟合
+        try:
+            a, b = fit_line(win_v[final_mask], win_u[final_mask])
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+
+        deviation_mm = abs(a) * ruler_length_m * 1000.0
+        angle_deg = float(np.degrees(np.arctan(abs(a))))
+        verticality_pass = np.isfinite(deviation_mm) and deviation_mm <= verticality_limit_mm
+
+        # 孔洞覆盖统计（2m 靠尺范围内）
+        ruler_half = ruler_length_m / 2.0
+        v_center = float(v_centers[vi])
+        v_lo_ruler = v_center - ruler_half
+        v_hi_ruler = v_center + ruler_half
+
+        pad = np.r_[True, solid_mask, True]
+        hs = np.flatnonzero(~pad[1:-1] & pad[:-2])
+        he = np.flatnonzero(~pad[1:-1] & pad[2:]) + 1
+        hole_length = 0.0
+        if hs.size:
+            h_lo = v0 + hs * bin_size
+            h_hi = v0 + he * bin_size
+            overlap = np.clip(np.minimum(h_hi, v_hi_ruler) - np.maximum(h_lo, v_lo_ruler), 0, None)
+            hole_length = float(overlap.sum())
+        hole_ratio = hole_length / ruler_length_m if ruler_length_m > 0 else 1.0
+
+        center_xyz = origin + u_c * horizontal_axis + v_center * vertical_axis
+
+        key, snap_u, snap_v, snap_xyz, snap_distance = _snap_window_to_base_grid(
+            center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min, v_step)
+
+        # 偏离趋势线最大的点作为 depression_source_id
+        trend_vals = a * win_v + b
+        dep_idx = int(np.argmax(np.abs(win_u - trend_vals)))
+
+        rows.append({
+            'grid_key': key,
+            'cell_u': int(key[0]), 'cell_v': int(key[1]),
+            'center_xyz': [float(x) for x in np.asarray(snap_xyz, dtype=float)],
+            'center_uv_base': (snap_u, snap_v),
+            'verticality_deviation_mm': deviation_mm,
+            'verticality_angle_deg': angle_deg,
+            'verticality_pass': bool(verticality_pass),
+            'hole_ratio': float(hole_ratio),
+            'coverage_valid': hole_ratio <= 0.2,
+            'effective_point_count': int(np.sum(final_mask)),
+            'snap_distance_m': snap_distance,
+            'pivot_source_ids': [int(win_ids[final_mask][0]), int(win_ids[final_mask][-1])],
+            'depression_source_id': int(win_ids[dep_idx]),
+            'trend_slope': float(a),
+            'trend_intercept': float(b),
+            'n_sor_removed': int(np.sum(~keep)),
+            'n_used': int(np.sum(final_mask)),
+        })
+
+    return uj, rows
+
 def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, params, u_min_full=None, v_min_full=None):
     """
-    - 垂直度 = 墙面整体相对于铅垂线的倾斜程度
-
-    1. 将点投影到 (H, V) 平面（H=水平偏移，V=竖直坐标）
-    2. 垂直度 = |a| * 2000mm（2m 高度处的水平偏移）
+    垂直度 = 墙面整体相对于铅垂线的倾斜程度
+    
+    建模逻辑：
+        1. 统一数据清洗（SOR → select_band → hole_band）与平整度对齐
+        2. 并行策略与平整度一致（parallel_mode + n_jobs）
+        3. 最终指标：|a| * 2000mm（2m 高度处的水平偏移）
     """
     started = time.perf_counter()
 
@@ -421,10 +584,10 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
         return empty('verticality_domain_too_short')
 
     half = params.ruler_length_m / 2.0             # 1.0m
-    half_width = params.ruler_width_m / 2.0        # 0.0275m
+    half_width = params.ruler_width_m / 2.0          # 0.0275m
 
     v_step = max(float(params.scan_step_m), 1e-6)   # 5cm vertical step
-    u_step = max(float(params.strip_step_m), 1e-6)  # 5cm lateral step
+    u_step = max(float(params.strip_step_m), 1e-6)   # 5cm lateral step
 
     # Window centers
     v_centers = np.arange(v_min + half, v_max - half + v_step * 0.5, v_step)
@@ -453,118 +616,70 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     v_lo_bounds = v_centers - half
     v_hi_bounds = v_centers + half
 
+    # ===================================================================
+    # Step 5: 并行逐横向 strip 处理
+    # ===================================================================
+    args_list = []
+    for uj, u_c in enumerate(u_centers):
+        args_list.append((
+            uj, float(u_c),
+            surf_u, surf_v, surf_ids,
+            v_centers, v_lo_bounds, v_hi_bounds,
+            horizontal_axis, vertical_axis, origin,
+            u_axis, v_axis, base_u_min, base_v_min, v_step,
+            half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
+            params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+            params.select_band_m, params.hole_band_m,
+        ))
+
+    n_workers = min(len(u_centers), params.n_jobs, os.cpu_count() or 1)
+
+    if n_workers > 1 and params.parallel_mode == 'process':
+        print(f'[PCFD] verticality.parallel_process workers={n_workers} '
+              f'strips={len(u_centers)}', flush=True)
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            strip_results = list(executor.map(_verticality_strip_worker, args_list))
+    elif n_workers > 1:
+        print(f'[PCFD] verticality.parallel_thread workers={n_workers} '
+              f'strips={len(u_centers)}', flush=True)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_verticality_strip_worker, args) for args in args_list]
+            strip_results = [f.result() for f in futures]
+    else:
+        print(f'[PCFD] verticality.sequential strips={len(u_centers)}', flush=True)
+        strip_results = [_verticality_strip_worker(args) for args in args_list]
+
+    # 按 uj 排序保证确定性输出顺序
+    strip_results.sort(key=lambda x: x[0])
+
+    # 合并结果
     rows = []
     total_valid = 0
     processed_strips = 0
 
-    # ===================================================================
-    # Step 5: 逐横向 strip 处理（参照平整度结构）
-    # ===================================================================
-    for uj, u_c in enumerate(u_centers):
-        u_lo = u_c - half_width
-        u_hi = u_c + half_width
-
-        # 在全局有序的 surf_u 上快速定位 strip
-        lo_idx = np.searchsorted(surf_u, u_lo, side='left')
-        hi_idx = np.searchsorted(surf_u, u_hi, side='right')
-
-        if hi_idx - lo_idx < params.min_points:
-            continue
-
-        # 提取 strip 数据
-        strip_v = surf_v[lo_idx:hi_idx]
-        strip_u = surf_u[lo_idx:hi_idx]
-        strip_ids_local = surf_ids[lo_idx:hi_idx]
-
-        # Strip 内按 V (vertical) 排序，用于沿竖直方向滑动窗口
-        v_order = np.argsort(strip_v, kind='quicksort')
-        strip_v = strip_v[v_order]
-        strip_u = strip_u[v_order]
-        strip_ids_local = strip_ids_local[v_order]
-
-        # ===================================================================
-        # Step 6: 向量化计算所有 v 窗口边界
-        # ===================================================================
-        v_win_lo = np.searchsorted(strip_v, v_lo_bounds, side='left')
-        v_win_hi = np.searchsorted(strip_v, v_hi_bounds, side='right')
-        n_win_points = v_win_hi - v_win_lo
-
-        valid_mask = n_win_points >= params.min_points
-        if not np.any(valid_mask):
+    for uj, strip_rows in strip_results:
+        if strip_rows:
             processed_strips += 1
-            continue
+            rows.extend(strip_rows)
+            total_valid += len(strip_rows)
 
-        # ===================================================================
-        # Step 7: —— Window-Level 独立拟合
-        # ===================================================================
-        for vi in np.flatnonzero(valid_mask):
-            v_c = v_centers[vi]
-            wlo = v_win_lo[vi]
-            whi = v_win_hi[vi]
-            n_win = whi - wlo
+            if processed_strips % 50 == 0:
+                elapsed = time.perf_counter() - started
+                print(f'[PCFD] verticality.progress '
+                      f'strips={processed_strips}/{len(u_centers)} '
+                      f'valid_windows={total_valid} '
+                      f'seconds={elapsed:.1f}', flush=True)
 
-            # 提取窗口数据
-            win_u = strip_u[wlo:whi]  # H (horizontal)
-            win_v = strip_v[wlo:whi]  # V (vertical)
-            win_ids = strip_ids_local[wlo:whi]
-
-            # ----------------------------------------------------------------
-            # Window-Level 鲁棒拟合 —— 每个窗口独立拟合趋势线
-            # ----------------------------------------------------------------
-            # 拟合 H = a*V + b，其中 a 是斜率（倾斜程度）
-            # 垂直度 = |a| * 2000mm（2m 高度处的水平偏移）
-            try:
-                a, b = fit_line(win_v, win_u)
-            except (np.linalg.LinAlgError, ValueError):
-                continue
-
-            # 2m 高度处的水平偏移 = |斜率| * 靠尺长度
-            deviation_mm = abs(a) * params.ruler_length_m * 1000.0
-            
-            # 倾斜角 = arctan(|a|)
-            angle_deg = float(np.degrees(np.arctan(abs(a))))
-
-            # 是否合格
-            verticality_pass = np.isfinite(deviation_mm) and deviation_mm <= params.verticality_limit_mm
-
-            # 窗口中心三维坐标
-            center_xyz = origin + u_c * horizontal_axis + v_c * vertical_axis
-
-            # 使用统一基准计算 grid_key
-            key, snap_u, snap_v, snap_xyz, snap_distance = _snap_window_to_base_grid(
-                center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min, v_step)
-
-            rows.append({
-                'grid_key': key,
-                'cell_u': int(key[0]), 'cell_v': int(key[1]),
-                'center_xyz': [float(x) for x in np.asarray(snap_xyz, dtype=float)],
-                'center_uv_base': (snap_u, snap_v),
-                'verticality_deviation_mm': deviation_mm,
-                'verticality_angle_deg': angle_deg,
-                'verticality_pass': bool(verticality_pass),
-                'hole_ratio': 0.0,
-                'coverage_valid': True,
-                'effective_point_count': n_win,
-                'snap_distance_m': snap_distance,
-                'pivot_source_ids': [int(win_ids[0]), int(win_ids[-1])],
-                'depression_source_id': int(win_ids[np.argmax(np.abs(win_u - (a * win_v + b)))]),
-                'trend_slope': float(a),
-                'trend_intercept': float(b),
-            })
-            total_valid += 1
-
-        processed_strips += 1
-
-        # 进度日志
-        if processed_strips % 50 == 0 or processed_strips == len(u_centers):
-            elapsed = time.perf_counter() - started
-            print(f'[PCFD] verticality.progress '
-                  f'strips={processed_strips}/{len(u_centers)} '
-                  f'valid_windows={total_valid} '
-                  f'seconds={elapsed:.1f}', flush=True)
+    # 最终进度日志
+    if processed_strips > 0:
+        elapsed = time.perf_counter() - started
+        print(f'[PCFD] verticality.progress '
+              f'strips={processed_strips}/{len(u_centers)} '
+              f'valid_windows={total_valid} '
+              f'seconds={elapsed:.1f}', flush=True)
 
     # ===================================================================
-    # Step 8: 汇总统计
+    # Step 6: 汇总统计
     # ===================================================================
     finite_rows = [r for r in rows if np.isfinite(r['verticality_deviation_mm'])]
     pass_rows = [r['verticality_pass'] for r in finite_rows]
