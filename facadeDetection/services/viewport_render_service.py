@@ -845,14 +845,17 @@ class ViewportRenderService:
             print(f'[PCFD] quality.compat_check_failed error={exc!r}', flush=True)
         return valid
 
-    def render_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None) -> bool:
-        """先恢复立面离散色，再按当前数据集兼容的质量结果叠加热力。"""
+    def render_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None,
+                              heatmap_mode: str = 'flatness') -> bool:
+        """恢复分色并按指定模式叠加全部兼容质量报告。"""
         self.highlight_facades(cloud_name, facades or [])
         reports = self.compatible_quality_reports(cloud_name, facades or [], index_service=index_service)
         if not reports:
             return False
         for _facade, report in reports:
-            self.apply_quality_colors(cloud_name, report, index_service=index_service)
+            display_report = dict(report)
+            display_report['heatmap_mode'] = heatmap_mode
+            self.apply_quality_colors(cloud_name, display_report, index_service=index_service)
         return True
 
     def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
