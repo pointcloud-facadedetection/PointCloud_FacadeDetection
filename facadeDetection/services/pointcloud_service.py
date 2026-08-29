@@ -102,6 +102,29 @@ class PointCloudService:
     def get_dataset(self, dataset_id: str) -> Optional[PointCloudDataset]:
         return self.datasets.get(dataset_id)
 
+    def release_station_domain(self, station_id) -> None:
+        """Release one station's raw/proxy/index domain after it is removed."""
+        token = f":{station_id}"
+        dataset_ids = [key for key in self.datasets if str(key).endswith(token)]
+        for dataset_id in dataset_ids:
+            dataset = self.datasets.pop(dataset_id, None)
+            if dataset is not None:
+                dataset.raw.points = np.empty((0, 3), dtype=np.float32)
+                dataset.raw.colors = None
+                dataset.index.source_points = None
+                dataset.index.source_colors = None
+                dataset.index.source_raw_offsets = None
+                dataset.index.source_raw_indices = None
+                dataset.index._raw_to_voxel = None
+            self.decisions.pop(dataset_id, None)
+            self._decision_versions.pop(dataset_id, None)
+        for source_id in [key for key in self.source_assets
+                          if str(key).endswith(f":{station_id}:source")]:
+            asset = self.source_assets.pop(source_id, None)
+            if asset is not None:
+                asset['points'] = np.empty((0, 3), dtype=np.float32)
+                asset['colors'] = None
+
     def bind_processing_cloud(self, cloud_name: str) -> Optional[str]:
         """Repair a restored viewport cloud's metadata from the dataset registry.
 
@@ -186,14 +209,18 @@ class PointCloudService:
                 if str(candidate).startswith("pcfd.station."):
                     continue
                 data = vp.get_cloud_data(candidate)
-                if data and data.get("dataset_id"):
+                if (data and data.get("dataset_id") and
+                        data.get("domain", "proxy") == "proxy"):
                     return candidate
         name = getattr(vp, "_active_name", None)
-        if name and not str(name).startswith("pcfd.station."):
+        if (name and not str(name).startswith("pcfd.station.") and
+                (not hasattr(vp, "get_cloud_data") or
+                 (vp.get_cloud_data(name) or {}).get("domain", "proxy") == "proxy")):
             return name
         if hasattr(vp, "get_cloud_names"):
             names = [n for n in (vp.get_cloud_names() or [])
-                     if not str(n).startswith("pcfd.station.")]
+                     if (not str(n).startswith("pcfd.station.") and
+                         (vp.get_cloud_data(n) or {}).get("domain", "proxy") == "proxy")]
             if names:
                 return names[-1]
         return None
@@ -413,6 +440,8 @@ class PointCloudService:
                 "points_before": n_before, "points_after": n_after,
                 "dataset_id": dataset_id, "raw_ids": raw_ids,
                 "raw_count": int(raw_count),
+                "station_id": (data.get("station_id") or
+                                (dataset.metadata or {}).get("station_id")),
                 "proxy_points": new_pts, "proxy_colors": new_cols,
             }
 
