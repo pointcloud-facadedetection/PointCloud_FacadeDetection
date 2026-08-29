@@ -213,7 +213,6 @@ class FacadeQualityService:
                 'plane_model': plane_model.tolist(),
                 'normal': plane_model[:3].tolist(),
                 'center': facade_ref['center'],
-                'measurement_method': 'rulermeasure_star_v3_true_center',
             })
 
             result.setdefault('thresholds', {})

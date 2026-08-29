@@ -17,6 +17,12 @@ class PointCloudStationRepo:
 
     @staticmethod
     def sync_assets(project_uuid):
+        """Reconcile FileAsset rows into the station projection.
+
+        Return counts so the caller can distinguish a valid empty project from
+        a failed restore.  This is intentionally one transaction: the UI must
+        never continue with a partially refreshed station list.
+        """
         with project_session(project_uuid) as s:
             p = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one()
             assets = s.execute(select(FileAsset).where(
@@ -64,6 +70,16 @@ class PointCloudStationRepo:
                     is_selected=(order == 0))
                 station.last_error = None if valid else reason
                 s.add(station)
+            s.flush()
+            active_rows = s.execute(select(PointCloudStation).where(
+                PointCloudStation.project_id == p.id,
+                PointCloudStation.is_deleted == False,
+            )).scalars().all()
+            return {
+                'assets': len(assets),
+                'stations': len(active_rows),
+                'invalid': sum(1 for x in active_rows if x.last_error),
+            }
 
     @staticmethod
     def set_selected(project_uuid, station_id, selected):
@@ -83,15 +99,42 @@ class PointCloudStationRepo:
     @staticmethod
     def delete(project_uuid, station_ids):
         with project_session(project_uuid) as s:
+            station_ids = {int(sid) for sid in station_ids}
             for sid in station_ids:
                 row = s.get(PointCloudStation, sid)
-                if row: row.is_deleted = True
+                if row:
+                    # Keep the legacy soft-delete flag for old databases, but
+                    # also unlink the asset so the station cannot reappear on
+                    # the next synchronization.
+                    row.is_deleted = True
+                    if row.file_asset_id is not None:
+                        asset = s.get(FileAsset, row.file_asset_id)
+                        if asset is not None:
+                            asset.is_deleted = True
 
     @staticmethod
     def update_registration(project_uuid, station_id, transform, fitness, rmse, path):
         with project_session(project_uuid) as s:
             row = s.get(PointCloudStation, station_id)
             if row:
+                row.transform_json = transform
+                row.fitness, row.inlier_rmse = fitness, rmse
+                row.registration_status, row.registered_path = 'success', path
+
+    @staticmethod
+    def update_registrations(project_uuid, station_ids, transforms, path):
+        """Commit one ICP operation atomically for every participating station."""
+        ids = [int(value) for value in station_ids]
+        with project_session(project_uuid) as s:
+            rows = {row.id: row for row in s.execute(select(PointCloudStation).where(
+                PointCloudStation.id.in_(ids),
+                PointCloudStation.is_deleted == False,
+            )).scalars().all()}
+            if len(rows) != len(set(ids)):
+                raise ValueError('配准站点已不存在或已被删除，结果未提交')
+            for station_id in ids:
+                transform, fitness, rmse = transforms[station_id]
+                row = rows[station_id]
                 row.transform_json = transform
                 row.fitness, row.inlier_rmse = fitness, rmse
                 row.registration_status, row.registered_path = 'success', path

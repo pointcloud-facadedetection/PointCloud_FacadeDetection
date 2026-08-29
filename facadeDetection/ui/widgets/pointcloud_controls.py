@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
 
 class PointCloudControls(QWidget):
@@ -29,6 +29,8 @@ class PointCloudControls(QWidget):
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel('点云尺寸'))
         self.slider = QSlider(Qt.Orientation.Horizontal)
+        # 业务点大小单位为 Open3D 的 point_size，范围固定为 0.01..1.00。
+        # 使用百分之一作为滑块步进，避免把业务值扩大成过大的像素值。
         self.slider.setRange(1, 100)
         self.slider.setValue(30)
         self.slider.setToolTip('调整视口中的点云显示尺寸')
@@ -43,6 +45,6 @@ class PointCloudControls(QWidget):
         root.addWidget(box)
 
     def _on_value_changed(self, value):
-        size = value / 100.0
+        size = max(0.01, min(value / 100.0, 1.0))
         self.value_label.setText(f'{size:.2f}')
         self.point_size_changed.emit(size)

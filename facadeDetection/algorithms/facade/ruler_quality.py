@@ -78,7 +78,7 @@ def _project_direction(points, plane_model, origin, u_axis, v_axis, angle_deg):
     return along, across, w, d3, q3
 
 
-def _build_strips_directional_v4(along, across, w, raw_ids, angle, params):
+def _build_strips_directional(along, across, w, raw_ids, angle, params):
     """Build strips and window centers for a given direction."""
     across_order = np.argsort(across, kind='stable')
     across_sorted = across[across_order]
@@ -206,7 +206,7 @@ def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0, step):
     distance = float(np.hypot(base_u - snap_u, base_v - snap_v))
     return (ku, kv), snap_u, snap_v, snap_xyz, distance
 
-def _aggregate_star_rows_v4(windows_by_direction, origin, u_axis, v_axis, 
+def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis, 
                              u_min_full, v_min_full, params):
     """Aggregate four directional ruler results using physical coordinate clustering.
 
@@ -347,15 +347,12 @@ def _aggregate_star_rows_v4(windows_by_direction, origin, u_axis, v_axis,
     return rows
 
 
-def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin, params, u_min_full=None, v_min_full=None):
-    """High-performance verticality calculation - v4 optimized.
-
+def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, params, u_min_full=None, v_min_full=None):
+    """
     - 垂直度 = 墙面整体相对于铅垂线的倾斜程度
 
     1. 将点投影到 (H, V) 平面（H=水平偏移，V=竖直坐标）
-    2. 在 55mm 宽 × 2m 高的 strip 内，用 RANSAC/最小二乘拟合 h = a*v + b
-    3. 垂直度 = |a| * 2000mm（2m 高度处的水平偏移）
-    4. 或者：垂直度 = 点相对于拟合线的最大残差（代表局部弯曲）
+    2. 垂直度 = |a| * 2000mm（2m 高度处的水平偏移）
     """
     started = time.perf_counter()
 
@@ -394,9 +391,9 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
     # Step 2: 投影到 (H, V, N) 坐标系
     # ===================================================================
     rel = points - origin
-    u_h = rel @ horizontal_axis   # 水平横向偏移
-    v_v = rel @ vertical_axis     # 真实竖直坐标
-    w_n = rel @ normal            # 距立面平面的距离
+    u_h = rel @ horizontal_axis   # 水平横向偏移 (H)
+    v_v = rel @ vertical_axis     # 真实竖直坐标 (V)
+    w_n = rel @ normal            # 距立面平面的距离 (N)
 
     # ===================================================================
     # Step 3: 表面点过滤
@@ -408,8 +405,8 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
     if n_surf < params.min_points:
         return empty(f'too_few_surface_points:{n_surf}')
 
-    surf_u = u_h[surf_mask]
-    surf_v = v_v[surf_mask]
+    surf_u = u_h[surf_mask]  # H (horizontal lateral)
+    surf_v = v_v[surf_mask]  # V (true vertical)
     surf_ids = raw_ids[surf_mask]
 
     v_min = float(surf_v.min())
@@ -426,9 +423,10 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
     half = params.ruler_length_m / 2.0             # 1.0m
     half_width = params.ruler_width_m / 2.0        # 0.0275m
 
-    v_step = max(float(params.scan_step_m), 1e-6)
-    u_step = max(float(params.strip_step_m), 1e-6)
+    v_step = max(float(params.scan_step_m), 1e-6)   # 5cm vertical step
+    u_step = max(float(params.strip_step_m), 1e-6)  # 5cm lateral step
 
+    # Window centers
     v_centers = np.arange(v_min + half, v_max - half + v_step * 0.5, v_step)
     u_centers = np.arange(u_min + half_width, u_max - half_width + u_step * 0.5, u_step)
 
@@ -440,7 +438,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
           f'total_windows_est={len(v_centers)*len(u_centers)}', flush=True)
 
     # ===================================================================
-    # Step 4: 全局按 u 排序（searchsorted 要求有序数组）
+    # Step 4: 全局按 H (horizontal) 排序 —— searchsorted 要求有序数组
     # ===================================================================
     u_order = np.argsort(surf_u, kind='stable')
     surf_u = surf_u[u_order]
@@ -460,7 +458,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
     processed_strips = 0
 
     # ===================================================================
-    # Step 5: 逐横向 strip 处理
+    # Step 5: 逐横向 strip 处理（参照平整度结构）
     # ===================================================================
     for uj, u_c in enumerate(u_centers):
         u_lo = u_c - half_width
@@ -478,30 +476,14 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
         strip_u = surf_u[lo_idx:hi_idx]
         strip_ids_local = surf_ids[lo_idx:hi_idx]
 
-        # FIX v5: strip 内按 v 排序（quicksort 更快）
+        # Strip 内按 V (vertical) 排序，用于沿竖直方向滑动窗口
         v_order = np.argsort(strip_v, kind='quicksort')
         strip_v = strip_v[v_order]
         strip_u = strip_u[v_order]
         strip_ids_local = strip_ids_local[v_order]
 
         # ===================================================================
-        # Step 6: strip 级别鲁棒回归 —— 拟合墙面趋势线
-        # ===================================================================
-        # 复用平整度实现逻辑：fit_line 迭代去噪 + MAD 异常值剔除
-        try:
-            a, b = fit_line(strip_v, strip_u)
-        except ValueError:
-            processed_strips += 1
-            continue
-
-        # 趋势线与竖直方向（v 轴）的夹角 = 垂直度偏差角
-        # 趋势线方向向量 = (1, a) 在 (v, u) 坐标系中
-        # 竖直方向向量 = (1, 0)
-        # 夹角 = arctan(|a|)
-        strip_angle_deg = float(np.degrees(np.arctan(abs(a))))
-
-        # ===================================================================
-        # Step 7: 向量化计算所有 v 窗口边界
+        # Step 6: 向量化计算所有 v 窗口边界
         # ===================================================================
         v_win_lo = np.searchsorted(strip_v, v_lo_bounds, side='left')
         v_win_hi = np.searchsorted(strip_v, v_hi_bounds, side='right')
@@ -513,7 +495,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
             continue
 
         # ===================================================================
-        # Step 8: 批量处理有效窗口
+        # Step 7: —— Window-Level 独立拟合
         # ===================================================================
         for vi in np.flatnonzero(valid_mask):
             v_c = v_centers[vi]
@@ -522,25 +504,28 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
             n_win = whi - wlo
 
             # 提取窗口数据
-            win_u = strip_u[wlo:whi]
-            win_v = strip_v[wlo:whi]
+            win_u = strip_u[wlo:whi]  # H (horizontal)
+            win_v = strip_v[wlo:whi]  # V (vertical)
             win_ids = strip_ids_local[wlo:whi]
 
             # ----------------------------------------------------------------
-            # 核心计算：垂直度 = 趋势线与铅垂线的偏差
+            # Window-Level 鲁棒拟合 —— 每个窗口独立拟合趋势线
             # ----------------------------------------------------------------
-            # 含义：2m 高度范围内，墙面水平偏移多少 mm
+            # 拟合 H = a*V + b，其中 a 是斜率（倾斜程度）
+            # 垂直度 = |a| * 2000mm（2m 高度处的水平偏移）
+            try:
+                a, b = fit_line(win_v, win_u)
+            except (np.linalg.LinAlgError, ValueError):
+                continue
+
+            # 2m 高度处的水平偏移 = |斜率| * 靠尺长度
             deviation_mm = abs(a) * params.ruler_length_m * 1000.0
             
-            # 倾斜角 = strip 级别角度（同一 strip 内所有 window 共享）
-            angle_deg = strip_angle_deg
+            # 倾斜角 = arctan(|a|)
+            angle_deg = float(np.degrees(np.arctan(abs(a))))
 
             # 是否合格
             verticality_pass = np.isfinite(deviation_mm) and deviation_mm <= params.verticality_limit_mm
-
-            # 记录最大偏差点的 source_id
-            residuals = np.abs(win_u - (a * win_v + b))
-            max_dev_idx = int(np.argmax(residuals))
 
             # 窗口中心三维坐标
             center_xyz = origin + u_c * horizontal_axis + v_c * vertical_axis
@@ -562,7 +547,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
                 'effective_point_count': n_win,
                 'snap_distance_m': snap_distance,
                 'pivot_source_ids': [int(win_ids[0]), int(win_ids[-1])],
-                'depression_source_id': int(win_ids[max_dev_idx]),
+                'depression_source_id': int(win_ids[np.argmax(np.abs(win_u - (a * win_v + b)))]),
                 'trend_slope': float(a),
                 'trend_intercept': float(b),
             })
@@ -579,7 +564,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
                   f'seconds={elapsed:.1f}', flush=True)
 
     # ===================================================================
-    # Step 9: 汇总统计
+    # Step 8: 汇总统计
     # ===================================================================
     finite_rows = [r for r in rows if np.isfinite(r['verticality_deviation_mm'])]
     pass_rows = [r['verticality_pass'] for r in finite_rows]
@@ -591,6 +576,7 @@ def _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, origin
           f'rows={len(finite_rows)} '
           f'max_deviation_mm={max((r["verticality_deviation_mm"] for r in finite_rows), default=np.nan):.3f} '
           f'max_angle_deg={max((r["verticality_angle_deg"] for r in finite_rows), default=np.nan):.3f} '
+          f'pass_rate={float(np.mean(pass_rows)) if pass_rows else 0.0:.3f} '
           f'seconds={elapsed:.2f}', flush=True)
 
     return {
@@ -619,7 +605,7 @@ def _direction_worker(args):
               f'along_range={along_range:.3f}m < ruler_length={params.ruler_length_m}m', flush=True)
         return float(angle), [], projection_time, 0.0, 0.0, np.empty((0, 2), float), along_range, across_range
 
-    strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted = _build_strips_directional_v4(
+    strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted = _build_strips_directional(
         along, across, w, raw_ids, angle, params)
     n_windows = len(centres_grid)
 
@@ -719,7 +705,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
           f'u_range={u_range_full:.3f}m v_range={v_range_full:.3f}m '
           f'points={len(points)}', flush=True)
 
-    # Parallel computation for each direction (v4 - 保留原架构)
+    # Parallel computation for each direction
     args_list = []
     for angle in params.flatness_angles_deg:
         args_list.append((
@@ -754,8 +740,8 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         total_projection_time += proj_time
         total_prep_time += prep_time
 
-    # v4 关键改进：用物理坐标聚类实现真米字
-    rows = _aggregate_star_rows_v4(
+    # 用物理坐标聚类实现真米字
+    rows = _aggregate_star_rows(
         direction_results, origin, u_axis, v_axis,
         u_min_full, v_min_full, params)
 
@@ -818,8 +804,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
             })
         intervals.sort(key=lambda x: x['v_min_m'])
 
-    # Compute verticality using v4 optimized implementation
-    verticality = _compute_verticality_v4(points, raw_ids, plane_model, u_axis, v_axis, 
+    verticality = _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, 
                                           origin, params, u_min_full=u_min_full, v_min_full=v_min_full)
 
     # Build verticality lookup by grid_key
@@ -887,7 +872,6 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         'plane_model': plane_model.tolist(),
         'normal': plane_model[:3].tolist(),
         'center': origin.tolist(),
-        'measurement_method': 'rulermeasure_star_v4_optimized',
     }
 
     return {
