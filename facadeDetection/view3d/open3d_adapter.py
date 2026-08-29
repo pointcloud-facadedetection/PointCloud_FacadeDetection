@@ -4,6 +4,9 @@ import threading
 
 
 class Open3DAdapter:
+    MIN_POINT_SIZE = 0.01
+    MAX_POINT_SIZE = 1.0
+
     def __init__(self):
         self.vis = None
         self.geometries = {}
@@ -40,7 +43,7 @@ class Open3DAdapter:
         opt = self.vis.get_render_option()
         # Match the Corporate Clean viewport token (#111827).
         opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
-        opt.point_size = 2.0
+        opt.point_size = self.MIN_POINT_SIZE
         opt.show_coordinate_frame = True
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
@@ -73,7 +76,11 @@ class Open3DAdapter:
 
     def set_point_size(self, size):
         if self._assert_owner():
-            self.vis.get_render_option().point_size = float(size)
+            # point_size 本身就是 Open3D 视口使用的像素尺寸，不再额外
+            # 映射到 1..20，避免滑块值被放大后显示过粗。
+            value = max(self.MIN_POINT_SIZE, min(float(size), self.MAX_POINT_SIZE))
+            self.vis.get_render_option().point_size = value
+            self.vis.update_renderer()
 
     def poll(self):
         if not self._assert_owner():
@@ -92,12 +99,23 @@ class Open3DAdapter:
         return self.vis.capture_screen_float_buffer(do_render=True)
 
     def destroy(self):
+        """Destroy the native window once, while GLFW is still available."""
+        if self._destroyed:
+            return
         if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
             raise RuntimeError('Open3D window must be destroyed on the GUI thread')
+        vis = self.vis
+        # Mark the adapter unavailable before entering Open3D.  Queued Qt
+        # callbacks can therefore not touch a half-destroyed Visualizer.
+        self._destroyed = True
+        self.vis = None
+        self.geometries.clear()
         try:
-            if self.vis is not None:
-                self.vis.destroy_window()
+            if vis is not None:
+                vis.destroy_window()
+        except Exception:
+            # 关闭阶段 Open3D 可能已经由 GLFW 清理了窗口；不能让异常
+            # 阻止 Qt 主窗口和其余线程退出。
+            pass
         finally:
-            self.vis = None
-            self.geometries.clear()
-            self._destroyed = True
+            del vis

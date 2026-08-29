@@ -126,6 +126,7 @@ class Open3DViewport(BaseViewport):
         # ROI 选择模式状态
         self._roi_on_complete = None
         self._scene_view_initialized = False
+        self._destroyed = False
 
         self.native = self
         self._render_queue = _RenderQueue(self._root)
@@ -357,9 +358,10 @@ class Open3DViewport(BaseViewport):
                     center = np.mean(allp, axis=0)
             except Exception:
                 pass
-            # 项目统一默认视角：沿 X 轴正面观察，Z 轴严格向上。
-            # 点云坐标中建筑立面法向位于 X/Y 平面；当前项目正面为 +X。
-            front = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            # Open3D starts from a top view in this embedded viewport. Rotate
+            # that view by 90 degrees to the building front: Y is depth and Z
+            # remains the screen-up direction.
+            front = np.array([0.0, -1.0, 0.0], dtype=np.float64)
             up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
             ctr.set_lookat(center.astype(np.float64))
@@ -370,6 +372,12 @@ class Open3DViewport(BaseViewport):
             self._scene_view_initialized = True
         except Exception:
             pass
+
+    def reset_view(self):
+        """恢复建筑立面默认正视图"""
+        self._scene_view_initialized = False
+        if self._scene.point_data:
+            self._initialize_scene_view()
 
     # ---------------- 统一交互模式 ----------------
     def set_mode(self, mode: str):
@@ -409,10 +417,67 @@ class Open3DViewport(BaseViewport):
         self.destroy()
 
     def destroy(self):
+        """Stop Qt delivery and release the embedded Open3D window once."""
+        if self._destroyed:
+            return
+        self._destroyed = True
         self._init_success = False
         if hasattr(self, '_timer') and self._timer is not None:
             self._timer.stop()
+        try:
+            if self._roi_controller is not None:
+                self._roi_controller.cancel()
+        except Exception:
+            pass
+        self._roi_on_complete = None
+        for watched, bridge_name in (
+            (self._qwindow, '_qwindow_event_bridge'),
+            (self._container, '_event_bridge'),
+        ):
+            bridge = getattr(self, bridge_name, None)
+            if watched is not None and bridge is not None:
+                try:
+                    watched.removeEventFilter(bridge)
+                except Exception:
+                    pass
+
+        # QWindow::fromWinId 只是原生窗口的 Qt 包装。先解除嵌入关系并隐藏容器，
+        # 避免 Qt 在 Visualizer 已销毁后继续向 GLFW 窗口投递
+        # 重绘/焦点事件（Windows 下这是关闭警告的主要来源）。
+        container = self._container
+        qwindow = self._qwindow
+        self._overlay = None
+        self._qwindow = None
+        self._container = None
+        if container is not None:
+            try:
+                container.removeEventFilter(self._event_bridge)
+                container.setParent(None)
+                container.hide()
+                container.deleteLater()
+            except Exception:
+                pass
+        if qwindow is not None:
+            try:
+                qwindow.removeEventFilter(getattr(self, '_qwindow_event_bridge', None))
+                qwindow.setParent(None)
+            except Exception:
+                pass
+
+        # destroy_window 必须在创建 Visualizer 的 GUI 线程中、Qt 事件源
+        # 停止之后调用；adapter.destroy() 已做幂等保护。
         self._adapter.destroy()
+        # fromWinId 返回的包装对象不能在 Visualizer 销毁后继续存活到
+        # QApplication 退出，否则 Qt 平台插件可能再次访问 GLFW 句柄。
+        if qwindow is not None:
+            try:
+                qwindow.destroy()
+            except Exception:
+                pass
+            try:
+                qwindow.deleteLater()
+            except Exception:
+                pass
 
     def get_widget(self):
         return self._root
@@ -506,6 +571,9 @@ class Open3DViewport(BaseViewport):
     def remove_cloud(self, name):
         self._scene.remove_cloud(name)
         if not self._scene.point_data:
+            # A station switch clears the old scene before adding the new
+            # proxy. The next cloud must receive the canonical front view.
+            self._scene_view_initialized = False
             self.clear_pick_markers()
 
     def clear(self):
@@ -520,8 +588,14 @@ class Open3DViewport(BaseViewport):
         self._scene.set_point_size(name, size)
 
     def set_all_point_size(self, size):
+        size = max(Open3DAdapter.MIN_POINT_SIZE,
+                   min(float(size), Open3DAdapter.MAX_POINT_SIZE))
         for name in self._scene.get_cloud_names():
             self._scene.set_point_size(name, size)
+        try:
+            self._adapter.poll()
+        except Exception:
+            pass
 
     def toggle_bbox(self, name, min_bound, max_bound):
         bbox_name = f"{name}__bbox"

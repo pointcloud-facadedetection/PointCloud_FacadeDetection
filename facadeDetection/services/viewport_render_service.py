@@ -49,9 +49,51 @@ class ViewportRenderService:
             pass
 
     def clear_station_scene(self):
-        for name in list(self.viewport.get_cloud_names() if hasattr(self.viewport, 'get_cloud_names') else []):
-            if str(name).startswith('pcfd.station.'):
-                self.viewport.remove_cloud(name)
+        # The whole visible scene is disposable.  Preserving the registration
+        # result here is incorrect because this method is also used by a
+        # station switch/denoise refresh and would leave result geometry
+        # overlaid with the proxy station.
+        for name in list(self.viewport.get_cloud_names()
+                         if hasattr(self.viewport, 'get_cloud_names') else []):
+            self.viewport.remove_cloud(name)
+
+    def clear_scene_display(self):
+        """清除站点/合并/注册结果显示，但不触碰业务索引数据。"""
+        self.clear_station_scene()
+        try:
+            if hasattr(self.viewport, 'clear_roi_visuals'):
+                self.viewport.clear_roi_visuals()
+            if hasattr(self.viewport, 'clear_pick_markers'):
+                self.viewport.clear_pick_markers()
+        except Exception:
+            pass
+
+    def show_station_proxy(self, station_id, name, points, colors=None, dataset_id=None):
+        """显示站点代理点云；视口元数据明确标记为 proxy 域。"""
+        cloud_name = f'pcfd.proxy.station.{station_id}'
+        self.show_point_cloud(cloud_name, points, colors)
+        data = self.viewport.get_cloud_data(cloud_name)
+        if data is not None:
+            data.update({'domain': 'proxy', 'index_space': 'proxy_global',
+                         'is_processing_cloud': True,
+                         'station_id': station_id,
+                         'display_name': name,
+                         'proxy_ids': np.arange(len(points), dtype=np.int32)})
+            if dataset_id is not None:
+                data['dataset_id'] = dataset_id
+        return cloud_name
+
+    def show_result_cloud(self, name, points, colors=None):
+        """显示结果快照，不注册到 PointCloudService 的处理数据域。"""
+        cloud_name = str(name)
+        self.show_point_cloud(cloud_name, points, colors)
+        data = self.viewport.get_cloud_data(cloud_name)
+        if data is not None:
+            data.update({'domain': 'result', 'index_space': 'result',
+                         'is_processing_cloud': False})
+            data.pop('dataset_id', None)
+            data.pop('proxy_ids', None)
+        return cloud_name
 
     def clear_runtime(self):
         """Drop renderer-side references that belong to a project session."""
@@ -74,20 +116,8 @@ class ViewportRenderService:
         self.clear_runtime()
 
     def show_station_cloud(self, station_id, name, points, colors=None):
-        cloud_name = f'pcfd.station.{station_id}.{name}'
-        self.show_point_cloud(cloud_name, points, colors)
-        # Station clouds are raw review resources, not proxy datasets.  Undo
-        # the generic renderer defaults explicitly so the resolver can never
-        # select them for processing.
-        try:
-            data = self.viewport.get_cloud_data(cloud_name)
-            if data is not None:
-                data.update({'domain': 'source', 'index_space': 'raw_global',
-                             'is_processing_cloud': False})
-                data.pop('dataset_id', None)
-                data.pop('proxy_ids', None)
-        except Exception:
-            pass
+        # Compatibility alias: callers must now provide proxy points.
+        return self.show_station_proxy(station_id, name, points, colors)
 
     def _proxy_rows_for_display(self, cloud_name, proxy_ids):
         """Convert dataset-global proxy IDs to current viewport row IDs."""
