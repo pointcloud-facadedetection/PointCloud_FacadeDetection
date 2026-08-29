@@ -52,14 +52,16 @@ class ResultsRepo:
                 return value.item()
             if isinstance(value, dict):
                 return {str(k): serializable(v) for k, v in value.items()
-                        if not str(k).startswith('__')}
+                        if not str(k).startswith('__') or str(k) == '__global_indices'}
             if isinstance(value, (list, tuple)):
                 return [serializable(v) for v in value]
             return value
 
         report = serializable(quality)
         report.pop('__export_context', None)
-        if quality_artifact_path:
+        # Keep the quality domain in SQLite. The optional artifact argument is
+        # retained only for backward-compatible callers and is not required.
+        if quality_artifact_path and not report.get('__global_indices'):
             report['quality_artifact_path'] = str(quality_artifact_path)
         # 在开启事务之前进行验证，以防止格式错误的算法输出
         json.dumps(report, ensure_ascii=False)

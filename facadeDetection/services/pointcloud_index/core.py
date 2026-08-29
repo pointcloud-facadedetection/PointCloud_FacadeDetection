@@ -22,9 +22,13 @@ class RawPointStore:
     @classmethod
     def from_arrays(cls, points, colors=None) -> "RawPointStore":
         p = np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3))
-        c = None if colors is None else np.ascontiguousarray(np.asarray(colors).reshape(-1, 3))
-        if c is not None and len(c) != len(p):
-            raise ValueError("colors length must match points")
+        c = None
+        if colors is not None:
+            raw_colors = np.asarray(colors, dtype=np.float32)
+            if raw_colors.size % 3 == 0:
+                raw_colors = raw_colors.reshape(-1, 3)
+                if len(raw_colors) == len(p):
+                    c = np.ascontiguousarray(np.clip(raw_colors, 0.0, 1.0))
         return cls(p, c)
 
 
