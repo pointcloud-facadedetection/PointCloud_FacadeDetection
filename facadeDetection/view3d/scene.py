@@ -6,6 +6,9 @@ from .lod import display_arrays, normalize_colors
 
 class PointCloudScene:
 
+    MIN_POINT_SIZE = 0.01
+    MAX_POINT_SIZE = 1.0
+
     def __init__(self, adapter):
         self.adapter = adapter
         self.clouds = {}
@@ -22,7 +25,7 @@ class PointCloudScene:
         self.point_data[name] = {
             "pos": positions,
             "color": colors,
-            "size": float(point_size),
+            "size": max(self.MIN_POINT_SIZE, min(float(point_size), self.MAX_POINT_SIZE)),
         }
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=reset_view or not had_clouds)
@@ -96,8 +99,9 @@ class PointCloudScene:
 
     def set_point_size(self, name, size):
         if name in self.point_data:
-            self.point_data[name]["size"] = float(size)
-        self.adapter.set_point_size(size)
+            value = max(self.MIN_POINT_SIZE, min(float(size), self.MAX_POINT_SIZE))
+            self.point_data[name]["size"] = value
+            self.adapter.set_point_size(value)
 
     def get_cloud_names(self):
         return list(self.point_data.keys())
