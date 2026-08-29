@@ -7,6 +7,28 @@ from services.dal.file_repo import FileRepo
 
 class PointCloudStationRepo:
     @staticmethod
+    def get_denoise_state(project_uuid, station_id):
+        with project_session(project_uuid) as s:
+            row = s.get(PointCloudStation, int(station_id))
+            return dict(row.denoise_state_json or {}) if row else None
+
+    @staticmethod
+    def save_denoise_state(project_uuid, station_id, state):
+        """Atomically persist the final proxy index mapping for one station."""
+        with project_session(project_uuid) as s:
+            row = s.get(PointCloudStation, int(station_id))
+            if row is None or row.is_deleted:
+                raise ValueError(f'去噪站点不存在: {station_id}')
+            row.denoise_state_json = dict(state or {})
+
+    @staticmethod
+    def clear_denoise_state(project_uuid, station_id):
+        with project_session(project_uuid) as s:
+            row = s.get(PointCloudStation, int(station_id))
+            if row is not None:
+                row.denoise_state_json = None
+
+    @staticmethod
     def list(project_uuid):
         with project_session(project_uuid) as s:
             p = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()

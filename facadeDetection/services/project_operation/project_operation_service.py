@@ -207,6 +207,26 @@ class ProjectOperationService:
                 if render is not None and hasattr(render, 'clear_station_scene'):
                     render.clear_station_scene()
                 points = np.asarray(stats.get('proxy_points'), dtype=np.float32).reshape(-1, 3)
+                # Persist only reconstruction metadata; coordinates remain in
+                # the source asset and are rebuilt on the next project load.
+                if self._project_uuid and stats.get('station_id'):
+                    from services.dal.pointcloud_station_repo import PointCloudStationRepo
+                    state = {
+                        'version': 1,
+                        'source_sha256': None,
+                        'method': stats.get('method', 'adaptive'),
+                        'voxel_size': float(stats.get('voxel_size', 0.05)),
+                        'keep_proxy_indices': np.asarray(
+                            stats.get('proxy_keep_indices', []), dtype=np.int64).tolist(),
+                        'proxy_base_count': int(stats.get('proxy_base_count', 0)),
+                        'proxy_source_offsets': stats.get('proxy_source_offsets'),
+                        'proxy_source_indices': stats.get('proxy_source_indices'),
+                        'ranges': stats.get('ranges'),
+                        'proxy_count': int(len(points)),
+                        'enabled': True,
+                    }
+                    PointCloudStationRepo.save_denoise_state(
+                        self._project_uuid, stats['station_id'], state)
                 station = None
                 if self._station_service is not None:
                     station = next((row for row in self._station_service.list_stations()
@@ -590,7 +610,8 @@ class ProjectOperationService:
                 if hasattr(render, 'render_quality_reports'):
                     ok = render.render_quality_reports(
                         cloud_name, self._last_facade_results,
-                        index_service=getattr(self._facade_service, '_index_service', None))
+                        index_service=getattr(self._facade_service, '_index_service', None),
+                        heatmap_mode='flatness')
                 if not ok:
                     try:
                         QMessageBox.information(None, '质量检测', '还未进行质量检测。')

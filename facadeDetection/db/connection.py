@@ -112,6 +112,9 @@ def _project_engine(project_uuid: str):
         for name, definition in additions.items():
             if name not in columns:
                 conn.execute(text(f'ALTER TABLE facades ADD COLUMN {name} {definition}'))
+        station_columns = {c['name'] for c in inspect(conn).get_columns('pointcloud_stations')}
+        if 'denoise_state_json' not in station_columns:
+            conn.execute(text('ALTER TABLE pointcloud_stations ADD COLUMN denoise_state_json JSON'))
     return engine
 
 

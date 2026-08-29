@@ -20,6 +20,9 @@ class PointCloudStation(Base):
     fitness = Column(Float, nullable=True)
     inlier_rmse = Column(Float, nullable=True)
     registered_path = Column(String, nullable=True)
+    # JSON index state allows denoised proxy reconstruction without a derived
+    # point-cloud file in the project results directory.
+    denoise_state_json = Column(JSON, nullable=True)
     last_error = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

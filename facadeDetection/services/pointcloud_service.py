@@ -86,9 +86,16 @@ class PointCloudService:
         return dataset
 
     def register_source_asset(self, source_id: str, points, colors=None, metadata=None):
+        points = np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3))
+        if colors is not None:
+            colors = np.asarray(colors, dtype=np.float32)
+            if colors.size % 3 != 0 or len(colors.reshape(-1, 3)) != len(points):
+                colors = None
+            else:
+                colors = np.ascontiguousarray(np.clip(colors.reshape(-1, 3), 0.0, 1.0))
         self.source_assets[source_id] = {
-            "points": np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3)),
-            "colors": None if colors is None else np.ascontiguousarray(np.asarray(colors, dtype=np.float32).reshape(-1, 3)),
+            "points": points,
+            "colors": colors,
             "metadata": metadata or {},
         }
 
@@ -200,10 +207,6 @@ class PointCloudService:
         vp = self.viewport
         if vp is None:
             return None
-        # Station preview clouds are full-resolution review resources.  The
-        # legacy processing pipeline must continue to use the FileService
-        # dataset/proxy cloud, otherwise a 32M-point PLY is sent through the
-        # expensive fallback denoise path after project restore.
         if hasattr(vp, "get_cloud_names") and hasattr(vp, "get_cloud_data"):
             for candidate in reversed(vp.get_cloud_names() or []):
                 if str(candidate).startswith("pcfd.station."):
@@ -296,6 +299,10 @@ class PointCloudService:
         try:
             if "color" in data and data["color"] is not None:
                 cols = np.asarray(data["color"], dtype=np.float32)
+                if cols.size % 3 != 0 or len(cols.reshape(-1, 3)) != len(pts):
+                    cols = None
+                else:
+                    cols = cols.reshape(-1, 3)
         except Exception:
             cols = None
 
@@ -410,17 +417,10 @@ class PointCloudService:
                     if len(old_elev) == n_before:
                         new_meta['elevations'] = old_elev[keep_proxy].tolist()
 
-                # 重新注册 dataset（替换旧的）
-                # register_dataset replaces the in-memory dataset object. Keep the
-                # local reference in sync; otherwise the following source mapping
-                # still reads the stale pre-denoise index and detection loses the
-                # dataset contract.
+                # 重新注册 dataset
                 dataset = self.register_dataset(dataset_id, new_pts, new_cols, metadata=new_meta)
 
                 # 计算 raw_ids
-                # The rebuilt dataset is renumbered: its proxy rows are now
-                # 0..n_after-1.  ``keep_proxy`` belongs to the old dataset and
-                # must not be queried against the new index.
                 new_proxy_ids = np.arange(n_after, dtype=np.int32)
                 raw_ids = dataset.index.proxy_to_source_ids(new_proxy_ids, deduplicate=True)
                 raw_count = len(raw_ids)
@@ -443,12 +443,15 @@ class PointCloudService:
                 "station_id": (data.get("station_id") or
                                 (dataset.metadata or {}).get("station_id")),
                 "proxy_points": new_pts, "proxy_colors": new_cols,
+                "proxy_keep_indices": keep_proxy,
+                "proxy_base_count": int(n_before),
+                "proxy_source_offsets": (dataset.metadata or {}).get('proxy_source_offsets'),
+                "proxy_source_indices": (dataset.metadata or {}).get('proxy_source_indices'),
+                "ranges": (dataset.metadata or {}).get('ranges'),
             }
 
         # 更新视口
         if dataset is not None and n_after > 0:
-            # After rebuilding, the displayed rows are the new dataset's
-            # global proxy rows, not the old pre-denoise row numbers.
             data["proxy_ids"] = np.arange(n_after, dtype=np.int32)
             data["domain"] = "proxy"
             data["index_space"] = "proxy_global"
