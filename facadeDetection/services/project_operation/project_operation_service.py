@@ -206,10 +206,21 @@ class ProjectOperationService:
                 render = self._get_render_service()
                 if render is not None and hasattr(render, 'clear_station_scene'):
                     render.clear_station_scene()
-                points = np.empty((0, 3), dtype=np.float32)
+                points = np.asarray(stats.get('proxy_points'), dtype=np.float32).reshape(-1, 3)
+                station = None
+                if self._station_service is not None:
+                    station = next((row for row in self._station_service.list_stations()
+                                    if str(row.id) == str(stats.get('station_id'))), None)
+                # Always publish under the station-domain name.  Importers may
+                # have used a filename as a transient cloud name, which is not
+                # a valid processing identity after project restore.
+                if station is not None:
+                    stats['name'] = f'pcfd.proxy.station.{station.id}'
+                    self._render_service.show_station_proxy(
+                        station.id, station.display_name, points,
+                        stats.get('proxy_colors'), dataset_id=stats.get('dataset_id'))
                 data = self._viewport.get_cloud_data(stats['name'])
                 if data is not None:
-                    points = np.asarray(stats.get('proxy_points'), dtype=np.float32).reshape(-1, 3)
                     colors = stats.get('proxy_colors')
                     if colors is not None:
                         colors = np.asarray(colors, dtype=np.float32).reshape(-1, 3)
@@ -238,6 +249,11 @@ class ProjectOperationService:
                         render.clear_selected_facade(stats['name'])
                     if len(points) == 0:
                         print(f"[PCFD] denoise.viewport_cleared cloud={stats['name']}", flush=True)
+                    reset = getattr(self._viewport, 'reset_view', None)
+                    if callable(reset) and len(points):
+                        # Denoising replaces the first scene snapshot; do not
+                        # retain the old Open3D camera (often the top view).
+                        reset()
                 # Keep the result payload intact for diagnostics and for any
                 # downstream snapshot consumer; never mutate worker output.
                 print(f"去噪完成: cloud={stats.get('name')} "

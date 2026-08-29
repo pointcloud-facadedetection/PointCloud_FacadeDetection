@@ -14,6 +14,7 @@ from sqlalchemy import select
 from services.viewport_render_service import ViewportRenderService
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.workers import PointCloudLoadWorker
+from models.enums import FileKind
 
 
 @dataclass
@@ -22,6 +23,10 @@ class ProjectCard:
     project_id: str
     name: str
     directory_path: str
+    org_unit: str | None = None
+    address: str | None = None
+    building_floor: str | None = None
+    remarks: str | None = None
 
 
 class ProjectOverviewService:
@@ -60,7 +65,12 @@ class ProjectOverviewService:
     # -------------- 项目管理 --------------
     def list_projects(self) -> list[ProjectCard]:
         items = ProjectRepo.list_projects()
-        return [ProjectCard(project_id=i["project_uuid"], name=i["name"], directory_path=i["root_dir"]) for i in items]
+        return [ProjectCard(
+            project_id=i["project_id"], name=i["name"],
+            directory_path=i["directory_path"],
+            org_unit=i.get("org_unit"), address=i.get("address"),
+            building_floor=i.get("building_floor"), remarks=i.get("remarks"),
+        ) for i in items]
 
     def create_project(
         self,
@@ -104,30 +114,6 @@ class ProjectOverviewService:
                     upsert_index_project(puid, pname, str(path))
                     # 激活项目（确保采用按项目划分的数据库架构）
                     ProjectRepo.load_and_activate(puid)
-                    # 尝试通过 PCFD 资源或 DAL 加载最新的点云数据
-                    try:
-                        assets = idx.get('assets') or {}
-                        cand = None
-                        # 在项目中优先使用 generated_ply
-                        gp = assets.get('generated_ply') or []
-                        if gp:
-                            cand = Path(path) / gp[-1]
-                        else:
-                            raws = assets.get('raw_pointclouds') or []
-                            if raws:
-                                cand = Path(raws[-1])
-                        if cand is not None and self.render_service is not None:
-                            svc = self._ensure_file_service()
-                            svc.upload_files(project_uuid=puid, file_path=str(cand), copy_into_project=False)
-                    except Exception:
-                        # fallback to DAL helper
-                        try:
-                            asset = FileRepo.get_latest_raw_pointcloud(puid)
-                            if asset is not None and self.render_service is not None:
-                                svc = self._ensure_file_service()
-                                svc.upload_files(project_uuid=puid, file_path=asset.path, copy_into_project=False)
-                        except Exception:
-                            pass
                     # The index branch returns early, so it must explicitly
                     # rebuild the station projection as well.
                     PointCloudStationRepo.sync_assets(puid)
@@ -139,15 +125,6 @@ class ProjectOverviewService:
             if Path(p.directory_path).resolve() == path:
                 # 激活场景（若需要）
                 ProjectRepo.load_and_activate(p.project_id)
-                # 尝试加载最新原始点云到视口
-                try:
-                    asset = FileRepo.get_latest_raw_pointcloud(p.project_id)
-                    if asset is not None and self.render_service is not None:
-                        # 直接读取并渲染（保持与 upload_files 一致的体验）
-                        svc = self._ensure_file_service()
-                        svc.upload_files(project_uuid=p.project_id, file_path=asset.path, copy_into_project=False)
-                except Exception:
-                    pass
                 PointCloudStationRepo.sync_assets(p.project_id)
                 return p
         # 未登记则创建新项目（名称取目录名）
@@ -157,50 +134,34 @@ class ProjectOverviewService:
             name=info["name"],
             directory_path=info["root_dir"],
         )
-        # 新登记项目：若目录中存在 PLY 文件，录入并渲染
+        # 新登记项目：登记目录中的全部 PLY；实际代理构建与渲染由
+        # StationService 在项目激活后按需完成，避免产生第二条加载链路。
         try:
             ply_candidates = list(path.glob("*.ply"))
+            for ply_path in ply_candidates:
+                FileRepo.import_file(project_uuid=pc.project_id,
+                                     src_path=str(ply_path),
+                                     kind=FileKind.raw_pointcloud,
+                                     copy_into_project=False)
             if ply_candidates:
-                svc = self._ensure_file_service()
-                svc.upload_files(project_uuid=pc.project_id, file_path=str(ply_candidates[0]), copy_into_project=False)
                 PointCloudStationRepo.sync_assets(pc.project_id)
         except Exception:
             pass
         return pc
 
     def activate_project(self, project_id: str) -> None:
-        # 项目切换必须先清空旧场景，否则 add_cloud() 会认为已有点云，
-        # 不会建立新项目默认视角，Open3D 还可能沿用旧 bounding box。
-        if self.viewport is not None and hasattr(self.viewport, 'clear'):
-            self.viewport.clear()
-        try:
-            ProjectRepo.load_and_activate(project_id)
-        except Exception:
-            return
+        """Validate and activate a project without hiding restore failures."""
+        if not project_id:
+            raise ValueError('项目标识为空，无法激活项目')
+        ProjectRepo.load_and_activate(project_id)
         # Rebuild the station projection before the UI asks for its list.  This
         # is required for legacy projects whose FileAsset rows predate the
         # station table.
-        try:
-            PointCloudStationRepo.sync_assets(project_id)
-        except Exception as exc:
-            log_event(project_id, 'stations.sync_failed', error=str(exc))
-        try:
-            svc = self._ensure_file_service()
-            for asset in FileRepo.list_assets(project_id, pointcloud_only=True):
-                valid, reason = FileRepo.validate_asset(asset)
-                log_event(project_id, 'asset.validate', path=asset.path, result=reason)
-                if valid:
-                    svc.upload_files(project_uuid=project_id, file_path=asset.path, copy_into_project=False)
-                    log_event(project_id, 'asset.loaded', path=asset.path)
-        except Exception as exc:
-            log_event(project_id, 'assets.restore_failed', error=str(exc))
-        # FileService may create/repair FileAsset rows while reopening a
-        # legacy project.  The projection must be rebuilt *after* that work,
-        # otherwise the UI sees an empty station list until the next reopen.
-        try:
-            PointCloudStationRepo.sync_assets(project_id)
-        except Exception as exc:
-            log_event(project_id, 'stations.sync_failed_after_restore', error=str(exc))
+        # StationService is the sole restore/display owner.  Do not load every
+        # PLY through FileService here: that would render full project data and
+        # create a second proxy registry before the first station is selected.
+        stats = PointCloudStationRepo.sync_assets(project_id)
+        log_event(project_id, 'stations.synced', **stats)
 
     def load_historical_facades(self, project_id: str) -> list[dict]:
         from config.storage import Storage
@@ -243,13 +204,24 @@ class ProjectOverviewService:
             return result
 
     def remove_project(self, project_id: str) -> bool:
-        return ProjectRepo.delete_project(project_id, hard=False)
+        return ProjectRepo.delete_project(project_id, hard=True)
 
     def get_project(self, project_id: str) -> Optional[ProjectCard]:
         for p in self.list_projects():
             if p.project_id == project_id:
                 return p
         return None
+
+    def update_project(self, project_id: str, **fields) -> ProjectCard:
+        info = ProjectRepo.update_project(project_id, **fields)
+        if info is None:
+            raise ValueError('项目不存在或已被删除。')
+        return ProjectCard(
+            project_id=info["project_id"], name=info["name"],
+            directory_path=info["directory_path"],
+            org_unit=info.get("org_unit"), address=info.get("address"),
+            building_floor=info.get("building_floor"), remarks=info.get("remarks"),
+        )
 
     # -------------- 文件导入 --------------
     def _ensure_file_service(self):
@@ -283,9 +255,10 @@ class ProjectOverviewService:
             pass
 
         return ProjectCard(
-            project_id=info['project_uuid'],
-            name=info['name'],
-            directory_path=info['root_dir'],
+            project_id=info["project_id"], name=info["name"],
+            directory_path=info["directory_path"],
+            org_unit=info.get("org_unit"), address=info.get("address"),
+            building_floor=info.get("building_floor"), remarks=info.get("remarks"),
         )
 
     def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:

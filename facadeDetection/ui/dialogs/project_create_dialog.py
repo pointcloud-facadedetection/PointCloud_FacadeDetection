@@ -139,11 +139,14 @@ class ProjectCreateDialog(QDialog):
     - 选填：单位、省市区（三级联动）、详细地址、备注
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, project=None):
         super().__init__(parent)
-        self.setWindowTitle("创建项目")
+        self._project = project
+        self.setWindowTitle("编辑项目" if project is not None else "创建项目")
         self.setModal(True)
         self._build_ui()
+        if project is not None:
+            self._load_project(project)
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
@@ -197,6 +200,14 @@ class ProjectCreateDialog(QDialog):
 
         self.resize(480, 360)
         self.edt_name.setFocus()
+
+    def _load_project(self, project):
+        """回填项目详情，编辑时保持创建表单字段一致。"""
+        self.edt_name.setText(str(getattr(project, 'name', '') or ''))
+        self.edt_org.setText(str(getattr(project, 'org_unit', '') or ''))
+        self.edt_address.setText(str(getattr(project, 'address', '') or ''))
+        self.edt_building.setText(str(getattr(project, 'building_floor', '') or ''))
+        self.edt_remarks.setPlainText(str(getattr(project, 'remarks', '') or ''))
 
     def _on_accept(self):
         if not self.edt_name.text().strip():
