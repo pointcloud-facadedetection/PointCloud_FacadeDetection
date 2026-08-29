@@ -132,3 +132,25 @@ class QualityWorker(QRunnable):
                 'facade_no': facade_no,
             }
             self.signals.finished.emit(self.facade, error_result)
+
+
+class RegistrationWorkerSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class RegistrationWorker(QRunnable):
+    """Run the expensive raw-point ICP pipeline outside the Qt GUI thread."""
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+        self.signals = RegistrationWorkerSignals()
+        self.setAutoDelete(False)
+
+    def run(self):
+        try:
+            self.signals.finished.emit(self.operation())
+        except Exception as exc:
+            traceback.print_exc()
+            self.signals.failed.emit(f'{type(exc).__name__}: {exc}')
