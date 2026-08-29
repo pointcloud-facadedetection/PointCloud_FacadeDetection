@@ -175,7 +175,7 @@ class FacadeQualityDialog(QDialog):
         # FIX: Safely get rates with proper defaults
         flat_rate = float(overall.get('flatness_pass_rate', 0.0) or 0.0) * 100.0
         vert_rate = float(overall.get('verticality_pass_rate', 0.0) or 0.0) * 100.0
-        quality_rate = float(overall.get('quality_pass_rate', 0.0) or 0.0) * 100.0
+        quality_rate = (flat_rate + vert_rate) / 2.0
 
         standard_name = profile.get('standard_name', '未指定')
         version = profile.get('version', '')
@@ -226,8 +226,6 @@ class FacadeQualityDialog(QDialog):
         n_candidates = int(overall.get('candidate_window_count', 0))
         n_geometry = int(overall.get('geometry_valid_window_count', 0))
         n_quality = int(overall.get('quality_valid_window_count', 0))
-        n_failed = int(overall.get('failed_window_count', 0))
-        n_intervals = len(self._quality.get('intervals', []))
 
         metrics = [
             ('平整度有效最大间隙', f'{gap:.2f} mm'),
@@ -235,9 +233,8 @@ class FacadeQualityDialog(QDialog):
             ('垂直度最大偏差角', f'{vangle:.3f}°' if vangle is not None else '--'),
             ('垂直度最大偏差', f'{vgap:.2f} mm' if vgap is not None else '--'),
             ('检测窗口总数', f'{n_candidates}'),
-            ('几何有效窗口', f'{n_geometry}'),
-            ('质量合格窗口', f'{n_quality}'),
-            ('失败窗口', f'{n_failed}'),
+            ('有效窗口', f'{n_geometry}'),
+            ('合格窗口', f'{n_quality}'),
         ]
 
         for i, (label_text, value_text) in enumerate(metrics):
@@ -293,7 +290,6 @@ class FacadeQualityDialog(QDialog):
 
         self._mode_combo = QComboBox(self)
         self._mode_combo.addItem('平整度效果', 'flatness')
-        self._mode_combo.addItem('平整度原始极值', 'flatness_raw')
         self._mode_combo.addItem('垂直度效果', 'verticality')
         self._mode_combo.setMinimumWidth(130)
 
@@ -344,7 +340,7 @@ class FacadeQualityDialog(QDialog):
 
         for r, item in enumerate(intervals):
             # FIX: Safely get verticality values with proper fallbacks
-            vert_max = item.get('verticality_max_deviation_mm_2m')
+            # vert_max = item.get('verticality_max_deviation_mm')
             if vert_max is None or (isinstance(vert_max, float) and not math.isfinite(vert_max)):
                 vert_max = item.get('verticality_max_deviation_mm')
 

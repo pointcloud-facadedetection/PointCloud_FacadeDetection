@@ -6,14 +6,10 @@ class Config:
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
     DEFAULT_VOXEL_SIZE = 0.05
 
-    QUALITY_GRID_SIZE = 20.0
-    RULER_SIZE = 0.05
-    RULER_STEP = 0.05
-
     DETECT_DIST_TOL_MM = 20.0
     # Minimum effective facade area in square meters
-    MIN_FACADE_AREA = 5.0
-    # 工业现场默认只进入业务流的最大立面数量：按最终点数降序选取。
+    MIN_FACADE_AREA = 10.0
+    # 进入业务流的最大立面数量：按最终点数降序选取。
     MAX_FACADE_COUNT = 15
 
     # 垂直立面法向 Z 分量阈值（|nz| < 此值视为垂直候选）
@@ -44,15 +40,15 @@ class Config:
     # 粗层 signed 距离容差倍数（相对 base）
     FACADE_COARSE_SIGNED_MULT: float = 2.0
     
-    # 细层 signed 距离容差（默认 1.0，与原有逻辑一致）
+    # 细层 signed 距离容差
     FACADE_SIGNED_DIST_TOL: float = 1.0
     
-    # Hough 参数调优（覆盖原有默认值）
-    HOUGH_MAX_VOTE_POINTS: int = 100000      # 从 30万降至 10万
-    HOUGH_MAX_DIRECTION_PEAKS: int = 6        # 从 8 降至 6
-    HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4  # 从 16 降至 4
-    HOUGH_MAX_CANDIDATES: int = 16           # 从 64 降至 16
-    HOUGH_RHO_MIN_PROMINENCE: float = 0.08   # 从 0.20 放宽至 0.08
+    # Hough 参数调优
+    HOUGH_MAX_VOTE_POINTS: int = 100000     
+    HOUGH_MAX_DIRECTION_PEAKS: int = 6       
+    HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4  
+    HOUGH_MAX_CANDIDATES: int = 16          
+    HOUGH_RHO_MIN_PROMINENCE: float = 0.08   
 
     # 平面拟合参数
     RANSAC_ITERATIONS: int = 50            # RANSAC 迭代次数
@@ -99,25 +95,17 @@ class Config:
     SELECT_FILL_RGBA = (255, 0, 0, 25)     # light red fill
     SELECT_BORDER_WIDTH = 2
 
-    SEGMENT_COLORS = [
-        [1.00, 0.20, 0.20],
-        [1.00, 0.85, 0.10],
-        [0.10, 0.45, 1.00],
-        [0.20, 0.85, 0.35],
-        [0.85, 0.25, 1.00],
-        [1.00, 0.50, 0.10],
-        [0.10, 0.90, 0.90],
-        [0.95, 0.95, 0.95],
-    ]
 
     # 立面实例颜色：按检测结果 id 循环使用，保证相邻立面易于区分。
     FACADE_INSTANCE_COLORS = [
-        [0.95, 0.25, 0.20], [0.15, 0.55, 0.95],
-        [0.15, 0.75, 0.35], [0.95, 0.65, 0.10],
-        [0.70, 0.30, 0.90], [0.05, 0.75, 0.75],
-        [0.95, 0.35, 0.65], [0.55, 0.75, 0.15],
-        [0.10, 0.90, 0.90], [0.95, 0.95, 0.95],
-        [1.00, 0.50, 0.10], [0.70, 0.85, 0.35],
+        [0.08, 0.30, 0.72], [0.05, 0.58, 0.78],
+        [0.28, 0.34, 0.78], [0.42, 0.22, 0.68],
+        [0.05, 0.62, 0.48], [0.35, 0.48, 0.88],
+        [0.18, 0.42, 0.62], [0.32, 0.28, 0.58],
+        [0.10, 0.50, 0.85], [0.50, 0.20, 0.70],
+        [0.20, 0.70, 0.55], [0.60, 0.30, 0.80],
+        [0.02, 0.60, 0.90], [0.40, 0.40, 0.60],
+        [0.70, 0.25, 0.50], [0.15, 0.55, 0.75],
     ]
 
     FACADE_TYPE_COLORS = {
