@@ -235,6 +235,10 @@ class ViewportInteractor:
 
         return False
 
+    def pick_at_screen(self, pos, cloud_name=None):
+        """Return the nearest visible point under a screen position."""
+        return self.pick_nearest_point(pos, cloud_name=cloud_name)
+
     def select_indices_in_rect(self, cloud_name, start, end):
         """
         根据屏幕矩形选框，投影点云并返回框内点的全局索引。
@@ -355,7 +359,10 @@ class ViewportInteractor:
                         "index": point_index,
                         "point": points[point_index].astype(float).tolist(),
                     }
-        return best or best_any
+        # A pick is only valid inside the configured pixel radius. Returning
+        # an arbitrary nearest point makes a missed click silently corrupt
+        # operator correspondences.
+        return best
 
     def handle_wheel(self, event):
         if self.selection_enabled:

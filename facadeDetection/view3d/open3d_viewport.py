@@ -11,6 +11,7 @@ from .geometry_factory import (
 from .interaction import ViewportInteractor
 from .open3d_adapter import Open3DAdapter
 from .roi_selection import ROISelectionController
+from .pick_overlay import PointPickOverlay
 from .scene import PointCloudScene
 from .window_embed import NativeWindowFinder
 
@@ -112,6 +113,7 @@ class Open3DViewport(BaseViewport):
         self._window_title = "PointCloud FacadeDetection"
         self._pick_markers = []
         self._pick_lines = []
+        self._pick_labels = []
         self._init_success = False
         self._overlay = None
         self._roi_controller = None
@@ -216,68 +218,16 @@ class Open3DViewport(BaseViewport):
             self._container.setFocusPolicy(Qt.StrongFocus)
             self._container.setMouseTracking(True)
 
-            # Overlay：红色实线矩形，用于建筑外立面 ROI 框选
-            class _Overlay(QWidget):
-                def __init__(self, owner, interactor):
-                    super().__init__(owner)
-                    self._interactor = interactor
-                    self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                    self.setAttribute(Qt.WA_NoSystemBackground, True)
-                    self.setAttribute(Qt.WA_TranslucentBackground, True)
-                    self.show()
-
-                def paintEvent(self, event):
-                    try:
-                        from config.settings import Config
-                        rect = self._interactor.get_selection_rect()
-                        if not rect:
-                            return
-                        (p1, p2) = rect
-                        x1, y1 = p1.x(), p1.y()
-                        x2, y2 = p2.x(), p2.y()
-                        x, y = min(x1, x2), min(y1, y2)
-                        w, h = abs(x2 - x1), abs(y2 - y1)
-
-                        painter = QPainter(self)
-                        painter.setRenderHint(QPainter.Antialiasing, True)
-
-                        # 选择样式来自配置
-                        br, bg, bb, ba = getattr(Config, 'SELECT_BORDER_RGBA', (255, 0, 0, 240))
-                        bw = int(getattr(Config, 'SELECT_BORDER_WIDTH', 2))
-
-                        pen = QPen(QColor(int(br), int(bg), int(bb), int(ba)))
-                        pen.setWidth(max(1, bw))
-                        pen.setStyle(Qt.SolidLine)
-                        painter.setPen(pen)
-                        painter.setBrush(Qt.NoBrush)
-                        painter.drawRect(x, y, w, h)
-
-                        # 绘制顶点标记（左上、右下）
-                        painter.setBrush(QColor(int(br), int(bg), int(bb), int(ba)))
-                        marker_size = max(4, bw + 2)
-                        painter.drawEllipse(x1 - marker_size//2, y1 - marker_size//2, marker_size, marker_size)
-                        painter.drawEllipse(x2 - marker_size//2, y2 - marker_size//2, marker_size, marker_size)
-
-                        painter.end()
-                    except Exception:
-                        pass
-
-            # 修复：将 overlay 作为 _container 的子 widget，确保坐标系一致
-            self._overlay = _Overlay(self._container, self._interactor)
-            self._overlay.setObjectName("viewportOverlay")
-            self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._overlay.setGeometry(0, 0, self._container.width(), self._container.height())
-            self._overlay.raise_()
-            self._overlay.show()
+            # PICK 使用独立顶层覆盖层；旧的内嵌 _Overlay 会与 GLFW 子窗口竞争输入，
+            # 因此不再实例化。ROI 仍由 ROISelectionController 独立接管。
+            self._overlay = None
+            self._pick_overlay = PointPickOverlay(self, self._container)
 
             def _sync_overlay_size():
                 try:
-                    if self._overlay is None or self._container is None:
+                    if self._pick_overlay is None or self._container is None:
                         return
-                    # overlay 作为 _container 的子 widget，geometry 相对于 _container
-                    self._overlay.setGeometry(0, 0, self._container.width(), self._container.height())
-                    self._overlay.raise_()
-                    self._overlay.show()
+                    self._pick_overlay.sync_geometry()
                 except Exception:
                     pass
 
@@ -291,7 +241,7 @@ class Open3DViewport(BaseViewport):
             QTimer.singleShot(0, _sync_overlay_size)
 
             self._event_bridge = _ContainerEventBridge(
-                self._interactor, overlay=self._overlay, parent=self._root
+                self._interactor, overlay=None, parent=self._root
             )
             # 作为兜底安装在 container 上（主要通道由 QWindow 事件桥处理）
             self._container.installEventFilter(self._event_bridge)
@@ -446,6 +396,12 @@ class Open3DViewport(BaseViewport):
         # 重绘/焦点事件（Windows 下这是关闭警告的主要来源）。
         container = self._container
         qwindow = self._qwindow
+        if self._pick_overlay is not None:
+            try:
+                self._pick_overlay.deactivate()
+            except Exception:
+                pass
+            self._pick_overlay = None
         self._overlay = None
         self._qwindow = None
         self._container = None
@@ -498,14 +454,14 @@ class Open3DViewport(BaseViewport):
     def clear_roi_visuals(self):
         self._interactor.clear_selection_rect()
         self._adapter.remove_geometry("__roi_selection_bbox")
-        if self._overlay is not None:
-            self._overlay.update()
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
 
     def show_roi_bbox(self, min_bound, max_bound, color=(1.0, 1.0, 1.0)):
         self._adapter.remove_geometry("__roi_selection_bbox")
         self._adapter.add_geometry("__roi_selection_bbox", make_bbox(min_bound, max_bound, color=color), reset_bounding_box=False)
-        if self._overlay is not None:
-            self._overlay.update()
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
 
     # ------------------------------------------------------------------
     # 高级 ROI 框选模式（建筑外立面检测专用）
@@ -648,13 +604,76 @@ class Open3DViewport(BaseViewport):
             pass
         if callback is not None:
             self.point_pick_callback = callback
+        if self._pick_overlay is not None:
+            self._pick_overlay.activate()
+
+    def _handle_pick_screen(self, pos):
+        """Handle a click from the top-level PICK overlay."""
+        picked = self._interactor.pick_at_screen(pos, cloud_name=self._interactor.pick_cloud)
+        if picked is None:
+            return
+        self._interactor.last_picked_point = np.asarray(picked['point'], dtype=float)
+        callback = self._interactor.point_pick_callback
+        if callable(callback):
+            callback(picked)
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
+
+    def pick_at_screen(self, pos, cloud_name=None):
+        """公开的视图点选入口，算法层和业务层不接触 interactor。"""
+        return self._interactor.pick_at_screen(pos, cloud_name=cloud_name)
+
+    def enter_registration_pick_mode(self, source_cloud, target_cloud,
+                                     callback, pick_radius=10):
+        """Pick source/target proxy points alternately for one registration pair."""
+        self.clear_pick_markers()
+        state = {'source': True, 'source_points': [], 'target_points': []}
+
+        def on_pick(picked):
+            expected = source_cloud if state['source'] else target_cloud
+            if picked.get('cloud_name') != expected:
+                return
+            point = np.asarray(picked['point'], dtype=np.float64)
+            if state['source']:
+                state['source_points'].append(point)
+                state['source'] = False
+            else:
+                state['target_points'].append(point)
+                state['source'] = True
+            self.update_pick_markers(state['source_points'], state['target_points'])
+            if callable(callback):
+                callback(picked, bool(state['source']))
+
+        self.enter_pick_mode(cloud_name=source_cloud, pick_radius=pick_radius,
+                             callback=on_pick)
+        # The callback switches the restricted cloud after each click.
+        self._registration_pick_state = state
+        self._registration_source_cloud = source_cloud
+        self._registration_target_cloud = target_cloud
+
+        def switch_cloud(_picked, source_next):
+            self._interactor.pick_cloud = (source_cloud if source_next else target_cloud)
+        self._registration_pick_switch = switch_cloud
+        # enter_pick_mode has already installed ``on_pick``; replace it only
+        # to switch the restricted cloud after the accepted click.
+        self.point_pick_callback = lambda picked: (
+            on_pick(picked), switch_cloud(picked, state['source']))
+
+    def registration_pick_points(self):
+        state = getattr(self, '_registration_pick_state', None) or {}
+        return (list(state.get('source_points', [])),
+                list(state.get('target_points', [])))
 
     def exit_pick_mode(self):
         self.set_pick_enabled(False)
+        self.point_pick_callback = None
+        if self._pick_overlay is not None:
+            self._pick_overlay.deactivate()
         try:
             self.set_mode(self.InteractionMode.NAVIGATE)
         except Exception:
             pass
+        self._registration_pick_state = None
 
     def update_pick_markers(self, src_points=None, tgt_points=None):
         self.clear_pick_markers()
