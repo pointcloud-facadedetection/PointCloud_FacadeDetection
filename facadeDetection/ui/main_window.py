@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QTextBrowser,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -52,7 +53,8 @@ from services.viewport_render_service import ViewportRenderService
 from services.pointcloud_service import PointCloudService
 from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
-from services.report_export import ReportExportService
+from services.report_export import ReportExportService, ReportDataService, PdfReportRenderer
+from services.dal.report_repo import ReportRepo
 from services.result_export_service import ResultExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
@@ -467,6 +469,7 @@ class MainWindow(QMainWindow):
         self._quality_reports = []
         self._heatmap_mode = 'flatness'
         self._quality_result_cache = {}
+        self._report_snapshot = {'project': {}, 'facades': []}
         # 质量结果窗口采用非阻塞打开方式；必须由主窗口持有引用，避免窗口被
         # Python 垃圾回收，同时避免再次进入 QDialog.exec() 的嵌套事件循环。
         self._quality_dialog = None
@@ -1299,6 +1302,9 @@ class MainWindow(QMainWindow):
         if not results:
             self.list_facades.clear()
             self._refresh_heatmap_button_state()
+            self._latest_facade_results = []
+            self.project_operation_service._last_facade_results = []
+            self._refresh_report_preview()
             return
         self.list_facades.clear()
         for display_no, f in enumerate(results, 1):
@@ -1363,6 +1369,7 @@ class MainWindow(QMainWindow):
         self._latest_facade_results = results
         self.project_operation_service._last_facade_results = results
         self._refresh_heatmap_button_state()
+        self._refresh_report_preview()
 
     def _compatible_quality_results(self):
         results = getattr(self.project_operation_service, '_last_facade_results', None) or []
@@ -1523,6 +1530,15 @@ class MainWindow(QMainWindow):
                     context.get('results_dir'), facade_no,
                     context.get('points'), context.get('colors'), display_quality)
                 if exported and exported.get('heatmap'):
+                    # Persist only small, portable artifact metadata. Runtime
+                    # point arrays stay in __export_context and are not stored.
+                    artifact = {key: exported.get(key) for key in
+                                ('mode', 'title', 'heatmap', 'overlay', 'legend')}
+                    quality_report = facade.get('quality_report')
+                    if isinstance(quality_report, dict):
+                        artifacts = quality_report.setdefault('heatmap_artifacts', {})
+                        artifacts[exported.get('mode', mode)] = artifact
+                        self._refresh_report_preview()
                     self.statusBar().showMessage(
                         f'热力图已保存：{exported["heatmap"]}', 6000)
                 else:
@@ -1656,6 +1672,7 @@ class MainWindow(QMainWindow):
             return
 
         self._active_quality_worker = None
+        self._refresh_report_preview()
         self.statusBar().showMessage('质量计算失败')
         QMessageBox.warning(self, '质量评估', f'质量计算失败：{error}')
 
@@ -1677,6 +1694,7 @@ class MainWindow(QMainWindow):
             print(f'[PCFD] ui.quality_none facade_id={facade_no}', flush=True)
             QMessageBox.warning(self, '质量评估', 
                 f'立面 #{facade_no} 质量计算失败：未返回结果。请检查日志。')
+            self._refresh_report_preview()
             return
 
         # Ensure quality is a dict
@@ -1685,6 +1703,7 @@ class MainWindow(QMainWindow):
                   f'type={type(quality)}', flush=True)
             QMessageBox.warning(self, '质量评估',
                 f'立面 #{facade_no} 质量计算返回异常类型：{type(quality)}')
+            self._refresh_report_preview()
             return
 
         # Cache the result regardless of ok status
@@ -1710,6 +1729,7 @@ class MainWindow(QMainWindow):
 
             # Open dialog even for error results so user can see diagnostics
             QTimer.singleShot(0, lambda: self._show_quality_dialog(cloud, f, quality))
+            self._refresh_report_preview()
             return
 
         # State 3: ok=True but no valid windows
@@ -1725,6 +1745,7 @@ class MainWindow(QMainWindow):
                 f'候选窗口数：{window_count}\n'
                 f'可能原因：立面尺寸过小、点云密度不足或存在大面积空洞。')
             QTimer.singleShot(0, lambda: self._show_quality_dialog(cloud, f, quality))
+            self._refresh_report_preview()
             return
 
         # State 4: Success with valid windows
@@ -1768,12 +1789,59 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f'[PCFD] quality.persist_failed facade_id={facade_no} error={exc!r}', flush=True)
             QMessageBox.warning(self, '质量评估', f'算法已完成，但结果保存失败：{exc}')
+            self._refresh_report_preview()
             return
+        self._refresh_report_preview()
         QTimer.singleShot(0, lambda: self._show_quality_dialog(cloud, f, quality))
 
     def _export_quality_report(self):
-        """Compatibility placeholder; PDF generation is intentionally disabled."""
-        QMessageBox.information(self, '导出报告', 'PDF 报告导出功能暂未启用。')
+        if self.current_project is None:
+            QMessageBox.information(self, '导出报告', '请先创建或选择项目。')
+            return
+        default_dir = Path(self.current_project.directory_path) / 'reports'
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(self, '导出质量报告',
+            str(default_dir / f'{self.current_project.name}_质量检测报告.pdf'), REPORT_PDF_FILTER)
+        if not path:
+            return
+        try:
+            PdfReportRenderer.write_pdf(self._report_html, path)
+            ReportRepo.register_pdf(
+                getattr(self.current_project, 'project_id', None),
+                path,
+                '建筑外立面质量检测报告',
+            )
+            self._set_report_pdf_status(f'已导出：{Path(path).name}', 'success')
+            self._current_report_pdf_name = Path(path).name
+            self.statusBar().showMessage(f'报告已导出：{path}', 6000)
+        except Exception as exc:
+            QMessageBox.warning(self, '导出报告', f'报告导出失败：{exc}')
+
+    def _project_db_id(self):
+        """Resolve the numeric project id required by the legacy report registry."""
+        from db.connection import index_session
+        from models import Project
+        from sqlalchemy import select
+        with index_session() as session:
+            row = session.execute(select(Project).where(Project.uuid == self.current_project.project_id)).scalar_one_or_none()
+            if row is None:
+                raise ValueError('当前项目不存在')
+            return row.id
+
+    def _refresh_report_preview(self):
+        if not hasattr(self, 'report_preview_browser'):
+            return
+        facades = getattr(self.project_operation_service, '_last_facade_results', None) or []
+        self._report_snapshot = ReportDataService.build(
+            self.current_project, facades,
+            getattr(self.current_project, 'directory_path', None))
+        self._report_html = PdfReportRenderer.html(self._report_snapshot)
+        self.report_document_title_label.setText('建筑外立面质量检测报告')
+        self.report_preview_browser.setHtml(self._report_html)
+        self.report_preview_browser.setVisible(True)
+        self.report_webview.setVisible(False)
+        self.report_preview_state_stack.setCurrentIndex(1)
+        self._set_report_pdf_status('在线报告预览已更新', 'success')
 
     def _create_report_export_page(self, page_title, page_key):
         page, body_layout = self._create_page_shell(
@@ -1829,6 +1897,11 @@ class MainWindow(QMainWindow):
         report_document_layout.setContentsMargins(0, 0, 0, 0)
         report_document_layout.setSpacing(0)
         # QtWebView2Widget 只嵌入系统 WebView2 内容区，不创建浏览器地址栏。
+        self.report_preview_browser = QTextBrowser(report_document_page)
+        self.report_preview_browser.setOpenExternalLinks(False)
+        self.report_preview_browser.setStyleSheet('QTextBrowser { background: #f8fafc; border: 0; }')
+        self.report_preview_browser.setHtml('<h2>报告预览</h2><p>创建或选择项目后将自动生成报告预览。</p>')
+        report_document_layout.addWidget(self.report_preview_browser, 1)
         self.report_webview = QtWebView2Widget(
             url='about:blank',
             debug=False,
@@ -1843,7 +1916,7 @@ class MainWindow(QMainWindow):
         self.report_webview.bridge.domContentLoaded.connect(
             self._on_report_pdf_loaded
         )
-        report_document_layout.addWidget(self.report_webview, 1)
+        self.report_webview.setVisible(False)
         self.report_preview_state_stack.addWidget(report_document_page)
         report_preview_layout.addWidget(self.report_preview_state_stack, 1)
 
@@ -2290,28 +2363,67 @@ class MainWindow(QMainWindow):
         try:
             self.station_service.refresh()
             rows = [x for x in self.station_service.list_stations() if x.is_selected]
-            if len(rows) < 2:
-                raise ValueError('点云配准至少需要选择两个 PLY 站点')
-            generation = self._project_generation
-            project_uuid = getattr(self.current_project, 'project_id', None)
-            station_ids = tuple(row.id for row in rows)
+            if len(rows) != 2:
+                raise ValueError('人工点配准需要恰好选择两个 PLY 站点')
+            rows, cloud_names = self.station_service.prepare_registration_view(rows)
+            # 第一站为固定参考目标，第二站为待移动源站点。
+            source_cloud, target_cloud = cloud_names[1], cloud_names[0]
+            self._registration_rows = tuple(row.id for row in rows)
+            self._registration_prompted_pairs = 0
 
-            def run_registration():
-                payload = self.station_service.register_selected(update_viewport=False)
-                payload['_project_generation'] = generation
-                payload['_project_uuid'] = project_uuid
-                payload['_station_ids_snapshot'] = station_ids
-                return payload
+            def on_pick(_picked, source_next):
+                src, tgt = self.render_service.registration_pick_points()
+                pairs = min(len(src), len(tgt))
+                self.statusBar().showMessage(
+                    f'配准选点：已完成 {pairs} 对，'
+                    f'请继续点击{("源站点" if source_next else "目标站点")}同名点')
+                if pairs >= 3 and pairs != self._registration_prompted_pairs:
+                    self._registration_prompted_pairs = pairs
+                    answer = QMessageBox.question(
+                        self, '点云配准',
+                        f'已选择 {pairs} 对对应点。是否立即执行代理域 ICP？',
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if answer == QMessageBox.StandardButton.Yes:
+                        self._start_manual_registration(src, tgt)
 
-            worker = RegistrationWorker(run_registration)
-            self._registration_worker = worker
-            worker.signals.finished.connect(self._on_registration_finished)
-            worker.signals.failed.connect(self._on_registration_failed)
-            self.statusBar().showMessage('正在执行 ICP 精配准，请稍候...')
-            self._set_registration_buttons_enabled(False)
-            self._registration_pool.start(worker)
+            self.render_service.enter_registration_pick_mode(
+                source_cloud, target_cloud, on_pick, pick_radius=10)
+            self._registration_proxy_snapshot = (
+                np.asarray(self.viewport.get_cloud_data(source_cloud)['pos'],
+                           dtype=np.float64).copy(),
+                np.asarray(self.viewport.get_cloud_data(target_cloud)['pos'],
+                           dtype=np.float64).copy())
+            self.statusBar().showMessage(
+                '配准选点模式：请先在源站点（绿色/目标前的移动站点）点击，再点击目标站点对应点；至少 3 对')
         except Exception as exc:
             QMessageBox.warning(self, '点云配准', str(exc))
+
+    def _start_manual_registration(self, source_points, target_points):
+        self.viewport.exit_pick_mode()
+        generation = self._project_generation
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        station_ids = tuple(self._registration_rows)
+        proxy_snapshot = tuple(
+            np.asarray(points, dtype=np.float64).copy()
+            for points in self._registration_proxy_snapshot)
+
+        def run_registration():
+            payload = self.station_service.register_selected(
+                update_viewport=False,
+                manual_points=(np.asarray(source_points), np.asarray(target_points)),
+                proxy_clouds=proxy_snapshot)
+            payload['_project_generation'] = generation
+            payload['_project_uuid'] = project_uuid
+            payload['_station_ids_snapshot'] = station_ids
+            return payload
+
+        worker = RegistrationWorker(run_registration)
+        self._registration_worker = worker
+        worker.signals.finished.connect(self._on_registration_finished)
+        worker.signals.failed.connect(self._on_registration_failed)
+        self.statusBar().showMessage('正在执行人工初值代理域 ICP，请稍候...')
+        self._set_registration_buttons_enabled(False)
+        self._registration_pool.start(worker)
 
     def _set_registration_buttons_enabled(self, enabled):
         button = self.header_buttons.get('btn_registration')
@@ -2504,6 +2616,8 @@ class MainWindow(QMainWindow):
             'loading',
         )
         self.report_preview_state_stack.setCurrentIndex(0)
+        self.report_preview_browser.setVisible(False)
+        self.report_webview.setVisible(True)
         self._current_report_pdf_name = document.name
         self._set_report_navigation(0)
         self.report_webview.load_url(document.uri)
@@ -2811,7 +2925,10 @@ class MainWindow(QMainWindow):
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 payload = self.project_overview_service.import_fls_directory(directory, project_id)
                 if payload.get('success'):
-                    self._activate_project(self.current_project)
+                    # FLS import already persists and synchronizes its assets.
+                    # Activate once, then render exactly one newly imported
+                    # station instead of restoring and switching twice.
+                    self.station_service.refresh()
                     new_station = next(
                         (row for row in reversed(self.station_service.list_stations())
                          if row.id not in before_ids), None)
@@ -2885,6 +3002,7 @@ class MainWindow(QMainWindow):
             self.render_service.clear_scene_display()
             raise RuntimeError(f'站点恢复失败：{exc}') from exc
         self._set_current_project(project)
+        self._refresh_report_preview()
         try:
             # propagate active project UUID to operation scheduler for DAL persistence
             self.project_operation_service.set_active_project_uuid(project_uuid)
@@ -2896,6 +3014,13 @@ class MainWindow(QMainWindow):
                 if historical:
                     self.project_operation_service._last_facade_results = historical
                     self._show_facade_results(historical)
+                    # The station restore and historical facade restore are
+                    # separate operations. Reapply segmentation colours only
+                    # after both are available, otherwise reopening shows the
+                    # correct proxy data in one neutral colour.
+                    cloud = self._active_cloud_name()
+                    if cloud:
+                        self.render_service.restore_highlight(cloud, historical)
         except Exception as exc:
             self.statusBar().showMessage(f'项目历史数据恢复部分失败：{exc}', 5000)
         operation_index = next(
@@ -3020,6 +3145,7 @@ class MainWindow(QMainWindow):
             self.current_project_label.setToolTip('')
             self.set_current_page(0)
         self._update_overview_workspace()
+        self._refresh_report_preview()
         self._update_window_title()
 
     def _update_window_title(self, page_key=None):

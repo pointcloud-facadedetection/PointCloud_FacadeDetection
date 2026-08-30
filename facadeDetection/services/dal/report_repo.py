@@ -3,23 +3,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from db.connection import index_session
+from sqlalchemy import select
+from db.connection import project_session
 from models import FileAsset, Project, Report
 from models.enums import FileKind, PersistPolicy
 
 
 class ReportRepo:
     @staticmethod
-    def register_pdf(project_id: int, pdf_path: str, title: str | None = None) -> Optional[Report]:
+    def register_pdf(project_id, pdf_path: str, title: str | None = None) -> Optional[Report]:
+        """Register a report in the selected project's database.
+
+        ``project_id`` is the project UUID used by the current architecture.
+        Keep accepting an integer for legacy callers, but never query the
+        project database through the global index session.
+        """
         path = Path(pdf_path).resolve()
         if not path.exists():
             raise FileNotFoundError(path)
-        with index_session() as s:
-            proj = s.get(Project, project_id)
+        with project_session(str(project_id)) as s:
+            proj = s.execute(
+                select(Project).where(Project.uuid == str(project_id))
+            ).scalar_one_or_none()
             if not proj:
                 return None
             asset = FileAsset(
-                project_id=project_id,
+                project_id=proj.id,
                 scene_id=None,
                 kind=FileKind.pdf_report.value,
                 persist_policy=PersistPolicy.PERSIST.value,
@@ -30,7 +39,7 @@ class ReportRepo:
             )
             s.add(asset)
             s.flush()
-            rep = Report(project_id=project_id, file_id=asset.id, title=title)
+            rep = Report(project_id=proj.id, file_id=asset.id, title=title)
             s.add(rep)
             s.flush()
             return rep
