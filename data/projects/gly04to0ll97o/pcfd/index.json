@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "project": {
+    "uuid": "da30cc3c-695a-48c9-b7a1-ca952d0e0394",
+    "name_cn": "gly测试04",
+    "pinyin_abbr": "gly04to0ll97o",
+    "org_unit": null,
+    "address": null,
+    "created_at": "2026-08-28T15:15:54"
+  },
+  "paths": {
+    "root_dir": "C:\\Users\\Gao Liying\\Documents\\GitHub\\PointCloud_FacadeDetection\\data\\projects\\gly04to0ll97o",
+    "raw": "raw/",
+    "cache": "cache/",
+    "results": "results/",
+    "reports": "reports/"
+  },
+  "assets": {
+    "raw_pointclouds": [
+      "C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg04.fls\\bllygg04.ply"
+    ],
+    "raw_images": [],
+    "fls_folders": [],
+    "generated_ply": [],
+    "result_pdfs": []
+  }
+}
