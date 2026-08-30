@@ -63,6 +63,18 @@ class BaseViewport(ABC):
         ...
 
     @abstractmethod
+    def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
+        ...
+
+    @abstractmethod
+    def exit_pick_mode(self):
+        ...
+
+    @abstractmethod
+    def pick_at_screen(self, pos, cloud_name=None):
+        ...
+
+    @abstractmethod
     def get_picked_point(self) -> np.ndarray | None:
         ...
 

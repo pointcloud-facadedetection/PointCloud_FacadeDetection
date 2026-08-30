@@ -7,6 +7,7 @@ import numpy as np
 from config.settings import Config
 from utils.array_utils import as_array
 from utils.logging_utils import trace
+from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
 
 
 class ViewportRenderService:
@@ -180,6 +181,19 @@ class ViewportRenderService:
             self.viewport.exit_pick_mode()
         self._pick_mode = False
 
+    def enter_registration_pick_mode(self, source_cloud, target_cloud,
+                                     callback, pick_radius=10):
+        """Start registration picking through the public viewport contract."""
+        method = getattr(self.viewport, 'enter_registration_pick_mode', None)
+        if not callable(method):
+            raise RuntimeError('Viewport does not support registration picking')
+        method(source_cloud, target_cloud, callback, pick_radius=pick_radius)
+        self._pick_mode = True
+
+    def registration_pick_points(self):
+        method = getattr(self.viewport, 'registration_pick_points', None)
+        return method() if callable(method) else ([], [])
+
     def is_pick_mode(self) -> bool:
         return self._pick_mode
 
@@ -215,8 +229,8 @@ class ViewportRenderService:
             if pos is None or len(pos) == 0:
                 return
 
-            n = len(pos)
-            colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
+            colors = self._facade_base_colors(cloud_name, facades, base_color)
+            n = len(colors)
 
             try:
                 self._facades_cache[cloud_name] = facades or []
@@ -251,6 +265,18 @@ class ViewportRenderService:
             self._update_cloud_color(cloud_name, colors)
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
+
+    def _facade_base_colors(self, cloud_name, facades, base_color=(0.75, 0.75, 0.75)):
+        data = self.viewport.get_cloud_data(cloud_name)
+        n = len(data.get('pos', [])) if data is not None else 0
+        colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
+        for order, facade in enumerate(facades or []):
+            idx = self._proxy_rows_for_display(
+                cloud_name, facade.get('proxy_indices') or facade.get('inlier_indices', []))
+            idx = idx[(idx >= 0) & (idx < n)]
+            if len(idx):
+                colors[idx] = np.asarray(self.facade_color_for(facade, order), dtype=np.float32)
+        return colors
 
     def set_facade_colors(self,
                           vertical: Tuple[float, float, float] | None = None,
@@ -658,7 +684,7 @@ class ViewportRenderService:
 
     def apply_quality_colors(self, cloud_name: str, quality_result: dict,
                              base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
-                             index_service=None) -> None:
+                             index_service=None, _colors=None) -> None:
         """将质量结果应用到点云颜色 - 统一缺陷值热力图。"""
         try:
             if not isinstance(quality_result, dict):
@@ -671,16 +697,12 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
-            # 从当前颜色层开始叠加热力：项目加载后若已有立面离散色，未命中
-            # 质量窗口或无法映射的点保持其所属立面默认色；新增/噪点保持默认色。
-            existing = data.get('colors')
-            if existing is None:
-                existing = data.get('color')
-            if existing is not None and len(existing) == n:
-                colors = np.asarray(existing, dtype=np.float32).reshape(n, 3).copy()
-            else:
-                colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
-            mode = quality_result.get('heatmap_mode', 'flatness')
+            # Rebuild from the persisted facade segmentation colours. A gray
+            # fallback is used only for points that do not belong to a facade.
+            colors = (_colors if _colors is not None else self._facade_base_colors(
+                cloud_name, self._facades_cache.get(cloud_name, []), base_color))
+            mode = normalize_heatmap_mode(quality_result.get('heatmap_mode'))
+            spec = heatmap_spec(mode)
             windows = quality_result.get('windows')
 
             if not isinstance(windows, list) or len(windows) == 0:
@@ -695,13 +717,10 @@ class ViewportRenderService:
             # Extract centers and values
             centers = np.asarray([r.get('center_xyz', [np.nan] * 3) for r in windows], dtype=np.float32).reshape(-1, 3)
             
-            values_key = {
-                'flatness_raw': 'flatness_raw_max_gap_mm',
-                'verticality': 'verticality_deviation_mm',
-            }.get(mode, 'flatness_gap_mm')
+            values_key = spec['value_key']
             values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
 
-            pass_key = 'verticality_pass' if mode == 'verticality' else 'flatness_pass'
+            pass_key = spec['pass_key']
             failed = np.asarray([not bool(r.get(pass_key, True)) for r in windows], dtype=bool)
 
             valid = np.isfinite(centers).all(axis=1) & np.isfinite(values) & failed
@@ -713,7 +732,7 @@ class ViewportRenderService:
 
             # Get limit for scaling
             limit = float((quality_result.get('thresholds') or {}).get(
-                'verticality_limit_mm' if mode == 'verticality' else 'flatness_limit_mm', 4.0))
+                spec['limit_key'], 4.0))
 
             # Domain mapping
             domain_raw = np.asarray(quality_result.get('__global_indices', []), dtype=np.int64)
@@ -739,7 +758,8 @@ class ViewportRenderService:
                                dtype=np.float64).reshape(3)
 
             # Map domain points to grid
-            valid_proxy = (domain_proxy >= 0)
+            valid_proxy = ((domain_proxy >= 0) &
+                           (domain_proxy < len(dataset.index.proxy_points)))
             if not np.any(valid_proxy):
                 return
             domain_proxy = domain_proxy[valid_proxy]
@@ -820,7 +840,8 @@ class ViewportRenderService:
                    displayed=int(np.sum(valid_rows)),
                    step=f'{step:.4f}')
 
-            self._update_cloud_color(cloud_name, colors)
+            if _colors is None:
+                self._update_cloud_color(cloud_name, colors)
 
         except Exception as e:
             print(f'立面质量着色失败: {e}', flush=True)
@@ -848,14 +869,22 @@ class ViewportRenderService:
     def render_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None,
                               heatmap_mode: str = 'flatness') -> bool:
         """恢复分色并按指定模式叠加全部兼容质量报告。"""
+        heatmap_mode = normalize_heatmap_mode(heatmap_mode)
         self.highlight_facades(cloud_name, facades or [])
         reports = self.compatible_quality_reports(cloud_name, facades or [], index_service=index_service)
         if not reports:
             return False
+        # apply_quality_colors is intentionally per-report for compatibility;
+        # render all reports into one base array so later facades do not erase
+        # earlier heatmap pixels.
+        data = self.viewport.get_cloud_data(cloud_name)
+        colors = self._facade_base_colors(cloud_name, facades or [])
         for _facade, report in reports:
             display_report = dict(report)
             display_report['heatmap_mode'] = heatmap_mode
-            self.apply_quality_colors(cloud_name, display_report, index_service=index_service)
+            self.apply_quality_colors(cloud_name, display_report,
+                                       index_service=index_service, _colors=colors)
+        self._update_cloud_color(cloud_name, colors)
         return True
 
     def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
