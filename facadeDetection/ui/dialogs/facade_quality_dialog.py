@@ -215,10 +215,7 @@ class FacadeQualityDialog(QDialog):
         vangle = float(vangle_raw) if vangle_raw is not None and np.isfinite(float(vangle_raw)) else None
 
         # FIX: Try multiple field names for verticality deviation
-        vgap_raw = (overall.get('verticality_deviation_mm_2m')
-                    or overall.get('verticality_deviation_mm')
-                    or overall.get('verticality_max_deviation_mm')
-                    or overall.get('verticality_max_deviation'))
+        vgap_raw = (overall.get('verticality_max_deviation_mm'))
         vgap = float(vgap_raw) if vgap_raw is not None and np.isfinite(float(vgap_raw)) else None
 
         pts = int(overall.get('point_count') or 0)
@@ -340,9 +337,7 @@ class FacadeQualityDialog(QDialog):
 
         for r, item in enumerate(intervals):
             # FIX: Safely get verticality values with proper fallbacks
-            # vert_max = item.get('verticality_max_deviation_mm')
-            if vert_max is None or (isinstance(vert_max, float) and not math.isfinite(vert_max)):
-                vert_max = item.get('verticality_max_deviation_mm')
+            vert_max = item.get('verticality_max_deviation_mm')
 
             vert_rate = item.get('verticality_pass_rate')
 
