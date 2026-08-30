@@ -79,7 +79,10 @@ class CameraController:
         try:
             center = np.asarray(center, dtype=float).reshape(3)
             eye = np.asarray(eye, dtype=float).reshape(3)
-            front = center - eye
+            # Open3D ViewControl 的 ``front`` 指向观察点到相机的位置，
+            # 即 camera_position = lookat + front * distance。它与通常
+            # 相机“视线方向”(center - eye) 的定义正好相反。
+            front = eye - center
             if np.linalg.norm(front) < 1e-12:
                 return
             front = front / (np.linalg.norm(front) + 1e-12)

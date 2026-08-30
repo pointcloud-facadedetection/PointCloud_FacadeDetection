@@ -272,8 +272,7 @@ class ProjectOperationService:
                     # 下次检测时必须根据新的代理行和新的 VoxelCascadeIndex 版本重新着色。
                     self._last_facade_results = None
                     if render is not None:
-                        render._facades_cache.pop(stats['name'], None)
-                        render.clear_selected_facade(stats['name'])
+                        render.invalidate_facade_cache(stats['name'])
                     if len(points) == 0:
                         print(f"[PCFD] denoise.viewport_cleared cloud={stats['name']}", flush=True)
                     reset = getattr(self._viewport, 'reset_view', None)
@@ -572,27 +571,31 @@ class ProjectOperationService:
                     cloud_name=cloud_name, roi_indices=roi_indices,
                     roi_bounds=roi_bounds, project_uuid=project_uuid,
                     roi_scope='seed')
-            return self._facade_service.detect(
-                cloud_name=cloud_name, project_uuid=project_uuid)
-
-        def on_success(context, results):
-            self._gui_dispatcher.detection_finished.emit((context, results))
-
-        def on_error(context, message):
-            self._gui_dispatcher.detection_failed.emit(message)
-
-        self._task_scheduler.submit(
-            'detection', project_uuid, getattr(self, '_project_generation', 0),
-            run_detection, on_success=on_success, on_error=on_error)
-
-    @Slot(object)
-    def _on_detection_finished(self, payload):
-        context, results = payload
-        if (context.project_generation != getattr(self, '_project_generation', 0)
-                or not self._task_scheduler.is_current(context)):
-            return
-        self._last_facade_results = results
-        if callable(self.on_facade_results):
+            else:
+                results = self._facade_service.detect(
+                    cloud_name=cloud_name, project_uuid=self._project_uuid)
+            self._last_facade_results = results
+            # 立面检测结果属于后续 2D-3D 热力图映射的必要输入。检测完成后
+            # 立即写入项目 results 目录，项目重新打开后无需重复执行检测。
+            if self._project_uuid:
+                try:
+                    from services.facade.facade_cache import save_facade_snapshot
+                    save_facade_snapshot(
+                        self._project_uuid,
+                        cloud_name,
+                        results or [],
+                    )
+                except Exception as exc:
+                    print(
+                        f'[PCFD] facade.cache_save_failed reason={exc}',
+                        flush=True,
+                    )
+            if callable(self.on_facade_results):
+                try:
+                    self.on_facade_results(results)
+                except Exception:
+                    pass
+            # 启用点击选择：在视口中点击立面点，高亮对应立面
             try:
                 self.on_facade_results(results)
             except Exception:

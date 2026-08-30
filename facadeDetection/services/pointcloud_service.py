@@ -274,10 +274,7 @@ class PointCloudService:
         """去噪成功后把 proxy 点云缓存到项目 cache 目录，供下次打开项目直接加载。"""
         if not self._project_uuid:
             return
-        source_path = (metadata or {}).get('source_ply_path')
-        if not source_path:
-            source_asset = self.get_source_asset((metadata or {}).get('source_id'))
-            source_path = (source_asset or {}).get('metadata', {}).get('ply_path')
+        source_path = self._source_path_for_metadata(metadata)
         if not source_path:
             print("[PCFD] denoise_cache.skip reason=source_ply_path_unknown", flush=True)
             return
@@ -286,6 +283,88 @@ class PointCloudService:
             denoise_cache.save(self._project_uuid, source_path, points, colors, metadata)
         except Exception as exc:
             print(f"[PCFD] denoise_cache.save_failed reason={exc}", flush=True)
+
+    def _source_path_for_metadata(self, metadata: Optional[dict]) -> Optional[str]:
+        """解析 dataset 对应的原始点云路径，作为缓存的稳定键。"""
+        metadata = metadata or {}
+        source_path = metadata.get('source_ply_path')
+        if not source_path:
+            source_asset = self.get_source_asset(metadata.get('source_id'))
+            source_path = (source_asset or {}).get('metadata', {}).get('ply_path')
+        return str(source_path) if source_path else None
+
+    def _load_denoise_cache(self, name: str, data: dict,
+                            dataset: PointCloudDataset,
+                            update_viewport: bool) -> Optional[Dict]:
+        """加载有效的去噪缓存，并用缓存快照替换当前 dataset。"""
+        if not self._project_uuid:
+            return None
+        source_path = self._source_path_for_metadata(dataset.metadata)
+        if not source_path:
+            return None
+        try:
+            from services import denoise_cache
+            cached = denoise_cache.load(self._project_uuid, source_path)
+        except Exception as exc:
+            print(f"[PCFD] denoise_cache.load_failed reason={exc}", flush=True)
+            return None
+        if cached is None:
+            return None
+
+        dataset_id = dataset.dataset_id
+        points = np.asarray(cached['points'], dtype=np.float32).reshape(-1, 3)
+        colors = cached.get('colors')
+        if colors is not None:
+            colors = np.asarray(colors, dtype=np.float32).reshape(-1, 3)
+            if len(colors) != len(points):
+                colors = None
+        metadata = dict(cached.get('metadata') or {})
+        metadata.setdefault('source_ply_path', source_path)
+        cached_dataset = self.register_dataset(
+            dataset_id, points, colors, metadata=metadata)
+
+        proxy_ids = np.arange(len(points), dtype=np.int32)
+        data.update({
+            'dataset_id': dataset_id,
+            'proxy_ids': proxy_ids,
+            'domain': 'proxy',
+            'index_space': 'proxy_global',
+            'is_processing_cloud': True,
+        })
+        raw_ids = None
+        if cached_dataset.index.has_source_mapping():
+            raw_ids = cached_dataset.index.proxy_to_source_ids(
+                proxy_ids, deduplicate=True)
+            raw_count = len(raw_ids)
+        else:
+            raw_count = cached_dataset.index.raw_count_for_proxy(proxy_ids)
+        self.map_proxy_decision(
+            dataset_id, proxy_ids, source='denoise_cache', expand_raw=False)
+
+        if update_viewport:
+            vp = self.viewport
+            if hasattr(vp, 'queue_update_cloud_points'):
+                vp.queue_update_cloud_points(name, points, colors)
+            elif hasattr(vp, 'update_cloud_points'):
+                vp.update_cloud_points(name, points, colors)
+            elif hasattr(vp, 'add_cloud'):
+                vp.add_cloud(name, points, colors)
+
+        print(f"[PCFD] denoise.cache_loaded cloud={name} proxy={len(points)}",
+              flush=True)
+        return {
+            'name': name,
+            'method': 'cached',
+            'voxel_size': 0.0,
+            'points_before': len(np.asarray(data.get('pos', []))),
+            'points_after': len(points),
+            'dataset_id': dataset_id,
+            'raw_ids': raw_ids,
+            'raw_count': int(raw_count),
+            'proxy_points': points,
+            'proxy_colors': colors,
+            'loaded_from_cache': True,
+        }
 
     def denoise(self, method: str = "adaptive", voxel_size: float = 0.05,
                 update_viewport: bool = True, **kwargs) -> Optional[Dict]:
@@ -327,6 +406,16 @@ class PointCloudService:
         if dataset is None:
             print(f"[PCFD] denoise.skip cloud={name} dataset={dataset_id} reason=dataset_not_registered", flush=True)
             return None
+
+        # 第二次及后续点击优先读取第一次去噪落盘的快照，避免重复计算。
+        # 源点云的 size/mtime 已由 denoise_cache.load 校验；源文件变化时
+        # 会自然回退到下面的正常去噪流程并生成新缓存。
+        if bool(kwargs.pop('use_cache', True)):
+            cached_stats = self._load_denoise_cache(
+                name, data, dataset, update_viewport)
+            if cached_stats is not None:
+                return cached_stats
+
         n_before = len(pts)
         keep_proxy = np.empty(0, dtype=np.int32)
 
@@ -486,6 +575,9 @@ class PointCloudService:
                 standard_meta['denoise_history'] = standard_meta.get('denoise_history', []) + [{
                     'before': n_before, 'after': n_after, 'method': method,
                 }]
+                dataset = self.register_dataset(
+                    dataset_id, new_pts, new_cols, metadata=standard_meta)
+                data["dataset_id"] = dataset_id
                 self._save_denoise_cache(standard_meta, new_pts, new_cols)
 
         if not update_viewport:

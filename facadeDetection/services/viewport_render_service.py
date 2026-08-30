@@ -39,6 +39,10 @@ class ViewportRenderService:
             self.viewport.add_cloud(name, points, colors)
         else:
             raise RuntimeError('Viewport does not support adding point cloud data')
+        self._pre_facade_colors.pop(name, None)
+        # Do not rely on the renderer to preserve business metadata.  The
+        # FileService normally binds this immediately; this fallback also
+        # covers alternative viewport adapters and makes the contract visible.
         try:
             data = self.viewport.get_cloud_data(name)
             if data is not None:
@@ -115,6 +119,12 @@ class ViewportRenderService:
 
     def close_project(self):
         self.clear_runtime()
+
+    def invalidate_facade_cache(self, cloud_name: str) -> None:
+        """点云几何替换后清除与旧代理行绑定的渲染缓存。"""
+        self._facades_cache.pop(cloud_name, None)
+        self._pre_facade_colors.pop(cloud_name, None)
+        self.clear_selected_facade(cloud_name)
 
     def show_station_cloud(self, station_id, name, points, colors=None):
         # Compatibility alias: callers must now provide proxy points.
@@ -308,12 +318,58 @@ class ViewportRenderService:
         if highlight is not None:
             self._highlight_color = tuple(highlight)
 
-    def select_facade(self, cloud_name: str, facade_id: int) -> None:
-        """记录选中立面；立面颜色层保持确定性，不重复重绘。"""
+    def select_facade(self, cloud_name: str, facade_id: int) -> bool:
+        """恢复检测前底色，仅用该立面的实例颜色进行高亮。"""
         try:
             self._selected_facade_id = int(facade_id)
         except Exception:
             self._selected_facade_id = None
+            return False
+
+        data = self.viewport.get_cloud_data(cloud_name)
+        if data is None or data.get('pos') is None:
+            return False
+        positions = data['pos']
+        count = len(positions)
+        facades = self._facades_cache.get(cloud_name) or []
+        selected = None
+        selected_order = 0
+        for order, facade in enumerate(facades):
+            if int(facade.get('id', -1)) == self._selected_facade_id:
+                selected = facade
+                selected_order = order
+                break
+        if selected is None:
+            return False
+
+        base = self._pre_facade_colors.get(cloud_name)
+        if base is None or base.shape != (count, 3):
+            current = np.asarray(data.get('color'), dtype=np.float32)
+            if current.shape == (count, 3):
+                base = current.copy()
+            else:
+                base = np.tile(
+                    np.asarray((0.75, 0.75, 0.75), dtype=np.float32),
+                    (count, 1),
+                )
+            self._pre_facade_colors[cloud_name] = base.copy()
+
+        rows = self._proxy_rows_for_display(
+            cloud_name,
+            selected.get('proxy_indices')
+            or selected.get('inlier_indices')
+            or [],
+        )
+        rows = rows[(rows >= 0) & (rows < count)]
+        if len(rows) == 0:
+            return False
+        colors = base.copy()
+        colors[rows] = np.asarray(
+            self.facade_color_for(selected, selected_order),
+            dtype=np.float32,
+        )
+        self._update_cloud_color(cloud_name, colors)
+        return True
 
     def clear_selected_facade(self, cloud_name: str | None = None) -> None:
         self._selected_facade_id = None
@@ -606,6 +662,288 @@ class ViewportRenderService:
             pass
 
     # ---- 从原 FacadeService 迁移的 UI 渲染方法 ----
+
+    def render_selected_facade_flatness(
+        self,
+        cloud_name: str,
+        facade: dict,
+        *,
+        neutral_mm: float = 2.0,
+    ) -> dict:
+        """仅为选中立面生成凹冷、平灰、凸暖的有符号平整度热力图。"""
+        data = self.viewport.get_cloud_data(cloud_name)
+        if data is None or data.get('pos') is None:
+            raise ValueError('当前点云不可用')
+        positions = np.asarray(data['pos'], dtype=np.float64).reshape(-1, 3)
+        if len(positions) == 0:
+            raise ValueError('当前点云为空')
+
+        rows = self._proxy_rows_for_display(
+            cloud_name,
+            facade.get('proxy_indices') or facade.get('inlier_indices') or [],
+        )
+        rows = np.unique(rows[(rows >= 0) & (rows < len(positions))])
+        if len(rows) < 3:
+            raise ValueError('所选立面有效点数不足')
+
+        plane = np.asarray(facade.get('plane_model') or [], dtype=np.float64)
+        if plane.shape != (4,):
+            raise ValueError('所选立面缺少拟合平面参数')
+        normal_norm = float(np.linalg.norm(plane[:3]))
+        if normal_norm < 1e-12:
+            raise ValueError('所选立面法向量无效')
+        plane = plane / normal_norm
+
+        # Open3D front 指向观察点到相机。让平面正方向朝向相机后，
+        # 正偏差即朝用户凸起，负偏差即背离用户凹陷。
+        camera = getattr(self.viewport, '_camera', None)
+        if camera is not None:
+            front, _up, _right = camera.get_camera_basis()
+            if front is not None and float(np.dot(plane[:3], front)) < 0.0:
+                plane *= -1.0
+
+        deviations_mm = (
+            positions[rows] @ plane[:3] + plane[3]
+        ) * 1000.0
+        finite = np.isfinite(deviations_mm)
+        if not np.any(finite):
+            raise ValueError('所选立面没有有效平整度数据')
+        rows = rows[finite]
+        deviations_mm = deviations_mm[finite]
+        limit_mm = max(
+            10.0,
+            float(np.percentile(np.abs(deviations_mm), 98.0)),
+        )
+        neutral_mm = max(0.1, min(float(neutral_mm), limit_mm * 0.5))
+
+        base = self._pre_facade_colors.get(cloud_name)
+        if base is None or base.shape != (len(positions), 3):
+            current = np.asarray(data.get('color'), dtype=np.float32)
+            if current.shape == (len(positions), 3):
+                base = current.copy()
+            else:
+                base = np.tile(
+                    np.asarray((0.75, 0.75, 0.75), dtype=np.float32),
+                    (len(positions), 1),
+                )
+            self._pre_facade_colors[cloud_name] = base.copy()
+        colors = base.copy()
+        colors[rows] = self._signed_flatness_colors(
+            deviations_mm,
+            neutral_mm,
+            limit_mm,
+        )
+        grid_bgr = self._flatness_grid_image(
+            positions[rows],
+            deviations_mm,
+            plane,
+            neutral_mm,
+            limit_mm,
+        )
+        self._update_cloud_color(cloud_name, colors)
+        return {
+            'point_count': int(len(rows)),
+            'neutral_mm': float(neutral_mm),
+            'limit_mm': float(limit_mm),
+            'min_mm': float(np.min(deviations_mm)),
+            'max_mm': float(np.max(deviations_mm)),
+            'grid_bgr': grid_bgr,
+        }
+
+    @staticmethod
+    def _signed_flatness_colors(values_mm, neutral_mm, limit_mm):
+        """负值蓝色、近零灰色、正值黄橙红。"""
+        values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
+        colors = np.tile(
+            np.asarray((0.50, 0.52, 0.52), dtype=np.float32),
+            (len(values), 1),
+        )
+        negative = values < -neutral_mm
+        positive = values > neutral_mm
+
+        if np.any(negative):
+            t = np.clip(
+                (-values[negative] - neutral_mm)
+                / max(limit_mm - neutral_mm, 1e-6),
+                0.0,
+                1.0,
+            )
+            near_cold = np.asarray((0.25, 0.45, 1.0), dtype=np.float32)
+            deep_cold = np.asarray((0.00, 0.00, 0.82), dtype=np.float32)
+            colors[negative] = (
+                near_cold[None, :] * (1.0 - t[:, None])
+                + deep_cold[None, :] * t[:, None]
+            )
+
+        if np.any(positive):
+            t = np.clip(
+                (values[positive] - neutral_mm)
+                / max(limit_mm - neutral_mm, 1e-6),
+                0.0,
+                1.0,
+            )
+            near_red = np.asarray((1.0, 0.38, 0.38), dtype=np.float32)
+            deep_red = np.asarray((0.85, 0.00, 0.00), dtype=np.float32)
+            colors[positive] = (
+                near_red[None, :] * (1.0 - t[:, None])
+                + deep_red[None, :] * t[:, None]
+            )
+        return np.clip(colors, 0.0, 1.0)
+
+    @classmethod
+    def _flatness_grid_image(
+        cls,
+        points,
+        values_mm,
+        plane,
+        neutral_mm,
+        limit_mm,
+    ):
+        """生成正视立面网格图，并附带凹凸毫米色标。"""
+        import cv2
+        from algorithms.geometry import plane_axes
+
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
+        normal = np.asarray(plane[:3], dtype=np.float64).reshape(3)
+        facade_type = (
+            'horizontal'
+            if abs(float(normal[2])) > 0.85
+            else 'vertical_facade'
+        )
+        u_axis, v_axis = plane_axes(normal, facade_type)
+        origin = np.mean(points, axis=0)
+        uv = np.column_stack(
+            ((points - origin) @ u_axis, (points - origin) @ v_axis)
+        )
+        lower = np.min(uv, axis=0)
+        upper = np.max(uv, axis=0)
+        span = np.maximum(upper - lower, 0.1)
+        pixel_size = max(
+            0.02,
+            float(span[0]) / 600.0,
+            float(span[1]) / 1000.0,
+        )
+        width = max(24, int(np.ceil(span[0] / pixel_size)) + 1)
+        height = max(24, int(np.ceil(span[1] / pixel_size)) + 1)
+        x = np.clip(
+            ((uv[:, 0] - lower[0]) / pixel_size).astype(np.int64),
+            0,
+            width - 1,
+        )
+        y = np.clip(
+            height - 1
+            - ((uv[:, 1] - lower[1]) / pixel_size).astype(np.int64),
+            0,
+            height - 1,
+        )
+        flat = y * width + x
+
+        # 同一格保留绝对偏差最大的点，避免缺陷被周围平整点平均掉。
+        order = np.lexsort((np.abs(values), flat))
+        sorted_flat = flat[order]
+        keep = np.r_[
+            sorted_flat[1:] != sorted_flat[:-1],
+            True,
+        ]
+        selected = order[keep]
+        cell_colors = cls._signed_flatness_colors(
+            values[selected],
+            neutral_mm,
+            limit_mm,
+        )
+
+        margin = 24
+        legend_width = 76
+        canvas = np.full(
+            (height + margin * 2, width + margin * 2 + legend_width, 3),
+            245,
+            dtype=np.uint8,
+        )
+        facade_rgb = np.full((height, width, 3), 225, dtype=np.uint8)
+        facade_rgb.reshape(-1, 3)[flat[selected]] = np.clip(
+            cell_colors * 255.0,
+            0,
+            255,
+        ).astype(np.uint8)
+        canvas[
+            margin:margin + height,
+            margin:margin + width,
+        ] = facade_rgb
+
+        grid_step_px = max(1, int(round(1.0 / pixel_size)))
+        grid_color = (175, 175, 175)
+        for grid_x in range(margin, margin + width, grid_step_px):
+            cv2.line(
+                canvas,
+                (grid_x, margin),
+                (grid_x, margin + height - 1),
+                grid_color,
+                1,
+                cv2.LINE_AA,
+            )
+        for grid_y in range(margin + height - 1, margin - 1, -grid_step_px):
+            cv2.line(
+                canvas,
+                (margin, grid_y),
+                (margin + width - 1, grid_y),
+                grid_color,
+                1,
+                cv2.LINE_AA,
+            )
+        cv2.rectangle(
+            canvas,
+            (margin, margin),
+            (margin + width - 1, margin + height - 1),
+            (90, 90, 90),
+            1,
+        )
+
+        bar_x = margin + width + 18
+        bar_width = 16
+        gradient_values = np.linspace(
+            limit_mm,
+            -limit_mm,
+            height,
+            dtype=np.float32,
+        )
+        gradient_rgb = np.clip(
+            cls._signed_flatness_colors(
+                gradient_values,
+                neutral_mm,
+                limit_mm,
+            )
+            * 255.0,
+            0,
+            255,
+        ).astype(np.uint8)
+        canvas[
+            margin:margin + height,
+            bar_x:bar_x + bar_width,
+        ] = gradient_rgb[:, None, :]
+        cv2.rectangle(
+            canvas,
+            (bar_x, margin),
+            (bar_x + bar_width, margin + height - 1),
+            (80, 80, 80),
+            1,
+        )
+        for label, label_y in (
+            (f'+{limit_mm:.1f}', margin + 9),
+            ('0', margin + height // 2 + 4),
+            (f'-{limit_mm:.1f}', margin + height - 2),
+        ):
+            cv2.putText(
+                canvas,
+                label,
+                (bar_x + bar_width + 4, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.34,
+                (40, 40, 40),
+                1,
+                cv2.LINE_AA,
+            )
+        return np.ascontiguousarray(canvas[:, :, ::-1])
 
     def render_flatness_heatmap(self, cloud_name: str, facades: list[dict],
                                 vmin: float | None = None,
