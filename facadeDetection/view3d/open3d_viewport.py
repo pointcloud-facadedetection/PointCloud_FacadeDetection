@@ -192,21 +192,12 @@ class _PickCaptureOverlay(QWidget):
             12, 22,
             '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
         )
-        for index, item in enumerate(self._pick_labels, start=1):
-            x, y = item[:2]
-            label = item[2] if len(item) > 2 else index
+        for index, (x, y) in enumerate(self._pick_labels, start=1):
             painter.setPen(QPen(QColor(255, 255, 255), 1))
             painter.setBrush(QColor(220, 40, 40))
             painter.drawEllipse(QPoint(int(x), int(y)), 8, 8)
             painter.setPen(QColor(255, 255, 255))
-            painter.drawText(
-                int(x) - 8,
-                int(y) - 12,
-                16,
-                16,
-                Qt.AlignCenter,
-                str(label),
-            )
+            painter.drawText(int(x) - 8, int(y) - 12, 16, 16, Qt.AlignCenter, str(index))
         painter.end()
 
     def mousePressEvent(self, event):
@@ -274,8 +265,6 @@ class Open3DViewport(BaseViewport):
         self._pick_markers = []
         self._pick_lines = []
         self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
-        self._pick_marker_labels = []
-        self.marker_projection_callback = None
         self._init_success = False
         self._overlay = None
         self._roi_controller = None
@@ -632,6 +621,39 @@ class Open3DViewport(BaseViewport):
         except Exception:
             return False
 
+    def focus_on_plane(self, center, normal, extent=None, zoom=0.5):
+        """沿平面法向正对目标中心，并尽量保持当前观察侧。"""
+        if not self._init_success:
+            return False
+        try:
+            center = np.asarray(center, dtype=np.float64).reshape(3)
+            normal = np.asarray(normal, dtype=np.float64).reshape(3)
+            norm = float(np.linalg.norm(normal))
+            if not np.isfinite(center).all() or norm < 1e-12:
+                return False
+            normal /= norm
+
+            current_front, _current_up, _right = self._camera.get_camera_basis()
+            if (
+                current_front is not None
+                and float(np.dot(normal, current_front)) < 0.0
+            ):
+                normal *= -1.0
+
+            world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            if abs(float(np.dot(normal, world_up))) > 0.95:
+                world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            target_extent = max(float(extent or 0.0), 1.0)
+            eye = center + normal * max(2.0, target_extent * 2.0)
+            return self.apply_scan_pose_view(
+                eye,
+                center,
+                world_up,
+                zoom=zoom,
+            )
+        except (TypeError, ValueError):
+            return False
+
     # ------------------------------------------------------------------
     # ROI 视觉辅助：2D 红框 + 3D 包围盒
     # ------------------------------------------------------------------
@@ -807,16 +829,11 @@ class Open3DViewport(BaseViewport):
             return
         overlay.set_pick_active(enabled)
 
-    def update_pick_markers(self, src_points=None, tgt_points=None, labels=None):
+    def update_pick_markers(self, src_points=None, tgt_points=None):
         self.clear_pick_markers()
         src = np.asarray(src_points if src_points is not None else [], dtype=np.float64).reshape(-1, 3)
         tgt = np.asarray(tgt_points if tgt_points is not None else [], dtype=np.float64).reshape(-1, 3)
         self._pick_marker_xyz = src.copy() if len(src) else np.zeros((0, 3), dtype=np.float64)
-        self._pick_marker_labels = (
-            [int(value) for value in labels]
-            if labels is not None
-            else list(range(1, len(src) + 1))
-        )
 
         r_src = self._marker_radius_for_points(src) if len(src) else None
         r_tgt = self._marker_radius_for_points(tgt) if len(tgt) else None
@@ -861,24 +878,11 @@ class Open3DViewport(BaseViewport):
             projected = self.project_points(pts)
             if projected is not None:
                 screen, valid = projected
-                for index, (point, is_valid) in enumerate(zip(screen, valid)):
+                for point, is_valid in zip(screen, valid):
                     if is_valid:
-                        label = (
-                            self._pick_marker_labels[index]
-                            if index < len(self._pick_marker_labels)
-                            else index + 1
-                        )
-                        labels.append(
-                            (float(point[0]), float(point[1]), int(label))
-                        )
+                        labels.append((float(point[0]), float(point[1])))
         overlay._pick_labels = labels
         overlay.update()
-        callback = self.marker_projection_callback
-        if callback is not None:
-            try:
-                callback(labels)
-            except Exception:
-                pass
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
@@ -886,7 +890,6 @@ class Open3DViewport(BaseViewport):
         self._pick_markers = []
         self._pick_lines = []
         self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
-        self._pick_marker_labels = []
         overlay = getattr(self, '_pick_capture_overlay', None)
         if overlay is not None:
             overlay._pick_labels = []

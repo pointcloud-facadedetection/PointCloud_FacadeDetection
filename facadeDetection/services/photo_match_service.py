@@ -172,6 +172,139 @@ class PhotoMatchService:
             crop_subject=crop_subject,
         )
 
+    def map_facade_heatmap_to_photo(
+        self,
+        photo_bgr,
+        points,
+        facade: dict,
+        *,
+        alpha: float = 0.58,
+        point_radius: int = 6,
+        blur_size: int = 15,
+    ) -> dict:
+        """将选中立面的点到平面偏差热力图投影并融合到当前照片。"""
+        if self.state.annotating:
+            raise ValueError('请先退出标注模式')
+        if self.state.pose is None:
+            raise ValueError('请先完成二维-三维匹配并估算匹配矩阵')
+        if not facade:
+            raise ValueError('请先从右侧列表选择一个立面')
+
+        from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
+            FacadeHeatmapOverlay,
+            compute_facade_deviation_scalars,
+            orient_plane_toward_camera,
+        )
+
+        cloud_points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        indices = np.asarray(
+            facade.get('proxy_indices')
+            or facade.get('inlier_indices')
+            or [],
+            dtype=np.int64,
+        )
+        indices = indices[
+            (indices >= 0) & (indices < len(cloud_points))
+        ]
+        if len(indices) < 3:
+            raise ValueError('所选立面没有足够的有效点，请重新执行立面检测')
+        facade_points = cloud_points[indices]
+
+        plane = facade.get('plane_model')
+        if plane is None:
+            raise ValueError('所选立面缺少拟合平面参数，请重新执行立面检测')
+        pose = self.state.pose
+        rotation = np.asarray(
+            pose.get('rotation_matrix'), dtype=np.float64
+        ).reshape(3, 3)
+        translation = np.asarray(
+            pose.get('translation_vector'), dtype=np.float64
+        ).reshape(3)
+        camera_matrix = np.asarray(
+            pose.get('camera_matrix'), dtype=np.float64
+        ).reshape(3, 3)
+        camera_center = -rotation.T @ translation
+        center = np.asarray(
+            facade.get('center', np.mean(facade_points, axis=0)),
+            dtype=np.float64,
+        ).reshape(3)
+        oriented_plane = orient_plane_toward_camera(
+            plane,
+            center,
+            camera_center,
+        )
+        scalars_mm = compute_facade_deviation_scalars(
+            facade_points,
+            oriented_plane,
+            unit='mm',
+        )
+        finite = np.isfinite(scalars_mm)
+        if not np.any(finite):
+            raise ValueError('所选立面的平整度偏差无有效值')
+        limit_mm = max(
+            10.0,
+            float(np.percentile(np.abs(scalars_mm[finite]), 98.0)),
+        )
+        plane_normal = oriented_plane[:3]
+        vertical_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        if abs(float(np.dot(plane_normal, vertical_axis))) > 0.95:
+            vertical_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        v_axis = (
+            vertical_axis
+            - plane_normal * float(np.dot(vertical_axis, plane_normal))
+        )
+        v_axis /= np.linalg.norm(v_axis) + 1e-12
+        u_axis = np.cross(v_axis, plane_normal)
+        u_axis /= np.linalg.norm(u_axis) + 1e-12
+        plane_origin = (
+            center
+            - plane_normal
+            * float(np.dot(plane_normal, center) + oriented_plane[3])
+        )
+        relative = facade_points - plane_origin
+        facade_u = relative @ u_axis
+        facade_v = relative @ v_axis
+        u_min, u_max = float(np.min(facade_u)), float(np.max(facade_u))
+        v_min, v_max = float(np.min(facade_v)), float(np.max(facade_v))
+        boundary_points = np.asarray(
+            [
+                plane_origin + u_min * u_axis + v_min * v_axis,
+                plane_origin + u_max * u_axis + v_min * v_axis,
+                plane_origin + u_max * u_axis + v_max * v_axis,
+                plane_origin + u_min * u_axis + v_max * v_axis,
+            ],
+            dtype=np.float64,
+        )
+
+        overlay = FacadeHeatmapOverlay(
+            alpha=alpha,
+            point_radius=point_radius,
+            blur_size=blur_size,
+        )
+        blended, heatmap, meta = overlay.overlay(
+            photo_bgr,
+            facade_points,
+            scalars_mm,
+            rotation,
+            translation.reshape(3, 1),
+            camera_matrix,
+            dist_coeffs=pose.get('distortion_coefficients'),
+            val_range=(-limit_mm, limit_mm),
+            draw_colorbar=True,
+            boundary_points_3d=boundary_points,
+            border_color=(0, 0, 255),
+            border_thickness=3,
+        )
+        return {
+            'image_bgr': blended,
+            'heatmap_bgr': heatmap,
+            'meta': meta,
+            'facade_id': int(facade.get('id', -1)),
+            'point_count': int(len(facade_points)),
+            'deviation_limit_mm': float(limit_mm),
+            'boundary_points_3d': boundary_points.tolist(),
+        }
+
     def complete_pair_count(self) -> int:
         return sum(
             1

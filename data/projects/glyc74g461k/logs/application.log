@@ -47,3 +47,87 @@
 2026-08-28 09:53:40,092 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
 2026-08-28 09:53:57,014 INFO [station.switch] station_id=1
 2026-08-28 09:53:57,219 INFO [results.loaded] facades=0
+2026-08-28 10:42:56,282 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 10:42:58,274 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 10:43:09,148 INFO [station.switch] station_id=1
+2026-08-28 10:43:09,314 INFO [results.loaded] facades=0
+2026-08-28 10:58:58,188 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 10:59:00,043 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 10:59:08,440 INFO [station.switch] station_id=1
+2026-08-28 10:59:08,606 INFO [results.loaded] facades=0
+2026-08-28 11:23:35,628 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 11:23:38,112 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 11:23:55,208 INFO [station.switch] station_id=1
+2026-08-28 11:23:55,522 INFO [results.loaded] facades=0
+2026-08-28 11:44:12,961 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 11:44:14,737 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 11:44:22,896 INFO [station.switch] station_id=1
+2026-08-28 11:44:23,099 INFO [results.loaded] facades=0
+2026-08-28 14:20:36,527 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 14:20:38,630 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 14:20:50,800 INFO [station.switch] station_id=1
+2026-08-28 14:20:51,021 INFO [results.loaded] facades=0
+2026-08-28 14:59:01,296 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 14:59:03,085 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 14:59:15,125 INFO [station.switch] station_id=1
+2026-08-28 14:59:15,401 INFO [results.loaded] facades=0
+2026-08-28 15:31:41,878 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 15:31:43,597 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 15:31:53,208 INFO [station.switch] station_id=1
+2026-08-28 15:31:53,470 INFO [results.loaded] facades=0
+2026-08-28 15:34:14,291 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 15:34:16,035 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 15:34:23,996 INFO [station.switch] station_id=1
+2026-08-28 15:34:24,114 INFO [results.loaded] facades=0
+2026-08-28 15:52:48,102 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 15:52:49,852 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 15:53:00,451 INFO [station.switch] station_id=1
+2026-08-28 15:53:00,736 INFO [results.loaded] facades=0
+2026-08-28 16:00:12,097 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 16:00:13,975 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 16:00:22,996 INFO [station.switch] station_id=1
+2026-08-28 16:00:23,165 INFO [results.loaded] facades=0
+2026-08-28 16:11:08,204 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 16:11:09,887 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 16:11:18,252 INFO [station.switch] station_id=1
+2026-08-28 16:11:18,413 INFO [results.loaded] facades=0
+2026-08-28 16:59:10,867 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 16:59:12,604 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 16:59:22,573 INFO [station.switch] station_id=1
+2026-08-28 16:59:22,740 INFO [results.loaded] facades=0
+2026-08-28 17:07:51,945 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 17:07:55,548 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 17:08:10,224 INFO [station.switch] station_id=1
+2026-08-28 17:08:10,511 INFO [results.loaded] facades=0
+2026-08-28 17:23:21,997 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 17:23:23,597 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 17:23:32,201 INFO [station.switch] station_id=1
+2026-08-28 17:23:32,360 INFO [results.loaded] facades=0
+2026-08-28 17:40:19,418 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 17:40:20,963 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 17:40:29,055 INFO [station.switch] station_id=1
+2026-08-28 17:40:29,208 INFO [results.loaded] facades=0
+2026-08-28 18:08:50,876 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 18:08:52,376 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 18:09:00,418 INFO [station.switch] station_id=1
+2026-08-28 18:09:00,570 INFO [results.loaded] facades=0
+2026-08-28 18:29:01,553 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 18:29:03,144 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 18:29:12,746 INFO [station.switch] station_id=1
+2026-08-28 18:29:12,971 INFO [results.loaded] facades=0
+2026-08-28 19:02:32,319 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 19:02:33,871 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 19:02:42,328 INFO [station.switch] station_id=1
+2026-08-28 19:02:42,488 INFO [results.loaded] facades=0
+2026-08-28 20:15:50,997 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 20:15:52,673 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 20:16:02,047 INFO [station.switch] station_id=1
+2026-08-28 20:16:02,221 INFO [results.loaded] facades=0
+2026-08-28 20:34:01,710 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-28 20:34:03,281 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-28 20:34:12,426 INFO [station.switch] station_id=1
+2026-08-28 20:34:12,655 INFO [results.loaded] facades=0
+2026-08-30 10:32:03,572 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-08-30 10:32:05,946 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-08-30 10:32:18,418 INFO [station.switch] station_id=1
+2026-08-30 10:32:18,674 INFO [results.loaded] facades=0

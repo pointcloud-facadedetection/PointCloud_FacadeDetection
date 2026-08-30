@@ -240,8 +240,7 @@ class ProjectOperationService:
                     # proxy rows and new VoxelCascadeIndex revision.
                     self._last_facade_results = None
                     if render is not None:
-                        render._facades_cache.pop(stats['name'], None)
-                        render.clear_selected_facade(stats['name'])
+                        render.invalidate_facade_cache(stats['name'])
                     if len(points) == 0:
                         print(f"[PCFD] denoise.viewport_cleared cloud={stats['name']}", flush=True)
                 # Keep the result payload intact for diagnostics and for any
@@ -542,6 +541,21 @@ class ProjectOperationService:
                 results = self._facade_service.detect(
                     cloud_name=cloud_name, project_uuid=self._project_uuid)
             self._last_facade_results = results
+            # 立面检测结果属于后续 2D-3D 热力图映射的必要输入。检测完成后
+            # 立即写入项目 results 目录，项目重新打开后无需重复执行检测。
+            if self._project_uuid:
+                try:
+                    from services.facade.facade_cache import save_facade_snapshot
+                    save_facade_snapshot(
+                        self._project_uuid,
+                        cloud_name,
+                        results or [],
+                    )
+                except Exception as exc:
+                    print(
+                        f'[PCFD] facade.cache_save_failed reason={exc}',
+                        flush=True,
+                    )
             if callable(self.on_facade_results):
                 try:
                     self.on_facade_results(results)
