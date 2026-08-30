@@ -4,7 +4,6 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 from datetime import datetime
-import base64
 from PySide6.QtGui import QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtGui import QPageSize
@@ -59,14 +58,8 @@ class PdfReportRenderer:
                 else:
                     path, title = image, "热力图"
                 if path:
-                    image_path = Path(path).expanduser().resolve()
-                    try:
-                        encoded = base64.b64encode(image_path.read_bytes()).decode('ascii')
-                        image_src = f"data:image/png;base64,{encoded}"
-                    except (OSError, ValueError):
-                        continue
                     image_parts.append(f"<td><figure><figcaption>{escape(str(title))}</figcaption>"
-                                       f"<img src='{image_src}' alt='{escape(str(title))}' /></figure></td>")
+                                       f"<img src='{Path(path).as_uri()}' /></figure></td>")
             images = "".join(image_parts)
             image_markup = (f"<table class='image-grid'><tr>{images}</tr></table>"
                             if images else "<p class='muted'>暂无平整度/垂直度热力图结果</p>")
@@ -82,7 +75,7 @@ class PdfReportRenderer:
         table {{ width:100%; border-collapse:collapse; margin:2px 0 4px; }} th,td {{ border:1px solid #cbd5e1; padding:2px 4px; text-align:left; vertical-align:top; }} th {{ background:#f1f5f9; width:22%; }}
         .project-info {{ background:#f8fafc; }} .info-cell {{ width:20%; border:1px solid #d7e0ea; padding:3px 5px; }} .info-cell b {{ color:#365b7d; }}
         .facade-overview th {{ width:18%; }} section {{ page-break-inside:avoid; margin-bottom:4px; }}
-        .image-grid {{ table-layout:fixed; }} .image-grid td {{ width:50%; border:0; padding:2px 4px; vertical-align:top; }} figure {{ margin:0; }} figcaption {{ color:#365b7d; font-weight:bold; margin-bottom:2px; }} img {{ display:block; width:auto; max-width:78mm; height:auto; max-height:48mm; margin:0 auto; object-fit:contain; }} .muted {{ color:#64748b; }}
+        .image-grid {{ table-layout:fixed; }} .image-grid td {{ width:50%; border:0; padding:2px 4px; }} figure {{ margin:0; }} figcaption {{ color:#365b7d; font-weight:bold; margin-bottom:2px; }} img {{ display:block; width:100%; max-height:72mm; }} .muted {{ color:#64748b; }}
         </style></head><body><h1>建筑外立面质量检测报告</h1><p>报告生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>
         <h2>一、项目基础信息</h2>{info_html}<h2>二、建筑立面检测结果</h2>{''.join(sections) or '<p class="muted">暂无立面检测结果</p>'}</body></html>"""
 

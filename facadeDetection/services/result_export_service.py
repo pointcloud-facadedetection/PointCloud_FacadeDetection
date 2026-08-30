@@ -222,26 +222,31 @@ class ResultExportService:
         overlay = raster['overlay_rgba'].copy()
         alpha = overlay[:, :, 3].astype(np.float32) / 255.0
 
-        # Do not blur the alpha channel.  A blurred alpha creates a large
-        # semi-transparent halo, which is perceived as an unwanted gradient
-        # and hides the boundary between the facade and the defect region.
+        if np.any(alpha > 0):
+            rgb = overlay[:, :, :3].astype(np.float32)
+            premul = rgb * alpha[:, :, None]
+            premul_blur = cv2.GaussianBlur(premul, (3, 3), 1.0)
+            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
+            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
+            rgb_smooth = premul_blur / alpha_blur[:, :, None]
+            overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
+            overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
 
-        # Keep the compositing operation in RGB space.  Converting the base to
-        # BGR before blending with the RGBA overlay swaps red/blue channels and
-        # makes the exported result differ from the viewport heatmap.
-        base_rgb = np.asarray(raster['base_rgb'], dtype=np.uint8)
+        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)
+        base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
+
         visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
         composite = (
-            base_rgb.astype(np.float32) * (1.0 - visible) +
+            base_rgb.astype(np.float32) * (1.0 - visible[:, :, :1]) +
             overlay[:, :, :3].astype(np.float32) * visible[:, :, :1]
         ).astype(np.uint8)
 
         heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
         overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
 
-        if not cv2.imwrite(str(heatmap_path), cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)):
+        if not cv2.imwrite(str(heatmap_path), overlay_bgr):
             raise RuntimeError('热力图 PNG 写入失败')
-        if not cv2.imwrite(str(overlay_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)):
+        if not cv2.imwrite(str(overlay_path), composite):
             raise RuntimeError('合成图 PNG 写入失败')
 
         return heatmap_path
