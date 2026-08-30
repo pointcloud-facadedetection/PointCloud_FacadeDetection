@@ -95,7 +95,15 @@ class ProjectRepo:
 
         # pcfd index already initialized before DB creation
 
-        return {"project_uuid": project_uuid, "name": name, "root_dir": str(dirs["root"]) }
+        return {
+            "project_uuid": project_uuid,
+            "name": name,
+            "root_dir": str(dirs["root"]),
+            "org_unit": org_unit,
+            "address": address,
+            "building_floor": building_floor,
+            "remarks": remarks,
+        }
 
     @staticmethod
     def update_project(project_uuid: str, **fields) -> Optional[dict]:

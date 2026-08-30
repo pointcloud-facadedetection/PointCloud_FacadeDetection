@@ -10,6 +10,13 @@ class ProjectService:
 
     @staticmethod
     def create_project(name: str, org_unit: str | None = None,
-                       address: str | None = None, remarks: str | None = None) -> dict:
+                       address: str | None = None, remarks: str | None = None,
+                       building_floor: str | None = None) -> dict:
         """Create a project via repository and return basic info dict."""
-        return ProjectRepo.create_project(name=name, org_unit=org_unit, address=address, remarks=remarks)
+        return ProjectRepo.create_project(
+            name=name,
+            org_unit=org_unit,
+            address=address,
+            remarks=remarks,
+            building_floor=building_floor,
+        )

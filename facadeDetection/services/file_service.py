@@ -330,29 +330,12 @@ class FileService:
                     self.pointcloud_service.register_dataset(
                         dataset_id, proc_pts, proc_cols, metadata=metadata)
                     dataset = self.pointcloud_service.get_dataset(dataset_id)
-                    self.render_service.show_point_cloud(
-                        name=Path(p).name,
-                        points=dataset.proxy_points,
-                        colors=dataset.proxy_colors)
-                    # The FLS batch path used to render the proxy but omitted
-                    # the cloud-to-dataset contract that upload_files writes.
-                    # Consequently the next project operation saw a perfectly
-                    # valid cloud with no dataset_id.
-                    data = self.viewport.get_cloud_data(Path(p).name)
-                    if data is not None:
-                        data.update({
-                            'dataset_id': dataset_id,
-                            'domain': 'proxy',
-                            'index_space': 'proxy_global',
-                            'is_processing_cloud': True,
-                            'proxy_ids': np.arange(len(dataset.proxy_points), dtype=np.int32),
-                        })
+                    # Import is a data transaction. Rendering here caused the
+                    # caller to activate and render the same stations again.
                     trace('fls.import.dataset_bound', cloud=Path(p).name,
                           dataset=dataset_id, proxy=len(dataset.proxy_points))
                 else:
                     proc_pts, proc_cols = voxel_downsample(proc_pts, proc_cols, voxel_size=0.05)
-                    self.render_service.show_point_cloud(
-                        name=Path(p).name, points=proc_pts, colors=proc_cols)
 
                 imported_metadata.append(metadata)
                 try:

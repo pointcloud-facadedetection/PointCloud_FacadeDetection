@@ -91,7 +91,11 @@ class ProjectOverviewService:
         return ProjectCard(
             project_id=info["project_uuid"],
             name=info["name"],
-            directory_path=info["root_dir"],
+            directory_path=info.get("root_dir", info.get("directory_path", "")),
+            org_unit=info.get("org_unit"),
+            address=info.get("address"),
+            building_floor=info.get("building_floor"),
+            remarks=info.get("remarks"),
         )
 
     def open_project(self, directory_path: str) -> ProjectCard:
@@ -117,7 +121,17 @@ class ProjectOverviewService:
                     # The index branch returns early, so it must explicitly
                     # rebuild the station projection as well.
                     PointCloudStationRepo.sync_assets(puid)
-                    return ProjectCard(project_id=puid, name=pname, directory_path=str(path))
+                    # The index is authoritative for projects opened from disk,
+                    # while the project DB remains the source for legacy data.
+                    return ProjectCard(
+                        project_id=puid,
+                        name=pname,
+                        directory_path=str(path),
+                        org_unit=proj.get("org_unit"),
+                        address=proj.get("address"),
+                        building_floor=proj.get("building_floor"),
+                        remarks=proj.get("remarks"),
+                    )
         except Exception:
             pass
         # 尝试匹配已登记项目
@@ -133,6 +147,10 @@ class ProjectOverviewService:
             project_id=info["project_uuid"],
             name=info["name"],
             directory_path=info["root_dir"],
+            org_unit=info.get("org_unit"),
+            address=info.get("address"),
+            building_floor=info.get("building_floor"),
+            remarks=info.get("remarks"),
         )
         # 新登记项目：登记目录中的全部 PLY；实际代理构建与渲染由
         # StationService 在项目激活后按需完成，避免产生第二条加载链路。
