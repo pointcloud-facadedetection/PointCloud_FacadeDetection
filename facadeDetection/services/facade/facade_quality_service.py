@@ -254,12 +254,12 @@ class FacadeQualityService:
             if profile is not None:
                 result['profile_snapshot'] = profile.snapshot()
 
-            # Export context
+            # Keep only a lightweight export descriptor.  The worker result can
+            # contain millions of points; retaining another points/colors copy
+            # here keeps the entire quality domain alive after the dialog opens.
             result['__export_context'] = {
-                'results_dir': results_dir,
+                'results_dir': str(results_dir) if results_dir else None,
                 'facade_no': facade_no,
-                'points': filtered_pts,
-                'colors': point_colors[quality_indices] if point_colors is not None else None,
             }
 
             total_elapsed = time.perf_counter() - started
