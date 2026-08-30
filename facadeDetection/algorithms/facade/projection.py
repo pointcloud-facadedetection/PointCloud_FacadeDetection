@@ -5,7 +5,9 @@ from algorithms.geometry import plane_axes
 
 def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
                      pixel_size=0.01, max_size=6000, defect_colors=None,
-                     vmin=None, vmax=None, base_points=None, base_colors=None):
+                     vmin=None, vmax=None, base_points=None, base_colors=None,
+                     projection_origin=None, projection_u_axis=None,
+                     projection_v_axis=None):
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     frame_pts = pts if base_points is None else np.asarray(base_points, dtype=float).reshape(-1, 3)
     gaps = np.asarray(defect_values, dtype=float).reshape(-1)
@@ -19,8 +21,15 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     
     n = np.asarray(plane_model[:3], dtype=float)
     n /= np.linalg.norm(n) + 1e-12
-    u, v = plane_axes(n, 'vertical_facade')
-    origin = np.mean(frame_pts, axis=0)
+    if projection_u_axis is None or projection_v_axis is None:
+        u, v = plane_axes(n, 'vertical_facade')
+    else:
+        u = np.asarray(projection_u_axis, dtype=float).reshape(3)
+        v = np.asarray(projection_v_axis, dtype=float).reshape(3)
+        u /= np.linalg.norm(u) + 1e-12
+        v /= np.linalg.norm(v) + 1e-12
+    origin = (np.asarray(projection_origin, dtype=float).reshape(3)
+              if projection_origin is not None else np.mean(frame_pts, axis=0))
     uv = np.column_stack(((pts-origin) @ u, (pts-origin) @ v))
     frame_uv = np.column_stack(((frame_pts-origin) @ u, (frame_pts-origin) @ v))
     lo = frame_uv.min(axis=0)
@@ -28,7 +37,9 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     size = max(float(pixel_size), 1e-4)
     shape = np.maximum(np.ceil((hi-lo)/size).astype(int)+1, 1)
     if max(shape) > max_size:
-        size *= max(shape) / float(max_size)
+        # The extra endpoint pixel is included in shape, so scale against
+        # max_size - 1 rather than max_size to keep the hard bound exact.
+        size = max(size, float(np.max(hi - lo)) / max(max_size - 1, 1))
         shape = np.maximum(np.ceil((hi-lo)/size).astype(int)+1, 1)
     h, w = int(shape[1]), int(shape[0])
     x = np.clip(((uv[:, 0]-lo[0])/size).astype(int), 0, w-1)
@@ -62,26 +73,35 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     # Gray (0.75, 0.75, 0.75) at t=0 -> Yellow (1, 1, 0) at t=0.33
     # -> Orange (1, 0.5, 0) at t=0.66 -> Red (1, 0, 0) at t=1.0
     
-    # Segment 1: Gray -> Yellow (t: 0 -> 0.33)
-    mask1 = t <= 0.33
-    tt1 = t[mask1] / 0.33
-    heat[mask1, 0] = 0.75 + 0.25 * tt1  # R: 0.75 -> 1.0
-    heat[mask1, 1] = 0.75 + 0.25 * tt1  # G: 0.75 -> 1.0
-    heat[mask1, 2] = 0.75 - 0.75 * tt1  # B: 0.75 -> 0.0
-    
-    # Segment 2: Yellow -> Orange (t: 0.33 -> 0.66)
-    mask2 = (t > 0.33) & (t <= 0.66)
-    tt2 = (t[mask2] - 0.33) / 0.33
-    heat[mask2, 0] = 1.0  # R: 1.0
-    heat[mask2, 1] = 1.0 - 0.5 * tt2  # G: 1.0 -> 0.5
-    heat[mask2, 2] = 0.0  # B: 0.0
-    
-    # Segment 3: Orange -> Red (t: 0.66 -> 1.0)
-    mask3 = t > 0.66
-    tt3 = (t[mask3] - 0.66) / 0.34
-    heat[mask3, 0] = 1.0  # R: 1.0
-    heat[mask3, 1] = 0.5 - 0.5 * tt3  # G: 0.5 -> 0.0
-    heat[mask3, 2] = 0.0  # B: 0.0
+    if defect_colors is not None:
+        supplied = np.asarray(defect_colors, dtype=np.float32).reshape(-1, 3)
+        if len(supplied) == len(pts):
+            heat = np.clip(supplied[defect], 0.0, 1.0)
+        elif len(supplied) == len(values):
+            heat = np.clip(supplied, 0.0, 1.0)
+        else:
+            raise ValueError('defect_colors must align with points or defects')
+    else:
+        # Segment 1: Gray -> Yellow (t: 0 -> 0.33)
+        mask1 = t <= 0.33
+        tt1 = t[mask1] / 0.33
+        heat[mask1, 0] = 0.75 + 0.25 * tt1
+        heat[mask1, 1] = 0.75 + 0.25 * tt1
+        heat[mask1, 2] = 0.75 - 0.75 * tt1
+
+        # Segment 2: Yellow -> Orange (t: 0.33 -> 0.66)
+        mask2 = (t > 0.33) & (t <= 0.66)
+        tt2 = (t[mask2] - 0.33) / 0.33
+        heat[mask2, 0] = 1.0
+        heat[mask2, 1] = 1.0 - 0.5 * tt2
+        heat[mask2, 2] = 0.0
+
+        # Segment 3: Orange -> Red (t: 0.66 -> 1.0)
+        mask3 = t > 0.66
+        tt3 = (t[mask3] - 0.66) / 0.34
+        heat[mask3, 0] = 1.0
+        heat[mask3, 1] = 0.5 - 0.5 * tt3
+        heat[mask3, 2] = 0.0
     
     defect_indices = np.flatnonzero(defect)
     

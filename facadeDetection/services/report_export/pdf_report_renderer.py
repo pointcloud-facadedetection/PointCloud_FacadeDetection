@@ -4,6 +4,7 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 from datetime import datetime
+import base64
 from PySide6.QtGui import QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtGui import QPageSize
@@ -20,7 +21,10 @@ class PdfReportRenderer:
         info = [("项目名称", project.get("name")), ("所属单位", project.get("org_unit")),
                 ("项目地址", project.get("address")), ("楼栋号信息", project.get("building_floor")),
                 ("备注", project.get("remarks"))]
-        info_html = "".join(f"<tr><th>{escape(label)}</th><td>{_text(value)}</td></tr>" for label, value in info)
+        info_cells = "".join(
+            f"<td class='info-cell'><b>{escape(label)}</b><br>{_text(value)}</td>"
+            for label, value in info)
+        info_html = f"<table class='project-info'><tr>{info_cells}</tr></table>"
         sections = []
         for facade in snapshot.get("facades", []):
             quality = facade.get("quality") or {}
@@ -55,20 +59,32 @@ class PdfReportRenderer:
                 else:
                     path, title = image, "热力图"
                 if path:
-                    image_parts.append(f"<figure><figcaption>{escape(str(title))}</figcaption>"
-                                       f"<img src='{Path(path).as_uri()}' /></figure>")
+                    image_path = Path(path).expanduser().resolve()
+                    try:
+                        encoded = base64.b64encode(image_path.read_bytes()).decode('ascii')
+                        image_src = f"data:image/png;base64,{encoded}"
+                    except (OSError, ValueError):
+                        continue
+                    image_parts.append(f"<td><figure><figcaption>{escape(str(title))}</figcaption>"
+                                       f"<img src='{image_src}' alt='{escape(str(title))}' /></figure></td>")
             images = "".join(image_parts)
-            image_markup = images or "<p class='muted'>暂无平整度/垂直度热力图结果</p>"
+            image_markup = (f"<table class='image-grid'><tr>{images}</tr></table>"
+                            if images else "<p class='muted'>暂无平整度/垂直度热力图结果</p>")
             detail_html = "<table>" + "".join(detail_rows) + "</table>" if detail_rows else "<p class='muted'>暂无详细检测数据</p>"
             sections.append(f"<section><h2>立面 {facade['report_no']}</h2><table class='facade-overview'>{metric_html}</table>"
                             f"<h3>关键检测数据</h3>{detail_html}<h3>可视化结果</h3>"
                             f"<div class='images'>{image_markup}</div></section>")
         return f"""<!doctype html><html><head><meta charset='utf-8'><style>
-        @page {{ size: A4; margin: 12mm 13mm 12mm; }} body {{ font-family: 'Microsoft YaHei','SimSun'; color:#1f2937; font-size:9pt; line-height:1.25; }}
-        h1 {{ color:#163a63; font-size:19pt; margin:0 0 5mm; border-bottom:2px solid #2f75b5; padding-bottom:4px; }} h2 {{ color:#163a63; background:#eaf2fb; padding:5px 7px; margin:7px 0 5px; border-left:4px solid #2f75b5; }} h3 {{ color:#365b7d; font-size:10pt; margin:5px 0 3px; }}
-        table {{ width:100%; border-collapse:collapse; margin:3px 0 7px; }} th,td {{ border:1px solid #cbd5e1; padding:3px 5px; text-align:left; vertical-align:top; }} th {{ background:#f1f5f9; width:22%; }} pre {{ white-space:pre-wrap; font-family:'Microsoft YaHei','SimSun'; font-size:8pt; margin:0; }} section {{ page-break-inside:auto; }} .images {{ display:flex; gap:8px; align-items:flex-start; }} figure {{ margin:0; width:49%; }} figcaption {{ color:#365b7d; font-weight:bold; margin-bottom:2px; }} img {{ display:block; width:100%; max-height:105mm; object-fit:contain; }} .muted {{ color:#64748b; }}
+        @page {{ size:A4; margin:9mm 11mm 9mm; }} body {{ font-family:'Microsoft YaHei','SimSun'; color:#1f2937; font-size:8.5pt; line-height:1.15; }}
+        h1 {{ color:#163a63; font-size:17pt; margin:0 0 2mm; border-bottom:2px solid #2f75b5; padding-bottom:2mm; }}
+        h2 {{ color:#163a63; background:#eaf2fb; padding:3px 6px; margin:4px 0 3px; border-left:3px solid #2f75b5; font-size:11pt; }}
+        h3 {{ color:#365b7d; font-size:9pt; margin:3px 0 2px; }}
+        table {{ width:100%; border-collapse:collapse; margin:2px 0 4px; }} th,td {{ border:1px solid #cbd5e1; padding:2px 4px; text-align:left; vertical-align:top; }} th {{ background:#f1f5f9; width:22%; }}
+        .project-info {{ background:#f8fafc; }} .info-cell {{ width:20%; border:1px solid #d7e0ea; padding:3px 5px; }} .info-cell b {{ color:#365b7d; }}
+        .facade-overview th {{ width:18%; }} section {{ page-break-inside:avoid; margin-bottom:4px; }}
+        .image-grid {{ table-layout:fixed; }} .image-grid td {{ width:50%; border:0; padding:2px 4px; vertical-align:top; }} figure {{ margin:0; }} figcaption {{ color:#365b7d; font-weight:bold; margin-bottom:2px; }} img {{ display:block; width:auto; max-width:78mm; height:auto; max-height:48mm; margin:0 auto; object-fit:contain; }} .muted {{ color:#64748b; }}
         </style></head><body><h1>建筑外立面质量检测报告</h1><p>报告生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>
-        <h2>一、项目基础信息</h2><table>{info_html}</table><h2>二、建筑立面检测结果</h2>{''.join(sections) or '<p class="muted">暂无立面检测结果</p>'}</body></html>"""
+        <h2>一、项目基础信息</h2>{info_html}<h2>二、建筑立面检测结果</h2>{''.join(sections) or '<p class="muted">暂无立面检测结果</p>'}</body></html>"""
 
     @staticmethod
     def _percent(value):

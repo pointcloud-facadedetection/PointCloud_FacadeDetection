@@ -46,12 +46,15 @@ class ResultExportService:
 
             heatmap_mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
 
-            # Check valid windows
+            # Only windows with a real measurement and a failed quality result
+            # are drawable.  Merely having a finite value is not a quality write.
             n_valid = 0
+            spec = heatmap_spec(heatmap_mode)
             for w in windows:
-                fgm = w.get(heatmap_spec(heatmap_mode)['value_key'], np.nan)
+                fgm = w.get(spec['value_key'], np.nan)
                 try:
-                    if np.isfinite(float(fgm)):
+                    if (not bool(w.get(spec['pass_key'], True)) and
+                            np.isfinite(float(fgm))):
                         n_valid += 1
                 except (TypeError, ValueError):
                     pass
@@ -65,12 +68,20 @@ class ResultExportService:
             pixel_size = max(float(pixel_size), 0.01)
             heatmap_path = self._export_window_heatmap(
                 root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
+            max_value = overall.get(spec['value_key'])
+            if max_value is None:
+                limit_for_legend = float(quality.get('parameters', {}).get(
+                    spec['limit_key'], quality.get('thresholds', {}).get(
+                        spec['limit_key'], 4.0)))
+                max_value = max((float(w.get(spec['value_key'])) for w in windows
+                                 if np.isfinite(float(w.get(spec['value_key'], np.nan)))),
+                                default=limit_for_legend)
             legend_path = self._create_heatmap_legend(
                 root,
                 quality.get('parameters', {}).get(
                     heatmap_spec(heatmap_mode)['limit_key'],
                     quality.get('thresholds', {}).get(heatmap_spec(heatmap_mode)['limit_key'], 4.0)),
-                float(overall.get(heatmap_spec(heatmap_mode)['value_key'], 4.0)),
+                float(max_value),
                 heatmap_mode)
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
@@ -196,39 +207,41 @@ class ResultExportService:
 
         # defect_values and defect_limit are already supplied positionally;
         # passing defect_values again by keyword raises a TypeError.
+        projection = quality.get('projection') or {}
+        projection_origin = quality.get('projection_origin')
+        projection_u_axis = quality.get('projection_u_axis')
+        projection_v_axis = quality.get('projection_v_axis')
         raster = rasterize_facade(
             centers, np.full((len(centers), 3), 0.7), plane_model, values_m, limit_m,
             pixel_size=pixel_size, defect_colors=defect_colors, vmin=limit_m,
-            base_points=base_points, base_colors=base_colors)
+            base_points=base_points, base_colors=base_colors,
+            projection_origin=projection_origin,
+            projection_u_axis=projection_u_axis,
+            projection_v_axis=projection_v_axis)
 
         overlay = raster['overlay_rgba'].copy()
         alpha = overlay[:, :, 3].astype(np.float32) / 255.0
 
-        if np.any(alpha > 0):
-            rgb = overlay[:, :, :3].astype(np.float32)
-            premul = rgb * alpha[:, :, None]
-            premul_blur = cv2.GaussianBlur(premul, (3, 3), 1.0)
-            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
-            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
-            rgb_smooth = premul_blur / alpha_blur[:, :, None]
-            overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
-            overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
+        # Do not blur the alpha channel.  A blurred alpha creates a large
+        # semi-transparent halo, which is perceived as an unwanted gradient
+        # and hides the boundary between the facade and the defect region.
 
-        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)
-        base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
-
+        # Keep the compositing operation in RGB space.  Converting the base to
+        # BGR before blending with the RGBA overlay swaps red/blue channels and
+        # makes the exported result differ from the viewport heatmap.
+        base_rgb = np.asarray(raster['base_rgb'], dtype=np.uint8)
         visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
         composite = (
-            base_rgb.astype(np.float32) * (1.0 - visible[:, :, :1]) +
+            base_rgb.astype(np.float32) * (1.0 - visible) +
             overlay[:, :, :3].astype(np.float32) * visible[:, :, :1]
         ).astype(np.uint8)
 
         heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
         overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
 
-        if not cv2.imwrite(str(heatmap_path), overlay_bgr):
+        if not cv2.imwrite(str(heatmap_path), cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)):
             raise RuntimeError('热力图 PNG 写入失败')
-        if not cv2.imwrite(str(overlay_path), composite):
+        if not cv2.imwrite(str(overlay_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)):
             raise RuntimeError('合成图 PNG 写入失败')
 
         return heatmap_path

@@ -1,4 +1,5 @@
 import numpy as np
+import open3d as o3d
 
 from .geometry_factory import make_point_cloud
 from .lod import display_arrays, normalize_colors
@@ -49,7 +50,13 @@ class PointCloudScene:
             return
         data = self.point_data[name]
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(data["pos"])).astype(np.float32))
-        self.refresh_cloud(name, reset_bounding_box=False)
+        geometry = self.clouds.get(name)
+        if geometry is None:
+            self.refresh_cloud(name, reset_bounding_box=False)
+            return
+        geometry.colors = o3d.utility.Vector3dVector(
+            np.asarray(data["color"], dtype=np.float64))
+        self.adapter.update_geometry(geometry)
 
     def update_cloud_points(self, name, positions, colors=None):
         if name not in self.point_data:

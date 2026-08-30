@@ -229,8 +229,8 @@ class ViewportRenderService:
             if pos is None or len(pos) == 0:
                 return
 
-            colors = self._facade_base_colors(cloud_name, facades, base_color)
-            n = len(colors)
+            n = len(pos)
+            colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
 
             try:
                 self._facades_cache[cloud_name] = facades or []
@@ -889,6 +889,9 @@ class ViewportRenderService:
 
     def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
         try:
+            # Restoring facade colors is an explicit visual action.  Keep it
+            # disabled by default for large processing clouds; callers can
+            # opt in after the UI is idle if that visual layer is required.
             self.highlight_facades(cloud_name, facades)
         except Exception:
             pass

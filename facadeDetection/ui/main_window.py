@@ -1282,8 +1282,6 @@ class MainWindow(QMainWindow):
             cloud = (self.pointcloud_service.resolve_processing_cloud()
                      if self.pointcloud_service is not None else None)
             if cloud and self.render_service is not None:
-                # Loading a project restores facade colors only. Quality heatmap
-                # rendering is an explicit action from the quality button.
                 self.render_service.highlight_facades(cloud, results or [])
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
@@ -1502,12 +1500,38 @@ class MainWindow(QMainWindow):
             # Rebuild the export input from the active processing dataset.
             try:
                 dataset = self.facade_service._index_service._get_dataset(cloud)
-                raw_indices = np.asarray(
-                    display_quality.get('__global_indices', []), dtype=np.int64)
+                # Export the segmented facade domain as the front-facing base.
+                # Quality indices are measurement support only and must not
+                # define the image extent.
+                proxy_ids = np.asarray(
+                    facade.get('proxy_indices') or facade.get('inlier_indices') or [],
+                    dtype=np.int64)
+                if len(proxy_ids) and dataset.index.has_source_mapping():
+                    raw_indices = dataset.index.proxy_to_source_ids(
+                        proxy_ids, deduplicate=True)
+                else:
+                    raw_indices = proxy_ids
+                raw_indices = raw_indices[(raw_indices >= 0) &
+                                          (raw_indices < len(dataset.processed_raw_points))]
+                if len(raw_indices) == 0:
+                    print(f'[PCFD] export_context_failed facade_id={facade_id} '
+                          'reason=no_facade_source_indices', flush=True)
+                    return context
                 points = np.asarray(dataset.processed_raw_points)[raw_indices]
                 source_colors = dataset.index.get_source_colors()
-                colors = (source_colors[raw_indices]
-                          if source_colors is not None else None)
+                colors = (np.asarray(source_colors)[raw_indices]
+                          if source_colors is not None and
+                          len(source_colors) > int(raw_indices.max()) else None)
+                if colors is None:
+                    colors = np.tile(np.asarray(
+                        self.render_service.facade_color_for(facade), dtype=float),
+                        (len(points), 1))
+                else:
+                    colors = np.asarray(colors, dtype=float).reshape(-1, 3)
+                    # Ensure the segmented facade colour is visible in the
+                    # exported base, independent of source RGB availability.
+                    colors[:] = np.asarray(
+                        self.render_service.facade_color_for(facade), dtype=float)
                 project_uuid = getattr(self.current_project, 'project_id', None)
                 results_dir = (Storage.ensure_project_dirs(project_uuid)['results']
                                if project_uuid else None)

@@ -60,6 +60,11 @@ class Open3DAdapter:
         self.geometries[name] = geometry
         self.vis.add_geometry(geometry, reset_bounding_box=reset_bounding_box)
 
+    def update_geometry(self, geometry):
+        """Upload changed attributes without removing/re-adding geometry."""
+        if self._assert_owner():
+            self.vis.update_geometry(geometry)
+
     def remove_geometry(self, name):
         if not self._assert_owner():
             return

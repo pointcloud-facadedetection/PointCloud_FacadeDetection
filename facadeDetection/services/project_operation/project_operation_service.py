@@ -571,11 +571,11 @@ class ProjectOperationService:
                     self.on_facade_results(results)
                 except Exception:
                     pass
-            # 启用点击选择：在视口中点击立面点，高亮对应立面
-            try:
-                self._enable_facade_click_select(cloud_name, results or [])
-            except Exception:
-                pass
+            # Do not build a point->facade dictionary here.  A processing
+            # cloud may contain millions of inlier indices; constructing that
+            # Python mapping on the GUI thread stalls every Qt control after
+            # detection has already completed.  Facade selection remains
+            # available from the result list, which carries the stable IDs.
             # The UI result callback performs the single authoritative color
             # commit.  Do not submit a second 1.9M-row color buffer here.
         except Exception as e:
