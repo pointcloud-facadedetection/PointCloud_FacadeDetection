@@ -1,7 +1,9 @@
 from pathlib import Path
 import numpy as np
 import open3d as o3d
-from algorithms.registration import point_to_plane_icp
+from algorithms.registration import (
+    point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
+)
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
 from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
@@ -18,12 +20,16 @@ class PointCloudStationService:
         self._loaded_project = None
         self._dataset_ids = {}
         self._active_station_id = None
+        # Registration snapshots are intentionally separate from raw assets.
+        # They are reused across retries and never trigger another PLY read.
+        self._registration_cloud_cache = {}
 
     def set_project(self, project_uuid):
         self.project_uuid = project_uuid
         self._loaded_project = None
         self._dataset_ids.clear()
         self._active_station_id = None
+        self._registration_cloud_cache.clear()
 
     def refresh(self):
         if self.project_uuid:
@@ -292,6 +298,20 @@ class PointCloudStationService:
         PointCloudStationRepo.save_view(self.project_uuid, mode, rows[0].id, [x.id for x in rows])
         log_event(self.project_uuid, 'station.merge', mode=mode, count=len(rows))
 
+    def prepare_registration_view(self, rows=None):
+        """Publish only proxy clouds for operator correspondence picking."""
+        rows = rows or [x for x in self.list_stations() if x.is_selected]
+        if len(rows) != 2:
+            raise ValueError('人工点配准当前需要恰好选择两个站点')
+        datasets = [self._load_proxy_domain(row) for row in rows]
+        self.render.clear_scene_display()
+        names = []
+        for row, dataset in zip(rows, datasets):
+            names.append(self.render.show_station_proxy(
+                row.id, row.display_name, dataset.proxy_points,
+                dataset.proxy_colors, dataset_id=dataset.dataset_id))
+        return rows, names
+
     def restore_view(self):
         """恢复持久化的站点视图，若无则回退到第一个站点。"""
         if self._restoring or self._loaded_project == self.project_uuid:
@@ -326,25 +346,71 @@ class PointCloudStationService:
         else:
             self.show_single(active or by_id[selected_ids[0]])
 
-    def register_selected(self, update_viewport=True):
-        self.refresh()
+    def register_selected(self, update_viewport=True, manual_points=None,
+                          proxy_clouds=None):
         rows = [x for x in self.list_stations() if x.is_selected]
         if len(rows) < 2: raise ValueError('点云配准至少需要选择两个 PLY 站点')
-        reference, _ = self._load(rows[0].source_path)
+        if manual_points is not None and len(rows) != 2:
+            raise ValueError('人工对应点配准当前只支持两个站点')
+        if manual_points is not None:
+            src_pairs, tgt_pairs = manual_points
+            src_pairs = np.asarray(src_pairs, dtype=np.float64).reshape(-1, 3)
+            tgt_pairs = np.asarray(tgt_pairs, dtype=np.float64).reshape(-1, 3)
+            if len(src_pairs) != len(tgt_pairs) or len(src_pairs) < 3:
+                raise ValueError('人工对应点至少需要 3 对且数量必须一致')
+            if not np.isfinite(src_pairs).all() or not np.isfinite(tgt_pairs).all():
+                raise ValueError('人工对应点包含无效坐标')
+            if proxy_clouds is not None:
+                snapshots = tuple(np.asarray(x, dtype=np.float64).reshape(-1, 3)
+                                  for x in proxy_clouds)
+                if len(snapshots) != 2:
+                    raise ValueError('人工点云快照数量必须为 2')
+                # The UI picks physical coordinates from these snapshots. A
+                # small tolerance allows float32 display conversion without
+                # accepting points from a stale station/domain.
+                for points, snapshot in zip((src_pairs, tgt_pairs),
+                                            (snapshots[1], snapshots[0])):
+                    if len(snapshot) == 0:
+                        raise ValueError('人工点云快照为空')
+                    distances = np.min(
+                        np.linalg.norm(points[:, None, :] - snapshot[None, :, :], axis=2),
+                        axis=1)
+                    if np.any(distances > 1e-3):
+                        raise ValueError('人工对应点不属于当前站点快照，请重新选点')
         log_event(self.project_uuid, 'station.registration.started', count=len(rows))
         staged = []
         transformed_clouds = []
-        reference_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(reference))
+        registration_clouds = []
+        for row in rows:
+            dataset = self._load_proxy_domain(row)
+            key = (dataset.dataset_id, int(len(dataset.proxy_points)), 0.05)
+            reg = self._registration_cloud_cache.get(key)
+            if reg is None:
+                reg = build_registration_cloud(
+                    dataset.proxy_points, dataset.proxy_colors, voxel_size=0.05)
+                self._registration_cloud_cache[key] = reg
+            if len(reg.points) < 3:
+                raise ValueError(f'{row.display_name} 配准下采样点不足')
+            registration_clouds.append(reg)
+
+        reference = registration_clouds[0]
+        reference_cloud = reference.as_open3d()
         transformed_clouds.append(reference_cloud)
-        for row in rows[1:]:
-            target, colors = self._load(row.source_path)
+        for row, moving_reg in zip(rows[1:], registration_clouds[1:]):
             # 输入点云已经过 GPS/全球坐标校正。ICP 只估计残余精化，不重新应用 JSON 变换。
-            result = point_to_plane_icp(target, reference, voxel_size=0.05)
+            if manual_points is not None:
+                src_pairs, tgt_pairs = manual_points
+                if proxy_clouds is None:
+                    raise ValueError('人工点配准缺少代理点云快照')
+                result = manual_seeded_icp(
+                    moving_reg.points, reference.points, src_pairs, tgt_pairs,
+                    voxel_size=0.05)
+            else:
+                result = point_to_plane_icp(
+                    moving_reg.points, reference.points, voxel_size=0.05)
             if not result.accepted:
                 raise ValueError(f'{row.display_name} 配准失败：{result.message}，RMSE={result.inlier_rmse:.4f}')
-            cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target))
-            if colors is not None and len(colors) == len(target):
-                cloud.colors = o3d.utility.Vector3dVector(colors)
+            cloud = moving_reg.as_open3d()
             cloud.transform(result.transformation)
             transformed_clouds.append(cloud)
             staged.append((row, result))
@@ -366,6 +432,9 @@ class PointCloudStationService:
             'station_ids': [x.id for x in rows],
             'reference_id': rows[0].id,
             'result_path': str(out),
+            'metric_domain': 'registration_downsample',
+            'registration_voxel_size': 0.05,
+            'registration_cloud_counts': [int(len(x.points)) for x in registration_clouds],
             'transforms': {
                 rows[0].id: (np.eye(4).tolist(), 1.0, 0.0),
                 **{row.id: (result.transformation.tolist(), result.fitness,
