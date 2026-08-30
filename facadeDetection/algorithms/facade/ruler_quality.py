@@ -949,7 +949,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
                 if interval['v_min_m'] <= row['center_uv_base'][1] <= interval['v_max_m']
                 and np.isfinite(row.get('verticality_deviation_mm', np.nan))
             ]
-            interval['verticality_max_deviation_mm_2m'] = (
+            interval['verticality_max_deviation_mm'] = (
                 float(np.nanmax([row['verticality_deviation_mm'] for row in vrows])) if vrows else 0.0
             )
             interval['verticality_pass_rate'] = float(np.mean([row['verticality_pass'] for row in vrows])) if vrows else 0.0

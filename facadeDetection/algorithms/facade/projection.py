@@ -5,20 +5,26 @@ from algorithms.geometry import plane_axes
 
 def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
                      pixel_size=0.01, max_size=6000, defect_colors=None,
-                     vmin=None, vmax=None):
+                     vmin=None, vmax=None, base_points=None, base_colors=None):
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    frame_pts = pts if base_points is None else np.asarray(base_points, dtype=float).reshape(-1, 3)
     gaps = np.asarray(defect_values, dtype=float).reshape(-1)
     rgb = np.asarray(colors if colors is not None else np.full((len(pts), 3), .75), dtype=float)
+    frame_rgb = np.asarray(base_colors if base_colors is not None else
+                           np.full((len(frame_pts), 3), .75), dtype=float).reshape(-1, 3)
+    if len(frame_rgb) != len(frame_pts):
+        frame_rgb = np.full((len(frame_pts), 3), .75, dtype=float)
     if len(pts) == 0 or len(gaps) != len(pts):
         raise ValueError('points and defect_values must have equal non-zero length')
     
     n = np.asarray(plane_model[:3], dtype=float)
     n /= np.linalg.norm(n) + 1e-12
     u, v = plane_axes(n, 'vertical_facade')
-    origin = np.mean(pts, axis=0)
+    origin = np.mean(frame_pts, axis=0)
     uv = np.column_stack(((pts-origin) @ u, (pts-origin) @ v))
-    lo = uv.min(axis=0)
-    hi = uv.max(axis=0)
+    frame_uv = np.column_stack(((frame_pts-origin) @ u, (frame_pts-origin) @ v))
+    lo = frame_uv.min(axis=0)
+    hi = frame_uv.max(axis=0)
     size = max(float(pixel_size), 1e-4)
     shape = np.maximum(np.ceil((hi-lo)/size).astype(int)+1, 1)
     if max(shape) > max_size:
@@ -29,10 +35,13 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     y = np.clip((h-1-(uv[:, 1]-lo[1])/size).astype(int), 0, h-1)
     flat = y*w+x
     count = np.bincount(flat, minlength=h*w).reshape(h,w).astype(np.int32)
-    base = np.zeros((h*w,3), dtype=np.float32)
-    np.add.at(base, flat, rgb.astype(np.float32))
-    base /= np.maximum(count.reshape(-1,1), 1)
-    base = base.reshape(h,w,3)
+    base_flat = np.zeros((h*w, 3), dtype=np.float32)
+    frame_x = np.clip(((frame_uv[:, 0]-lo[0])/size).astype(int), 0, w-1)
+    frame_y = np.clip((h-1-(frame_uv[:, 1]-lo[1])/size).astype(int), 0, h-1)
+    frame_flat = frame_y*w+frame_x
+    np.add.at(base_flat, frame_flat, frame_rgb.astype(np.float32))
+    base_flat /= np.maximum(np.bincount(frame_flat, minlength=h*w).reshape(-1, 1), 1)
+    base = base_flat.reshape(h,w,3)
     
     # ==================== Unified defect heatmap ====================
     abs_gap = np.abs(gaps)

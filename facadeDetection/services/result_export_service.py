@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 from algorithms.facade.projection import rasterize_facade
+from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
 
 
 class ResultExportService:
@@ -43,17 +44,12 @@ class ResultExportService:
                 print(f'[PCFD] export_heatmap: no windows, skip', flush=True)
                 return None
 
-            heatmap_mode = str(quality.get('heatmap_mode') or 'flatness')
+            heatmap_mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
 
             # Check valid windows
             n_valid = 0
             for w in windows:
-                if heatmap_mode == 'verticality':
-                    fgm = w.get('verticality_deviation_mm', np.nan)
-                elif heatmap_mode == 'flatness_raw':
-                    fgm = w.get('flatness_raw_max_gap_mm', np.nan)
-                else:
-                    fgm = w.get('flatness_gap_mm', np.nan)
+                fgm = w.get(heatmap_spec(heatmap_mode)['value_key'], np.nan)
                 try:
                     if np.isfinite(float(fgm)):
                         n_valid += 1
@@ -64,21 +60,28 @@ class ResultExportService:
                 print(f'[PCFD] export_heatmap: no valid windows, skip', flush=True)
                 return None
 
+            # Keep raster dimensions bounded.  A facade image larger than this
+            # is not printable and creates a dangerous transient memory spike.
+            pixel_size = max(float(pixel_size), 0.01)
             heatmap_path = self._export_window_heatmap(
-                root, facade_no, pts, windows, plane_model, pixel_size, quality)
+                root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
             legend_path = self._create_heatmap_legend(
                 root,
                 quality.get('parameters', {}).get(
-                    'verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm',
-                    quality.get('thresholds', {}).get('verticality_limit_mm' if heatmap_mode == 'verticality' else 'flatness_limit_mm', 4.0)),
-                float(overall.get('verticality_deviation_mm' if heatmap_mode == 'verticality' else 'flatness_raw_max_gap_mm' if heatmap_mode == 'flatness_raw' else 'flatness_max_gap_mm', 4.0)))
+                    heatmap_spec(heatmap_mode)['limit_key'],
+                    quality.get('thresholds', {}).get(heatmap_spec(heatmap_mode)['limit_key'], 4.0)),
+                float(overall.get(heatmap_spec(heatmap_mode)['value_key'], 4.0)),
+                heatmap_mode)
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
                   f'heatmap={heatmap_path.name if heatmap_path else None}', flush=True)
 
             return {
                 'root': str(root),
+                'mode': heatmap_mode,
+                'title': heatmap_spec(heatmap_mode)['title'],
                 'heatmap': str(heatmap_path) if heatmap_path else None,
+                'overlay': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'),
                 'legend': str(legend_path) if legend_path else None,
             }
 
@@ -99,16 +102,17 @@ class ResultExportService:
                     pass
             return None
 
-    def _export_window_heatmap(self, root, facade_no, pts_local, windows, plane_model, pixel_size, quality):
+    def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
         """Export window results as heatmap PNG with unified defect coloring."""
-        mode = str(quality.get('heatmap_mode') or 'flatness')
+        mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
+        spec = heatmap_spec(mode)
         
         # Extract centers and defect values
         centers_list = []
         values_list = []
         
         for r in windows:
-            pass_key = 'verticality_pass' if mode == 'verticality' else 'flatness_pass'
+            pass_key = spec['pass_key']
             if bool(r.get(pass_key, True)):
                 continue
             cx = r.get('center_xyz')
@@ -126,12 +130,7 @@ class ResultExportService:
             else:
                 continue
 
-            if mode == 'verticality':
-                val = r.get('verticality_deviation_mm', np.nan)
-            elif mode == 'flatness_raw':
-                val = r.get('flatness_raw_max_gap_mm', np.nan)
-            else:
-                val = r.get('flatness_gap_mm', np.nan)
+            val = r.get(spec['value_key'], np.nan)
             
             try:
                 val = float(val)
@@ -149,7 +148,7 @@ class ResultExportService:
             raise ValueError('质量结果没有有效窗口，无法导出热力图')
 
         # Get limit
-        limit_key = 'verticality_limit_mm' if mode == 'verticality' else 'flatness_limit_mm'
+        limit_key = spec['limit_key']
         limit_mm = float(quality.get('parameters', {}).get(
             limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
         
@@ -162,37 +161,45 @@ class ResultExportService:
         scale_m = max(float(np.nanpercentile(excess_m, 97)), 1e-9)
         t = np.clip(excess_m / scale_m, 0.0, 1.0)
 
-        colors = np.zeros((len(values_m), 3), dtype=float)
+        defect_colors = np.zeros((len(values_m), 3), dtype=float)
         
         # Gray (0.75, 0.75, 0.75) at t=0 -> Yellow (1, 1, 0) at t=0.33
         # -> Orange (1, 0.5, 0) at t=0.66 -> Red (1, 0, 0) at t=1.0
         
         mask1 = t <= 0.33
         tt1 = t[mask1] / 0.33
-        colors[mask1, 0] = 0.75 + 0.25 * tt1
-        colors[mask1, 1] = 0.75 + 0.25 * tt1
-        colors[mask1, 2] = 0.75 - 0.75 * tt1
+        defect_colors[mask1, 0] = 0.75 + 0.25 * tt1
+        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1
+        defect_colors[mask1, 2] = 0.75 - 0.75 * tt1
         
         mask2 = (t > 0.33) & (t <= 0.66)
         tt2 = (t[mask2] - 0.33) / 0.33
-        colors[mask2, 0] = 1.0
-        colors[mask2, 1] = 1.0 - 0.5 * tt2
-        colors[mask2, 2] = 0.0
+        defect_colors[mask2, 0] = 1.0
+        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2
+        defect_colors[mask2, 2] = 0.0
         
         mask3 = t > 0.66
         tt3 = (t[mask3] - 0.66) / 0.34
-        colors[mask3, 0] = 1.0
-        colors[mask3, 1] = 0.5 - 0.5 * tt3
-        colors[mask3, 2] = 0.0
+        defect_colors[mask3, 0] = 1.0
+        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3
+        defect_colors[mask3, 2] = 0.0
 
-        base = np.full((len(centers), 3), 0.75, dtype=float)
+        # The complete facade domain is supplied as the raster background; the
+        # defect windows are only the overlay.  This preserves facade colours.
+        base_points = np.asarray(pts_local, dtype=float).reshape(-1, 3)
+        if len(base_points) == 0:
+            raise ValueError('完整立面点云为空，无法导出叠加图')
+        base_colors = np.asarray(colors if colors is not None else
+                                 np.full((len(base_points), 3), 0.7), dtype=float)
+        if len(base_colors) != len(base_points):
+            base_colors = np.full((len(base_points), 3), 0.7, dtype=float)
 
         # defect_values and defect_limit are already supplied positionally;
         # passing defect_values again by keyword raises a TypeError.
         raster = rasterize_facade(
-            centers, base, plane_model, values_m, limit_m,
-            pixel_size=pixel_size, defect_colors=colors, vmin=limit_m
-        )
+            centers, np.full((len(centers), 3), 0.7), plane_model, values_m, limit_m,
+            pixel_size=pixel_size, defect_colors=defect_colors, vmin=limit_m,
+            base_points=base_points, base_colors=base_colors)
 
         overlay = raster['overlay_rgba'].copy()
         alpha = overlay[:, :, 3].astype(np.float32) / 255.0
@@ -216,8 +223,8 @@ class ResultExportService:
             overlay[:, :, :3].astype(np.float32) * visible[:, :, :1]
         ).astype(np.uint8)
 
-        heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_defect_heatmap.png'
-        overlay_path = Path(root) / 'defect_overlay.png'
+        heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
+        overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
 
         if not cv2.imwrite(str(heatmap_path), overlay_bgr):
             raise RuntimeError('热力图 PNG 写入失败')
@@ -226,7 +233,7 @@ class ResultExportService:
 
         return heatmap_path
 
-    def _create_heatmap_legend(self, root, limit_mm, max_mm):
+    def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
         """Create unified heatmap color legend PNG."""
         h, w = 80, 500
         legend = np.ones((h, w, 3), dtype=np.uint8) * 245
@@ -273,6 +280,6 @@ class ResultExportService:
         cv2.putText(legend, "严重", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
         cv2.putText(legend, f"{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
-        legend_path = Path(root) / 'heatmap_legend.png'
+        legend_path = Path(root) / f'{Path(root).name}_{normalize_heatmap_mode(mode)}_legend.png'
         cv2.imwrite(str(legend_path), legend)
         return legend_path
