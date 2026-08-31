@@ -2389,9 +2389,42 @@ class MainWindow(QMainWindow):
             self.station_service.refresh()
             rows = [x for x in self.station_service.list_stations() if x.is_selected]
             if len(rows) != 2:
-                raise ValueError('人工点配准需要恰好选择两个 PLY 站点')
+                raise ValueError('点云配准需要恰好选择两个 PLY 站点')
+            # PLY 已在 FLS 导出阶段应用 transformToGlobal。默认直接执行
+            # GPS 全局坐标上的残差 ICP；人工选点仅作为失败后的兜底工具。
+            self._registration_rows = tuple(x.id for x in rows)
+            self._start_auto_registration(self._registration_rows)
+        except Exception as exc:
+            QMessageBox.warning(self, '点云配准', str(exc))
+
+    def _start_auto_registration(self, station_ids):
+        """Run residual ICP on already-globalized PLY clouds off the GUI thread."""
+        generation = self._project_generation
+        project_uuid = getattr(self.current_project, 'project_id', None)
+
+        def run_registration():
+            payload = self.station_service.register_selected(update_viewport=False)
+            payload['_project_generation'] = generation
+            payload['_project_uuid'] = project_uuid
+            payload['_station_ids_snapshot'] = tuple(station_ids)
+            return payload
+
+        worker = RegistrationWorker(run_registration)
+        self._registration_worker = worker
+        worker.signals.finished.connect(self._on_registration_finished)
+        worker.signals.failed.connect(self._on_registration_failed)
+        self.statusBar().showMessage('正在执行 GPS 全局坐标残差 ICP，请稍候...')
+        self._set_registration_buttons_enabled(False)
+        self._registration_pool.start(worker)
+
+    def _enter_manual_registration_fallback(self):
+        """Prepare the optional correspondence workflow after auto ICP fails."""
+        rows = [x for x in self.station_service.list_stations()
+                if x.is_selected]
+        if len(rows) != 2:
+            return
+        try:
             rows, cloud_names = self.station_service.prepare_registration_view(rows)
-            # 第一站为固定参考目标，第二站为待移动源站点。
             source_cloud, target_cloud = cloud_names[1], cloud_names[0]
             self._registration_rows = tuple(row.id for row in rows)
             self._registration_prompted_pairs = 0
@@ -2400,13 +2433,13 @@ class MainWindow(QMainWindow):
                 src, tgt = self.render_service.registration_pick_points()
                 pairs = min(len(src), len(tgt))
                 self.statusBar().showMessage(
-                    f'配准选点：已完成 {pairs} 对，'
-                    f'请继续点击{("源站点" if source_next else "目标站点")}同名点')
+                    f'配准选点：已完成 {pairs} 对，请继续点击'
+                    f'{"源站点" if source_next else "目标站点"}同名点')
                 if pairs >= 3 and pairs != self._registration_prompted_pairs:
                     self._registration_prompted_pairs = pairs
                     answer = QMessageBox.question(
                         self, '点云配准',
-                        f'已选择 {pairs} 对对应点。是否立即执行代理域 ICP？',
+                        f'已选择 {pairs} 对对应点，是否执行人工初值 ICP？',
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                     if answer == QMessageBox.StandardButton.Yes:
                         self._start_manual_registration(src, tgt)
@@ -2419,9 +2452,9 @@ class MainWindow(QMainWindow):
                 np.asarray(self.viewport.get_cloud_data(target_cloud)['pos'],
                            dtype=np.float64).copy())
             self.statusBar().showMessage(
-                '配准选点模式：请先在源站点（绿色/目标前的移动站点）点击，再点击目标站点对应点；至少 3 对')
+                '自动配准未达到质量门限。请按源站点、目标站点交替选择至少 3 对同名点')
         except Exception as exc:
-            QMessageBox.warning(self, '点云配准', str(exc))
+            QMessageBox.warning(self, '点云配准', f'进入人工选点失败：{exc}')
 
     def _start_manual_registration(self, source_points, target_points):
         self.viewport.exit_pick_mode()
@@ -2483,6 +2516,10 @@ class MainWindow(QMainWindow):
     def _on_registration_failed(self, message):
         self._registration_worker = None
         self._set_registration_buttons_enabled(True)
+        if getattr(self, '_registration_rows', None):
+            self._enter_manual_registration_fallback()
+            self.statusBar().showMessage(f'自动配准失败：{message}', 5000)
+            return
         self.statusBar().showMessage('点云配准失败', 5000)
         QMessageBox.warning(self, '点云配准', message)
 
@@ -3036,16 +3073,18 @@ class MainWindow(QMainWindow):
         try:
             if project_uuid:
                 historical = self.project_overview_service.load_historical_facades(project_uuid)
-                if historical:
-                    self.project_operation_service._last_facade_results = historical
-                    self._show_facade_results(historical)
-                    # The station restore and historical facade restore are
-                    # separate operations. Reapply segmentation colours only
-                    # after both are available, otherwise reopening shows the
-                    # correct proxy data in one neutral colour.
-                    cloud = self._active_cloud_name()
-                    if cloud:
-                        self.render_service.restore_highlight(cloud, historical)
+                # Restore historical facades through the same state path as a
+                # fresh detection. This synchronizes the list, renderer cache,
+                # heatmap availability and report snapshot, including the
+                # empty-history case (which must clear the previous project).
+                self.project_operation_service._last_facade_results = historical or []
+                self._show_facade_results(historical or [])
+                cloud = self._active_cloud_name()
+                if cloud and historical:
+                    # The station scene is restored before historical results;
+                    # apply segmentation colours only after both are ready.
+                    self.render_service.restore_highlight(cloud, historical)
+                self._refresh_report_preview()
         except Exception as exc:
             self.statusBar().showMessage(f'项目历史数据恢复部分失败：{exc}', 5000)
         operation_index = next(
@@ -3101,18 +3140,26 @@ class MainWindow(QMainWindow):
             self.station_list.blockSignals(False)
 
     def closeEvent(self, event):
-        """Dispose project/runtime resources before destroying the Qt window."""
+        """严格按顺序销毁，先停 timer，再断信号，再销毁 viewport，最后退出 app。"""
         if getattr(self, '_closing', False):
             event.accept()
             return
         self._closing = True
-        # Prevent queued Open3D polling/color work from reaching GLFW while it
-        # is being torn down.
+        # Step 1: 停止 viewport timer，防止 poll_events 在销毁中调用
         timer = getattr(self.viewport, '_timer', None)
         if timer is not None:
             timer.stop()
-        # Stop accepting new queued work before any scene or native-window
-        # teardown. This prevents GLFW calls after Visualizer destruction.
+        # Step 2: 断开 viewport 的渲染队列信号
+        if hasattr(self.viewport, '_render_queue'):
+            rq = self.viewport._render_queue
+            rq.color.disconnect()
+            rq.points.disconnect()
+        # Step 3: 关闭质量结果对话框
+        quality_dialog = getattr(self, '_quality_dialog', None)
+        if quality_dialog is not None:
+            quality_dialog.close()
+            self._quality_dialog = None
+        # Step 4: 清理线程池（不再接受新任务）
         for pool_name in ('_quality_pool', '_load_pool', '_registration_pool'):
             pool = getattr(self, pool_name, None)
             if pool is not None:
@@ -3120,38 +3167,40 @@ class MainWindow(QMainWindow):
                     pool.clear()
                 except Exception:
                     pass
-        quality_dialog = getattr(self, '_quality_dialog', None)
-        if quality_dialog is not None:
-            quality_dialog.close()
-            self._quality_dialog = None
+
+        # Step 5: 释放项目运行时资源
         self._dispose_project_runtime()
+
+        # Step 6: 销毁 viewport（关键：在 Qt 窗口销毁前完成）
         try:
-            # Do not block the GUI event loop for seconds while a large
-            # quality calculation is winding down.  Request invalidation was
-            # performed above; stale completion signals are token-guarded.
-            self._quality_pool.waitForDone(100)
+            if hasattr(self, 'viewport') and self.viewport is not None:
+                self.viewport.destroy()
         except Exception:
             pass
+
+        # Step 7: 等待线程池完成（短超时）
+        for pool_name in ('_quality_pool', '_load_pool', '_registration_pool'):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                try:
+                    pool.waitForDone(100)
+                except Exception:
+                    pass
+
+        # Step 8: 调用父类关闭事件
         try:
-            self._load_pool.waitForDone(100)
+            super().closeEvent(event)
+        except Exception:
+            event.accept()
+
+        # Step 9: 确保 Qt 事件循环退出（最关键）
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                    app.quit()
         except Exception:
             pass
-        try:
-            self._registration_pool.waitForDone(100)
-        except Exception:
-            pass
-        try:
-            self.viewport.destroy()
-        except Exception:
-            pass
-        super().closeEvent(event)
-        # The custom frameless close button does not always close the last
-        # native child window on Windows. Explicitly terminate the Qt event
-        # loop after closeEvent has accepted the window close.
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app is not None:
-            app.quit()
 
     def _set_current_project(self, project):
         self.current_project = project
