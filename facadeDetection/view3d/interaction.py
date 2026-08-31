@@ -105,12 +105,14 @@ class ViewportInteractor:
             return True
 
         if event.button() == Qt.LeftButton:
+            self.adapter.begin_interaction()
             self._rotate_start = QPoint(pos)
             if self.pick_enabled:
                 self._click_start = QPoint(pos)
             return True
 
         if event.button() == Qt.RightButton:
+            self.adapter.begin_interaction()
             self._pan_start = QPoint(pos)
             ctr = self.adapter.get_view_control()
             self._cached_pan_scale = self._compute_pan_scale(ctr) if ctr is not None else self._right_pan_scale
@@ -157,6 +159,7 @@ class ViewportInteractor:
                             pass
                 except Exception:
                     pass
+            self.adapter.request_render('camera.pan')
             return True
 
         # 左键拖拽旋转
@@ -190,6 +193,7 @@ class ViewportInteractor:
                             ctr.set_up(up)
                     except Exception:
                         pass
+            self.adapter.request_render('camera.rotate')
             return True
 
         return False
@@ -205,11 +209,13 @@ class ViewportInteractor:
         if event.button() == Qt.RightButton:
             self._pan_start = None
             self._cached_pan_scale = None
+            self.adapter.end_interaction()
             return True
 
         # 左键释放：拾取
         if event.button() == Qt.LeftButton:
             self._rotate_start = None
+            self.adapter.end_interaction()
             if self.pick_enabled:
                 start = self._click_start
                 self._click_start = None
@@ -359,14 +365,13 @@ class ViewportInteractor:
                         "index": point_index,
                         "point": points[point_index].astype(float).tolist(),
                     }
-        # A pick is only valid inside the configured pixel radius. Returning
-        # an arbitrary nearest point makes a missed click silently corrupt
-        # operator correspondences.
+        # 选中操作仅在配置的像素半径范围内有效。
         return best
 
     def handle_wheel(self, event):
         if self.selection_enabled:
             return True
+        self.adapter.begin_interaction()
         try:
             delta = 0
             if hasattr(event, "angleDelta"):
@@ -401,9 +406,12 @@ class ViewportInteractor:
                         ctr.camera_local_translate(0.0, 0.0, sign * 0.02)
                     except Exception:
                         pass
+            self.adapter.request_render('camera.zoom')
             return True
         except Exception:
             return False
+        finally:
+            self.adapter.end_interaction()
 
     def _event_pos(self, event):
         if hasattr(event, "position"):

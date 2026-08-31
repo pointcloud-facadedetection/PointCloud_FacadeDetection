@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint, Slot, Signal
-from PySide6.QtGui import QImage, QWindow, QPainter, QPen, QColor
+from PySide6.QtGui import QImage, QWindow
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .base_viewport import BaseViewport
@@ -129,17 +129,20 @@ class Open3DViewport(BaseViewport):
         self._roi_on_complete = None
         self._scene_view_initialized = False
         self._destroyed = False
+        self._pending_point_updates = {}
+        self._pending_color_updates = {}
 
         self.native = self
         self._render_queue = _RenderQueue(self._root)
-        self._render_queue.color.connect(self.update_cloud_color, Qt.QueuedConnection)
-        self._render_queue.points.connect(self.update_cloud_points, Qt.QueuedConnection)
+        self._render_queue.color.connect(self._queue_cloud_color, Qt.QueuedConnection)
+        self._render_queue.points.connect(self._queue_cloud_points, Qt.QueuedConnection)
 
         self._init_ui()
 
         self._timer = QTimer(self._root)
         self._timer.timeout.connect(self.process_events)
-        self._timer.start(16)
+        # 该定时器会触发 GLFW 事件；由适配器决定是否实际提交帧
+        self._timer.start(33)
 
     def queue_update_cloud_color(self, name, colors):
         """Thread-safe color update; Open3D is touched only by the Qt GUI thread."""
@@ -148,6 +151,15 @@ class Open3DViewport(BaseViewport):
     def queue_update_cloud_points(self, name, positions, colors=None):
         """Thread-safe geometry replacement for worker completion callbacks."""
         self._render_queue.points.emit(name, positions, colors)
+
+    def _queue_cloud_color(self, name, colors):
+        self._pending_color_updates[name] = colors
+        self._adapter.request_render('color.queued')
+
+    def _queue_cloud_points(self, name, positions, colors=None):
+        # 仅保留最新的工作进程快照。
+        self._pending_point_updates[name] = (positions, colors)
+        self._adapter.request_render('points.queued')
 
     @property
     def _clouds(self):
@@ -323,9 +335,8 @@ class Open3DViewport(BaseViewport):
                     center = np.mean(allp, axis=0)
             except Exception:
                 pass
-            # Open3D starts from a top view in this embedded viewport. Rotate
-            # that view by 90 degrees to the building front: Y is depth and Z
-            # remains the screen-up direction.
+            # Open3D 在此嵌入式视口中的起始视角为俯视图。将该视图旋转 90 度
+            # 使其面向建筑物正面：Y 轴表示深度，Z轴仍保持屏幕向上方向。
             front = np.array([0.0, -1.0, 0.0], dtype=np.float64)
             up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
@@ -374,6 +385,14 @@ class Open3DViewport(BaseViewport):
         if not self._init_success:
             return
         try:
+            pending = self._pending_point_updates
+            self._pending_point_updates = {}
+            for name, (positions, colors) in pending.items():
+                self.update_cloud_points(name, positions, colors)
+            pending_colors = self._pending_color_updates
+            self._pending_color_updates = {}
+            for name, colors in pending_colors.items():
+                self.update_cloud_color(name, colors)
             self._adapter.poll()
         except Exception:
             pass
@@ -389,6 +408,8 @@ class Open3DViewport(BaseViewport):
         self._init_success = False
         if hasattr(self, '_timer') and self._timer is not None:
             self._timer.stop()
+        self._pending_point_updates.clear()
+        self._pending_color_updates.clear()
         try:
             if self._roi_controller is not None:
                 self._roi_controller.cancel()
@@ -434,8 +455,6 @@ class Open3DViewport(BaseViewport):
             except Exception:
                 pass
             try:
-                # QWindow.fromWinId wraps an external GLFW HWND. Do not call
-                # destroy() on the wrapper after GLFW has released that HWND.
                 qwindow.setParent(None)
             except Exception:
                 pass
@@ -564,10 +583,6 @@ class Open3DViewport(BaseViewport):
                    min(float(size), Open3DAdapter.MAX_POINT_SIZE))
         for name in self._scene.get_cloud_names():
             self._scene.set_point_size(name, size)
-        try:
-            self._adapter.poll()
-        except Exception:
-            pass
 
     def toggle_bbox(self, name, min_bound, max_bound):
         bbox_name = f"{name}__bbox"
@@ -792,10 +807,6 @@ class Open3DViewport(BaseViewport):
                 self._pick_lines.append(name)
             except Exception:
                 pass
-        try:
-            self._adapter.poll()
-        except Exception:
-            pass
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
