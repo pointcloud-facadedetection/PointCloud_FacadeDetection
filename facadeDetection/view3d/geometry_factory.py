@@ -5,8 +5,12 @@ import open3d as o3d
 
 def make_point_cloud(positions, colors):
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(np.asarray(positions, dtype=np.float64))
-    pcd.colors = o3d.utility.Vector3dVector(np.asarray(colors, dtype=np.float64))
+    # 将 float32 保留在场景层/业务层中；仅在 Open3D边界处进行转换，并在上传后立即释放临时数组。
+    pos64 = np.asarray(positions, dtype=np.float64, order='C')
+    col64 = np.asarray(colors, dtype=np.float64, order='C')
+    pcd.points = o3d.utility.Vector3dVector(pos64)
+    pcd.colors = o3d.utility.Vector3dVector(col64)
+    del pos64, col64
     return pcd
 
 

@@ -35,12 +35,19 @@ class PointCloudScene:
         if name not in self.point_data:
             return
         data = self.point_data[name]
+        old = self.clouds.pop(name, None)
+        if old is not None:
+            self.adapter.remove_geometry(name)
+            del old
+
         pos, colors = display_arrays(data)
-        # Open3D copies these buffers into its geometry. Do not retain a
-        # second normalized/converted representation in the scene layer.
+        # Open3D 会将这些缓冲区复制到其几何体中。因此，我们在这里删除它们，以避免内存泄漏。
         pos = np.asarray(pos, dtype=np.float32, order='C')
         colors = np.asarray(colors, dtype=np.float32, order='C')
-        pcd = make_point_cloud(pos, colors)
+        try:
+            pcd = make_point_cloud(pos, colors)
+        finally:
+            del pos, colors
         self.clouds[name] = pcd
         self.adapter.add_geometry(name, pcd, reset_bounding_box=reset_bounding_box)
         self.adapter.set_point_size(data["size"])
@@ -54,8 +61,11 @@ class PointCloudScene:
         if geometry is None:
             self.refresh_cloud(name, reset_bounding_box=False)
             return
-        geometry.colors = o3d.utility.Vector3dVector(
-            np.asarray(data["color"], dtype=np.float64))
+        colors64 = np.asarray(data["color"], dtype=np.float64, order='C')
+        try:
+            geometry.colors = o3d.utility.Vector3dVector(colors64)
+        finally:
+            del colors64
         self.adapter.update_geometry(geometry)
 
     def update_cloud_points(self, name, positions, colors=None):

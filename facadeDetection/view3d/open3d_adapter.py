@@ -1,6 +1,7 @@
 import numpy as np
 import open3d as o3d
 import threading
+import time
 
 
 class Open3DAdapter:
@@ -14,6 +15,16 @@ class Open3DAdapter:
         self.geometries = {}
         self._owner_thread_id = None
         self._destroyed = False
+        # GLFW must continue to receive events, but rendering is demand-driven.
+        self._scene_dirty = False
+        self._render_pending = False
+        self._interaction_active = False
+        self._render_enabled = True
+        self._last_render_time = 0.0
+        self._last_event_poll_time = 0.0
+        self._event_poll_interval = 1.0 / 30.0
+        self._idle_render_interval = 0.20
+        self._interaction_render_interval = 1.0 / 30.0
 
     def _assert_owner(self):
         """Visualizer/GLFW is single-threaded; fail early instead of racing WGL."""
@@ -37,7 +48,31 @@ class Open3DAdapter:
         )
         if not ok:
             raise RuntimeError("Open3D Visualizer create_window returned False")
+        self.request_render('window.created')
         return self.vis
+
+    def request_render(self, reason='unknown'):
+        if not self._destroyed and self.vis is not None:
+            self._scene_dirty = True
+            self._render_pending = True
+
+    def begin_interaction(self):
+        if not self._destroyed:
+            self._interaction_active = True
+            self.request_render('interaction.begin')
+
+    def end_interaction(self):
+        if not self._destroyed:
+            self._interaction_active = False
+            self.request_render('interaction.end')
+            # The final camera state must be presented without waiting for the
+            # idle cadence after a drag/wheel gesture.
+            self._last_render_time = 0.0
+
+    def set_render_enabled(self, enabled):
+        self._render_enabled = bool(enabled)
+        if self._render_enabled:
+            self.request_render('render.enabled')
 
     def configure_render_options(self):
         if self.vis is None:
@@ -47,6 +82,7 @@ class Open3DAdapter:
         opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
         opt.point_size = self.MIN_POINT_PIXEL_SIZE
         opt.show_coordinate_frame = True
+        self.request_render('render.options')
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
         if not self._assert_owner():
@@ -57,13 +93,17 @@ class Open3DAdapter:
                 self.vis.remove_geometry(old, reset_bounding_box=False)
             except Exception:
                 pass
+            self.geometries.pop(name, None)
+            del old
         self.geometries[name] = geometry
         self.vis.add_geometry(geometry, reset_bounding_box=reset_bounding_box)
+        self.request_render('geometry.add')
 
     def update_geometry(self, geometry):
         """Upload changed attributes without removing/re-adding geometry."""
         if self._assert_owner():
             self.vis.update_geometry(geometry)
+            self.request_render('geometry.update')
 
     def remove_geometry(self, name):
         if not self._assert_owner():
@@ -74,30 +114,49 @@ class Open3DAdapter:
                 self.vis.remove_geometry(geom, reset_bounding_box=False)
             except Exception:
                 pass
+            self.request_render('geometry.remove')
 
     def clear(self):
         if not self._assert_owner():
             return
-        for name in list(self.geometries.keys()):
-            self.remove_geometry(name)
+        try:
+            self.vis.clear_geometries()
+        except Exception:
+            for name in list(self.geometries.keys()):
+                self.remove_geometry(name)
+        self.geometries.clear()
+        self.request_render('scene.clear')
 
     def set_point_size(self, size):
         if self._assert_owner():
-            # Map the normalized application value to Open3D's pixel range;
-            # values below one pixel otherwise render indistinguishably.
+            # 将归一化的值映射到 Open3D 的像素范围
             value = max(self.MIN_POINT_SIZE, min(float(size), self.MAX_POINT_SIZE))
             ratio = ((value - self.MIN_POINT_SIZE) /
                      (self.MAX_POINT_SIZE - self.MIN_POINT_SIZE))
             pixel_size = (self.MIN_POINT_PIXEL_SIZE + ratio *
                           (self.MAX_POINT_PIXEL_SIZE - self.MIN_POINT_PIXEL_SIZE))
             self.vis.get_render_option().point_size = pixel_size
-            self.vis.update_renderer()
+            self.request_render('point_size')
 
     def poll(self):
         if not self._assert_owner():
-            return
+            return False
+        now = time.monotonic()
+        if now - self._last_event_poll_time < self._event_poll_interval:
+            return False
+        self._last_event_poll_time = now
         self.vis.poll_events()
+        if not self._render_enabled or not self._render_pending:
+            return False
+        interval = (self._interaction_render_interval
+                    if self._interaction_active else self._idle_render_interval)
+        if now - self._last_render_time < interval:
+            return False
         self.vis.update_renderer()
+        self._last_render_time = now
+        self._scene_dirty = False
+        self._render_pending = False
+        return True
 
     def get_view_control(self):
         if not self._assert_owner():
@@ -107,7 +166,11 @@ class Open3DAdapter:
     def capture_screen(self):
         if not self._assert_owner():
             return None
-        return self.vis.capture_screen_float_buffer(do_render=True)
+        self.vis.update_renderer()
+        self._last_render_time = time.monotonic()
+        self._scene_dirty = False
+        self._render_pending = False
+        return self.vis.capture_screen_float_buffer(do_render=False)
 
     def destroy(self):
         """Destroy the native window once, while GLFW is still available.
@@ -126,6 +189,9 @@ class Open3DAdapter:
     
         # Step 1: 标记销毁状态
         self._destroyed = True
+        self._render_enabled = False
+        self._render_pending = False
+        self._scene_dirty = False
     
         # Step 2: 保存并清空引用（先于 Open3D 调用）
         vis = self.vis
