@@ -3,6 +3,7 @@ import numpy as np
 import open3d as o3d
 from algorithms.registration import (
     point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
+    audit_exported_global_transform,
 )
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
@@ -79,10 +80,27 @@ class PointCloudStationService:
         log_event(self.project_uuid, 'station.delete', count=len(rows))
 
     def _load(self, path):
+        """Read an already-globalized PLY; never apply transformToGlobal here."""
         cloud = o3d.io.read_point_cloud(str(path))
-        points = np.asarray(cloud.points)
-        colors = np.asarray(cloud.colors) if cloud.has_colors() else None
+        points = np.asarray(cloud.points, dtype=np.float64)
+        colors = np.asarray(cloud.colors, dtype=np.float64) if cloud.has_colors() else None
         return points, colors
+
+    @staticmethod
+    def _global_coordinate_metadata(path):
+        """Audit the export matrix without transforming runtime point data."""
+        ply = Path(path)
+        candidates = (ply.with_suffix('.json'),
+                      ply.parent / 'pointclouds' / f'{ply.stem}.json')
+        json_path = next((item for item in candidates if item.exists()), None)
+        metadata = {'coordinate_frame': 'global',
+                    'transform_applied': True,
+                    'transform_applied_at': 'fls_export'}
+        if json_path is not None:
+            audit = audit_exported_global_transform(json_path)
+            metadata['transform_json_path'] = audit.json_path
+            metadata['transform_to_global'] = audit.matrix.tolist()
+        return metadata
 
     def _load_proxy_domain(self, station):
         """加载站点的两个域并返回用于显示的代理数据。
@@ -101,14 +119,27 @@ class PointCloudStationService:
                 existing.dataset_id = dataset_id
                 self.pointcloud.datasets[dataset_id] = existing
         if existing is not None:
-            self._dataset_ids[station.id] = dataset_id
-            return existing
+            # A dataset can survive a view refresh while the persisted denoise
+            # snapshot was written afterwards (or while an older runtime
+            # dataset was restored before the station projection).  Returning
+            # it unconditionally silently re-published the noisy proxy.  Only
+            # reuse it when it already represents the persisted snapshot.
+            state = PointCloudStationRepo.get_denoise_state(
+                self.project_uuid, station.id)
+            if not (state and state.get('enabled') and
+                    not (existing.metadata or {}).get('denoise_restored')):
+                self._dataset_ids[station.id] = dataset_id
+                return existing
+            self.pointcloud.datasets.pop(dataset_id, None)
         points, colors = self._load(station.source_path)
         source_id = f'{dataset_id}:source'
         state = PointCloudStationRepo.get_denoise_state(self.project_uuid, station.id)
         dist_path = Path(station.source_path).with_suffix('.dist')
         metadata = {'source_id': source_id, 'station_id': station.id,
                     'source_raw_count': int(len(points))}
+        # FLS export has already applied transformToGlobal. Keep it as an
+        # audit trail only; proxy and ICP inputs remain in PLY global coords.
+        metadata.update(self._global_coordinate_metadata(station.source_path))
         state_offsets = np.asarray((state or {}).get('proxy_source_offsets', []),
                                    dtype=np.int64)
         state_indices = np.asarray((state or {}).get('proxy_source_indices', []),
@@ -383,11 +414,12 @@ class PointCloudStationService:
         registration_clouds = []
         for row in rows:
             dataset = self._load_proxy_domain(row)
-            key = (dataset.dataset_id, int(len(dataset.proxy_points)), 0.05)
+            voxel_size = 0.05
+            key = (dataset.dataset_id, int(len(dataset.proxy_points)), voxel_size)
             reg = self._registration_cloud_cache.get(key)
             if reg is None:
                 reg = build_registration_cloud(
-                    dataset.proxy_points, dataset.proxy_colors, voxel_size=0.05)
+                    dataset.proxy_points, dataset.proxy_colors, voxel_size=voxel_size)
                 self._registration_cloud_cache[key] = reg
             if len(reg.points) < 3:
                 raise ValueError(f'{row.display_name} 配准下采样点不足')
@@ -404,10 +436,11 @@ class PointCloudStationService:
                     raise ValueError('人工点配准缺少代理点云快照')
                 result = manual_seeded_icp(
                     moving_reg.points, reference.points, src_pairs, tgt_pairs,
-                    voxel_size=0.05)
+                    voxel_size=voxel_size, max_correspondence_distance=0.12)
             else:
                 result = point_to_plane_icp(
-                    moving_reg.points, reference.points, voxel_size=0.05)
+                    moving_reg.points, reference.points, voxel_size=voxel_size,
+                    max_correspondence_distance=0.12)
             if not result.accepted:
                 raise ValueError(f'{row.display_name} 配准失败：{result.message}，RMSE={result.inlier_rmse:.4f}')
             cloud = moving_reg.as_open3d()

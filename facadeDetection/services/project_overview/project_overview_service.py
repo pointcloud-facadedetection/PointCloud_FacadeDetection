@@ -199,8 +199,9 @@ class ProjectOverviewService:
                                # inputs, not merely display summaries.
                                **{key: geometry[key] for key in (
                                    'plane_model', 'normal', 'center', 'inlier_indices',
-                                   'proxy_indices', 'measurement_indices', 'voxel_ids',
-                                   'cloud_name', '__index_space') if key in geometry},
+                                    'proxy_indices', 'measurement_indices', 'voxel_ids',
+                                    'cloud_name', '__index_space', 'review_status')
+                                   if key in geometry},
                                 'quality_metrics': [{'name': m.metric_name, 'value': m.value,
                                                     'unit': m.unit, 'pass': m.pass_flag}
                                                     for m in metrics],
