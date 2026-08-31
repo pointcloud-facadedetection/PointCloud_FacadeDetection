@@ -8,5 +8,4 @@ through db.crud.get_session().
 from .project_repo import ProjectRepo  # noqa: F401
 from .file_repo import FileRepo  # noqa: F401
 from .results_repo import ResultsRepo  # noqa: F401
-from .pipeline_repo import PipelineRepo  # noqa: F401
 from .report_repo import ReportRepo  # noqa: F401

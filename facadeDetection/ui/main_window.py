@@ -1305,7 +1305,8 @@ class MainWindow(QMainWindow):
             self._refresh_report_preview()
             return
         self.list_facades.clear()
-        for display_no, f in enumerate(results, 1):
+        for index, f in enumerate(results, 1):
+            display_no = int(f.get('display_no') or index)
             f['display_no'] = display_no
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, f)

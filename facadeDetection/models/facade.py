@@ -26,17 +26,19 @@ class Facade(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     is_deleted = Column(Integer, default=0, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
-    # Runtime geometry stays in the point-cloud index; these fields contain only
-    # the durable decision metadata and the serializable quality report.
+    # 运行时几何信息保存在点云索引中；这些字段仅包含
+    # 持久的决策元数据和可序列化的质量报告。
     quality_status = Column(String, default="pending", nullable=False)
     quality_report_json = Column(JSON, nullable=True)
     color_json = Column(JSON, nullable=True)
     dataset_revision = Column(String, nullable=True)
     quality_completed_at = Column(DateTime, nullable=True)
+    display_no = Column(Integer, nullable=False, default=1)
+    point_count = Column(Integer, nullable=False, default=0)
+    raw_point_count = Column(Integer, nullable=False, default=0)
 
     scene = relationship("ResultScene", back_populates="facades")
     metrics = relationship("QualityMetric", back_populates="facade", cascade="all, delete-orphan")
-    heatmap = relationship("Heatmap", back_populates="facade", uselist=False, cascade="all, delete-orphan")
 
 
 class QualityMetric(Base):
@@ -51,16 +53,3 @@ class QualityMetric(Base):
     thresholds_json = Column(JSON, nullable=True)
 
     facade = relationship("Facade", back_populates="metrics")
-
-
-class Heatmap(Base):
-    __tablename__ = "heatmaps"
-
-    id = Column(Integer, primary_key=True)
-    facade_id = Column(Integer, ForeignKey("facades.id", ondelete="CASCADE"), index=True, nullable=False)
-    file_id = Column(Integer, ForeignKey("file_assets.id", ondelete="SET NULL"), nullable=True)
-    vmin = Column(Float, nullable=True)
-    vmax = Column(Float, nullable=True)
-    cmap = Column(String, nullable=True)
-
-    facade = relationship("Facade", back_populates="heatmap")

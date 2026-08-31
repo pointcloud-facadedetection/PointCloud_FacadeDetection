@@ -9,8 +9,8 @@ from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
 
 
 class ResultExportService:
-    """Export service: generates heatmap PNG on demand.
-    Cleaned: removed redundant fields, unified defect visualization.
+    """
+    导出服务：按需生成热力图 PNG 文件。
     """
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
@@ -46,8 +46,7 @@ class ResultExportService:
 
             heatmap_mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
 
-            # Only windows with a real measurement and a failed quality result
-            # are drawable.  Merely having a finite value is not a quality write.
+            # 只有同时具有实际测量值且质量检测结果为失败的窗口才可绘制。
             n_valid = 0
             spec = heatmap_spec(heatmap_mode)
             for w in windows:
@@ -63,8 +62,7 @@ class ResultExportService:
                 print(f'[PCFD] export_heatmap: no valid windows, skip', flush=True)
                 return None
 
-            # Keep raster dimensions bounded.  A facade image larger than this
-            # is not printable and creates a dangerous transient memory spike.
+            # 确保栅格图像尺寸在限定范围内。  
             pixel_size = max(float(pixel_size), 0.01)
             heatmap_path = self._export_window_heatmap(
                 root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
@@ -114,11 +112,11 @@ class ResultExportService:
             return None
 
     def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
-        """Export window results as heatmap PNG with unified defect coloring."""
+        """将窗口结果导出为热力图 PNG 文件，并采用统一的缺陷配色方案。"""
         mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
         spec = heatmap_spec(mode)
         
-        # Extract centers and defect values
+        # 提取中心和缺陷值
         centers_list = []
         values_list = []
         
@@ -127,9 +125,7 @@ class ResultExportService:
             if bool(r.get(pass_key, True)):
                 continue
             cx = r.get('center_xyz')
-            # A window is drawable only when its geometry and measurement are
-            # both valid.  Append them together so rasterize_facade never gets
-            # two differently filtered arrays.
+            # 只有当窗口的几何信息和尺寸均有效时，该窗口才可绘制。
             if cx is not None and len(cx) == 3:
                 try:
                     if all(np.isfinite(float(x)) for x in cx):
@@ -163,7 +159,6 @@ class ResultExportService:
         limit_mm = float(quality.get('parameters', {}).get(
             limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
         
-        # Convert to meters for rasterize
         values_m = values / 1000.0
         limit_m = limit_mm / 1000.0
 
@@ -195,8 +190,7 @@ class ResultExportService:
         defect_colors[mask3, 1] = 0.5 - 0.5 * tt3
         defect_colors[mask3, 2] = 0.0
 
-        # The complete facade domain is supplied as the raster background; the
-        # defect windows are only the overlay.  This preserves facade colours.
+        # 将整个立面区域作为栅格背景提供；缺陷窗口仅作为叠加层。
         base_points = np.asarray(pts_local, dtype=float).reshape(-1, 3)
         if len(base_points) == 0:
             raise ValueError('完整立面点云为空，无法导出叠加图')
@@ -205,8 +199,6 @@ class ResultExportService:
         if len(base_colors) != len(base_points):
             base_colors = np.full((len(base_points), 3), 0.7, dtype=float)
 
-        # defect_values and defect_limit are already supplied positionally;
-        # passing defect_values again by keyword raises a TypeError.
         projection = quality.get('projection') or {}
         projection_origin = quality.get('projection_origin')
         projection_u_axis = quality.get('projection_u_axis')

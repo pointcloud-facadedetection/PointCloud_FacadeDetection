@@ -118,11 +118,8 @@ class ProjectOverviewService:
                     upsert_index_project(puid, pname, str(path))
                     # 激活项目（确保采用按项目划分的数据库架构）
                     ProjectRepo.load_and_activate(puid)
-                    # The index branch returns early, so it must explicitly
-                    # rebuild the station projection as well.
+                    # 索引分支会提前返回，因此必须显式地重建站点投影 
                     PointCloudStationRepo.sync_assets(puid)
-                    # The index is authoritative for projects opened from disk,
-                    # while the project DB remains the source for legacy data.
                     return ProjectCard(
                         project_id=puid,
                         name=pname,
@@ -172,24 +169,29 @@ class ProjectOverviewService:
         if not project_id:
             raise ValueError('项目标识为空，无法激活项目')
         ProjectRepo.load_and_activate(project_id)
-        # Rebuild the station projection before the UI asks for its list.  This
-        # is required for legacy projects whose FileAsset rows predate the
-        # station table.
-        # StationService is the sole restore/display owner.  Do not load every
-        # PLY through FileService here: that would render full project data and
-        # create a second proxy registry before the first station is selected.
+        # 在用户界面请求列表之前，先重建站点投影。
         stats = PointCloudStationRepo.sync_assets(project_id)
         log_event(project_id, 'stations.synced', **stats)
 
     def load_historical_facades(self, project_id: str) -> list[dict]:
         from config.storage import Storage
         with project_session(project_id) as s:
-            rows = s.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.id)).scalars().all()
+            rows = s.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.display_no, Facade.id)).scalars().all()
             result = []
             for row in rows:
                 metrics = s.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
                 geometry = row.plane_json or {}
-                item = {'id': row.id, 'facade_db_id': row.id,
+                display_no = int(row.display_no or 0)
+                if display_no <= 0:
+                    try:
+                        display_no = int(str(row.label).rsplit(' ', 1)[-1])
+                    except (ValueError, IndexError):
+                        display_no = len(result) + 1
+                point_count = int(row.point_count or geometry.get('point_count') or
+                                  len(geometry.get('proxy_indices') or geometry.get('inlier_indices') or []))
+                raw_point_count = int(row.raw_point_count or geometry.get('raw_point_count') or point_count)
+                item = {'id': row.id, 'facade_db_id': row.id, 'display_no': display_no,
+                               'point_count': point_count, 'raw_point_count': raw_point_count,
                                'type': row.label, 'type_label': row.label,
                                'area': row.area or 0.0, 'plane': row.plane_json,
                                'bbox': row.bbox_json,
@@ -303,9 +305,7 @@ class ProjectOverviewService:
                 uploaded.append(p)
             except Exception as e:
                 print(f"上传失败: {p} -> {e}", flush=True)
-        # FileService persists FileAsset before rendering.  Synchronize the
-        # station projection only after all uploads have completed so the UI
-        # never observes a half-populated station list.
+        # FileService 在渲染前会将 FileAsset 持久化。 
         PointCloudStationRepo.sync_assets(project_uuid)
         return uploaded
 
@@ -314,9 +314,7 @@ class ProjectOverviewService:
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
         res = svc.import_fls_directory(dir_path, project_uuid)
-        # FLS import creates one FileAsset per generated PLY. Refresh the
-        # station registry immediately so the operation page can select all
-        # stations without requiring a second project activation.
+        # FLS 导入会为每个生成的 PLY 文件创建一个 FileAsset。
         if project_uuid and res.get('success'):
             PointCloudStationRepo.sync_assets(project_uuid)
         return res

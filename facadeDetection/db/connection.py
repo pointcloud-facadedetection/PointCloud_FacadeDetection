@@ -98,9 +98,10 @@ def _project_engine(project_uuid: str):
     event.listen(engine, "connect", _apply_sqlite_pragmas)
     # Ensure schema (import models)
     GlobalBase.metadata.create_all(engine)
-    # create_all does not migrate existing project databases. Keep this small
-    # compatibility migration local and idempotent for deployed projects.
+    # create_all 不会迁移现有项目的数据库。
     with engine.begin() as conn:
+        conn.execute(text('DROP TABLE IF EXISTS heatmaps'))
+        conn.execute(text('DROP TABLE IF EXISTS processing_runs'))
         columns = {c['name'] for c in inspect(conn).get_columns('facades')}
         additions = {
             'quality_status': 'TEXT NOT NULL DEFAULT \'pending\'',
@@ -108,10 +109,21 @@ def _project_engine(project_uuid: str):
             'color_json': 'JSON',
             'dataset_revision': 'TEXT',
             'quality_completed_at': 'DATETIME',
+            'display_no': 'INTEGER NOT NULL DEFAULT 1',
+            'point_count': 'INTEGER NOT NULL DEFAULT 0',
+            'raw_point_count': 'INTEGER NOT NULL DEFAULT 0',
         }
+        added_display_no = 'display_no' not in columns
         for name, definition in additions.items():
             if name not in columns:
                 conn.execute(text(f'ALTER TABLE facades ADD COLUMN {name} {definition}'))
+        if added_display_no:
+            conn.execute(text("""
+            UPDATE facades
+               SET display_no = CAST(substr(label, instr(label, ' ') + 1) AS INTEGER) + 1
+             WHERE (display_no IS NULL OR display_no = 1)
+               AND label GLOB 'Facade [0-9]*'
+            """))
         station_columns = {c['name'] for c in inspect(conn).get_columns('pointcloud_stations')}
         if 'denoise_state_json' not in station_columns:
             conn.execute(text('ALTER TABLE pointcloud_stations ADD COLUMN denoise_state_json JSON'))

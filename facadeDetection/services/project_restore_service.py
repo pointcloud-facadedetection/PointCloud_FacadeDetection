@@ -39,14 +39,28 @@ class ProjectRestoreService:
     @staticmethod
     def load_facades(project_uuid: str) -> list[dict]:
         with project_session(project_uuid) as session:
-            rows = session.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.id)).scalars().all()
+            rows = session.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.display_no, Facade.id)).scalars().all()
             result = []
             for row in rows:
                 metrics = session.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
                 geometry = row.plane_json or {}
-                item = {"id": row.id, "type": row.label, "type_label": row.label,
+                display_no = int(row.display_no or 0)
+                if display_no <= 0:
+                    try:
+                        display_no = int(str(row.label).rsplit(' ', 1)[-1])
+                    except (ValueError, IndexError):
+                        display_no = len(result) + 1
+                point_count = int(row.point_count or geometry.get('point_count') or
+                                  len(geometry.get('proxy_indices') or geometry.get('inlier_indices') or []))
+                raw_point_count = int(row.raw_point_count or geometry.get('raw_point_count') or point_count)
+                item = {"id": row.id, "facade_db_id": row.id, "display_no": display_no,
+                        "point_count": point_count, "raw_point_count": raw_point_count,
+                        "type": row.label, "type_label": row.label,
                         "area": row.area or 0.0, "plane": row.plane_json,
-                        "bbox": row.bbox_json, "quality_metrics": [
+                         "bbox": row.bbox_json, "quality_status": row.quality_status,
+                         "quality_report": row.quality_report_json,
+                         "color": row.color_json, "dataset_revision": row.dataset_revision,
+                         "quality_metrics": [
                             {"name": m.metric_name, "value": m.value, "unit": m.unit, "pass": m.pass_flag}
                             for m in metrics],
                         **{key: geometry[key] for key in (
