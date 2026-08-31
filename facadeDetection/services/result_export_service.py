@@ -1,5 +1,4 @@
 from __future__ import annotations
-import json
 import traceback
 from pathlib import Path
 import numpy as np
@@ -15,7 +14,7 @@ class ResultExportService:
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
                        pixel_size=0.01):
-        """Generate defect heatmap PNG. No JSON/NPZ export."""
+        """Generate defect heatmap PNG. """
         root = None
         try:
             if not isinstance(results_dir, (str, Path)) or str(results_dir) == '':
@@ -111,6 +110,67 @@ class ResultExportService:
                     pass
             return None
 
+    def _filter_base_points(self, pts_local, colors, plane_model, quality):
+        """
+        过滤 base_points，排除视口外的背景点和远离立面主平面的异常点
+        """
+        base_points = np.asarray(pts_local, dtype=float).reshape(-1, 3)
+        if len(base_points) == 0:
+            return base_points, colors
+        
+        # 获取立面投影参数
+        projection = quality.get('projection') or {}
+        projection_origin = quality.get('projection_origin')
+        projection_u_axis = quality.get('projection_u_axis')
+        projection_v_axis = quality.get('projection_v_axis')
+        
+        # 如果有投影参数，过滤掉投影范围外的点（视口背景）
+        if (projection_origin is not None and 
+            projection_u_axis is not None and 
+            projection_v_axis is not None):
+            
+            origin = np.asarray(projection_origin, dtype=float)
+            u_axis = np.asarray(projection_u_axis, dtype=float)
+            v_axis = np.asarray(projection_v_axis, dtype=float)
+            
+            # 计算每个点在UV平面上的投影坐标
+            rel = base_points - origin
+            u = np.dot(rel, u_axis)
+            v = np.dot(rel, v_axis)
+            
+            # 计算立面在UV平面的bbox
+            u_min, u_max = np.percentile(u, [1, 99])
+            v_min, v_max = np.percentile(v, [1, 99])
+            
+            # 添加小margin，过滤掉远离立面主体的点
+            u_margin = (u_max - u_min) * 0.05
+            v_margin = (v_max - v_min) * 0.05
+            
+            in_bounds = ((u >= u_min - u_margin) & (u <= u_max + u_margin) &
+                        (v >= v_min - v_margin) & (v <= v_max + v_margin))
+            
+            base_points = base_points[in_bounds]
+            if colors is not None and len(colors) == len(in_bounds):
+                colors = np.asarray(colors)[in_bounds]
+        
+        # 额外过滤：基于到平面距离的异常值剔除
+        a, b, c, d = plane_model
+        norm = np.sqrt(a*a + b*b + c*c)
+        distances = np.abs(np.dot(base_points, [a, b, c]) + d) / norm
+        
+        # 剔除距离过大的异常点（通常是背景或噪点）
+        dist_threshold = np.percentile(distances, 99.5) * 1.5
+        valid_dist = distances <= max(dist_threshold, 0.5)
+        
+        base_points = base_points[valid_dist]
+        if colors is not None:
+            if len(colors) == len(valid_dist):
+                colors = np.asarray(colors)[valid_dist]
+            else:
+                colors = None
+        
+        return base_points, colors
+
     def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
         """将窗口结果导出为热力图 PNG 文件，并采用统一的缺陷配色方案。"""
         mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
@@ -159,54 +219,76 @@ class ResultExportService:
         limit_mm = float(quality.get('parameters', {}).get(
             limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
         
-        values_m = values / 1000.0
-        limit_m = limit_mm / 1000.0
-
-        # Generate unified heatmap colors: gray -> yellow -> orange -> red
-        excess_m = np.maximum(np.abs(values_m) - limit_m, 0.0)
-        scale_m = max(float(np.nanpercentile(excess_m, 97)), 1e-9)
-        t = np.clip(excess_m / scale_m, 0.0, 1.0)
-
-        defect_colors = np.zeros((len(values_m), 3), dtype=float)
+        # 修复: 统一单位 - 与视口保持一致
+        values_mm = values  # 保持 mm 单位用于颜色计算
+        limit_m = limit_mm / 1000.0  # 阈值转为 m
         
-        # Gray (0.75, 0.75, 0.75) at t=0 -> Yellow (1, 1, 0) at t=0.33
-        # -> Orange (1, 0.5, 0) at t=0.66 -> Red (1, 0, 0) at t=1.0
+        # 统一缩放因子 - 使用全局最大缺陷值
+        excess_mm = np.maximum(np.abs(values_mm) - limit_mm, 0.0)
+        
+        # 使用全局最大超标量作为缩放基准（与视口一致）
+        # 如果所有值都低于limit，使用limit的10%作为最小缩放
+        global_max_excess = float(np.nanmax(excess_mm)) if np.any(np.isfinite(excess_mm)) else limit_mm * 0.1
+        scale_mm = max(global_max_excess, limit_mm * 0.05)  # 至少保留5%的limit作为缩放
+        
+        t = np.clip(excess_mm / scale_mm, 0.0, 1.0)
+
+        # 统一配色 - 青→黄→橙→红 (与3D视口一致)
+        defect_colors = np.zeros((len(values_mm), 3), dtype=float)
+        
+        # 青色 (0.0, 0.75, 1.0) at t=0 -> 黄色 (1, 1, 0) at t=0.33
+        # -> 橙色 (1, 0.5, 0) at t=0.66 -> 红色 (1, 0, 0) at t=1.0
         
         mask1 = t <= 0.33
         tt1 = t[mask1] / 0.33
-        defect_colors[mask1, 0] = 0.75 + 0.25 * tt1
-        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1
-        defect_colors[mask1, 2] = 0.75 - 0.75 * tt1
+        defect_colors[mask1, 0] = 0.0 + 1.0 * tt1          # R: 0 -> 1
+        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1         # G: 0.75 -> 1
+        defect_colors[mask1, 2] = 1.0 - 1.0 * tt1            # B: 1 -> 0
         
         mask2 = (t > 0.33) & (t <= 0.66)
         tt2 = (t[mask2] - 0.33) / 0.33
         defect_colors[mask2, 0] = 1.0
-        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2
+        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2            # G: 1 -> 0.5
         defect_colors[mask2, 2] = 0.0
         
         mask3 = t > 0.66
         tt3 = (t[mask3] - 0.66) / 0.34
         defect_colors[mask3, 0] = 1.0
-        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3
+        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3            # G: 0.5 -> 0
         defect_colors[mask3, 2] = 0.0
 
-        # 将整个立面区域作为栅格背景提供；缺陷窗口仅作为叠加层。
-        base_points = np.asarray(pts_local, dtype=float).reshape(-1, 3)
+        base_points, _ = self._filter_base_points(pts_local, colors, plane_model, quality)
+        
         if len(base_points) == 0:
-            raise ValueError('完整立面点云为空，无法导出叠加图')
-        base_colors = np.asarray(colors if colors is not None else
-                                 np.full((len(base_points), 3), 0.7), dtype=float)
-        if len(base_colors) != len(base_points):
-            base_colors = np.full((len(base_points), 3), 0.7, dtype=float)
+            raise ValueError('过滤后立面点云为空，无法导出叠加图')
 
+        # 纯色深色背景 - 与3D视口一致
+        # 深色背景: RGB(0.12, 0.13, 0.15) - 深蓝灰色
+        base_colors = np.full((len(base_points), 3), 0.13, dtype=float)
+        # 给背景添加轻微噪点纹理，避免过于平坦
+        noise = np.random.RandomState(42).uniform(-0.02, 0.02, base_colors.shape)
+        base_colors = np.clip(base_colors + noise, 0.08, 0.18)
+
+        # 转换为米单位传入 rasterize_facade
+        values_m = values_mm / 1000.0
+        
         projection = quality.get('projection') or {}
         projection_origin = quality.get('projection_origin')
         projection_u_axis = quality.get('projection_u_axis')
         projection_v_axis = quality.get('projection_v_axis')
+
+        # 传入与视口一致的参数
+        global_vmax_m = (limit_mm + scale_mm) / 1000.0
+        
         raster = rasterize_facade(
-            centers, np.full((len(centers), 3), 0.7), plane_model, values_m, limit_m,
-            pixel_size=pixel_size, defect_colors=defect_colors, vmin=limit_m,
-            base_points=base_points, base_colors=base_colors,
+            centers, np.full((len(centers), 3), 0.7), plane_model, 
+            values_m, limit_m,
+            pixel_size=pixel_size, 
+            defect_colors=defect_colors, 
+            vmin=limit_m,
+            vmax=global_vmax_m,  # 传入全局vmax确保内部映射一致
+            base_points=base_points, 
+            base_colors=base_colors,
             projection_origin=projection_origin,
             projection_u_axis=projection_u_axis,
             projection_v_axis=projection_v_axis)
@@ -216,10 +298,15 @@ class ResultExportService:
 
         if np.any(alpha > 0):
             rgb = overlay[:, :, :3].astype(np.float32)
-            premul = rgb * alpha[:, :, None]
-            premul_blur = cv2.GaussianBlur(premul, (3, 3), 1.0)
+
+            # 优化模糊处理 - 保持缺陷边缘清晰
             alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
             alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
+            
+            # RGB使用更小的模糊核，保持边缘清晰
+            premul = rgb * alpha[:, :, None]
+            premul_blur = cv2.GaussianBlur(premul, (3, 3), 0.5)
+            
             rgb_smooth = premul_blur / alpha_blur[:, :, None]
             overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
             overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
@@ -228,9 +315,19 @@ class ResultExportService:
         base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
 
         visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
+
+        # 缺陷层使用更高权重，确保颜色鲜明
+        defect_boost = 1.15  # 缺陷层增强系数
+        
+        # 对base进行轻微暗化，进一步突出缺陷
+        base_darkened = base_rgb.astype(np.float32) * 0.85
+        
+        boosted_overlay = overlay[:, :, :3].astype(np.float32) * defect_boost
+        boosted_overlay = np.clip(boosted_overlay, 0, 255)
+        
         composite = (
-            base_rgb.astype(np.float32) * (1.0 - visible[:, :, :1]) +
-            overlay[:, :, :3].astype(np.float32) * visible[:, :, :1]
+            base_darkened * (1.0 - visible[:, :, :1]) +
+            boosted_overlay * visible[:, :, :1]
         ).astype(np.uint8)
 
         heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
@@ -256,13 +353,13 @@ class ResultExportService:
 
         for i in range(n_segments):
             t = i / max(n_segments - 1, 1)
-            
-            # Unified color: gray -> yellow -> orange -> red
+
+            # 图例配色与热力图一致 - 青→黄→橙→红
             if t <= 0.33:
                 tt = t / 0.33
-                r = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
+                r = int(np.clip((0.0 + 1.0 * tt) * 255, 0, 255))
                 g = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
-                b = int(np.clip((0.75 - 0.75 * tt) * 255, 0, 255))
+                b = int(np.clip((1.0 - 1.0 * tt) * 255, 0, 255))
             elif t <= 0.66:
                 tt = (t - 0.33) / 0.33
                 r = 255
