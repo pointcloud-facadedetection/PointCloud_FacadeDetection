@@ -28,21 +28,10 @@ def load_local_points(ply_file, json_file, voxel_size=0.1):
         pts_h = np.hstack((pts, np.ones((pts.shape[0], 1))))
         return (T_local @ pts_h.T).T[:, :3], None
 
-    keys = None
-    for accessor in ("keys", "primary_key"):
-        try:
-            cand = getattr(pcd.point, accessor)
-            cand = list(cand() if callable(cand) else cand)
-            if cand:
-                keys = cand
-                break
-        except Exception:
-            pass
-    if keys is None:
-        try:
-            keys = list(pcd.point)
-        except Exception:
-            keys = []
+    try:
+        keys = list(pcd.point)
+    except Exception:
+        keys = []
     keys = list(dict.fromkeys(keys + ["intensity", "intensities",
                                       "scalar_intensity", "Intensity"]))
 
@@ -55,6 +44,16 @@ def load_local_points(ply_file, json_file, voxel_size=0.1):
             break
         except Exception:
             continue
+    
+    if intensity is None and "colors" in keys:
+        colors = pcd.point["colors"].numpy().astype(np.float32)
+        intensity = (
+            0.299 * colors[:, 0]
+            + 0.587 * colors[:, 1]
+            + 0.114 * colors[:, 2]
+        )
+        print("Using PLY colors as intensity")
+
     if intensity is None:
         print("No intensity attribute found -> depth colouring will be used")
 
@@ -374,5 +373,5 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
 
 
 if __name__ == "__main__":
-    launch_viewer("bllygg01.ply", "bllygg01.json",
+    launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.ply", "../data/bllygg01.json",
                   long_side=1024, short_side=576, voxel_size=0.1)

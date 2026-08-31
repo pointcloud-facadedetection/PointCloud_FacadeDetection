@@ -19,6 +19,7 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
     match_photo_to_cloud_view,
     remap_cloud_points_to_photo,
     default_projection_params,
+    projection_viewport_camera,
     render_projection,
 )
 
@@ -135,15 +136,30 @@ class PhotoMatchService:
             raise ValueError('请先上传扫描仪位姿文件')
         return build_scan_viewport_camera(self.state.scan_pose_path, lookat)
 
-    def initialize_projection(self, points) -> dict:
+    def initialize_projection(self, points, image_size=(1024, 576)) -> dict:
         """根据扫描仪位姿和点云主体初始化针孔投影参数。"""
         meta = self.state.scan_pose_meta or {}
         transform = meta.get('transform_to_global')
         if transform is None:
             raise ValueError('扫描仪位姿缺少 transformToGlobal，无法生成针孔投影')
-        params = default_projection_params(points, transform)
+        params = default_projection_params(
+            points,
+            transform,
+            image_size=image_size,
+        )
         self.state.projection_params = dict(params)
         return dict(params)
+
+    def build_projection_viewport_camera(self, params=None) -> dict:
+        """用当前针孔参数生成方向一致的三维视口相机。"""
+        meta = self.state.scan_pose_meta or {}
+        transform = meta.get('transform_to_global')
+        if transform is None:
+            raise ValueError('请先上传含 transformToGlobal 的扫描仪位姿')
+        values = dict(params or self.state.projection_params)
+        if not values:
+            raise ValueError('请先执行自动取景')
+        return projection_viewport_camera(values, transform)
 
     def render_projection_view(
         self,
@@ -161,7 +177,7 @@ class PhotoMatchService:
             raise ValueError('请先上传含 transformToGlobal 的扫描仪位姿')
         values = dict(params or self.state.projection_params)
         if not values:
-            values = self.initialize_projection(points)
+            values = self.initialize_projection(points, image_size=image_size)
         self.state.projection_params = dict(values)
         return render_projection(
             points,
@@ -178,6 +194,7 @@ class PhotoMatchService:
         points,
         facade: dict,
         *,
+        cloud_projection=None,
         alpha: float = 0.58,
         point_radius: int = 6,
         blur_size: int = 15,
@@ -295,7 +312,7 @@ class PhotoMatchService:
             border_color=(0, 0, 255),
             border_thickness=3,
         )
-        return {
+        result = {
             'image_bgr': blended,
             'heatmap_bgr': heatmap,
             'meta': meta,
@@ -304,6 +321,35 @@ class PhotoMatchService:
             'deviation_limit_mm': float(limit_mm),
             'boundary_points_3d': boundary_points.tolist(),
         }
+        if cloud_projection is not None:
+            projection_image = np.asarray(
+                cloud_projection.get('view_bgr'), dtype=np.uint8
+            )
+            projection_extrinsic = np.asarray(
+                cloud_projection.get('extrinsic'), dtype=np.float64
+            ).reshape(4, 4)
+            projection_intrinsic = np.asarray(
+                cloud_projection.get('camera_matrix'), dtype=np.float64
+            ).reshape(3, 3)
+            cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay(
+                projection_image,
+                facade_points,
+                scalars_mm,
+                projection_extrinsic[:3, :3],
+                projection_extrinsic[:3, 3].reshape(3, 1),
+                projection_intrinsic,
+                val_range=(-limit_mm, limit_mm),
+                draw_colorbar=True,
+                boundary_points_3d=boundary_points,
+                border_color=(0, 0, 255),
+                border_thickness=3,
+            )
+            result.update({
+                'cloud_image_bgr': cloud_blended,
+                'cloud_heatmap_bgr': cloud_heatmap,
+                'cloud_meta': cloud_meta,
+            })
+        return result
 
     def complete_pair_count(self) -> int:
         return sum(
