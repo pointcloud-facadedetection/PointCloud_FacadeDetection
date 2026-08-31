@@ -24,6 +24,80 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
 )
 
 
+def _robust_uv_quadrilateral(uv):
+    """过滤 UV 离群点，并将分位裁剪后的凸包简化为四边形。"""
+    import cv2
+
+    coordinates = np.asarray(uv, dtype=np.float64).reshape(-1, 2)
+    finite = np.isfinite(coordinates).all(axis=1)
+    if int(finite.sum()) < 4:
+        raise ValueError('立面 UV 坐标不足，无法生成边界')
+
+    robust = finite.copy()
+    finite_coordinates = coordinates[finite]
+    for axis in range(2):
+        values = finite_coordinates[:, axis]
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        scale = 1.4826 * mad
+        if scale < 1e-9:
+            q25, q75 = np.percentile(values, (25.0, 75.0))
+            scale = float(q75 - q25) / 1.349
+        if scale >= 1e-9:
+            robust &= np.abs(coordinates[:, axis] - median) <= 6.0 * scale
+    if int(robust.sum()) < 4:
+        robust = finite.copy()
+
+    lower, upper = np.percentile(
+        coordinates[robust],
+        (1.0, 99.0),
+        axis=0,
+    )
+    trimmed = (
+        robust
+        & (coordinates[:, 0] >= lower[0])
+        & (coordinates[:, 0] <= upper[0])
+        & (coordinates[:, 1] >= lower[1])
+        & (coordinates[:, 1] <= upper[1])
+    )
+    if int(trimmed.sum()) < 4:
+        raise ValueError('分位裁剪后的立面点不足，无法生成边界')
+
+    hull = cv2.convexHull(
+        np.ascontiguousarray(coordinates[trimmed], dtype=np.float32)
+    ).reshape(-1, 2)
+    if len(hull) < 4:
+        raise ValueError('立面 UV 凸包退化，无法生成四边形边界')
+    if len(hull) == 4:
+        return trimmed, hull.astype(np.float64)
+
+    perimeter = float(
+        cv2.arcLength(np.ascontiguousarray(hull[:, None, :]), True)
+    )
+    for fraction in np.linspace(0.002, 0.12, 120):
+        polygon = cv2.approxPolyDP(
+            np.ascontiguousarray(hull[:, None, :]),
+            fraction * perimeter,
+            True,
+        ).reshape(-1, 2)
+        if len(polygon) == 4:
+            return trimmed, polygon.astype(np.float64)
+        if len(polygon) < 4:
+            break
+
+    # 极端形状无法稳定简化为四边形时，退回分位边界，避免重新引入离群点。
+    quadrilateral = np.asarray(
+        [
+            (lower[0], lower[1]),
+            (upper[0], lower[1]),
+            (upper[0], upper[1]),
+            (lower[0], upper[1]),
+        ],
+        dtype=np.float64,
+    )
+    return trimmed, quadrilateral
+
+
 @dataclass
 class MatchPair:
     photo: Optional[tuple[float, float]] = None
@@ -255,13 +329,6 @@ class PhotoMatchService:
             oriented_plane,
             unit='mm',
         )
-        finite = np.isfinite(scalars_mm)
-        if not np.any(finite):
-            raise ValueError('所选立面的平整度偏差无有效值')
-        limit_mm = max(
-            10.0,
-            float(np.percentile(np.abs(scalars_mm[finite]), 98.0)),
-        )
         plane_normal = oriented_plane[:3]
         vertical_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         if abs(float(np.dot(plane_normal, vertical_axis))) > 0.95:
@@ -281,16 +348,22 @@ class PhotoMatchService:
         relative = facade_points - plane_origin
         facade_u = relative @ u_axis
         facade_v = relative @ v_axis
-        u_min, u_max = float(np.min(facade_u)), float(np.max(facade_u))
-        v_min, v_max = float(np.min(facade_v)), float(np.max(facade_v))
-        boundary_points = np.asarray(
-            [
-                plane_origin + u_min * u_axis + v_min * v_axis,
-                plane_origin + u_max * u_axis + v_min * v_axis,
-                plane_origin + u_max * u_axis + v_max * v_axis,
-                plane_origin + u_min * u_axis + v_max * v_axis,
-            ],
-            dtype=np.float64,
+        uv_inliers, boundary_uv = _robust_uv_quadrilateral(
+            np.column_stack((facade_u, facade_v))
+        )
+        facade_points = facade_points[uv_inliers]
+        scalars_mm = scalars_mm[uv_inliers]
+        finite = np.isfinite(scalars_mm)
+        if not np.any(finite):
+            raise ValueError('所选立面的平整度偏差无有效值')
+        limit_mm = max(
+            10.0,
+            float(np.percentile(np.abs(scalars_mm[finite]), 98.0)),
+        )
+        boundary_points = (
+            plane_origin
+            + boundary_uv[:, 0, None] * u_axis
+            + boundary_uv[:, 1, None] * v_axis
         )
 
         overlay = FacadeHeatmapOverlay(
