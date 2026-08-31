@@ -32,8 +32,22 @@ def _local_points(points, transform_to_global):
     return pts @ inverse[:3, :3].T + inverse[:3, 3]
 
 
-def default_projection_params(points, transform_to_global):
-    """按 `perspective_view_gui.py` 的主体密度思想生成初始投影参数。"""
+def default_projection_params(
+    points,
+    transform_to_global,
+    image_size=(1024, 576),
+    *,
+    camera_height=1.75,
+    fov_candidates=(100.0, 110.0, 120.0, 130.0),
+    back_range=(1.0, 3.0),
+    top_margin=0.07,
+    near=0.3,
+    core_percentile=88.0,
+):
+    """按二维画幅自动拟合扫描仪局部坐标系中的针孔相机。"""
+    width, height = map(int, image_size)
+    if width <= 0 or height <= 0:
+        raise ValueError('投影图像尺寸必须为正数')
     local = _local_points(points, transform_to_global)
     finite = local[np.isfinite(local).all(axis=1)]
     if len(finite) == 0:
@@ -45,41 +59,170 @@ def default_projection_params(points, transform_to_global):
     radius = np.linalg.norm(finite[:, :2], axis=1)
     z_low, z_high = np.percentile(finite[:, 2], (0.5, 99.5))
     core = finite[
-        (radius <= np.percentile(radius, 88.0))
+        (radius <= np.percentile(radius, core_percentile))
         & (finite[:, 2] >= z_low)
         & (finite[:, 2] <= z_high)
     ]
     if len(core) < 100:
         core = finite
+    if len(core) < 100:
+        raise ValueError('有效点数量不足，无法自动取景')
 
-    azimuth = np.degrees(np.arctan2(core[:, 1], core[:, 0]))
-    yaw_grid = np.arange(-180.0, 180.0, 3.0)
-    half_fov = 50.0
-    counts = [
-        np.sum(np.abs((azimuth - yaw + 180.0) % 360.0 - 180.0) <= half_fov)
-        for yaw in yaw_grid
-    ]
-    yaw = float(yaw_grid[int(np.argmax(counts))])
-    direction = np.array(
-        (np.cos(np.radians(yaw)), np.sin(np.radians(yaw))),
-        dtype=np.float64,
-    )
-    camera_xy = -direction * 2.0
+    xy = core[:, :2]
+    z_values = core[:, 2]
+    azimuth = np.degrees(np.arctan2(xy[:, 1], xy[:, 0]))
+    yaw_grid = np.arange(-180.0, 180.0, 5.0)
+
+    def evaluate(camera_xy, yaw_deg, fov_deg):
+        angle = np.radians(yaw_deg)
+        direction = np.array((np.cos(angle), np.sin(angle)))
+        perpendicular = np.array((-direction[1], direction[0]))
+        relative = xy - camera_xy
+        forward = relative @ direction
+        sideways = relative @ perpendicular
+        dz = z_values - camera_height
+        focal = _focal_from_fov(width, height, fov_deg)
+        horizontal_tangent = (width * 0.5) / focal
+        visible_horizontally = (
+            (forward > near)
+            & (np.abs(sideways) <= forward * horizontal_tangent)
+        )
+        if int(visible_horizontally.sum()) < 100:
+            return None
+
+        top_elevation = np.percentile(
+            np.arctan2(dz[visible_horizontally], forward[visible_horizontally]),
+            99.5,
+        )
+        elevation = top_elevation - np.arctan(
+            ((0.5 - top_margin) * height) / focal
+        )
+        elevation = float(np.clip(elevation, np.radians(-85), np.radians(85)))
+
+        rotated_forward = forward * np.cos(elevation) + dz * np.sin(elevation)
+        rotated_up = -forward * np.sin(elevation) + dz * np.cos(elevation)
+        in_front = rotated_forward > near
+        if int(in_front.sum()) < 100:
+            return None
+        u = width * 0.5 - focal * sideways[in_front] / rotated_forward[in_front]
+        v = height * 0.5 - focal * rotated_up[in_front] / rotated_forward[in_front]
+        inside = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        if int(inside.sum()) < 100:
+            return None
+        top_gap = float(np.clip(v[inside].min(), 0, height)) / height
+        return (
+            float(inside.sum()) / len(xy),
+            float(np.degrees(elevation)),
+            top_gap,
+        )
+
+    def densest_yaw(fov_deg):
+        half_fov = np.degrees(
+            np.arctan((width * 0.5) / _focal_from_fov(width, height, fov_deg))
+        )
+        counts = [
+            np.sum(
+                np.abs((azimuth - yaw + 180.0) % 360.0 - 180.0)
+                <= half_fov
+            )
+            for yaw in yaw_grid
+        ]
+        return float(yaw_grid[int(np.argmax(counts))])
+
+    best = None
+    best_score = -np.inf
+    for fov in fov_candidates:
+        initial_yaw = densest_yaw(fov)
+        for yaw in initial_yaw + np.arange(-10.0, 11.0, 5.0):
+            angle = np.radians(yaw)
+            direction = np.array((np.cos(angle), np.sin(angle)))
+            for distance_back in np.linspace(back_range[0], back_range[1], 9):
+                camera_xy = -direction * distance_back
+                result = evaluate(camera_xy, yaw, fov)
+                if result is None:
+                    continue
+                fraction, elevation_deg, gap = result
+                score = fraction + 0.35 * min(gap / top_margin, 1.0)
+                candidate = {
+                    'fov': float(fov),
+                    'yaw': float(yaw),
+                    'pitch': float(-elevation_deg),
+                    'roll': 0.0,
+                    'tx': float(camera_xy[0]),
+                    'ty': float(camera_xy[1]),
+                    'tz': float(camera_height),
+                    'near': float(near),
+                    'point_size': 3,
+                    'center_h': True,
+                    'center_v': False,
+                    '_score': score,
+                }
+                if score > best_score:
+                    best = candidate
+                    best_score = score
+
+    if best is None:
+        raise ValueError('点云主体未落入候选视场，无法自动取景')
     distance = np.linalg.norm(
-        core - np.array((camera_xy[0], camera_xy[1], 1.75)), axis=1
+        core - np.array((best['tx'], best['ty'], best['tz'])), axis=1
+    )
+    best['far'] = float(
+        np.clip(np.percentile(distance, 99.0) * 1.15, 10.0, 300.0)
+    )
+    best.pop('_score', None)
+    return best
+
+
+def projection_viewport_camera(params, transform_to_global):
+    """把针孔投影姿态转换为 Open3D 视口的 eye/lookat/up。"""
+    yaw, pitch, roll = (
+        np.radians(float(params[key])) for key in ('yaw', 'pitch', 'roll')
+    )
+    rotation_local = _rot_z(yaw) @ _rot_y(pitch) @ _rot_x(roll)
+    transform = np.asarray(transform_to_global, dtype=np.float64).reshape(4, 4)
+    local_eye = np.array(
+        (params['tx'], params['ty'], params['tz']), dtype=np.float64
+    )
+    eye = transform[:3, :3] @ local_eye + transform[:3, 3]
+    forward = transform[:3, :3] @ rotation_local[:, 0]
+    up = transform[:3, :3] @ rotation_local[:, 2]
+    forward /= np.linalg.norm(forward) + 1e-12
+    up -= forward * float(np.dot(forward, up))
+    up /= np.linalg.norm(up) + 1e-12
+    focus_distance = float(
+        np.clip(float(params.get('far', 20.0)) * 0.5, 1.0, 20.0)
     )
     return {
-        'fov': 100.0,
-        'yaw': yaw,
-        'pitch': 0.0,
-        'roll': 0.0,
-        'tx': float(camera_xy[0]),
-        'ty': float(camera_xy[1]),
-        'tz': 1.75,
-        'near': 0.3,
-        'far': float(np.clip(np.percentile(distance, 99.0) * 1.15, 10.0, 300.0)),
-        'point_size': 3,
+        'eye': eye.tolist(),
+        'lookat': (eye + forward * focus_distance).tolist(),
+        'up': up.tolist(),
     }
+
+
+def _intensity_rgb(colors, point_count):
+    """将 PLY colors 统一转换为测试查看器使用的归一化灰度强度。"""
+    if colors is None or len(colors) != point_count:
+        return np.full((point_count, 3), 220, dtype=np.uint8)
+    values = np.asarray(colors, dtype=np.float32)
+    if values.ndim == 1:
+        intensity = values.reshape(-1)
+    elif values.ndim == 2 and values.shape[1] >= 3:
+        intensity = (
+            0.299 * values[:, 0]
+            + 0.587 * values[:, 1]
+            + 0.114 * values[:, 2]
+        )
+    else:
+        raise ValueError('点云颜色格式无效，无法转换为 intensity')
+    finite = np.isfinite(intensity)
+    normalized = np.zeros(point_count, dtype=np.float32)
+    if finite.any():
+        low, high = np.percentile(intensity[finite], (1.0, 99.0))
+        normalized[finite] = np.clip(
+            (intensity[finite] - low) / (high - low + 1e-9), 0.0, 1.0
+        )
+    gray = np.rint(normalized * 255.0).astype(np.uint8)
+    return np.repeat(gray[:, None], 3, axis=1)
 
 
 def projection_camera(params, transform_to_global, width, height):
@@ -131,31 +274,34 @@ def render_projection(
     camera = pts @ extrinsic[:3, :3].T + extrinsic[:3, 3]
     z = camera[:, 2]
     finite = np.isfinite(camera).all(axis=1)
+    distance = np.linalg.norm(camera, axis=1)
     valid = (
         finite
         & (z > float(params.get('near', 0.3)))
-        & (z < float(params.get('far', 300.0)))
+        & (distance < float(params.get('far', 300.0)))
     )
     indices = np.flatnonzero(valid)
     camera, z = camera[valid], z[valid]
 
-    u = np.rint(
-        intrinsic[0, 0] * camera[:, 0] / z + intrinsic[0, 2]
-    ).astype(np.int32)
-    v = np.rint(
-        intrinsic[1, 1] * camera[:, 1] / z + intrinsic[1, 2]
-    ).astype(np.int32)
+    offset_u = intrinsic[0, 0] * camera[:, 0] / z
+    offset_v = intrinsic[1, 1] * camera[:, 1] / z
+    if len(offset_u):
+        if bool(params.get('center_h', True)):
+            clipped = np.clip(offset_u, -2 * width, 2 * width)
+            intrinsic[0, 2] = width * 0.5 - 0.5 * (
+                np.percentile(clipped, 5.0) + np.percentile(clipped, 95.0)
+            )
+        if bool(params.get('center_v', False)):
+            clipped = np.clip(offset_v, -2 * height, 2 * height)
+            intrinsic[1, 2] = height * 0.5 - 0.5 * (
+                np.percentile(clipped, 5.0) + np.percentile(clipped, 95.0)
+            )
+    u = np.rint(offset_u + intrinsic[0, 2]).astype(np.int32)
+    v = np.rint(offset_v + intrinsic[1, 2]).astype(np.int32)
     inside = (u >= 0) & (u < width) & (v >= 0) & (v < height)
     u, v, z, indices = u[inside], v[inside], z[inside], indices[inside]
 
-    if colors is None or len(colors) != len(pts):
-        rgb = np.full((len(pts), 3), 220, dtype=np.uint8)
-    else:
-        rgb = np.asarray(colors)
-        if np.issubdtype(rgb.dtype, np.floating):
-            rgb = np.clip(rgb * 255.0, 0, 255)
-        rgb = rgb.astype(np.uint8, copy=False)
-    rgb = rgb[indices]
+    rgb = _intensity_rgb(colors, len(pts))[indices]
 
     image = np.zeros((height, width, 3), dtype=np.uint8)
     depth = np.zeros((height, width), dtype=np.float64)
@@ -216,5 +362,6 @@ def _crop_subject(image, depth, point_index, intrinsic):
 __all__ = [
     'default_projection_params',
     'projection_camera',
+    'projection_viewport_camera',
     'render_projection',
 ]

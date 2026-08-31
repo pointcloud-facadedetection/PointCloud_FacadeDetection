@@ -23,6 +23,7 @@ from .auto_view_match import match_photo_to_cloud_view
 from .perspective_camera import (
     default_projection_params,
     projection_camera,
+    projection_viewport_camera,
     render_projection,
 )
 
@@ -41,5 +42,6 @@ __all__ = [
     'match_photo_to_cloud_view',
     'default_projection_params',
     'projection_camera',
+    'projection_viewport_camera',
     'render_projection',
 ]

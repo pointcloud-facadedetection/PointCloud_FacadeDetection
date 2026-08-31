@@ -1864,9 +1864,24 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '针孔投影', '请先加载点云。')
             return
         try:
-            params = self.photo_match_service.initialize_projection(points)
+            params = self.photo_match_service.initialize_projection(
+                points,
+                image_size=self._projection_image_size(),
+            )
+            camera = self.photo_match_service.build_projection_viewport_camera(
+                params
+            )
+            applied = self.viewport.apply_scan_pose_view(
+                camera['eye'],
+                camera['lookat'],
+                camera['up'],
+                zoom=float(getattr(Config, 'INITIAL_VIEW_ZOOM', 0.45)),
+            )
         except (ValueError, np.linalg.LinAlgError) as exc:
             QMessageBox.warning(self, '针孔投影', str(exc))
+            return
+        if not applied:
+            QMessageBox.warning(self, '针孔投影', '视口相机设置失败。')
             return
         self._set_projection_controls(params)
         self._saved_match_view = None
@@ -1916,13 +1931,13 @@ class MainWindow(QMainWindow):
         if len(finite_points) == 0:
             QMessageBox.warning(self, '调整点云视角', '当前点云不包含有效坐标。')
             return
-        # 与 liying_ruiqi_dev 保持一致：观察点取点云平均中心。
-        # 包围盒中心容易被少量远端离群点拉偏，导致建筑主体缩在视口一角。
-        lookat = np.mean(finite_points, axis=0)
         try:
-            camera = self.photo_match_service.build_viewport_camera(lookat)
             projection_params = self.photo_match_service.initialize_projection(
-                finite_points
+                finite_points,
+                image_size=self._projection_image_size(),
+            )
+            camera = self.photo_match_service.build_projection_viewport_camera(
+                projection_params
             )
             applied = self.viewport.apply_scan_pose_view(
                 camera['eye'],
@@ -2122,7 +2137,7 @@ class MainWindow(QMainWindow):
                 data['pos'],
                 data.get('color'),
                 self._projection_params_from_controls(),
-                crop_subject=True,
+                crop_subject=False,
                 image_size=self._projection_image_size(),
             )
             view_image = bgr_to_qimage(captured['view_bgr'])
@@ -2355,11 +2370,15 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError) as exc:
             QMessageBox.warning(self, '生成热力图', str(exc))
             return
+        self.render_service.clear_pick_markers()
+        self.photo_view.set_markers([])
+        self.photo_view.set_remap_markers([])
         grid_bgr = stats.get('grid_bgr')
         if grid_bgr is not None:
             self.facade_heatmap_grid_view.set_image(
                 bgr_to_qimage(grid_bgr)
             )
+        self._refresh_photo_match_controls()
         self.statusBar().showMessage(
             f"立面 {int(facade.get('display_no', 1))} 平整度热力图已生成："
             '灰色=平整（±2 mm），蓝色=凹陷，红色=凸起；'
@@ -2381,13 +2400,6 @@ class MainWindow(QMainWindow):
 
     def _map_heatmap_back_to_photo(self):
         state = self.photo_match_service.state
-        if not (getattr(self.project_operation_service, '_last_facade_results', None) or []):
-            QMessageBox.information(
-                self,
-                '热力图映射回照片',
-                '请先执行立面检测；检测结果会显示在右侧立面列表中。',
-            )
-            return
         selected = self.photo_match_facade_list.currentItem()
         if selected is None:
             QMessageBox.information(
@@ -2401,6 +2413,13 @@ class MainWindow(QMainWindow):
                 self,
                 '热力图映射回照片',
                 '请先完成二维-三维匹配并估算匹配矩阵。',
+            )
+            return
+        if self._live_projection_view is None:
+            QMessageBox.information(
+                self,
+                '热力图映射回照片',
+                '请先点击“投影到二维视图”，以生成点云二维映射图。',
             )
             return
 
@@ -2454,8 +2473,10 @@ class MainWindow(QMainWindow):
                 self._qimage_to_bgr(source),
                 dataset.proxy_points,
                 facade,
+                cloud_projection=self._live_projection_view,
             )
             image = bgr_to_qimage(result['image_bgr'])
+            cloud_image = bgr_to_qimage(result['cloud_image_bgr'])
         except (ImportError, KeyError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
             QMessageBox.warning(self, '热力图映射回照片', str(exc))
             return
@@ -2468,6 +2489,7 @@ class MainWindow(QMainWindow):
         self.photo_view.set_image(image)
         self.photo_view.set_markers([])
         self.photo_view.set_remap_markers([])
+        self.cloud_match_view.set_image(cloud_image)
         self.statusBar().showMessage(
             f"立面 {int(facade.get('display_no', 1))} 热力图已映射到照片"
             f"（{int(result.get('point_count', 0)):,} 点，"
@@ -2563,12 +2585,9 @@ class MainWindow(QMainWindow):
             hasattr(self, 'photo_match_facade_list')
             and self.photo_match_facade_list.currentItem() is not None
         )
-        has_facades = bool(
-            getattr(
-                self.project_operation_service,
-                '_last_facade_results',
-                None,
-            )
+        has_generated_heatmap = (
+            hasattr(self, 'facade_heatmap_grid_view')
+            and self.facade_heatmap_grid_view.has_image()
         )
         if hasattr(self, 'btn_generate_facade_heatmap'):
             self.btn_generate_facade_heatmap.setEnabled(
@@ -2580,7 +2599,7 @@ class MainWindow(QMainWindow):
             self.btn_map_heatmap_to_photo.setEnabled(
                 has_photo
                 and has_cloud
-                and has_facades
+                and has_generated_heatmap
                 and selected_facade
                 and state.pose is not None
                 and not state.annotating
