@@ -128,6 +128,14 @@ class FacadeDetectionService:
             facade['review_status'] = facade.get('review_status',
                                                  facade.get('preview_status', 'pending'))
             facade['quality_ready'] = facade['review_status'] == 'complete'
+            if self._index_service is not None:
+                facade['raw_point_count'] = self._index_service.get_raw_count_for_facade(
+                    cloud_name, facade)
+            else:
+                facade['raw_point_count'] = int(facade.get('point_count', 0) or 0)
+
+        if project_uuid:
+            ResultsRepo.save_detected_facades(project_uuid, facades)
 
         trace("facade.detect.done", cloud=cloud_name, facades=len(facades),
               detected=detected_count,
@@ -256,6 +264,14 @@ class FacadeDetectionService:
             facade['review_status'] = facade.get('review_status',
                                                  facade.get('preview_status', 'pending'))
             facade['quality_ready'] = facade['review_status'] == 'complete'
+            if self._index_service is not None:
+                facade['raw_point_count'] = self._index_service.get_raw_count_for_facade(
+                    cloud_name, facade)
+            else:
+                facade['raw_point_count'] = int(facade.get('point_count', 0) or 0)
+
+        if project_uuid:
+            ResultsRepo.save_detected_facades(project_uuid, facades)
 
         for facade in facades:
             trace("facade.roi.mapping", facade=facade.get('id'),

@@ -23,8 +23,6 @@ class ResultScene(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
 
-    # Simplified relationship; Project no longer references active_scene_id
     project = relationship("Project", back_populates="scenes")
     files = relationship("FileAsset", back_populates="scene")
     facades = relationship("Facade", back_populates="scene", cascade="all, delete-orphan")
-    runs = relationship("ProcessingRun", back_populates="scene", cascade="all, delete-orphan")

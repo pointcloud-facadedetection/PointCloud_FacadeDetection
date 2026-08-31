@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy import select
 
 from db.connection import project_session
-from models import Facade, Heatmap, QualityMetric, Project, ResultScene
+from models import Facade, QualityMetric, Project, ResultScene
 
 
 class ResultsRepo:
@@ -23,8 +23,7 @@ class ResultsRepo:
         root.mkdir(parents=True, exist_ok=True)
         path = root / f'facade_{int(facade_id):03d}_quality_domain.npz'
         np.savez_compressed(path, global_indices=np.asarray(indices, dtype=np.int64))
-        # Store a project-relative artifact name in SQLite so the whole
-        # project can be copied to another Windows machine.
+        # 将项目相对的构建产物名称存储在 SQLite 中
         return path.name
 
     @staticmethod
@@ -59,8 +58,7 @@ class ResultsRepo:
 
         report = serializable(quality)
         report.pop('__export_context', None)
-        # Keep the quality domain in SQLite. The optional artifact argument is
-        # retained only for backward-compatible callers and is not required.
+        # 在 SQLite 中保留质量域。
         if quality_artifact_path and not report.get('__global_indices'):
             report['quality_artifact_path'] = str(quality_artifact_path)
         # 在开启事务之前进行验证，以防止格式错误的算法输出
@@ -73,27 +71,6 @@ class ResultsRepo:
                     Facade.id == int(facade_data['facade_db_id']),
                     Facade.is_deleted == 0,
                 )).scalar_one_or_none()
-            # 检测 ID 仅在算法内部有效，在场景重建后可能与数据库主键不一致。
-            # 仅将持久化的显示标签作为兼容性备选方案使用
-            if facade is None and display_no is not None:
-                facade = s.execute(select(Facade).where(
-                    # save_detected_facades stores the algorithm's zero-based
-                    # ordinal in the legacy label (Facade 0, Facade 1, ...).
-                    Facade.label == f'Facade {int(display_no) - 1}',
-                    Facade.is_deleted == 0,
-                ).order_by(Facade.id.desc())).scalars().first()
-            # 序号与项目中持久化的立面行进行匹配
-            if facade is None and display_no is not None:
-                project = s.execute(select(Project).where(
-                    Project.uuid == project_uuid)).scalar_one_or_none()
-                if project is not None:
-                    rows = s.execute(select(Facade).where(
-                        Facade.project_id == project.id,
-                        Facade.is_deleted == 0,
-                    ).order_by(Facade.id)).scalars().all()
-                    ordinal = int(display_no) - 1
-                    if 0 <= ordinal < len(rows):
-                        facade = rows[ordinal]
 
             if facade is None and isinstance(facade_data, dict):
                 project = s.execute(select(Project).where(
@@ -116,9 +93,15 @@ class ResultsRepo:
                         'proxy_indices', 'measurement_indices', 'voxel_ids',
                         'cloud_name', '__index_space')
                         if facade_data.get(key) is not None}
+                    point_count = int(facade_data.get('point_count') or
+                                      len(facade_data.get('proxy_indices') or
+                                          facade_data.get('inlier_indices') or []))
                     facade = Facade(
                         project_id=project.id, scene_id=scene.id,
                         label=f'Facade {int(display_no or 1)}',
+                        display_no=int(display_no or 1),
+                        point_count=point_count,
+                        raw_point_count=int(facade_data.get('raw_point_count') or point_count),
                         plane_json=geometry,
                         bbox_json=facade_data.get('bbox_2d'),
                         area=float(facade_data.get('area', 0.0) or 0.0),
@@ -130,13 +113,15 @@ class ResultsRepo:
                 raise ValueError(
                     f'立面不存在: facade_id={facade_id}, display_no={display_no}')
             facade.quality_report_json = report
+            if display_no is not None:
+                facade.display_no = int(display_no)
             facade.quality_status = 'complete'
             facade.quality_completed_at = datetime.now()
             if dataset_revision is not None:
                 facade.dataset_revision = str(dataset_revision)
             if color is not None:
                 facade.color_json = serializable(color)
-            # Replace metrics for repeat evaluations instead of accumulating rows.
+            # 在重复评估时替换指标，而不是累积行。
             for metric in list(facade.metrics):
                 s.delete(metric)
             overall = report.get('overall') or {}
@@ -170,7 +155,7 @@ class ResultsRepo:
             s.flush()
 
     @staticmethod
-    def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> None:
+    def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> list[Facade]:
         """Persist a detection batch and its basic metrics in the active scene.
 
         Keeping this transaction in the repository prevents the application
@@ -193,26 +178,44 @@ class ResultsRepo:
                 s.add(scene)
                 s.flush()
 
-            for item in items:
+            items = list(items)
+            # 新的检测结果将替换当前场景之前的有效数据集。
+            old_rows = s.execute(select(Facade).where(
+                Facade.scene_id == scene.id, Facade.is_deleted == 0)).scalars().all()
+            for old in old_rows:
+                s.delete(old)
+            s.flush()
+            saved = []
+            for display_no, item in enumerate(items, 1):
+                point_count = int(item.get('point_count') or
+                                  len(item.get('proxy_indices') or item.get('inlier_indices') or []))
+                raw_point_count = int(item.get('raw_point_count') or point_count)
+                item['display_no'] = display_no
                 facade = Facade(
                     project_id=project.id,
                     scene_id=scene.id,
-                    label=f"Facade {int(item.get('id', 0))}",
-                    # Keep the complete index-space payload.  Quality evaluation
-                    # after reopening depends on these fields, not just on the
-                    # plane preview/summary.
+                    label=f"Facade {display_no}",
+                    display_no=display_no,
+                    point_count=point_count,
+                    raw_point_count=raw_point_count,
+                    # 保留完整的索引空间有效载荷。
                     plane_json={key: item.get(key) for key in (
                         "plane_model", "normal", "center", "inlier_indices",
                         "proxy_indices", "measurement_indices", "voxel_ids",
                         "review_status",
                         "cloud_name", "__index_space",
-                    ) if item.get(key) is not None},
+                    ) if item.get(key) is not None} | {
+                        'point_count': point_count,
+                        'raw_point_count': raw_point_count,
+                    },
                     bbox_json=item.get("bbox_2d"),
                     area=float(item.get("area", 0.0)),
                     orientation=item.get("type_label") or item.get("type"),
                 )
                 s.add(facade)
                 s.flush()
+                item['facade_db_id'] = facade.id
+                saved.append(facade)
                 metrics = (
                     ("flatness_std", float(item.get("flatness", 0.0)) * 1000.0, "mm"),
                     ("flatness_mean", float(item.get("flatness_mean", 0.0)) * 1000.0, "mm"),
@@ -225,6 +228,7 @@ class ResultsRepo:
                         facade_id=facade.id, metric_name=name, value=value, unit=unit
                     ))
             s.flush()
+            return saved
 
     @staticmethod
     def save_facades(project_uuid: str, scene_id: int, items: Iterable[dict]) -> list[Facade]:
@@ -272,14 +276,6 @@ class ResultsRepo:
                     thresholds_json=thresholds,
                 ))
             s.flush()
-
-    @staticmethod
-    def bind_heatmap(project_uuid: str, facade_id: int, file_id: int, vmin: float | None, vmax: float | None, cmap: str | None) -> Heatmap:
-        with project_session(project_uuid) as s:
-            h = Heatmap(facade_id=facade_id, file_id=file_id, vmin=vmin, vmax=vmax, cmap=cmap)
-            s.add(h)
-            s.flush()
-            return h
 
     @staticmethod
     def get_facade_list(project_uuid: str, scene_id: int) -> list[Facade]:
