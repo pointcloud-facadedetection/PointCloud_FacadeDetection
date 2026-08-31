@@ -5,6 +5,15 @@ import numpy as np
 import open3d as o3d
 
 
+@dataclass(frozen=True)
+class RegistrationConfig:
+    """Parameters for residual ICP on already-globalized PLY clouds."""
+    voxel_size: float = 0.05
+    max_correspondence_distance: float = 0.12
+    max_iteration: int = 30
+    pyramid_scales: tuple[float, ...] = (2.0, 1.0)
+
+
 # =============================================================================
 # 1. 配准质量评估
 # =============================================================================
@@ -128,13 +137,14 @@ def rigid_transform_from_correspondences(source_points, target_points):
 
 def manual_seeded_icp(source_points, target_points, source_correspondences,
                        target_correspondences, *, voxel_size=0.05,
-                       max_iteration=50):
-    """Proxy-domain ICP initialized by operator-selected physical matches."""
+                       max_iteration=30, max_correspondence_distance=0.12):
+    """Global-coordinate ICP seeded by optional operator correspondences."""
     src_pairs = np.asarray(source_correspondences, dtype=np.float64).reshape(-1, 3)
     tgt_pairs = np.asarray(target_correspondences, dtype=np.float64).reshape(-1, 3)
     init = rigid_transform_from_correspondences(src_pairs, tgt_pairs)
     result = point_to_plane_icp(source_points, target_points, init=init,
-                                voxel_size=voxel_size, max_iteration=max_iteration)
+                                voxel_size=voxel_size, max_iteration=max_iteration,
+                                max_correspondence_distance=max_correspondence_distance)
     initial_rmse = float(np.sqrt(np.mean(np.sum((src_pairs @ init[:3, :3].T + init[:3, 3] - tgt_pairs) ** 2, axis=1))))
     final_pairs = src_pairs @ result.transformation[:3, :3].T + result.transformation[:3, 3]
     pair_rmse = float(np.sqrt(np.mean(np.sum((final_pairs - tgt_pairs) ** 2, axis=1))))
@@ -147,7 +157,9 @@ def manual_seeded_icp(source_points, target_points, source_correspondences,
 
 
 def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.05,
-                       max_correspondence_distance=None, max_iteration=40):
+                       max_correspondence_distance=None, max_iteration=30,
+                       pyramid_scales=(2.0, 1.0)):
+    """Estimate residual ``Delta T`` between clouds in one global frame."""
     src = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 3)
     src = src[np.isfinite(src).all(axis=1)]
@@ -155,7 +167,9 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
     if len(src) < 3 or len(tgt) < 3:
         raise ValueError('点到面 ICP 至少需要两组各 3 个有效点')
 
-    scales = [float(voxel_size) * 4, float(voxel_size) * 2, float(voxel_size)] if voxel_size else [0.05]
+    scales = [float(voxel_size) * float(level) for level in pyramid_scales] if voxel_size else [0.05]
+    if not scales:
+        raise ValueError('ICP 至少需要一个有效金字塔层级')
     scales = [max(x, 1e-3) for x in scales]
     T = np.eye(4) if init is None else np.asarray(init, dtype=np.float64).reshape(4, 4)
     reports = []
@@ -170,7 +184,9 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
         for cloud in (source, target):
             cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50))
             cloud.normalize_normals()
-        distance = max_correspondence_distance or max(scale * 2.5, 0.01)
+        distance = (float(max_correspondence_distance)
+                    if max_correspondence_distance is not None
+                    else max(scale * 2.5, 0.01))
         criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
             relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=int(max_iteration))
         final = o3d.pipelines.registration.registration_icp(
@@ -181,8 +197,11 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
                         'rmse': float(final.inlier_rmse),
                         'correspondences': len(final.correspondence_set)})
 
+    metric_distance = (float(max_correspondence_distance)
+                       if max_correspondence_distance is not None
+                       else max(scales[-1] * 2.5, 0.01))
     checked = registration_metrics(src, tgt, T,
-                                   max_correspondence_distance=max(scales[-1] * 2.5, 0.01))
+                                   max_correspondence_distance=metric_distance)
     fitness = checked['fitness']
     rmse = checked['rmse']
     correspondence_count = checked['correspondence_count']

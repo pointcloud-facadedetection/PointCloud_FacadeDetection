@@ -37,8 +37,6 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     size = max(float(pixel_size), 1e-4)
     shape = np.maximum(np.ceil((hi-lo)/size).astype(int)+1, 1)
     if max(shape) > max_size:
-        # The extra endpoint pixel is included in shape, so scale against
-        # max_size - 1 rather than max_size to keep the hard bound exact.
         size = max(size, float(np.max(hi - lo)) / max(max_size - 1, 1))
         shape = np.maximum(np.ceil((hi-lo)/size).astype(int)+1, 1)
     h, w = int(shape[1]), int(shape[0])
@@ -54,25 +52,20 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     base_flat /= np.maximum(np.bincount(frame_flat, minlength=h*w).reshape(-1, 1), 1)
     base = base_flat.reshape(h,w,3)
     
-    # ==================== Unified defect heatmap ====================
+    # ==================== 统一缺陷热力图 ====================
     abs_gap = np.abs(gaps)
     defect = np.isfinite(abs_gap) & (abs_gap > float(defect_limit))
     values = abs_gap[defect]  # Always use absolute values
+
+    if vmax is not None:
+        vmax = float(vmax)
+    else:
+        vmax = max(float(np.percentile(values, 98)) if values.size else float(defect_limit) * 1.05,
+                   float(defect_limit) * 1.05)
     
-    # Auto-scale vmax
-    vmax = max(float(np.percentile(values, 98)) if values.size else float(defect_limit) * 1.05,
-               float(defect_limit) * 1.05)
     vmin = float(defect_limit if vmin is None else vmin)
     
-    # Conventional heatmap: gray(qualified) -> yellow -> orange -> red
-    # t: 0 = at limit (just qualified), 1 = max defect
-    t = np.clip((values - vmin) / (vmax - vmin + 1e-12), 0, 1)
-    
-    heat = np.zeros((len(values), 3), dtype=np.float32)
-    
-    # Gray (0.75, 0.75, 0.75) at t=0 -> Yellow (1, 1, 0) at t=0.33
-    # -> Orange (1, 0.5, 0) at t=0.66 -> Red (1, 0, 0) at t=1.0
-    
+    # 当 defect_colors 传入时，直接使用传入的颜色
     if defect_colors is not None:
         supplied = np.asarray(defect_colors, dtype=np.float32).reshape(-1, 3)
         if len(supplied) == len(pts):
@@ -82,21 +75,24 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
         else:
             raise ValueError('defect_colors must align with points or defects')
     else:
-        # Segment 1: Gray -> Yellow (t: 0 -> 0.33)
+        # 仅当未传入 defect_colors 时才使用默认映射
+        # 统一配色 - 青→黄→橙→红
+        t = np.clip((values - vmin) / (vmax - vmin + 1e-12), 0, 1)
+        
+        heat = np.zeros((len(values), 3), dtype=np.float32)
+
         mask1 = t <= 0.33
         tt1 = t[mask1] / 0.33
-        heat[mask1, 0] = 0.75 + 0.25 * tt1
+        heat[mask1, 0] = 0.0 + 1.0 * tt1
         heat[mask1, 1] = 0.75 + 0.25 * tt1
-        heat[mask1, 2] = 0.75 - 0.75 * tt1
+        heat[mask1, 2] = 1.0 - 1.0 * tt1
 
-        # Segment 2: Yellow -> Orange (t: 0.33 -> 0.66)
         mask2 = (t > 0.33) & (t <= 0.66)
         tt2 = (t[mask2] - 0.33) / 0.33
         heat[mask2, 0] = 1.0
         heat[mask2, 1] = 1.0 - 0.5 * tt2
         heat[mask2, 2] = 0.0
 
-        # Segment 3: Orange -> Red (t: 0.66 -> 1.0)
         mask3 = t > 0.66
         tt3 = (t[mask3] - 0.66) / 0.34
         heat[mask3, 0] = 1.0
@@ -105,7 +101,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     
     defect_indices = np.flatnonzero(defect)
     
-    # Pixel-level aggregation: keep max defect value per pixel
+    # 像素级聚合：保留每个像素的最大缺陷值
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
     pixel_values = np.full(h*w, -np.inf, dtype=float)
     pixel_ids = flat[defect_indices]
