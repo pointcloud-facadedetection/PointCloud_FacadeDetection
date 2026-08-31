@@ -227,8 +227,23 @@ class Open3DViewport(BaseViewport):
                 try:
                     if self._pick_overlay is None or self._container is None:
                         return
-                    self._pick_overlay.sync_geometry()
-                except Exception:
+                    if not self._container.isVisible():
+                        return
+
+                        # 获取容器在屏幕上的精确位置
+                    container_global = self._container.mapToGlobal(QPoint(0, 0))
+                    self._pick_overlay.setGeometry(
+                            container_global.x(),
+                            container_global.y(),
+                            self._container.width(),
+                            self._container.height()
+                        )
+                    self._pick_overlay.raise_()
+
+                        # 如果处于激活状态，确保焦点
+                    if getattr(self._pick_overlay, '_active', False):
+                        self._pick_overlay.setFocus(Qt.OtherFocusReason)
+                except RuntimeError:
                     pass
 
             original_resize = self._root.resizeEvent
@@ -416,6 +431,11 @@ class Open3DViewport(BaseViewport):
         if qwindow is not None:
             try:
                 qwindow.removeEventFilter(getattr(self, '_qwindow_event_bridge', None))
+            except Exception:
+                pass
+            try:
+                # QWindow.fromWinId wraps an external GLFW HWND. Do not call
+                # destroy() on the wrapper after GLFW has released that HWND.
                 qwindow.setParent(None)
             except Exception:
                 pass
@@ -426,10 +446,6 @@ class Open3DViewport(BaseViewport):
         # fromWinId 返回的包装对象不能在 Visualizer 销毁后继续存活到
         # QApplication 退出，否则 Qt 平台插件可能再次访问 GLFW 句柄。
         if qwindow is not None:
-            try:
-                qwindow.destroy()
-            except Exception:
-                pass
             try:
                 qwindow.deleteLater()
             except Exception:
@@ -625,44 +641,113 @@ class Open3DViewport(BaseViewport):
 
     def enter_registration_pick_mode(self, source_cloud, target_cloud,
                                      callback, pick_radius=10):
-        """Pick source/target proxy points alternately for one registration pair."""
+        """
+        进入注册配准选点模式。
+
+        视图层职责：
+        - 管理选点状态（源/目标点列表）
+        - 渲染选点标记
+        - 将选点事件通过回调通知业务层
+
+        算法层职责（外部）：
+        - 接收点对后计算变换矩阵
+        """
         self.clear_pick_markers()
-        state = {'source': True, 'source_points': [], 'target_points': []}
 
-        def on_pick(picked):
-            expected = source_cloud if state['source'] else target_cloud
-            if picked.get('cloud_name') != expected:
-                return
-            point = np.asarray(picked['point'], dtype=np.float64)
-            if state['source']:
-                state['source_points'].append(point)
-                state['source'] = False
-            else:
-                state['target_points'].append(point)
-                state['source'] = True
-            self.update_pick_markers(state['source_points'], state['target_points'])
-            if callable(callback):
-                callback(picked, bool(state['source']))
+        # 选点状态机 —— 纯视图状态，无业务逻辑
+        self._registration_pick_state = {
+            'source_cloud': source_cloud,
+                'target_cloud': target_cloud,
+            'source_points': [],
+            'target_points': [],
+            'next_is_source': True,  # 下一次点击收集源点还是目标点
+        }
 
-        self.enter_pick_mode(cloud_name=source_cloud, pick_radius=pick_radius,
-                             callback=on_pick)
-        # The callback switches the restricted cloud after each click.
-        self._registration_pick_state = state
-        self._registration_source_cloud = source_cloud
-        self._registration_target_cloud = target_cloud
+        # 设置交互模式为 PICK
+        self.set_mode(self.InteractionMode.PICK)
+        self._interactor.pick_enabled = True
+        self._interactor.pick_cloud = source_cloud  # 第一次先选源站点
+        self._interactor.point_pick_callback = self._on_registration_pick
 
-        def switch_cloud(_picked, source_next):
-            self._interactor.pick_cloud = (source_cloud if source_next else target_cloud)
-        self._registration_pick_switch = switch_cloud
-        # enter_pick_mode has already installed ``on_pick``; replace it only
-        # to switch the restricted cloud after the accepted click.
-        self.point_pick_callback = lambda picked: (
-            on_pick(picked), switch_cloud(picked, state['source']))
+        # 存储外部回调（业务层传入）
+        self._registration_callback = callback
+
+        # 激活覆盖层
+        if self._pick_overlay is not None:
+            self._pick_overlay.activate()
+
+        # 渲染初始状态（空标记）
+        self.update_pick_markers()
+
+    def _on_registration_pick(self, picked):
+        """
+        选点回调 —— 视图层内部处理。
+        职责：记录点坐标、切换源/目标、更新视觉标记、通知业务层。
+        """
+        state = getattr(self, '_registration_pick_state', None)
+        if state is None:
+            return
+
+        cloud_name = picked.get('cloud_name')
+        point = np.asarray(picked['point'], dtype=np.float64)
+
+        # 验证点属于正确的站点
+        expected = state['source_cloud'] if state['next_is_source'] else state['target_cloud']
+        if cloud_name != expected:
+            return
+
+        # 记录点坐标
+        if state['next_is_source']:
+            state['source_points'].append(point)
+            state['next_is_source'] = False
+            # 切换下一次点击的目标站点
+            self._interactor.pick_cloud = state['target_cloud']
+        else:
+            state['target_points'].append(point)
+            state['next_is_source'] = True
+            # 切换回源站点
+            self._interactor.pick_cloud = state['source_cloud']
+
+        # 更新视觉标记
+        self.update_pick_markers(
+            state['source_points'],
+            state['target_points']
+        )
+
+        # 通知业务层回调
+        callback = getattr(self, '_registration_callback', None)
+        if callable(callback):
+            try:
+                callback(picked, state['next_is_source'])
+            except Exception:
+                pass
 
     def registration_pick_points(self):
+        """返回当前已选的源/目标点对 —— 供业务层读取。"""
         state = getattr(self, '_registration_pick_state', None) or {}
         return (list(state.get('source_points', [])),
                 list(state.get('target_points', [])))
+
+    def handle_pick_screen(self, pos):
+        """处理来自覆盖层的屏幕点击，唯一的点选入口。"""
+        picked = self._interactor.pick_at_screen(pos, cloud_name=self._interactor.pick_cloud)
+        if picked is None:
+            return
+
+        # 更新最后选中的点（供外部查询）
+        self._interactor.last_picked_point = np.asarray(picked['point'], dtype=float)
+
+        # 触发选点回调
+        callback = self._interactor.point_pick_callback
+        if callable(callback):
+            try:
+                callback(picked)
+            except Exception:
+                pass
+
+        # 刷新覆盖层显示
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
 
     def exit_pick_mode(self):
         self.set_pick_enabled(False)

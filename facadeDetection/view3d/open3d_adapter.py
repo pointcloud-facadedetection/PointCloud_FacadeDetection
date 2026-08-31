@@ -110,23 +110,43 @@ class Open3DAdapter:
         return self.vis.capture_screen_float_buffer(do_render=True)
 
     def destroy(self):
-        """Destroy the native window once, while GLFW is still available."""
+        """Destroy the native window once, while GLFW is still available.
+        策略：
+        1. 先标记销毁状态，阻止后续操作
+        2. 清理几何体引用（不触发 Open3D 调用）
+        3. 使用 try/except 包裹 destroy_window，吞掉 GLFW 错误
+        4. 延迟释放 vis 引用，避免半销毁状态访问
+        """
         if self._destroyed:
             return
+    
+        # 线程安全检查
         if self._owner_thread_id is not None and threading.get_ident() != self._owner_thread_id:
             raise RuntimeError('Open3D window must be destroyed on the GUI thread')
-        vis = self.vis
-        # Mark the adapter unavailable before entering Open3D.  Queued Qt
-        # callbacks can therefore not touch a half-destroyed Visualizer.
+    
+        # Step 1: 标记销毁状态
         self._destroyed = True
+    
+        # Step 2: 保存并清空引用（先于 Open3D 调用）
+        vis = self.vis
         self.vis = None
         self.geometries.clear()
-        try:
-            if vis is not None:
+    
+        # Step 3: 安全销毁窗口
+        if vis is not None:
+            try:
+                # 先清除所有几何体，减少 destroy_window 的工作量
+                try:
+                    vis.clear_geometries()
+                except Exception:
+                    pass
+            
+                # 最终销毁
                 vis.destroy_window()
-        except Exception:
-            # 关闭阶段 Open3D 可能已经由 GLFW 清理了窗口；不能让异常
-            # 阻止 Qt 主窗口和其余线程退出。
-            pass
-        finally:
-            del vis
+            except Exception as e:
+                # 吞掉所有 GLFW/Open3D 关闭阶段的错误
+                print(f'[Open3DAdapter] destroy_window warning (safe to ignore): {e}',
+                      flush=True)
+            finally:
+                # 确保引用释放
+                del vis
