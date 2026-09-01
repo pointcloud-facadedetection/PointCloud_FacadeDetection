@@ -32,6 +32,7 @@ class FacadePanel(QWidget):
         result_layout.addWidget(self.summary)
         
         self.evaluate_button = QPushButton('评估选中立面')
+        self.evaluate_button.setProperty('buttonRole', 'primary')
         self.evaluate_button.setMinimumHeight(34)
         self.evaluate_button.setCursor(Qt.CursorShape.PointingHandCursor)
         result_layout.addWidget(self.evaluate_button)

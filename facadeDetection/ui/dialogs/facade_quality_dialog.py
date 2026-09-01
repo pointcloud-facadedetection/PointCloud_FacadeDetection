@@ -292,8 +292,11 @@ class FacadeQualityDialog(QDialog):
 
         btn_show = QPushButton("显示检测效果")
         btn_show.setObjectName('primaryBtn')
+        btn_show.setProperty('buttonRole', 'primary')
         btn_restore = QPushButton("恢复原始颜色")
+        btn_restore.setProperty('buttonRole', 'tonal')
         btn_close = QPushButton("关闭")
+        btn_close.setProperty('buttonRole', 'tonal')
 
         btn_row.addWidget(self._mode_combo)
         btn_row.addWidget(btn_show)

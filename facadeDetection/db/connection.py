@@ -102,6 +102,15 @@ def _project_engine(project_uuid: str):
     with engine.begin() as conn:
         conn.execute(text('DROP TABLE IF EXISTS heatmaps'))
         conn.execute(text('DROP TABLE IF EXISTS processing_runs'))
+        # 旧项目库创建于“楼栋号”字段加入之前；打开项目时 ORM 会查询完整
+        # Project 模型，因此先做只增列迁移，保留全部历史项目数据。
+        project_columns = {
+            c['name'] for c in inspect(conn).get_columns('projects')
+        }
+        if 'building_floor' not in project_columns:
+            conn.execute(
+                text('ALTER TABLE projects ADD COLUMN building_floor TEXT')
+            )
         columns = {c['name'] for c in inspect(conn).get_columns('facades')}
         additions = {
             'quality_status': 'TEXT NOT NULL DEFAULT \'pending\'',

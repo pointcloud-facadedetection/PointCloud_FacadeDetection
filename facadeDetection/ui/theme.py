@@ -5,6 +5,8 @@ one white workspace surface, thin borders, restrained blue anchors and no
 decorative gradients or nested-card shadows.
 """
 
+from pathlib import Path
+
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -218,8 +220,8 @@ QToolButton[uiRole="windowControl"] {
     border: none;
     border-radius: 0;
     font-family: "Segoe UI Symbol", "Microsoft YaHei UI";
-    font-size: 17px;
-    font-weight: 500;
+    font-size: 20px;
+    font-weight: 600;
 }
 
 QToolButton[uiRole="windowControl"]:hover {
@@ -263,6 +265,32 @@ QPushButton[buttonRole="primary"]:disabled {
     color: #94A3B8;
     background-color: #E2E8F0;
     border-color: #E2E8F0;
+}
+
+/* 低频工具动作使用雾蓝色调，和主蓝按钮形成清晰但统一的层级。 */
+QPushButton[buttonRole="tonal"] {
+    color: #1E40AF;
+    background-color: #E7EEFF;
+    border-color: #BFD0FF;
+    font-weight: 600;
+}
+
+QPushButton[buttonRole="tonal"]:hover {
+    color: #173A9A;
+    background-color: #D9E5FF;
+    border-color: #91ABF8;
+}
+
+QPushButton[buttonRole="tonal"]:pressed {
+    color: #FFFFFF;
+    background-color: #2457D6;
+    border-color: #2457D6;
+}
+
+QPushButton[buttonRole="tonal"]:disabled {
+    color: #94A3B8;
+    background-color: #E8EDF3;
+    border-color: #D4DDE8;
 }
 
 QPushButton[buttonRole="danger"] {
@@ -363,9 +391,54 @@ QWidget#bottomDockPanel {
 }
 
 QWidget#bottomNavigation {
-    background-color: #FFFFFF;
-    border: 1px solid #D4DDE9;
+    background-color: #F1F5FA;
+    border: 1px solid #C6D2E1;
     border-radius: 11px;
+}
+
+QGroupBox {
+    color: #334155;
+    background-color: #F1F6FB;
+    border: 1px solid #CFDAE8;
+    border-radius: 8px;
+    margin-top: 12px;
+    padding-top: 8px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 6px;
+    color: #334155;
+    background-color: #F1F6FB;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background-color: #CBD7E6;
+    border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+    background-color: #2F6BFF;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    background-color: #FFFFFF;
+    border: 2px solid #2F6BFF;
+    border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+    background-color: #E7EEFF;
+    border-color: #1E48B8;
 }
 
 QFrame[uiRole="workspaceSection"] {
@@ -499,13 +572,69 @@ QWidget#viewportPanel {
     border: none;
 }
 
-QLabel#viewportStateLabel {
-    color: #34445A;
-    background-color: #EEF2F7;
-    border: 1px solid #D5DEEA;
-    border-radius: 7px;
-    padding: 4px 8px;
+QFrame#inspectionConfigBar {
+    background-color: #EDF3FA;
+    border: none;
+    border-top: 1px solid #C8D5E4;
+    border-bottom: 1px solid #C8D5E4;
+}
+
+QFrame#inspectionConfigBar QLabel {
+    color: #475569;
+    background-color: transparent;
+}
+
+QLabel[uiRole="inspectionFieldLabel"] {
+    color: #334155;
     font-size: 13px;
+    font-weight: 600;
+}
+
+QComboBox#standardProfileCombo,
+QComboBox#inspectionIntervalCombo {
+    color: #173A7A;
+    background-color: #E7EEFF;
+    border: 1px solid #B3C6E6;
+    border-radius: 7px;
+    padding-left: 12px;
+    font-weight: 600;
+}
+
+QComboBox#standardProfileCombo:hover,
+QComboBox#inspectionIntervalCombo:hover {
+    background-color: #DCE7FF;
+    border-color: #86A4DF;
+}
+
+QComboBox#standardProfileCombo:focus,
+QComboBox#inspectionIntervalCombo:focus {
+    background-color: #F6F9FF;
+    border-color: #2F6BFF;
+}
+
+QLabel#standardSummary {
+    color: #475569;
+    background-color: #F7FAFD;
+    border: 1px solid #D3DEEA;
+    border-radius: 7px;
+    padding: 7px 10px;
+    font-size: 12px;
+}
+
+QLabel#viewportStateLabel {
+    color: #1E40AF;
+    background-color: #E7EEFF;
+    border: 1px solid #BFD0FF;
+    border-radius: 7px;
+    padding: 4px 10px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#viewportStateLabel[statusState="loading"] {
+    color: #1E40AF;
+    background-color: #E7EEFF;
+    border-color: #9FB8FF;
 }
 
 QWidget#open3dViewport {
@@ -563,11 +692,21 @@ QTextEdit {
     min-height: 22px;
     padding: 6px 10px;
     color: #0F172A;
-    background-color: #FFFFFF;
-    border: 1px solid #CBD5E1;
+    background-color: #EEF4FA;
+    border: 1px solid #B8C7DA;
     border-radius: 6px;
     selection-color: #FFFFFF;
     selection-background-color: #1E40AF;
+}
+
+QLineEdit:hover,
+QComboBox:hover,
+QSpinBox:hover,
+QDoubleSpinBox:hover,
+QPlainTextEdit:hover,
+QTextEdit:hover {
+    background-color: #F4F8FC;
+    border-color: #8FA8C8;
 }
 
 QLineEdit:focus,
@@ -576,7 +715,230 @@ QSpinBox:focus,
 QDoubleSpinBox:focus,
 QPlainTextEdit:focus,
 QTextEdit:focus {
+    background-color: #F8FBFF;
     border-color: #3B82F6;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled,
+QPlainTextEdit:disabled,
+QTextEdit:disabled {
+    color: #94A3B8;
+    background-color: #E8EDF3;
+    border-color: #D4DDE8;
+}
+
+/* 下拉框与数字输入统一成一体式雾蓝控件，替换不稳定的系统箭头。 */
+QComboBox {
+    padding-right: 36px;
+}
+
+QSpinBox,
+QDoubleSpinBox {
+    padding-right: 34px;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 30px;
+    background-color: #E1EAF5;
+    border: none;
+    border-left: 1px solid #B8C7DA;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+QComboBox::drop-down:hover {
+    background-color: #D6E3F3;
+    border-left-color: #8FA8C8;
+}
+
+QComboBox::drop-down:on {
+    background-color: #C9D9EE;
+    border-left-color: #6F8FB9;
+}
+
+QComboBox::down-arrow {
+    image: url(__CHEVRON_DOWN__);
+    width: 12px;
+    height: 8px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 28px;
+    background-color: #E1EAF5;
+    border: none;
+    border-left: 1px solid #B8C7DA;
+    border-bottom: 1px solid #C6D3E3;
+    border-top-right-radius: 6px;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 28px;
+    background-color: #E1EAF5;
+    border: none;
+    border-left: 1px solid #B8C7DA;
+    border-bottom-right-radius: 6px;
+}
+
+QSpinBox::up-button:hover,
+QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::down-button:hover {
+    background-color: #D6E3F3;
+    border-left-color: #8FA8C8;
+}
+
+QSpinBox::up-button:pressed,
+QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed,
+QDoubleSpinBox::down-button:pressed {
+    background-color: #C9D9EE;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+    image: url(__CHEVRON_UP__);
+    width: 10px;
+    height: 7px;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+    image: url(__CHEVRON_DOWN__);
+    width: 10px;
+    height: 7px;
+}
+
+QComboBox QAbstractItemView {
+    color: #0F172A;
+    background-color: #F8FBFF;
+    border: 1px solid #AFC0D6;
+    selection-color: #FFFFFF;
+    selection-background-color: #2457D6;
+    outline: 0;
+}
+
+QCheckBox {
+    color: #334155;
+    spacing: 7px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    background-color: #EEF4FA;
+    border: 1px solid #9FB0C7;
+    border-radius: 4px;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #3B82F6;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #2457D6;
+    border-color: #2457D6;
+}
+
+QFrame#qualityParameterPanel {
+    background-color: #F1F6FB;
+    border: 1px solid #CFDAE8;
+    border-radius: 8px;
+}
+
+/* 紧凑参数输入保留足够的数字区，不让右侧增减按钮压住文本。 */
+QSpinBox[uiRole="qualityParameterInput"],
+QDoubleSpinBox[uiRole="qualityParameterInput"],
+QComboBox[uiRole="qualityParameterInput"] {
+    min-height: 32px;
+    color: #173A7A;
+    background-color: #F8FBFF;
+    border-color: #B3C6E6;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QDialog#projectCreateDialog {
+    background-color: #E9EEF5;
+}
+
+QFrame#projectDialogHero {
+    background-color: #0F1B2D;
+    border: 1px solid #2A3A52;
+    border-radius: 10px;
+}
+
+QLabel#projectDialogTitle {
+    color: #F8FAFC;
+    background-color: transparent;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QLabel#projectDialogSubtitle {
+    color: #B9C7DA;
+    background-color: transparent;
+    font-size: 12px;
+}
+
+QFrame#projectFormPanel {
+    background-color: #F7FAFD;
+    border: 1px solid #CBD7E6;
+    border-radius: 10px;
+}
+
+QDialog#projectCreateDialog QFrame#projectFormPanel QLabel {
+    color: #334155;
+    background-color: transparent;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QDialog#projectCreateDialog QLineEdit,
+QDialog#projectCreateDialog QComboBox,
+QDialog#projectCreateDialog QTextEdit {
+    min-height: 26px;
+    color: #172033;
+    background-color: #EEF4FA;
+    border-color: #B8C7DA;
+    font-size: 13px;
+}
+
+QWidget#projectRegionSelector QComboBox {
+    min-height: 30px;
+    padding-left: 10px;
+    color: #173A7A;
+    background-color: #EEF4FA;
+    border-color: #B8C7DA;
+    font-weight: 600;
+}
+
+QDialog#projectCreateDialog QLineEdit:hover,
+QDialog#projectCreateDialog QComboBox:hover,
+QDialog#projectCreateDialog QTextEdit:hover {
+    background-color: #F8FBFF;
+    border-color: #8FA8C8;
+}
+
+QDialog#projectCreateDialog QLineEdit:focus,
+QDialog#projectCreateDialog QComboBox:focus,
+QDialog#projectCreateDialog QTextEdit:focus {
+    background-color: #FFFFFF;
+    border-color: #2F6BFF;
+}
+
+QDialogButtonBox#projectDialogButtons {
+    background-color: transparent;
 }
 
 QListView,
@@ -650,6 +1012,16 @@ QToolTip {
 """
 
 
+def _theme_style_sheet() -> str:
+    """Resolve reusable SVG controls to stable absolute QSS paths."""
+    icon_dir = Path(__file__).resolve().parent / "assets" / "icons"
+    return (
+        APPLICATION_STYLE_SHEET
+        .replace("__CHEVRON_DOWN__", f'"{(icon_dir / "chevron_down.svg").as_posix()}"')
+        .replace("__CHEVRON_UP__", f'"{(icon_dir / "chevron_up.svg").as_posix()}"')
+    )
+
+
 def apply_application_theme(app: QApplication) -> None:
     """Apply one sans-serif font stack, palette and QSS to every Qt window."""
     app.setStyle("Fusion")
@@ -693,4 +1065,4 @@ def apply_application_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLORS["surface"]))
     palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(COLORS["text_muted"]))
     app.setPalette(palette)
-    app.setStyleSheet(APPLICATION_STYLE_SHEET)
+    app.setStyleSheet(_theme_style_sheet())

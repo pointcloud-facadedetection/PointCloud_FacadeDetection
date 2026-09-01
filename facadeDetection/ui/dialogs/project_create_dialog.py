@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QComboBox,
+    QFrame,
     QWidget,
     QHBoxLayout,
 )
@@ -33,6 +34,10 @@ class RegionSelector(QWidget):
         self.cb_province = QComboBox()
         self.cb_city = QComboBox()
         self.cb_district = QComboBox()
+        # 三级区域选择沿用全局下拉按钮，避免出现 Windows 原生减号式箭头。
+        for combo in (self.cb_province, self.cb_city, self.cb_district):
+            combo.setProperty('uiRole', 'projectRegionInput')
+            combo.setMinimumHeight(36)
 
         # 布局：水平排列三个下拉框
         layout = QHBoxLayout(self)
@@ -142,6 +147,7 @@ class ProjectCreateDialog(QDialog):
     def __init__(self, parent=None, project=None):
         super().__init__(parent)
         self._project = project
+        self.setObjectName('projectCreateDialog')
         self.setWindowTitle("编辑项目" if project is not None else "创建项目")
         self.setModal(True)
         self._build_ui()
@@ -150,55 +156,88 @@ class ProjectCreateDialog(QDialog):
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
-        title = QLabel("请输入项目信息")
-        title.setStyleSheet("font-size:16px; font-weight:600; color:#333;")
-        lay.addWidget(title)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(16)
 
-        form = QFormLayout()
+        # 与主工作台相同的深蓝标题层，明确区分标题、说明与表单内容。
+        hero = QFrame()
+        hero.setObjectName('projectDialogHero')
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(4)
+        title_text = '编辑项目信息' if self._project is not None else '创建新项目'
+        title = QLabel(title_text)
+        title.setObjectName('projectDialogTitle')
+        subtitle = QLabel('填写工程识别信息，后续点云与检测结果将归档到该项目。')
+        subtitle.setObjectName('projectDialogSubtitle')
+        subtitle.setWordWrap(True)
+        hero_layout.addWidget(title)
+        hero_layout.addWidget(subtitle)
+        lay.addWidget(hero)
+
+        form_panel = QFrame()
+        form_panel.setObjectName('projectFormPanel')
+        form = QFormLayout(form_panel)
+        form.setContentsMargins(20, 18, 20, 18)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(13)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         # 项目名称（必填）
         self.edt_name = QLineEdit()
-        self.edt_name.setPlaceholderText("必填")
-        form.addRow("项目名称：", self.edt_name)
+        self.edt_name.setObjectName('projectNameInput')
+        self.edt_name.setPlaceholderText("请输入项目名称")
+        form.addRow("项目名称 *", self.edt_name)
 
         # 单位（选填）
         self.edt_org = QLineEdit()
-        self.edt_org.setPlaceholderText("选填")
-        form.addRow("所属单位：", self.edt_org)
+        self.edt_org.setPlaceholderText("请输入所属单位（选填）")
+        form.addRow("所属单位", self.edt_org)
 
         # 省市区三级联动（选填）
         self.region_selector = RegionSelector()
-        form.addRow("省市区：", self.region_selector)
+        self.region_selector.setObjectName('projectRegionSelector')
+        form.addRow("省市区", self.region_selector)
 
         # 详细地址（选填）
         self.edt_address = QLineEdit()
         self.edt_address.setPlaceholderText("具体地址，如街道")
-        form.addRow("详细地址：", self.edt_address)
+        form.addRow("详细地址", self.edt_address)
 
         # 楼栋号（选填）
-        self.edt_building = QLineEdit(); 
+        self.edt_building = QLineEdit()
         self.edt_building.setPlaceholderText('如：1号楼')
-        form.addRow('楼栋号信息：', self.edt_building)
+        form.addRow('楼栋号信息', self.edt_building)
 
         # 备注（选填）
         self.edt_remarks = QTextEdit()
-        self.edt_remarks.setPlaceholderText("选填")
-        self.edt_remarks.setFixedHeight(80)
-        form.addRow("备注：", self.edt_remarks)
+        self.edt_remarks.setPlaceholderText("补充项目说明（选填）")
+        self.edt_remarks.setFixedHeight(92)
+        form.addRow("备注", self.edt_remarks)
 
-        lay.addLayout(form)
+        lay.addWidget(form_panel, 1)
 
         # 按钮
         self.btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        self.btns.setObjectName('projectDialogButtons')
+        save_button = self.btns.button(QDialogButtonBox.StandardButton.Save)
+        cancel_button = self.btns.button(QDialogButtonBox.StandardButton.Cancel)
+        save_button.setText('保存项目')
+        save_button.setProperty('buttonRole', 'primary')
+        save_button.setMinimumSize(104, 38)
+        cancel_button.setText('取消')
+        cancel_button.setProperty('buttonRole', 'tonal')
+        cancel_button.setMinimumSize(88, 38)
         self.btns.accepted.connect(self._on_accept)
         self.btns.rejected.connect(self.reject)
         lay.addWidget(self.btns)
 
-        self.resize(480, 360)
+        self.resize(660, 560)
+        self.setMinimumSize(620, 520)
         self.edt_name.setFocus()
 
     def _load_project(self, project):

@@ -623,7 +623,8 @@ class MainWindow(QMainWindow):
         button.setText(text)
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
-        button.setFixedSize(48, 44)
+        # 采用接近系统标题栏的点击热区，避免高分屏下符号能看见却难以点中。
+        button.setFixedSize(54, 44)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         return button
 
@@ -934,10 +935,12 @@ class MainWindow(QMainWindow):
         viewport_title.setProperty('uiRole', 'sectionTitle')
         viewport_heading_row.addWidget(viewport_title)
         viewport_heading_row.addStretch(1)
-        viewport_state = QLabel('等待点云加载')
-        viewport_state.setObjectName('viewportStateLabel')
-        viewport_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        viewport_heading_row.addWidget(viewport_state)
+        # 加载提示只在真实点云任务执行期间出现，空闲时不再常驻误导性文案。
+        self.viewport_state_label = QLabel()
+        self.viewport_state_label.setObjectName('viewportStateLabel')
+        self.viewport_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.viewport_state_label.setVisible(False)
+        viewport_heading_row.addWidget(self.viewport_state_label)
         viewport_layout.addLayout(viewport_heading_row)
 
         # 新增检测标准配置沿用当前扁平工作台样式，不再恢复旧页面标题卡片。
@@ -948,8 +951,12 @@ class MainWindow(QMainWindow):
         config_layout = QHBoxLayout(config_bar)
         config_layout.setContentsMargins(16, 6, 16, 6)
         config_layout.setSpacing(8)
-        config_layout.addWidget(QLabel('墙面标准'))
+        standard_label = QLabel('墙面标准')
+        standard_label.setProperty('uiRole', 'inspectionFieldLabel')
+        config_layout.addWidget(standard_label)
         self.standard_combo = QComboBox()
+        self.standard_combo.setObjectName('standardProfileCombo')
+        self.standard_combo.setMinimumSize(220, 36)
         for profile in InspectionProfileService.all():
             self.standard_combo.addItem(
                 f'{profile.standard_name} · {profile.version}', profile.standard_id)
@@ -958,8 +965,12 @@ class MainWindow(QMainWindow):
         self.standard_summary.setObjectName('standardSummary')
         self.standard_summary.setProperty('uiRole', 'supportingText')
         config_layout.addWidget(self.standard_summary, 1)
-        config_layout.addWidget(QLabel('区间'))
+        interval_label = QLabel('区间')
+        interval_label.setProperty('uiRole', 'inspectionFieldLabel')
+        config_layout.addWidget(interval_label)
         self.interval_combo = QComboBox()
+        self.interval_combo.setObjectName('inspectionIntervalCombo')
+        self.interval_combo.setMinimumSize(88, 36)
         for value in (3.0, 5.0, 10.0, 20.0):
             self.interval_combo.addItem(f'{value:g}m', value)
         self.interval_combo.setCurrentIndex(3)
@@ -987,6 +998,19 @@ class MainWindow(QMainWindow):
         )
         body_layout.addWidget(self.operation_splitter, 1)
         return page
+
+    def _set_pointcloud_load_state(self, active, message='正在加载点云'):
+        """同步真实加载任务与视口提示，空闲时完全隐藏提示。"""
+        label = getattr(self, 'viewport_state_label', None)
+        if label is None:
+            return
+        label.setText(message if active else '')
+        label.setVisible(bool(active))
+        label.setProperty('statusState', 'loading' if active else '')
+        # 动态属性改变后主动刷新，确保长时间点云加载前能立即显示状态。
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.update()
 
     def _on_standard_changed(self, _index):
         profile = InspectionProfileService.get(self.standard_combo.currentData())
@@ -1045,6 +1069,7 @@ class MainWindow(QMainWindow):
         self.btn_evaluate_selected.setToolTip('对右侧列表当前选中的立面执行质量评估')
         self.btn_evaluate_selected.clicked.connect(self._evaluate_selected_facade)
         self.btn_evaluate_selected.setMinimumHeight(34)
+        self.btn_evaluate_selected.setProperty('buttonRole', 'primary')
         self.btn_evaluate_selected.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self.btn_evaluate_selected)
 
@@ -1052,6 +1077,7 @@ class MainWindow(QMainWindow):
         self.btn_heatmap_toggle.setObjectName('btn_heatmap_toggle')
         self.btn_heatmap_toggle.setToolTip('在平整度热力与垂直度热力之间切换')
         self.btn_heatmap_toggle.setMinimumHeight(34)
+        self.btn_heatmap_toggle.setProperty('buttonRole', 'tonal')
         self.btn_heatmap_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_heatmap_toggle.clicked.connect(self._toggle_heatmap_display)
         self.btn_heatmap_toggle.setEnabled(False)
@@ -1070,13 +1096,6 @@ class MainWindow(QMainWindow):
         config = QFrame()
         config.setObjectName('qualityParameterPanel')
         config.setFrameShape(QFrame.Shape.StyledPanel)
-        config.setStyleSheet("""
-            #qualityParameterPanel {
-                background: #fafbfc;
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-            }
-        """)
         config_layout = QVBoxLayout(config)
         config_layout.setContentsMargins(10, 10, 10, 10)
         config_layout.setSpacing(10)
@@ -1121,18 +1140,14 @@ class MainWindow(QMainWindow):
         
         for label_text, widget in normal_params:
             row = QHBoxLayout()
-            row.setSpacing(6)
+            row.setSpacing(8)
             row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(82)
+            lbl.setFixedWidth(92)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(lbl)
-            if isinstance(widget, QDoubleSpinBox):
-                widget.setFixedWidth(90)
-                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
-            elif isinstance(widget, QSpinBox):
-                widget.setFixedWidth(90)
-                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            # 参数输入共用同一语义角色，主题统一绘制文本区和右侧增减按钮。
+            self._polish_quality_parameter_input(widget)
             row.addWidget(widget)
             row.addStretch(1)
             normal_layout.addLayout(row)
@@ -1179,20 +1194,13 @@ class MainWindow(QMainWindow):
         
         for label_text, widget in sor_params:
             row = QHBoxLayout()
-            row.setSpacing(6)
+            row.setSpacing(8)
             row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(82)
+            lbl.setFixedWidth(92)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(lbl)
-            if isinstance(widget, QDoubleSpinBox):
-                widget.setFixedWidth(90)
-                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
-            elif isinstance(widget, QSpinBox):
-                widget.setFixedWidth(90)
-                widget.setAlignment(Qt.AlignmentFlag.AlignRight)
-            elif isinstance(widget, QComboBox):
-                widget.setFixedWidth(90)
+            self._polish_quality_parameter_input(widget)
             row.addWidget(widget)
             row.addStretch(1)
             sor_layout.addLayout(row)
@@ -1211,6 +1219,8 @@ class MainWindow(QMainWindow):
         
         # 恢复标准参数按钮
         reset = QPushButton('恢复标准参数')
+        reset.setObjectName('btn_reset_quality_parameters')
+        reset.setProperty('buttonRole', 'tonal')
         reset.setMinimumHeight(30)
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self._reset_quality_parameters)
@@ -1234,6 +1244,14 @@ class MainWindow(QMainWindow):
         box.setDecimals(3)
         box.setValue(value)
         return box
+
+    @staticmethod
+    def _polish_quality_parameter_input(widget):
+        """Apply compact workbench sizing without embedding per-widget colors."""
+        widget.setProperty('uiRole', 'qualityParameterInput')
+        widget.setFixedSize(112, 34)
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            widget.setAlignment(Qt.AlignmentFlag.AlignRight)
 
     def _reset_quality_parameters(self):
         profile = getattr(self, '_inspection_profile', None)
@@ -1340,22 +1358,10 @@ class MainWindow(QMainWindow):
             status = self._facade_review_status(f)
             action_button = QPushButton(
                 '完整' if status == 'complete' else '确认完整')
+            action_button.setProperty('buttonRole', 'tonal')
             action_button.setFixedWidth(72)
             action_button.setMinimumHeight(26)
-            action_button.setStyleSheet("""
-                QPushButton {
-                    font-size: 11px;
-                    padding: 2px 8px;
-                    border-radius: 4px;
-                    border: 1px solid #cbd5e1;
-                    background: #ffffff;
-                    color: #475569;
-                }
-                QPushButton:hover {
-                    background: #f1f5f9;
-                    border-color: #94a3b8;
-                }
-            """)
+            action_button.setStyleSheet('font-size: 11px; padding: 2px 8px;')
             action_button.setToolTip('点击切换完整/不完整；仅完整立面允许质量计算')
             action_button.clicked.connect(
                 lambda _=False, obj=f, button=action_button:
@@ -2310,6 +2316,14 @@ class MainWindow(QMainWindow):
         if button is not None:
             button.setChecked(True)
         self._update_window_title(page_key)
+        if page_key == 'project_operation':
+            # 等 QStackedWidget 完成可见性切换后再恢复原生 Open3D 子窗口。
+            QTimer.singleShot(0, self._restore_operation_viewport)
+
+    def _restore_operation_viewport(self):
+        restore = getattr(self.viewport, 'restore_after_page_switch', None)
+        if callable(restore):
+            restore()
 
     def _set_report_navigation(self, page_index):
         """切换报告页内部内容，不改变底部四个主页面。"""
@@ -2815,6 +2829,7 @@ class MainWindow(QMainWindow):
 
             edit_button = QPushButton('编辑')
             edit_button.setObjectName('btn_edit_project')
+            edit_button.setProperty('buttonRole', 'tonal')
             edit_button.setToolTip('修改项目名称')
             edit_button.setAccessibleName('编辑项目')
             edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2962,8 +2977,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '点云加载', '已有加载任务正在执行，请稍候。')
             return
         self._load_in_progress = True
+        load_failed = False
         try:
             self.statusBar().showMessage('正在加载点云，请稍候...')
+            self._set_pointcloud_load_state(True)
+            # 当前 Open3D 加载必须留在 GUI 线程，先刷新一次让真实状态可见。
+            QApplication.processEvents()
             if operation == 'activate':
                 self._activate_project(project)
             elif operation == 'upload':
@@ -3001,10 +3020,13 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
             self._refresh_project_list()
         except Exception as exc:
+            load_failed = True
             self._on_load_failed(self._project_generation, str(exc))
         finally:
             self._load_in_progress = False
-            self.statusBar().clearMessage()
+            self._set_pointcloud_load_state(False)
+            if not load_failed:
+                self.statusBar().clearMessage()
 
     def _on_load_failed(self, generation, error):
         if generation != self._project_generation:
@@ -3118,6 +3140,7 @@ class MainWindow(QMainWindow):
     def _dispose_project_runtime(self):
         """Single GUI-thread disposal gate for project switches and close."""
         self._load_in_progress = False
+        self._set_pointcloud_load_state(False)
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:

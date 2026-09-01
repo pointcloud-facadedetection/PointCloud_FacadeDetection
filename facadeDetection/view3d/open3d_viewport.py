@@ -487,6 +487,34 @@ class Open3DViewport(BaseViewport):
     def get_widget(self):
         return self._root
 
+    def restore_after_page_switch(self):
+        """切回工作台时重新挂起原生 GLFW 子窗口并请求首帧。"""
+        if self._destroyed or not self._init_success:
+            return
+        try:
+            # createWindowContainer 包装的是原生 HWND。QStackedWidget 隐藏页面
+            # 后 Qt 控件虽已可见，原生子窗口仍可能停留在旧的 Z-order；显式
+            # 重新 show/raise 可触发 Windows 更新其层级和裁剪区域。
+            self._layout.activate()
+            self._root.updateGeometry()
+            self._root.update()
+            if self._container is not None:
+                self._container.hide()
+                self._container.show()
+                self._container.raise_()
+                self._container.updateGeometry()
+                self._container.update()
+            if self._qwindow is not None:
+                self._qwindow.show()
+                self._qwindow.raise_()
+                self._qwindow.requestUpdate()
+            self._adapter.set_render_enabled(True)
+            self._adapter.request_render('page.activated')
+            self.process_events()
+        except (RuntimeError, AttributeError):
+            # 页面可能正随主窗口关闭；此时不再触碰已释放的原生句柄。
+            return
+
     def project_points(self, points):
         """将 3D 点投影为屏幕坐标（逻辑像素）。返回 (screen, valid) 或 None。"""
         try:
