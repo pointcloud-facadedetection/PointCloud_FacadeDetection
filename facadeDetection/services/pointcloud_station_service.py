@@ -24,6 +24,7 @@ class PointCloudStationService:
         # Registration snapshots are intentionally separate from raw assets.
         # They are reused across retries and never trigger another PLY read.
         self._registration_cloud_cache = {}
+        self._station_fingerprints = {}
 
     def set_project(self, project_uuid):
         self.project_uuid = project_uuid
@@ -31,6 +32,7 @@ class PointCloudStationService:
         self._dataset_ids.clear()
         self._active_station_id = None
         self._registration_cloud_cache.clear()
+        self._station_fingerprints.clear()
 
     def refresh(self):
         if self.project_uuid:
@@ -110,6 +112,11 @@ class PointCloudStationService:
         if self.pointcloud is None:
             raise RuntimeError('PointCloudService 未注入，无法建立站点索引')
         dataset_id = f'{self.project_uuid}:{station.id}'
+        fingerprint = PointCloudStationRepo.get_asset_fingerprint(
+            self.project_uuid, station.id)
+        # The asset fingerprint, not the filename, determines whether arrays
+        # can be reused.  A changed source must never reuse an old station.
+        fingerprint_key = tuple(fingerprint or (str(station.source_path), None, None))
         existing = self.pointcloud.get_dataset(dataset_id)
         if existing is None:
             legacy_id = f'{self.project_uuid}:{Path(station.source_path).name}'
@@ -118,12 +125,7 @@ class PointCloudStationService:
                 self.pointcloud.datasets.pop(legacy_id, None)
                 existing.dataset_id = dataset_id
                 self.pointcloud.datasets[dataset_id] = existing
-        if existing is not None:
-            # A dataset can survive a view refresh while the persisted denoise
-            # snapshot was written afterwards (or while an older runtime
-            # dataset was restored before the station projection).  Returning
-            # it unconditionally silently re-published the noisy proxy.  Only
-            # reuse it when it already represents the persisted snapshot.
+        if existing is not None and self._station_fingerprints.get(station.id) == fingerprint_key:
             state = PointCloudStationRepo.get_denoise_state(
                 self.project_uuid, station.id)
             if not (state and state.get('enabled') and
@@ -131,14 +133,15 @@ class PointCloudStationService:
                 self._dataset_ids[station.id] = dataset_id
                 return existing
             self.pointcloud.datasets.pop(dataset_id, None)
+            self.pointcloud.release_station_domain(station.id)
         points, colors = self._load(station.source_path)
         source_id = f'{dataset_id}:source'
         state = PointCloudStationRepo.get_denoise_state(self.project_uuid, station.id)
         dist_path = Path(station.source_path).with_suffix('.dist')
         metadata = {'source_id': source_id, 'station_id': station.id,
+                    'project_uuid': self.project_uuid,
+                    'asset_fingerprint': list(fingerprint_key),
                     'source_raw_count': int(len(points))}
-        # FLS export has already applied transformToGlobal. Keep it as an
-        # audit trail only; proxy and ICP inputs remain in PLY global coords.
         metadata.update(self._global_coordinate_metadata(station.source_path))
         state_offsets = np.asarray((state or {}).get('proxy_source_offsets', []),
                                    dtype=np.int64)
@@ -187,6 +190,7 @@ class PointCloudStationService:
                                               {'ply_path': station.source_path})
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
                                                    metadata=metadata)
+        self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
         if state and state.get('enabled') and not restored_direct:
             keep = np.asarray(state.get('keep_proxy_indices', []), dtype=np.int64)
@@ -396,9 +400,7 @@ class PointCloudStationService:
                                   for x in proxy_clouds)
                 if len(snapshots) != 2:
                     raise ValueError('人工点云快照数量必须为 2')
-                # The UI picks physical coordinates from these snapshots. A
-                # small tolerance allows float32 display conversion without
-                # accepting points from a stale station/domain.
+                # 用户界面从这些快照中提取物理坐标。
                 for points, snapshot in zip((src_pairs, tgt_pairs),
                                             (snapshots[1], snapshots[0])):
                     if len(snapshot) == 0:

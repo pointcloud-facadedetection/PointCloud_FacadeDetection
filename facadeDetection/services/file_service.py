@@ -17,7 +17,6 @@ from models.enums import FileKind
 from services.dal.file_repo import FileRepo
 from config.storage import Storage
 
-# Reuse the existing converter implementation as the official reference
 from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
 from utils.logging_utils import log_event, trace
@@ -330,8 +329,6 @@ class FileService:
                     self.pointcloud_service.register_dataset(
                         dataset_id, proc_pts, proc_cols, metadata=metadata)
                     dataset = self.pointcloud_service.get_dataset(dataset_id)
-                    # Import is a data transaction. Rendering here caused the
-                    # caller to activate and render the same stations again.
                     trace('fls.import.dataset_bound', cloud=Path(p).name,
                           dataset=dataset_id, proxy=len(dataset.proxy_points))
                 else:
@@ -376,11 +373,17 @@ class FileService:
 
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         pcd = o3d.io.read_point_cloud(path)
-        pts = np.ascontiguousarray(np.asarray(pcd.points, dtype=np.float32))
-        cols = None
-        if pcd.has_colors():
-            cols = np.ascontiguousarray(np.asarray(pcd.colors, dtype=np.float32))
-        return pts, cols
+        try:
+            pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)
+            pts = pts if pts.flags.c_contiguous else np.ascontiguousarray(pts)
+            cols = None
+            if pcd.has_colors():
+                candidate = np.asarray(pcd.colors, dtype=np.float32).reshape(-1, 3)
+                if len(candidate) == len(pts):
+                    cols = candidate if candidate.flags.c_contiguous else np.ascontiguousarray(candidate)
+            return pts, cols
+        finally:
+            del pcd
 
     def _load_image(self, path: str) -> np.ndarray:
         img = o3d.io.read_image(path)

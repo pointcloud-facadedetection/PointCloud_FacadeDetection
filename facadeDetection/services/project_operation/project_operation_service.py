@@ -6,12 +6,15 @@ from PySide6.QtWidgets import QColorDialog, QMessageBox
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
 from config.storage import Storage
 import json
+from runtime.task_scheduler import RuntimeTaskScheduler
 
 
 class _GuiDispatcher(QObject):
     """Queued signal boundary owned by the Qt GUI thread."""
     denoise_finished = Signal(object)
     denoise_failed = Signal(str)
+    detection_finished = Signal(object)
+    detection_failed = Signal(str)
 
 
 class ProjectOperationService:
@@ -28,16 +31,17 @@ class ProjectOperationService:
         self._project_uuid: Optional[str] = None
         self._last_facade_results: Optional[list[dict]] = None
         self._station_service = None
-        # ProjectOperationService is intentionally not a QObject.  Connecting
-        # a worker signal directly to its Python method can therefore invoke
-        # the slot in the worker thread.  Use a real GUI QObject as the queued
-        # dispatch boundary for every Open3D-facing completion.
         parent = viewport.get_widget() if hasattr(viewport, 'get_widget') else None
         self._gui_dispatcher = _GuiDispatcher(parent)
         self._gui_dispatcher.denoise_finished.connect(
             self._on_denoise_finished, Qt.ConnectionType.QueuedConnection)
         self._gui_dispatcher.denoise_failed.connect(
             self._on_denoise_failed, Qt.ConnectionType.QueuedConnection)
+        self._gui_dispatcher.detection_finished.connect(
+            self._on_detection_finished, Qt.ConnectionType.QueuedConnection)
+        self._gui_dispatcher.detection_failed.connect(
+            self._on_detection_failed, Qt.ConnectionType.QueuedConnection)
+        self._task_scheduler = RuntimeTaskScheduler(parent)
 
     def set_station_service(self, service):
         self._station_service = service
@@ -65,14 +69,15 @@ class ProjectOperationService:
             pass
 
     def invalidate_async_jobs(self):
-        """Invalidate completion callbacks without blocking the GUI thread."""
+        """在不阻塞 GUI 线程的情况下完成回调。"""
         self._quality_request_token = getattr(self, '_quality_request_token', 0) + 1
         thread = getattr(self, '_denoise_thread', None)
         if thread is not None and thread.isRunning():
             thread.requestInterruption()
+        self._task_scheduler.cancel_all()
 
     def clear_processing_state(self):
-        """Drop transient facade/ROI state; never remove raw/source data."""
+        """丢弃临时的外观/ROI状态；切勿删除原始/源数据。"""
         self._last_facade_results = None
         self._last_roi_indices = None
         self._last_roi_bounds = None
@@ -200,15 +205,9 @@ class ProjectOperationService:
     def _on_denoise_finished(self, stats):
         try:
             if stats:
-                # A station review layer is never authoritative for processing.
-                # Remove it before publishing the new proxy snapshot so the
-                # viewport cannot display stale source geometry over the proxy.
                 render = self._get_render_service()
-                if render is not None and hasattr(render, 'clear_station_scene'):
-                    render.clear_station_scene()
                 points = np.asarray(stats.get('proxy_points'), dtype=np.float32).reshape(-1, 3)
-                # Persist only reconstruction metadata; coordinates remain in
-                # the source asset and are rebuilt on the next project load.
+                # 仅保留重建元数据；坐标仍保存在源资源中，并在下次加载项目时重新构建。
                 if self._project_uuid and stats.get('station_id'):
                     from services.dal.pointcloud_station_repo import PointCloudStationRepo
                     state = {
@@ -231,38 +230,40 @@ class ProjectOperationService:
                 if self._station_service is not None:
                     station = next((row for row in self._station_service.list_stations()
                                     if str(row.id) == str(stats.get('station_id'))), None)
-                # Always publish under the station-domain name.  Importers may
-                # have used a filename as a transient cloud name, which is not
-                # a valid processing identity after project restore.
+                # 始终以站点域名发布。导入工具可能将文件名用作临时云名称，
+                # 而该名称在项目恢复后将不再是有效的处理标识符。
                 if station is not None:
                     stats['name'] = f'pcfd.proxy.station.{station.id}'
-                    self._render_service.show_station_proxy(
-                        station.id, station.display_name, points,
-                        stats.get('proxy_colors'), dataset_id=stats.get('dataset_id'))
                 data = self._viewport.get_cloud_data(stats['name'])
-                if data is not None:
+                if data is not None or hasattr(self._viewport, 'commit_processing_snapshot'):
                     colors = stats.get('proxy_colors')
                     if colors is not None:
                         colors = np.asarray(colors, dtype=np.float32).reshape(-1, 3)
                         if len(colors) != len(points):
                             colors = None
-                    # This slot runs in the GUI thread.  Keep the viewport
-                    # metadata and geometry update atomic from the UI's point
-                    # of view; the worker must never touch Open3D.
                     metadata = {'proxy_ids': np.arange(len(points), dtype=np.int32),
                                 'domain': 'proxy', 'index_space': 'proxy_global',
-                                'is_processing_cloud': True}
-                    if hasattr(self._viewport, "replace_cloud_snapshot"):
-                        self._viewport.replace_cloud_snapshot(stats['name'], points, colors, metadata)
-                    elif hasattr(self._viewport, "queue_update_cloud_points"):
-                        data.update(metadata)
-                        self._viewport.queue_update_cloud_points(stats['name'], points, colors)
-                    elif hasattr(self._viewport, "update_cloud_points"):
-                        data.update(metadata)
-                        self._viewport.update_cloud_points(stats['name'], points, colors)
-                    # A replacement invalidates proxy-indexed facade working
-                    # data.  The next detection must recolor from the new
-                    # proxy rows and new VoxelCascadeIndex revision.
+                                'is_processing_cloud': True,
+                                'dataset_id': stats.get('dataset_id'),
+                                'station_id': stats.get('station_id')}
+                    if hasattr(self._viewport, 'commit_processing_snapshot'):
+                        displayed_count = self._viewport.commit_processing_snapshot(
+                            stats['name'], points, colors, metadata, reset_view=False)
+                    elif hasattr(self._viewport, "replace_cloud_snapshot"):
+                        displayed_count = self._viewport.replace_cloud_snapshot(
+                            stats['name'], points, colors, metadata)
+                    else:
+                        displayed_count = len(points)
+                    committed = self._viewport.get_cloud_data(stats['name'])
+                    actual_count = len(committed.get('pos', [])) if committed else 0
+                    if displayed_count != len(points) or actual_count != len(points):
+                        raise RuntimeError(
+                            f'去噪视口提交点数不一致 expected={len(points)} '
+                            f'reported={displayed_count} actual={actual_count}')
+                    print(f'[PCFD] denoise.render_committed cloud={stats["name"]} '
+                          f'proxy={actual_count}', flush=True)
+                    # 替换操作会使基于代理索引的立面处理数据失效。
+                    # 下次检测时必须根据新的代理行和新的 VoxelCascadeIndex 版本重新着色。
                     self._last_facade_results = None
                     if render is not None:
                         render._facades_cache.pop(stats['name'], None)
@@ -271,11 +272,8 @@ class ProjectOperationService:
                         print(f"[PCFD] denoise.viewport_cleared cloud={stats['name']}", flush=True)
                     reset = getattr(self._viewport, 'reset_view', None)
                     if callable(reset) and len(points):
-                        # Denoising replaces the first scene snapshot; do not
-                        # retain the old Open3D camera (often the top view).
+                        # 降噪会替换第一个场景快照
                         reset()
-                # Keep the result payload intact for diagnostics and for any
-                # downstream snapshot consumer; never mutate worker output.
                 print(f"去噪完成: cloud={stats.get('name')} "
                       f"proxy={len(points)} raw={stats.get('raw_count', 0)}", flush=True)
             else:
@@ -550,36 +548,47 @@ class ProjectOperationService:
         if not cloud_name:
             print('无已注册的代理处理点云。', flush=True)
             return
-        try:
-            roi_indices = self._last_roi_indices
-            roi_bounds = self._last_roi_bounds
+        roi_indices = (list(self._last_roi_indices)
+                       if self._last_roi_indices else None)
+        roi_bounds = self._last_roi_bounds
+        project_uuid = self._project_uuid
+
+        def run_detection(context):
+            context.check_cancelled()
             if roi_indices or roi_bounds is not None:
-                # 框选检测使用 seed 模式：全场景识别，按 ROI 选择相交立面，
-                # 避免把建筑墙体截断；没有 ROI 时保持全局检测行为。
-                results = self._facade_service.detect_on_roi(
-                    cloud_name=cloud_name,
-                    roi_indices=roi_indices,
-                    roi_bounds=roi_bounds,
-                    project_uuid=self._project_uuid,
+                return self._facade_service.detect_on_roi(
+                    cloud_name=cloud_name, roi_indices=roi_indices,
+                    roi_bounds=roi_bounds, project_uuid=project_uuid,
                     roi_scope='seed')
-            else:
-                results = self._facade_service.detect(
-                    cloud_name=cloud_name, project_uuid=self._project_uuid)
-            self._last_facade_results = results
-            if callable(self.on_facade_results):
-                try:
-                    self.on_facade_results(results)
-                except Exception:
-                    pass
-            # Do not build a point->facade dictionary here.  A processing
-            # cloud may contain millions of inlier indices; constructing that
-            # Python mapping on the GUI thread stalls every Qt control after
-            # detection has already completed.  Facade selection remains
-            # available from the result list, which carries the stable IDs.
-            # The UI result callback performs the single authoritative color
-            # commit.  Do not submit a second 1.9M-row color buffer here.
-        except Exception as e:
-            print(f'立面检测失败: {e}', flush=True)
+            return self._facade_service.detect(
+                cloud_name=cloud_name, project_uuid=project_uuid)
+
+        def on_success(context, results):
+            self._gui_dispatcher.detection_finished.emit((context, results))
+
+        def on_error(context, message):
+            self._gui_dispatcher.detection_failed.emit(message)
+
+        self._task_scheduler.submit(
+            'detection', project_uuid, getattr(self, '_project_generation', 0),
+            run_detection, on_success=on_success, on_error=on_error)
+
+    @Slot(object)
+    def _on_detection_finished(self, payload):
+        context, results = payload
+        if (context.project_generation != getattr(self, '_project_generation', 0)
+                or not self._task_scheduler.is_current(context)):
+            return
+        self._last_facade_results = results
+        if callable(self.on_facade_results):
+            try:
+                self.on_facade_results(results)
+            except Exception:
+                pass
+
+    @Slot(str)
+    def _on_detection_failed(self, message):
+        print(f'立面检测失败: {message}', flush=True)
 
     def quality_inspection(self):
         self._notify('quality_inspection')
@@ -624,8 +633,7 @@ class ProjectOperationService:
         """Persist operator review when a project result repository is available."""
         if not self._project_uuid or not facade:
             return
-        # Detection IDs are transient ordinals.  Only a formally persisted
-        # facade may be addressed by the database primary key.
+        # 检测 ID 是临时序号。只有经过正式持久化的facade才能通过数据库主键进行定位。
         facade_id = facade.get('facade_db_id') or facade.get('database_id')
         if not facade_id:
             return
@@ -635,8 +643,6 @@ class ProjectOperationService:
                 self._project_uuid, int(facade_id),
                 facade.get('review_status', facade.get('preview_status', 'pending')))
         except (AttributeError, NotImplementedError):
-            # Older databases do not yet expose this optional column; the
-            # in-memory result remains authoritative for the current session.
             pass
         except Exception as exc:
             print(f'[PCFD] facade.review.persist_failed reason={exc}', flush=True)
