@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# OpenCV 的 Python API 由二进制扩展动态导出。
+# pylint: disable=no-member
+
 import time
 import hashlib
 from typing import Optional, Callable, Tuple, Dict
@@ -772,6 +775,7 @@ class ViewportRenderService:
         if hasattr(self.viewport, 'clear_facade_boundary'):
             self.viewport.clear_facade_boundary()
         return {
+            'facade_id': int(facade.get('id', -1)),
             'point_count': int(len(rows)),
             'neutral_mm': float(neutral_mm),
             'limit_mm': float(limit_mm),
@@ -780,6 +784,13 @@ class ViewportRenderService:
             'min_mm': float(np.min(deviations_mm)),
             'max_mm': float(np.max(deviations_mm)),
             'grid_bgr': grid_bgr,
+            # 映射阶段必须复用这里已显示在网格和点云上的同一批数据，
+            # 不能按另一套索引或相机方向重新计算点到平面的偏差。
+            'points_3d': np.ascontiguousarray(positions[rows]),
+            'values_mm': np.ascontiguousarray(
+                deviations_mm.astype(np.float32)
+            ),
+            'plane_model': np.ascontiguousarray(plane),
         }
 
     @staticmethod
@@ -905,18 +916,19 @@ class ViewportRenderService:
                 1,
                 cv2.LINE_AA,
             )
+        legend_height = min(height, max(120, min(300, int(height * 0.42))))
         draw_signed_colorbar(
             canvas,
             margin + width + 18,
-            margin,
+            margin + height - legend_height,
             22,
-            height,
+            legend_height,
             neutral_mm,
             vmin=float(vmin_mm),
             vmax=float(vmax_mm),
             text_color=(40, 40, 40),
-            font_scale=0.74,
-            thickness=2,
+            font_scale=0.62,
+            thickness=1,
             output_bgr=False,
         )
         return np.ascontiguousarray(canvas[:, :, ::-1])

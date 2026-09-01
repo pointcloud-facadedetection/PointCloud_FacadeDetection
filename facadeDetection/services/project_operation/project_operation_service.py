@@ -286,6 +286,9 @@ class ProjectOperationService:
                     callback(stats)
             else:
                 print('去噪未产生结果。', flush=True)
+                callback = getattr(self, 'denoise_completed_callback', None)
+                if callable(callback):
+                    callback(None)
         finally:
             self._finish_denoise_state()
 

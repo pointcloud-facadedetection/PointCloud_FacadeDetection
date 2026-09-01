@@ -17,6 +17,7 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
     build_scan_viewport_camera,
     estimate_match_matrix,
     match_photo_to_cloud_view,
+    rectify_facade_views,
     remap_cloud_points_to_photo,
     default_projection_params,
     projection_viewport_camera,
@@ -42,6 +43,33 @@ def _robust_uv_quadrilateral(uv):
         dtype=np.float64,
     )
     return finite, quadrilateral
+
+
+def _cached_heatmap_samples(heatmap_data, facade):
+    """读取视口已生成的热力图采样，确保网格、点云和照片颜色一致。"""
+    if not heatmap_data:
+        return None
+    facade_id = int((facade or {}).get('id', -1))
+    cached_id = int(heatmap_data.get('facade_id', -2))
+    if cached_id != facade_id:
+        raise ValueError('当前热力图不属于所选立面，请重新生成热力图')
+    points = np.asarray(
+        heatmap_data.get('points_3d'), dtype=np.float64
+    ).reshape(-1, 3)
+    values = np.asarray(
+        heatmap_data.get('values_mm'), dtype=np.float32
+    ).reshape(-1)
+    plane = np.asarray(
+        heatmap_data.get('plane_model'), dtype=np.float64
+    ).reshape(-1)
+    if len(points) != len(values) or len(points) < 3:
+        raise ValueError('当前热力图采样数据无效，请重新生成热力图')
+    if plane.shape != (4,):
+        raise ValueError('当前热力图缺少有效平面参数')
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(values)
+    if int(finite.sum()) < 3:
+        raise ValueError('当前热力图没有足够的有效采样点')
+    return points[finite], values[finite], plane
 
 
 @dataclass
@@ -219,6 +247,7 @@ class PhotoMatchService:
         alpha: float = 0.72,
         point_radius: int = 6,
         blur_size: int = 7,
+        heatmap_data=None,
         neutral_mm: float | None = None,
         limit_mm: float | None = None,
         vmin_mm: float | None = None,
@@ -239,23 +268,6 @@ class PhotoMatchService:
             orient_plane_toward_camera,
         )
 
-        cloud_points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        indices = np.asarray(
-            facade.get('proxy_indices')
-            or facade.get('inlier_indices')
-            or [],
-            dtype=np.int64,
-        )
-        indices = indices[
-            (indices >= 0) & (indices < len(cloud_points))
-        ]
-        if len(indices) < 3:
-            raise ValueError('所选立面没有足够的有效点，请重新执行立面检测')
-        facade_points = cloud_points[indices]
-
-        plane = facade.get('plane_model')
-        if plane is None:
-            raise ValueError('所选立面缺少拟合平面参数，请重新执行立面检测')
         pose = self.state.pose
         rotation = np.asarray(
             pose.get('rotation_matrix'), dtype=np.float64
@@ -266,21 +278,45 @@ class PhotoMatchService:
         camera_matrix = np.asarray(
             pose.get('camera_matrix'), dtype=np.float64
         ).reshape(3, 3)
-        camera_center = -rotation.T @ translation
-        center = np.asarray(
-            facade.get('center', np.mean(facade_points, axis=0)),
-            dtype=np.float64,
-        ).reshape(3)
-        oriented_plane = orient_plane_toward_camera(
-            plane,
-            center,
-            camera_center,
-        )
-        scalars_mm = compute_facade_deviation_scalars(
-            facade_points,
-            oriented_plane,
-            unit='mm',
-        )
+        cached = _cached_heatmap_samples(heatmap_data, facade)
+        if cached is not None:
+            facade_points, scalars_mm, oriented_plane = cached
+        else:
+            cloud_points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+            indices = np.asarray(
+                facade.get('proxy_indices')
+                or facade.get('inlier_indices')
+                or [],
+                dtype=np.int64,
+            )
+            indices = indices[
+                (indices >= 0) & (indices < len(cloud_points))
+            ]
+            if len(indices) < 3:
+                raise ValueError(
+                    '所选立面没有足够的有效点，请重新执行立面检测'
+                )
+            facade_points = cloud_points[indices]
+            plane = facade.get('plane_model')
+            if plane is None:
+                raise ValueError(
+                    '所选立面缺少拟合平面参数，请重新执行立面检测'
+                )
+            camera_center = -rotation.T @ translation
+            center = np.asarray(
+                facade.get('center', np.mean(facade_points, axis=0)),
+                dtype=np.float64,
+            ).reshape(3)
+            oriented_plane = orient_plane_toward_camera(
+                plane,
+                center,
+                camera_center,
+            )
+            scalars_mm = compute_facade_deviation_scalars(
+                facade_points,
+                oriented_plane,
+                unit='mm',
+            )
         from algorithms.geometry import plane_axes
 
         plane_normal = oriented_plane[:3]
@@ -339,7 +375,7 @@ class PhotoMatchService:
             dist_coeffs=pose.get('distortion_coefficients'),
             val_range=(scale_vmin, scale_vmax),
             threshold=scale_threshold,
-            draw_colorbar=True,
+            draw_colorbar=False,
         )
         result = {
             'image_bgr': blended,
@@ -372,7 +408,7 @@ class PhotoMatchService:
                 projection_intrinsic,
                 val_range=(scale_vmin, scale_vmax),
                 threshold=scale_threshold,
-                draw_colorbar=True,
+                draw_colorbar=False,
             )
             result.update({
                 'cloud_image_bgr': cloud_blended,
@@ -380,6 +416,166 @@ class PhotoMatchService:
                 'cloud_meta': cloud_meta,
             })
         return result
+
+    def align_facade_view_heatmaps(
+        self,
+        photo_bgr,
+        points,
+        facade: dict,
+        *,
+        cloud_projection,
+        alpha: float = 0.72,
+        point_radius: int = 6,
+        blur_size: int = 7,
+        heatmap_data=None,
+        neutral_mm: float | None = None,
+        limit_mm: float | None = None,
+        vmin_mm: float | None = None,
+        vmax_mm: float | None = None,
+        target_max_dim: int = 1600,
+    ) -> dict:
+        """将照片和点云映射图校正为选中立面的正视热力图。"""
+        if self.state.annotating:
+            raise ValueError('请先退出标注模式')
+        if self.state.pose is None:
+            raise ValueError('请先完成自动匹配')
+        if not facade:
+            raise ValueError('请先从右侧列表选择一个立面')
+        if not cloud_projection:
+            raise ValueError('请先执行点云映射')
+
+        cached = _cached_heatmap_samples(heatmap_data, facade)
+        if cached is not None:
+            facade_points, scalars_mm, plane = cached
+        else:
+            cloud_points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+            indices = np.asarray(
+                facade.get('proxy_indices')
+                or facade.get('inlier_indices')
+                or [],
+                dtype=np.int64,
+            )
+            indices = indices[
+                (indices >= 0) & (indices < len(cloud_points))
+            ]
+            if len(indices) < 3:
+                raise ValueError(
+                    '所选立面没有足够的有效点，请重新执行立面检测'
+                )
+            facade_points = cloud_points[indices]
+            plane = facade.get('plane_model')
+            if plane is None:
+                raise ValueError(
+                    '所选立面缺少拟合平面参数，请重新执行立面检测'
+                )
+            scalars_mm = None
+
+        pose = self.state.pose
+        photo_rotation = np.asarray(
+            pose.get('rotation_matrix'), dtype=np.float64
+        ).reshape(3, 3)
+        photo_translation = np.asarray(
+            pose.get('translation_vector'), dtype=np.float64
+        ).reshape(3)
+        photo_camera = np.asarray(
+            pose.get('camera_matrix'), dtype=np.float64
+        ).reshape(3, 3)
+        cloud_extrinsic = np.asarray(
+            cloud_projection.get('extrinsic'), dtype=np.float64
+        ).reshape(4, 4)
+        cloud_camera = np.asarray(
+            cloud_projection.get('camera_matrix'), dtype=np.float64
+        ).reshape(3, 3)
+        aligned = rectify_facade_views(
+            photo_bgr,
+            cloud_projection.get('view_bgr'),
+            facade_points,
+            plane,
+            photo_rotation=photo_rotation,
+            photo_translation=photo_translation,
+            photo_camera_matrix=photo_camera,
+            photo_distortion=pose.get('distortion_coefficients'),
+            cloud_rotation=cloud_extrinsic[:3, :3],
+            cloud_translation=cloud_extrinsic[:3, 3],
+            cloud_camera_matrix=cloud_camera,
+            target_max_dim=target_max_dim,
+        )
+
+        from algorithms.facade.heatmap_colors import compute_heatmap_scale
+        from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
+            FacadeHeatmapOverlay,
+            compute_facade_deviation_scalars,
+        )
+
+        if scalars_mm is None:
+            scalars_mm = compute_facade_deviation_scalars(
+                facade_points,
+                aligned['plane_model'],
+                unit='mm',
+            )
+        finite = np.isfinite(scalars_mm)
+        if not np.any(finite):
+            raise ValueError('所选立面的平整度偏差无有效值')
+        if vmin_mm is not None and vmax_mm is not None:
+            threshold, scale_vmin, scale_vmax = compute_heatmap_scale(
+                (float(vmin_mm), float(vmax_mm))
+            )
+        else:
+            threshold, scale_vmin, scale_vmax = compute_heatmap_scale(
+                scalars_mm[finite]
+            )
+        if neutral_mm is not None:
+            threshold = float(neutral_mm)
+        if limit_mm is not None and (vmin_mm is None or vmax_mm is None):
+            scale_vmax = abs(float(limit_mm))
+            scale_vmin = -scale_vmax
+
+        overlay = FacadeHeatmapOverlay(
+            alpha=alpha,
+            point_radius=point_radius,
+            blur_size=blur_size,
+        )
+        overlay_args = (
+            facade_points,
+            scalars_mm,
+            aligned['rotation_matrix'],
+            aligned['translation_vector'].reshape(3, 1),
+            aligned['camera_matrix'],
+        )
+        overlay_options = {
+            'val_range': (scale_vmin, scale_vmax),
+            'threshold': threshold,
+            'draw_colorbar': False,
+        }
+        photo_image, photo_heatmap, photo_meta = overlay.overlay(
+            aligned['photo_bgr'],
+            *overlay_args,
+            **overlay_options,
+        )
+        cloud_image, cloud_heatmap, cloud_meta = overlay.overlay(
+            aligned['cloud_bgr'],
+            *overlay_args,
+            **overlay_options,
+        )
+        return {
+            'image_bgr': photo_image,
+            'heatmap_bgr': photo_heatmap,
+            'cloud_image_bgr': cloud_image,
+            'cloud_heatmap_bgr': cloud_heatmap,
+            'photo_meta': photo_meta,
+            'cloud_meta': cloud_meta,
+            'facade_id': int(facade.get('id', -1)),
+            'point_count': int(len(facade_points)),
+            'deviation_limit_mm': float(
+                max(abs(scale_vmin), abs(scale_vmax))
+            ),
+            'deviation_threshold_mm': float(threshold),
+            'deviation_vmin_mm': float(scale_vmin),
+            'deviation_vmax_mm': float(scale_vmax),
+            'output_size': tuple(aligned['output_size']),
+            'photo_homography': aligned['photo_homography'],
+            'cloud_homography': aligned['cloud_homography'],
+        }
 
     def complete_pair_count(self) -> int:
         return sum(
