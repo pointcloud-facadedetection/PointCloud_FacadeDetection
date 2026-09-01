@@ -525,6 +525,8 @@ class MainWindow(QMainWindow):
         self._reprojection_display_indices = None
         self._projection_marker_points = []
         self._projected_3d_labels = []
+        self._heatmap_scale = None
+        self._show_match_markers = True
         self._projection_sliders = {}
         self._projection_value_labels = {}
         self._projection_controls_updating = False
@@ -1555,10 +1557,16 @@ class MainWindow(QMainWindow):
     def _compatible_quality_results(self):
         results = getattr(self.project_operation_service, '_last_facade_results', None) or []
         cloud = self._active_cloud_name()
-        if not cloud or self.render_service is None:
-            return []
-        return self.render_service.compatible_quality_reports(
-            cloud, results, index_service=self.facade_service._index_service)
+        if facade and cloud:
+            if hasattr(self, 'facade_heatmap_grid_view'):
+                self.facade_heatmap_grid_view.clear_image()
+            self.render_service.select_facade(
+                cloud,
+                int(facade.get('id', 0)),
+                facade=facade,
+            )
+            self._focus_view_on_facade(facade)
+        self._refresh_photo_match_controls()
 
     def _refresh_heatmap_button_state(self):
         button = getattr(self, 'btn_heatmap_toggle', None)
@@ -1709,6 +1717,7 @@ class MainWindow(QMainWindow):
         self.photo_view.set_image(image)
         self.photo_view.set_markers([])
         self.photo_view.set_remap_markers([])
+        self._show_match_markers = True
         self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
 
@@ -1996,6 +2005,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '进入标注模式', str(exc))
             return
         self.render_service.clear_pick_markers()
+        self._show_match_markers = True
         self._refresh_manual_match_markers()
         self._sync_manual_match_phase()
         self._refresh_photo_match_controls()
@@ -2269,6 +2279,7 @@ class MainWindow(QMainWindow):
         self.photo_view.set_markers([])
         self.photo_view.set_remap_markers([])
         self.cloud_match_view.set_markers([])
+        self._show_match_markers = True
         self.btn_auto_match_view.setEnabled(False)
         self.photo_match_status.setText(
             f'正在使用 SuperPoint + LightGlue 匹配'
@@ -2363,19 +2374,26 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError) as exc:
             QMessageBox.warning(self, '生成热力图', str(exc))
             return
-        self.render_service.clear_pick_markers()
-        self.photo_view.set_markers([])
-        self.photo_view.set_remap_markers([])
+        self._heatmap_scale = {
+            'facade_id': facade.get('id'),
+            'neutral_mm': float(stats.get('neutral_mm', 5.0)),
+            'limit_mm': float(stats.get('limit_mm', 10.0)),
+            'vmin_mm': float(stats.get('vmin_mm', -stats.get('limit_mm', 10.0))),
+            'vmax_mm': float(stats.get('vmax_mm', stats.get('limit_mm', 10.0))),
+        }
         grid_bgr = stats.get('grid_bgr')
         if grid_bgr is not None:
             self.facade_heatmap_grid_view.set_image(
                 bgr_to_qimage(grid_bgr)
             )
+        self._show_match_markers = False
+        self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
         self.statusBar().showMessage(
             f"立面 {int(facade.get('display_no', 1))} 平整度热力图已生成："
-            '灰色=平整（±2 mm），蓝色=凹陷，红色=凸起；'
-            f"范围 ±{float(stats.get('limit_mm', 0.0)):.1f} mm",
+            '灰色=平整（±5 mm），蓝色=凹陷，红色=凸起；'
+            f"范围 ±{float(stats.get('limit_mm', 0.0)):.1f} mm。"
+            '匹配点对已隐藏。',
             8000,
         )
 
@@ -2462,11 +2480,17 @@ class MainWindow(QMainWindow):
         self.btn_map_heatmap_to_photo.setText('正在映射热力图…')
         QApplication.processEvents()
         try:
+            scale = self._heatmap_scale or {}
+            same_facade = scale.get('facade_id') == facade.get('id')
             result = self.photo_match_service.map_facade_heatmap_to_photo(
                 self._qimage_to_bgr(source),
                 dataset.proxy_points,
                 facade,
                 cloud_projection=self._live_projection_view,
+                neutral_mm=scale.get('neutral_mm') if same_facade else None,
+                limit_mm=scale.get('limit_mm') if same_facade else None,
+                vmin_mm=scale.get('vmin_mm') if same_facade else None,
+                vmax_mm=scale.get('vmax_mm') if same_facade else None,
             )
             image = bgr_to_qimage(result['image_bgr'])
             cloud_image = bgr_to_qimage(result['cloud_image_bgr'])
@@ -2480,9 +2504,9 @@ class MainWindow(QMainWindow):
         self._photo_heatmap_image = image
         self._photo_match_display_image = image
         self.photo_view.set_image(image)
-        self.photo_view.set_markers([])
-        self.photo_view.set_remap_markers([])
         self.cloud_match_view.set_image(cloud_image)
+        self._show_match_markers = False
+        self._refresh_manual_match_markers()
         self.statusBar().showMessage(
             f"立面 {int(facade.get('display_no', 1))} 热力图已映射到照片"
             f"（{int(result.get('point_count', 0)):,} 点，"
@@ -2612,6 +2636,13 @@ class MainWindow(QMainWindow):
         overlay.set_links(links)
 
     def _refresh_manual_match_markers(self):
+        if not getattr(self, '_show_match_markers', True):
+            self.photo_view.set_markers([])
+            self.photo_view.set_remap_markers([])
+            self.render_service.clear_pick_markers()
+            if hasattr(self, 'cloud_match_view'):
+                self.cloud_match_view.set_markers([])
+            return
         state = self.photo_match_service.state
         pairs = [
             pair
@@ -2946,6 +2977,12 @@ class MainWindow(QMainWindow):
         # Selection remains an explicit, non-expensive interaction.
         self.render_service.select_facade(cloud, int(f.get('id', 0)))
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
+        self.render_service.select_facade(
+            cloud,
+            int(f.get('id', 0)),
+            facade=f,
+        )
+        self._focus_view_on_facade(f)
         return
 
     def _evaluate_facade(self, f):

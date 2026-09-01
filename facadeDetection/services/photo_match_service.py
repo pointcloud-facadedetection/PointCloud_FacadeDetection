@@ -270,9 +270,13 @@ class PhotoMatchService:
         facade: dict,
         *,
         cloud_projection=None,
-        alpha: float = 0.58,
+        alpha: float = 0.72,
         point_radius: int = 6,
-        blur_size: int = 15,
+        blur_size: int = 7,
+        neutral_mm: float | None = None,
+        limit_mm: float | None = None,
+        vmin_mm: float | None = None,
+        vmax_mm: float | None = None,
     ) -> dict:
         """将选中立面的点到平面偏差热力图投影并融合到当前照片。"""
         if self.state.annotating:
@@ -282,6 +286,7 @@ class PhotoMatchService:
         if not facade:
             raise ValueError('请先从右侧列表选择一个立面')
 
+        from algorithms.facade.heatmap_colors import compute_heatmap_scale
         from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
             FacadeHeatmapOverlay,
             compute_facade_deviation_scalars,
@@ -357,10 +362,20 @@ class PhotoMatchService:
         finite = np.isfinite(scalars_mm)
         if not np.any(finite):
             raise ValueError('所选立面的平整度偏差无有效值')
-        limit_mm = max(
-            10.0,
-            float(np.percentile(np.abs(scalars_mm[finite]), 98.0)),
-        )
+        if vmin_mm is not None and vmax_mm is not None:
+            scale_threshold, scale_vmin, scale_vmax = compute_heatmap_scale(
+                (float(vmin_mm), float(vmax_mm)),
+            )
+        else:
+            scale_threshold, scale_vmin, scale_vmax = compute_heatmap_scale(
+                scalars_mm[finite]
+            )
+        if neutral_mm is not None:
+            scale_threshold = float(neutral_mm)
+        if limit_mm is not None and (vmin_mm is None or vmax_mm is None):
+            scale_vmax = abs(float(limit_mm))
+            scale_vmin = -scale_vmax
+        limit_mm = max(abs(scale_vmin), abs(scale_vmax))
         boundary_points = (
             plane_origin
             + boundary_uv[:, 0, None] * u_axis
@@ -380,7 +395,8 @@ class PhotoMatchService:
             translation.reshape(3, 1),
             camera_matrix,
             dist_coeffs=pose.get('distortion_coefficients'),
-            val_range=(-limit_mm, limit_mm),
+            val_range=(scale_vmin, scale_vmax),
+            threshold=scale_threshold,
             draw_colorbar=True,
             boundary_points_3d=boundary_points,
             border_color=(0, 0, 255),
@@ -393,6 +409,9 @@ class PhotoMatchService:
             'facade_id': int(facade.get('id', -1)),
             'point_count': int(len(facade_points)),
             'deviation_limit_mm': float(limit_mm),
+            'deviation_threshold_mm': float(scale_threshold),
+            'deviation_vmin_mm': float(scale_vmin),
+            'deviation_vmax_mm': float(scale_vmax),
             'boundary_points_3d': boundary_points.tolist(),
         }
         if cloud_projection is not None:
@@ -405,6 +424,13 @@ class PhotoMatchService:
             projection_intrinsic = np.asarray(
                 cloud_projection.get('camera_matrix'), dtype=np.float64
             ).reshape(3, 3)
+            photo_h, photo_w = np.asarray(photo_bgr).shape[:2]
+            proj_h, proj_w = projection_image.shape[:2]
+            size_scale = min(
+                proj_w / max(photo_w, 1),
+                proj_h / max(photo_h, 1),
+            )
+            cloud_border = max(1, int(round(3 * size_scale)))
             cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay(
                 projection_image,
                 facade_points,
@@ -412,11 +438,12 @@ class PhotoMatchService:
                 projection_extrinsic[:3, :3],
                 projection_extrinsic[:3, 3].reshape(3, 1),
                 projection_intrinsic,
-                val_range=(-limit_mm, limit_mm),
+                val_range=(scale_vmin, scale_vmax),
+                threshold=scale_threshold,
                 draw_colorbar=True,
                 boundary_points_3d=boundary_points,
                 border_color=(0, 0, 255),
-                border_thickness=3,
+                border_thickness=cloud_border,
             )
             result.update({
                 'cloud_image_bgr': cloud_blended,
