@@ -191,3 +191,7 @@
 2026-09-01 12:49:05,214 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
 2026-09-01 12:49:15,129 INFO [station.switch] station_id=1
 2026-09-01 12:49:15,367 INFO [results.loaded] facades=0
+2026-09-01 13:06:16,425 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply' result='ok'
+2026-09-01 13:06:18,023 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Downloads\\ply\\ply\\bllygg01.fls\\bllygg01.ply'
+2026-09-01 13:06:27,919 INFO [station.switch] station_id=1
+2026-09-01 13:06:28,147 INFO [results.loaded] facades=0

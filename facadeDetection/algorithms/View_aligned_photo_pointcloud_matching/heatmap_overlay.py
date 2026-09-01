@@ -33,6 +33,150 @@ def orient_plane_toward_camera(plane_model, facade_center, camera_center):
     return plane
 
 
+def _draw_metre_grid(image, pixel_size):
+    height, width = image.shape[:2]
+    step = max(1, int(round(1.0 / float(pixel_size))))
+    color = (175, 175, 175)
+    for grid_x in range(0, width, step):
+        cv2.line(
+            image,
+            (grid_x, 0),
+            (grid_x, height - 1),
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    for grid_y in range(height - 1, -1, -step):
+        cv2.line(
+            image,
+            (0, grid_y),
+            (width - 1, grid_y),
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def build_plane_grid_heatmap(
+    points,
+    values_mm,
+    plane,
+    neutral_mm,
+    vmin_mm,
+    vmax_mm=None,
+):
+    """生成与侧栏网格图相同的立面热力栅格，并给出可贴到照片上的像素与四角。"""
+    from algorithms.facade.heatmap_colors import (
+        draw_signed_colorbar,
+        signed_deviation_colors,
+    )
+    from algorithms.geometry import plane_axes
+
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
+    normal = np.asarray(plane[:3], dtype=np.float64).reshape(3)
+    facade_type = (
+        'horizontal'
+        if abs(float(normal[2])) > 0.85
+        else 'vertical_facade'
+    )
+    u_axis, v_axis = plane_axes(normal, facade_type)
+    origin = np.mean(points, axis=0)
+    uv = np.column_stack(
+        ((points - origin) @ u_axis, (points - origin) @ v_axis)
+    )
+    lower = np.min(uv, axis=0)
+    upper = np.max(uv, axis=0)
+    span = np.maximum(upper - lower, 0.1)
+    pixel_size = max(
+        0.02,
+        float(span[0]) / 600.0,
+        float(span[1]) / 1000.0,
+    )
+    width = max(24, int(np.ceil(span[0] / pixel_size)) + 1)
+    height = max(24, int(np.ceil(span[1] / pixel_size)) + 1)
+    x = np.clip(
+        ((uv[:, 0] - lower[0]) / pixel_size).astype(np.int64),
+        0,
+        width - 1,
+    )
+    y = np.clip(
+        height - 1
+        - ((uv[:, 1] - lower[1]) / pixel_size).astype(np.int64),
+        0,
+        height - 1,
+    )
+    flat = y * width + x
+    order = np.lexsort((np.abs(values), flat))
+    sorted_flat = flat[order]
+    keep = np.r_[
+        sorted_flat[1:] != sorted_flat[:-1],
+        True,
+    ]
+    selected = order[keep]
+    if vmax_mm is None:
+        bound = abs(float(vmin_mm))
+        vmin_mm, vmax_mm = -bound, bound
+    cell_colors = signed_deviation_colors(
+        values[selected],
+        threshold=neutral_mm,
+        vmin=float(vmin_mm),
+        vmax=float(vmax_mm),
+    )
+
+    margin = 36
+    legend_width = 168
+    canvas_rgb = np.full(
+        (height + margin * 2, width + margin * 2 + legend_width, 3),
+        245,
+        dtype=np.uint8,
+    )
+    facade_rgb = np.full((height, width, 3), 225, dtype=np.uint8)
+    facade_rgb.reshape(-1, 3)[flat[selected]] = np.clip(
+        cell_colors * 255.0,
+        0,
+        255,
+    ).astype(np.uint8)
+    patch_mask = np.zeros((height, width), dtype=np.uint8)
+    patch_mask.reshape(-1)[flat[selected]] = 255
+    patch_rgb = facade_rgb.copy()
+    _draw_metre_grid(patch_rgb, pixel_size)
+    canvas_rgb[margin:margin + height, margin:margin + width] = patch_rgb
+    legend_height = min(height, max(120, min(300, int(height * 0.42))))
+    draw_signed_colorbar(
+        canvas_rgb,
+        margin + width + 18,
+        margin + height - legend_height,
+        22,
+        legend_height,
+        neutral_mm,
+        vmin=float(vmin_mm),
+        vmax=float(vmax_mm),
+        text_color=(40, 40, 40),
+        font_scale=0.62,
+        thickness=1,
+        output_bgr=False,
+    )
+    u0, v0 = float(lower[0]), float(lower[1])
+    u1 = u0 + (width - 1) * float(pixel_size)
+    v1 = v0 + (height - 1) * float(pixel_size)
+    corners_3d = np.vstack(
+        (
+            origin + u0 * u_axis + v0 * v_axis,
+            origin + u1 * u_axis + v0 * v_axis,
+            origin + u1 * u_axis + v1 * v_axis,
+            origin + u0 * u_axis + v1 * v_axis,
+        )
+    )
+    return {
+        'canvas_bgr': np.ascontiguousarray(canvas_rgb[:, :, ::-1]),
+        'patch_bgr': np.ascontiguousarray(patch_rgb[:, :, ::-1]),
+        'patch_mask': np.ascontiguousarray(patch_mask),
+        'corners_3d': np.ascontiguousarray(corners_3d),
+        'pixel_size': float(pixel_size),
+    }
+
+
 class FacadeHeatmapOverlay:
     """按相机内外参投影点状热力图，并与原照片 Alpha 融合。"""
 
@@ -224,6 +368,105 @@ class FacadeHeatmapOverlay:
         if boundary_pixels is not None:
             meta['facade_boundary_pixels'] = boundary_pixels.tolist()
         return blended, heatmap, meta
+
+    def overlay_grid(
+        self,
+        photo_img,
+        grid_bgr,
+        grid_mask,
+        corners_3d,
+        rotation,
+        translation,
+        camera_matrix,
+        *,
+        dist_coeffs=None,
+        draw_colorbar=False,
+        val_range=None,
+        threshold=None,
+    ):
+        """把侧栏网格热力图原图像素透视贴到照片或点云映射图上。"""
+        photo = np.asarray(photo_img, dtype=np.uint8)
+        if photo.ndim == 2:
+            photo = cv2.cvtColor(photo, cv2.COLOR_GRAY2BGR)
+        if photo.ndim != 3 or photo.shape[2] != 3:
+            raise ValueError('照片图像格式无效')
+        grid = np.ascontiguousarray(grid_bgr, dtype=np.uint8)
+        if grid.ndim != 3 or grid.shape[2] != 3:
+            raise ValueError('网格热力图格式无效')
+        mask = np.asarray(grid_mask, dtype=np.uint8)
+        if mask.shape[:2] != grid.shape[:2]:
+            raise ValueError('网格热力图与有效像素掩膜尺寸不一致')
+        corners = np.asarray(corners_3d, dtype=np.float64).reshape(4, 3)
+        rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+        translation = np.asarray(translation, dtype=np.float64).reshape(3, 1)
+        camera_matrix = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+        depths = (rotation @ corners.T + translation).T[:, 2]
+        if np.any(~np.isfinite(depths)) or np.any(depths <= 1e-6):
+            raise ValueError('所选立面不在照片视野内，请检查匹配矩阵')
+        rvec, _ = cv2.Rodrigues(rotation)
+        projected, _ = cv2.projectPoints(
+            np.ascontiguousarray(corners),
+            rvec,
+            translation,
+            camera_matrix,
+            self._distortion(dist_coeffs),
+        )
+        destination = projected.reshape(4, 2).astype(np.float32)
+        if not np.isfinite(destination).all():
+            raise ValueError('网格热力图投影坐标无效')
+        height, width = grid.shape[:2]
+        source = np.asarray(
+            (
+                (0.0, height - 1.0),
+                (width - 1.0, height - 1.0),
+                (width - 1.0, 0.0),
+                (0.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(source, destination)
+        photo_h, photo_w = photo.shape[:2]
+        warped = cv2.warpPerspective(
+            grid,
+            matrix,
+            (photo_w, photo_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        warped_mask = cv2.warpPerspective(
+            mask,
+            matrix,
+            (photo_w, photo_h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        weight = (
+            warped_mask.astype(np.float32)[:, :, np.newaxis]
+            / 255.0
+            * self.alpha
+        )
+        blended = np.clip(
+            photo.astype(np.float32) * (1.0 - weight)
+            + warped.astype(np.float32) * weight,
+            0,
+            255,
+        ).astype(np.uint8)
+        if draw_colorbar and val_range is not None and threshold is not None:
+            self._draw_colorbar(
+                blended,
+                float(val_range[0]),
+                float(val_range[1]),
+                float(threshold),
+            )
+        meta = {
+            'projected_point_count': int(np.count_nonzero(mask)),
+            'visible_point_count': int(np.count_nonzero(warped_mask)),
+            'total_point_count': int(np.count_nonzero(mask)),
+            'alpha': self.alpha,
+            'unit': 'mm',
+            'source': 'grid',
+        }
+        return blended, warped, meta
 
     @classmethod
     def _draw_colorbar(cls, image, min_value, max_value, threshold):
