@@ -3,7 +3,7 @@ import numpy as np
 import open3d as o3d
 from algorithms.registration import (
     point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
-    audit_exported_global_transform,
+    audit_exported_global_transform, auto_register,
 )
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
@@ -372,14 +372,10 @@ class PointCloudStationService:
             selected_ids = [rows[0].id]
         for row in rows:
             PointCloudStationRepo.set_selected(self.project_uuid, row.id, row.id in selected_ids)
-        active = by_id.get(state.active_station_id) if state else None
-        mode = state.display_mode if state else 'single'
-        if mode not in ('single', 'registered_merge', 'raw_overlay'):
-            mode = 'single'
-        if mode in ('registered_merge', 'raw_overlay') and len(selected_ids) > 1:
-            self.merge_selected()
-        else:
-            self.show_single(active or by_id[selected_ids[0]])
+        # Opening a project must have a deterministic, low-cost initial view.
+        # Persisted merge/active state remains available through explicit user
+        # actions, but never hides the first station on project activation.
+        self.show_single(rows[0])
 
     def register_selected(self, update_viewport=True, manual_points=None,
                           proxy_clouds=None):
@@ -402,20 +398,31 @@ class PointCloudStationService:
                     raise ValueError('人工点云快照数量必须为 2')
                 # 用户界面从这些快照中提取物理坐标。
                 for points, snapshot in zip((src_pairs, tgt_pairs),
-                                            (snapshots[1], snapshots[0])):
+                                             (snapshots[1], snapshots[0])):
                     if len(snapshot) == 0:
                         raise ValueError('人工点云快照为空')
-                    distances = np.min(
-                        np.linalg.norm(points[:, None, :] - snapshot[None, :, :], axis=2),
-                        axis=1)
-                    if np.any(distances > 1e-3):
+                    # Do not allocate an NxM distance matrix for large proxy
+                    # clouds; every selected point must be an exact snapshot
+                    # member (the picker already returns snapshot coordinates).
+                    tree = o3d.geometry.KDTreeFlann(
+                        o3d.geometry.PointCloud(o3d.utility.Vector3dVector(snapshot)))
+                    distances = []
+                    for point in points:
+                        count, _, squared = tree.search_knn_vector_3d(point, 1)
+                        distances.append(np.sqrt(squared[0]) if count else np.inf)
+                    if np.any(np.asarray(distances) > 1e-3):
                         raise ValueError('人工对应点不属于当前站点快照，请重新选点')
         log_event(self.project_uuid, 'station.registration.started', count=len(rows))
+        registration_started = __import__('time').perf_counter()
         staged = []
+        diagnostics = []
         transformed_clouds = []
         registration_clouds = []
         for row in rows:
             dataset = self._load_proxy_domain(row)
+            # 5 cm is the fine registration domain.  The algorithm builds its
+            # own 20/10/5 cm pyramid, so this snapshot is not needlessly
+            # downsampled twice at the coarse levels.
             voxel_size = 0.05
             key = (dataset.dataset_id, int(len(dataset.proxy_points)), voxel_size)
             reg = self._registration_cloud_cache.get(key)
@@ -438,11 +445,23 @@ class PointCloudStationService:
                     raise ValueError('人工点配准缺少代理点云快照')
                 result = manual_seeded_icp(
                     moving_reg.points, reference.points, src_pairs, tgt_pairs,
-                    voxel_size=voxel_size, max_correspondence_distance=0.12)
+                    voxel_size=voxel_size, max_correspondence_distance=0.25,
+                    pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40)
             else:
-                result = point_to_plane_icp(
+                def registration_log(stage, **fields):
+                    log_event(self.project_uuid, f'station.registration.{stage}',
+                              source=row.id, target=rows[0].id, **fields)
+
+                registration_log('pair_started',
+                                 source_points=len(moving_reg.points),
+                                 target_points=len(reference.points))
+                result, pair_diagnostics = auto_register(
                     moving_reg.points, reference.points, voxel_size=voxel_size,
-                    max_correspondence_distance=0.12)
+                    global_voxel_size=0.10,
+                    max_correspondence_distance=0.25,
+                    max_iteration=40, logger=registration_log)
+                diagnostics.append({'source': row.id, 'target': rows[0].id,
+                                    **pair_diagnostics})
             if not result.accepted:
                 raise ValueError(f'{row.display_name} 配准失败：{result.message}，RMSE={result.inlier_rmse:.4f}')
             cloud = moving_reg.as_open3d()
@@ -453,6 +472,10 @@ class PointCloudStationService:
         merged = o3d.geometry.PointCloud()
         for cloud in transformed_clouds:
             merged += cloud
+        # The transform is estimated on the cached registration domain, but
+        # do not quantize the published result a second time.  This preserves
+        # the physical facade edge used for the final overlay while keeping
+        # the expensive ICP work bounded by the proxy domain.
         merged = merged.voxel_down_sample(0.05)
         result_dir = Storage.ensure_project_dirs(self.project_uuid)['results']
         operation_id = uuid.uuid4().hex
@@ -470,6 +493,9 @@ class PointCloudStationService:
             'metric_domain': 'registration_downsample',
             'registration_voxel_size': 0.05,
             'registration_cloud_counts': [int(len(x.points)) for x in registration_clouds],
+            'registration_diagnostics': diagnostics,
+            'registration_elapsed_ms': round(
+                (__import__('time').perf_counter() - registration_started) * 1000, 2),
             'transforms': {
                 rows[0].id: (np.eye(4).tolist(), 1.0, 0.0),
                 **{row.id: (result.transformation.tolist(), result.fitness,

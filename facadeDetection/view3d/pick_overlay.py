@@ -23,7 +23,9 @@ class PointPickOverlay(QWidget):
     """
 
     def __init__(self, viewport, container, parent=None):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint |
+        # Keep this as a passive sibling of the embedded QWindow.  A Tool
+        # window that grabs the mouse/keyboard competes with GLFW on Windows.
+        super().__init__(parent, Qt.FramelessWindowHint |
                          Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
         self.viewport = viewport
         self.container = container
@@ -63,25 +65,14 @@ class PointPickOverlay(QWidget):
         self.show()
         self.raise_()
         self._active = True
-        # 使用强焦点捕获确保事件不被其他窗口截获
-        self.setFocus(Qt.OtherFocusReason)
-        # 延迟grab确保窗口已显示
-        QTimer.singleShot(50, self._do_grab)
-
-    def _do_grab(self):
-        if self._active and self.isVisible():
-            try:
-                self.grabMouse()
-                self.grabKeyboard()
-            except RuntimeError:
-                pass
 
     def deactivate(self):
         """退出点选模式：释放输入、隐藏覆盖层。"""
         self._active = False
         try:
-            self.releaseMouse()
-            self.releaseKeyboard()
+            # No grab was taken: the embedded Open3D QWindow remains the
+            # owner of navigation and receives events immediately on exit.
+            self.clearFocus()
         except RuntimeError:
             pass
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)

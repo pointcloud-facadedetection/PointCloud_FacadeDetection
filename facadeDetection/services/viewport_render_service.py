@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import hashlib
 from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
@@ -25,6 +26,7 @@ class ViewportRenderService:
         self._highlight_color = tuple(Config.HIGHLIGHT_COLOR)
         self._selected_facade_id: Optional[int] = None
         self._facades_cache: Dict[str, list[dict]] = {}
+        self._facade_color_signatures: Dict[str, str] = {}
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
@@ -53,7 +55,11 @@ class ViewportRenderService:
 
     def clear_scene_display(self):
         """清除站点/合并/注册结果显示，但不触碰业务索引数据。"""
+        invalidate = getattr(self.viewport, 'invalidate_render_queue', None)
+        if callable(invalidate):
+            invalidate()
         self.clear_station_scene()
+        self._facade_color_signatures.clear()
         try:
             if hasattr(self.viewport, 'clear_roi_visuals'):
                 self.viewport.clear_roi_visuals()
@@ -95,6 +101,7 @@ class ViewportRenderService:
         self._picked_points.clear()
         self._selected_facade_id = None
         self._facades_cache.clear()
+        self._facade_color_signatures.clear()
         if hasattr(self.viewport, 'exit_pick_mode'):
             try:
                 self.viewport.exit_pick_mode()
@@ -226,6 +233,17 @@ class ViewportRenderService:
                 return
 
             n = len(pos)
+            dataset_id = str(data.get('dataset_id') or '')
+            revision = str(data.get('dataset_revision') or '')
+            digest = hashlib.sha1()
+            digest.update(f'{cloud_name}|{dataset_id}|{revision}|{n}'.encode())
+            for facade in facades or []:
+                digest.update(str(facade.get('id', '')).encode())
+                indices = facade.get('proxy_indices') or facade.get('inlier_indices') or []
+                digest.update(np.asarray(indices, dtype=np.int64).tobytes())
+            signature = digest.hexdigest()
+            if self._facade_color_signatures.get(cloud_name) == signature:
+                return
             colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
 
             try:
@@ -259,6 +277,7 @@ class ViewportRenderService:
                        for f in (facades or []))),
                   colored=int(np.sum(np.any(colors != np.asarray(base_color), axis=1))))
             self._update_cloud_color(cloud_name, colors)
+            self._facade_color_signatures[cloud_name] = signature
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
 

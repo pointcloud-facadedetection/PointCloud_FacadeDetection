@@ -2219,6 +2219,17 @@ class MainWindow(QMainWindow):
         station = next((x for x in self.station_service.list_stations() if x.id == station_id), None)
         if station:
             self.station_service.show_single(station)
+            # A station switch changes the processing domain.  Replay only
+            # results belonging to the newly active station; never reuse the
+            # previous station's facade indices or colours.
+            try:
+                project_id = getattr(self.current_project, 'project_id', None)
+                historical = (self.project_overview_service.load_historical_facades(
+                    project_id, station.id) if project_id else [])
+                self.project_operation_service._last_facade_results = historical or []
+                self._show_facade_results(historical or [])
+            except Exception as exc:
+                print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
 
     def _delete_stations(self):
         try:
@@ -3090,11 +3101,6 @@ class MainWindow(QMainWindow):
                 # empty-history case (which must clear the previous project).
                 self.project_operation_service._last_facade_results = historical or []
                 self._show_facade_results(historical or [])
-                cloud = self._active_cloud_name()
-                if cloud and historical:
-                    # The station scene is restored before historical results;
-                    # apply segmentation colours only after both are ready.
-                    self.render_service.restore_highlight(cloud, historical)
                 self._refresh_report_preview()
         except Exception as exc:
             self.statusBar().showMessage(f'项目历史数据恢复部分失败：{exc}', 5000)
