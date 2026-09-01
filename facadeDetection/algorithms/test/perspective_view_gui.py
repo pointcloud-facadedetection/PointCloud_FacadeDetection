@@ -13,7 +13,7 @@ if str(_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(_TEST_DIR))
 from tiaozheng_roll import estimate_roll_correction
 
-EYE_HEIGHT = 1.75          # camera height, held fixed (never touched by auto-fit)
+EYE_HEIGHT = 1.75          # default camera height; adjustable via the tz slider
 
 
 # ------------------------------------------------------------------ loading ----
@@ -252,6 +252,7 @@ def auto_fit_params(points, W, H, cam_z=EYE_HEIGHT, hfov_list=(100, 110, 120, 13
     far = float(np.percentile(np.linalg.norm(C - np.array([best["tx"], best["ty"], cam_z]),
                                              axis=1), 99) * 1.15)
     best["far"] = float(np.clip(far, 10, 300))
+    best["tz"] = float(cam_z)
     print(f"[auto-fit] HFOV {best['hfov']}°, yaw {best['yaw']:.1f}°, pitch {best['pitch']:.1f}°, "
           f"cam ({best['tx']:.2f}, {best['ty']:.2f}, {cam_z}), stepped back {best['D']:.1f} m, "
           f"subject in frame {best['frac']*100:.1f}%, top gap {best['gap']*100:.1f}%")
@@ -306,16 +307,17 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
         ("roll",  "Roll (deg)",                  -180, 180, 0.1),
         ("tx",    "Camera X (m)",                -span, span, 0.1),
         ("ty",    "Camera Y (m)",                -span, span, 0.1),
+        ("tz",    "Camera Z (m)",                -5, 40, 0.1),
         ("near",  "Near clip (m)",                0.1, 10, 0.1),
         ("far",   "Far clip (m)",                 5, 300, 1),
         ("gamma", "Colour gamma",                 0.2, 3.0, 0.05),
         ("splat", "Point size (px)",              1, 15, 2),
     ]
-    x0, w, h, y = 0.80, 0.17, 0.022, 0.90
+    x0, w, h, y = 0.80, 0.17, 0.020, 0.92
     for key, label, lo_, hi_, st in specs:
         sax = fig.add_axes([x0, y, w, h])
         sliders[key] = Slider(sax, label, lo_, hi_, valinit=P[key], valstep=st)
-        y -= 0.045
+        y -= 0.040
 
     y -= 0.02
     ax_or = fig.add_axes([x0, y - 0.07, w, 0.08]); ax_or.set_title("Orientation", fontsize=9)
@@ -343,7 +345,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
             return
         for k in sliders:
             P[k] = sliders[k].val
-        P["tz"] = EYE_HEIGHT                      # z is never touched
         W, H = dims()
 
         if S["color"] == "Intensity" and inten01 is not None:
@@ -369,7 +370,7 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
         back = np.hypot(P["tx"], P["ty"])
         title.set_text(f"{S['orient']} {W}x{H}   FOV {P['hfov']:.0f}° (H {hfov:.0f}° / V {vfov:.0f}°)   "
                        f"yaw {P['yaw']:.0f}°  pitch {P['pitch']:.0f}°  roll {P['roll']:.1f}°   "
-                       f"eye {EYE_HEIGHT} m, back {back:.1f} m   {n} px")
+                       f"eye {P['tz']:.2f} m, back {back:.1f} m   {n} px")
         fig.canvas.draw_idle()
 
     def detect_values():
@@ -383,7 +384,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
     def apply_auto_roll(_=None):
         for k in sliders:
             P[k] = sliders[k].val
-        P["tz"] = EYE_HEIGHT
         W, H = dims()
         roll = estimate_roll_from_projection(
             points, detect_values(), W, H, P, S["center_h"], S["center_v"])
@@ -391,15 +391,14 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
 
     def apply_fit(_=None):
         W, H = dims()
-        f = auto_fit_params(points, W, H)
+        f = auto_fit_params(points, W, H, cam_z=float(sliders["tz"].val))
         updating["busy"] = True
-        for k in ("hfov", "yaw", "pitch", "tx", "ty", "far"):
+        for k in ("hfov", "yaw", "pitch", "tx", "ty", "tz", "far"):
             s = sliders[k]
             s.set_val(float(np.clip(f[k], s.valmin, s.valmax)))
         sliders["roll"].set_val(0.0)
         for k in sliders:
             P[k] = sliders[k].val
-        P["tz"] = EYE_HEIGHT
         updating["busy"] = False
         apply_auto_roll()
 
@@ -427,7 +426,8 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
         step = {"left": ("yaw", 5), "right": ("yaw", -5),
                 "up": ("pitch", -3), "down": ("pitch", 3),
                 "w": ("tx", 1), "s": ("tx", -1),
-                "a": ("ty", 1), "d": ("ty", -1)}
+                "a": ("ty", 1), "d": ("ty", -1),
+                "q": ("tz", 0.2), "e": ("tz", -0.2)}
         if ev.key in step:
             k, dv = step[ev.key]
             s = sliders[k]

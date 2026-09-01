@@ -660,6 +660,30 @@ class Open3DViewport(BaseViewport):
         if self._overlay is not None:
             self._overlay.update()
 
+    def clear_facade_boundary(self):
+        self._adapter.remove_geometry("__facade_boundary")
+        if self._overlay is not None:
+            self._overlay.update()
+
+    def show_facade_boundary(self, corners, color=(1.0, 0.0, 0.0)):
+        from view3d.geometry_factory import make_closed_polyline
+
+        self._adapter.remove_geometry("__facade_boundary")
+        geometry = make_closed_polyline(corners, color=color)
+        if geometry is None:
+            return
+        self._adapter.add_geometry(
+            "__facade_boundary",
+            geometry,
+            reset_bounding_box=False,
+        )
+        try:
+            self._adapter.vis.get_render_option().line_width = 3.0
+        except Exception:
+            pass
+        if self._overlay is not None:
+            self._overlay.update()
+
     # ------------------------------------------------------------------
     # 高级 ROI 框选模式（建筑外立面检测专用）
     # ------------------------------------------------------------------
@@ -731,6 +755,7 @@ class Open3DViewport(BaseViewport):
             self._scene.clear()
             return
         self.clear_pick_markers()
+        self.clear_facade_boundary()
         self._scene.clear()
         self._scene_view_initialized = False
 

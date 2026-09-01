@@ -72,6 +72,11 @@ class ViewportRenderService:
                 self.viewport.exit_roi_selection()
             except Exception:
                 pass
+        if hasattr(self.viewport, 'clear_facade_boundary'):
+            try:
+                self.viewport.clear_facade_boundary()
+            except Exception:
+                pass
 
     def close_project(self):
         self.clear_runtime()
@@ -335,6 +340,8 @@ class ViewportRenderService:
 
     def clear_selected_facade(self, cloud_name: str | None = None) -> None:
         self._selected_facade_id = None
+        if hasattr(self.viewport, 'clear_facade_boundary'):
+            self.viewport.clear_facade_boundary()
 
     def set_global_point_color(self, color: Tuple[float, float, float]) -> None:
         """在视口内将整个点云场景统一着色."""
@@ -711,6 +718,8 @@ class ViewportRenderService:
             vmax_mm,
         )
         self._update_cloud_color(cloud_name, colors)
+        if hasattr(self.viewport, 'clear_facade_boundary'):
+            self.viewport.clear_facade_boundary()
         return {
             'point_count': int(len(rows)),
             'neutral_mm': float(neutral_mm),
@@ -845,14 +854,6 @@ class ViewportRenderService:
                 1,
                 cv2.LINE_AA,
             )
-        cv2.rectangle(
-            canvas,
-            (margin, margin),
-            (margin + width - 1, margin + height - 1),
-            (90, 90, 90),
-            1,
-        )
-
         draw_signed_colorbar(
             canvas,
             margin + width + 18,

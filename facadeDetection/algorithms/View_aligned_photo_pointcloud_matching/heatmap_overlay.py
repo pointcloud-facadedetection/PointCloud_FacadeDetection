@@ -178,20 +178,14 @@ class FacadeHeatmapOverlay:
                 boundary_depths = (
                     rotation @ boundary.T + translation
                 ).T[:, 2]
-                if (
-                    np.isfinite(candidate).all()
-                    and np.all(boundary_depths > 1e-6)
-                ):
+                visible = (
+                    np.isfinite(candidate).all(axis=1)
+                    & np.isfinite(boundary_depths)
+                    & (boundary_depths > 1e-6)
+                )
+                if int(visible.sum()) >= 2:
                     boundary_pixels = candidate
-                    polygon = np.rint(candidate).astype(np.int32)
-                    facade_mask = np.zeros_like(mask)
-                    cv2.fillConvexPoly(
-                        facade_mask,
-                        polygon,
-                        255,
-                        lineType=cv2.LINE_AA,
-                    )
-                    mask = cv2.bitwise_and(mask, facade_mask)
+                    # 红框只标出检测点 UV 包围盒，不再用四边形裁掉两端热力。
         weight = (
             mask.astype(np.float32)[:, :, np.newaxis]
             / 255.0
