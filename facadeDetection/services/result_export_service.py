@@ -1,6 +1,7 @@
 from __future__ import annotations
 import traceback
 from pathlib import Path
+import re
 import numpy as np
 import cv2
 from algorithms.facade.projection import rasterize_facade
@@ -13,7 +14,7 @@ class ResultExportService:
     """
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
-                       pixel_size=0.01):
+                       pixel_size=0.01, station_name=None, run_id=None):
         """Generate defect heatmap PNG. """
         root = None
         try:
@@ -30,7 +31,15 @@ class ResultExportService:
                 print(f'[PCFD] export_heatmap: plane_model missing, skip', flush=True)
                 return None
 
-            root = Path(results_dir) / f'facade_{int(facade_no):03d}'
+            # New exports are isolated by source cloud and evaluation run.
+            # Keep the legacy path only when callers provide no context.
+            cloud_name = str(station_name or quality.get('cloud_name') or 'station')
+            safe_cloud = re.sub(r'[^A-Za-z0-9_.-]+', '_', Path(cloud_name).stem).strip('_') or 'station'
+            if run_id is not None:
+                root = (Path(results_dir) / safe_cloud / f'facade_{int(facade_no):03d}' /
+                        f'run_{int(run_id)}')
+            else:
+                root = Path(results_dir) / f'facade_{int(facade_no):03d}'
             root.mkdir(parents=True, exist_ok=True)
 
             pts = np.asarray(points, dtype=float)
@@ -89,7 +98,7 @@ class ResultExportService:
                 'mode': heatmap_mode,
                 'title': heatmap_spec(heatmap_mode)['title'],
                 'heatmap': str(heatmap_path) if heatmap_path else None,
-                'overlay': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'),
+                'overlay': str(root / f'{heatmap_mode}_overlay.png'),
                 'legend': str(legend_path) if legend_path else None,
             }
 
@@ -330,8 +339,8 @@ class ResultExportService:
             boosted_overlay * visible[:, :, :1]
         ).astype(np.uint8)
 
-        heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
-        overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
+        heatmap_path = Path(root) / f'{mode}_heatmap.png'
+        overlay_path = Path(root) / f'{mode}_overlay.png'
 
         if not cv2.imwrite(str(heatmap_path), overlay_bgr):
             raise RuntimeError('热力图 PNG 写入失败')

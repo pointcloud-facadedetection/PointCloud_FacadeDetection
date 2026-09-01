@@ -126,7 +126,9 @@ class PdfReportRenderer:
                 ("检测窗口总数", overall.get("window_count") or overall.get("total_window_count"), "个"),
                 ("平整度最大间隙", overall.get("flatness_max_gap_mm"), "mm"),
                 ("平整度原始最大间隙", overall.get("flatness_raw_max_gap_mm"), "mm"),
+                ("平整度平均偏差", overall.get("flatness_mean_deviation_mm"), "mm"),
                 ("垂直度最大偏差", overall.get("verticality_deviation_mm"), "mm"),
+                ("垂直度平均偏差", overall.get("verticality_mean_deviation_mm"), "mm"),
                 ("检测靠尺长度", parameters.get("ruler_length_m"), "m")
             ]
             detail_rows = []

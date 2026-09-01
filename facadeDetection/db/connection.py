@@ -100,6 +100,31 @@ def _project_engine(project_uuid: str):
     GlobalBase.metadata.create_all(engine)
     # create_all 不会迁移现有项目的数据库。
     with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS quality_inspection_runs (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL,
+            station_id INTEGER,
+            facade_id INTEGER,
+            facade_key TEXT NOT NULL,
+            facade_display_no INTEGER,
+            cloud_name TEXT,
+            dataset_id TEXT,
+            dataset_fingerprint TEXT,
+            dataset_revision TEXT,
+            standard_id TEXT,
+            standard_name TEXT,
+            standard_version TEXT,
+            interval_size_m REAL,
+            parameter_fingerprint TEXT NOT NULL,
+            profile_snapshot_json JSON,
+            quality_status TEXT NOT NULL DEFAULT 'complete',
+            quality_report_json JSON NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )"""))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_quality_runs_project_station ON quality_inspection_runs(project_id, station_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_quality_runs_facade ON quality_inspection_runs(facade_id)"))
         conn.execute(text('DROP TABLE IF EXISTS heatmaps'))
         conn.execute(text('DROP TABLE IF EXISTS processing_runs'))
         columns = {c['name'] for c in inspect(conn).get_columns('facades')}

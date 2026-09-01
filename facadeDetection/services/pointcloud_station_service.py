@@ -3,7 +3,7 @@ import numpy as np
 import open3d as o3d
 from algorithms.registration import (
     point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
-    audit_exported_global_transform, auto_register,
+    audit_exported_global_transform, estimate_xy_initial_transform,
 )
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
@@ -413,9 +413,7 @@ class PointCloudStationService:
                     if np.any(np.asarray(distances) > 1e-3):
                         raise ValueError('人工对应点不属于当前站点快照，请重新选点')
         log_event(self.project_uuid, 'station.registration.started', count=len(rows))
-        registration_started = __import__('time').perf_counter()
         staged = []
-        diagnostics = []
         transformed_clouds = []
         registration_clouds = []
         for row in rows:
@@ -448,20 +446,16 @@ class PointCloudStationService:
                     voxel_size=voxel_size, max_correspondence_distance=0.25,
                     pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40)
             else:
-                def registration_log(stage, **fields):
-                    log_event(self.project_uuid, f'station.registration.{stage}',
-                              source=row.id, target=rows[0].id, **fields)
-
-                registration_log('pair_started',
-                                 source_points=len(moving_reg.points),
-                                 target_points=len(reference.points))
-                result, pair_diagnostics = auto_register(
+                # GPS has already established the global frame.  This only
+                # estimates the residual XY pose and is not a second GPS
+                # transform application.
+                initial = estimate_xy_initial_transform(
+                    moving_reg.points, reference.points)
+                result = point_to_plane_icp(
                     moving_reg.points, reference.points, voxel_size=voxel_size,
-                    global_voxel_size=0.10,
+                    init=initial,
                     max_correspondence_distance=0.25,
-                    max_iteration=40, logger=registration_log)
-                diagnostics.append({'source': row.id, 'target': rows[0].id,
-                                    **pair_diagnostics})
+                    pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40)
             if not result.accepted:
                 raise ValueError(f'{row.display_name} 配准失败：{result.message}，RMSE={result.inlier_rmse:.4f}')
             cloud = moving_reg.as_open3d()
@@ -493,9 +487,6 @@ class PointCloudStationService:
             'metric_domain': 'registration_downsample',
             'registration_voxel_size': 0.05,
             'registration_cloud_counts': [int(len(x.points)) for x in registration_clouds],
-            'registration_diagnostics': diagnostics,
-            'registration_elapsed_ms': round(
-                (__import__('time').perf_counter() - registration_started) * 1000, 2),
             'transforms': {
                 rows[0].id: (np.eye(4).tolist(), 1.0, 0.0),
                 **{row.id: (result.transformation.tolist(), result.fitness,

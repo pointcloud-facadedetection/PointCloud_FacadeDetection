@@ -61,6 +61,7 @@ from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
 from services.dal.results_repo import ResultsRepo
+from services.dal.quality_run_repo import QualityRunRepo
 from utils.workers import QualityWorker, PointCloudLoadWorker, RegistrationWorker
 
 
@@ -1553,7 +1554,8 @@ class MainWindow(QMainWindow):
                 context = _export_context(display_quality)
                 exported = ResultExportService().export_heatmap(
                     context.get('results_dir'), facade_no,
-                    context.get('points'), context.get('colors'), display_quality)
+                    context.get('points'), context.get('colors'), display_quality,
+                    station_name=cloud, run_id=display_quality.get('run_id'))
                 if exported and exported.get('heatmap'):
                     # Persist only small, portable artifact metadata. Runtime
                     # point arrays stay in __export_context and are not stored.
@@ -1658,9 +1660,6 @@ class MainWindow(QMainWindow):
         # activation. Revision mismatches are deliberately handled by the
         # normal worker path, which will reject stale geometry safely.
         historical_quality = facade_copy.get('quality_report')
-        if facade_copy.get('quality_status') == 'complete' and isinstance(historical_quality, dict):
-            self._show_quality_dialog(cloud, facade_copy, historical_quality)
-            return
 
         print(f'[PCFD] ui.evaluate_start facade_id={facade_id} facade_no={facade_no} '
               f'cloud={cloud}', flush=True)
@@ -1671,6 +1670,14 @@ class MainWindow(QMainWindow):
             getattr(self, '_inspection_profile', None))
         grid_size = float(self.interval_combo.currentData())
         cache_key = self._quality_cache_key(cloud, facade_copy, profile, grid_size)
+        # A facade's current JSON is not sufficient to identify a historical
+        # result: standard and interval are part of the calculation identity.
+        if (facade_copy.get('quality_status') == 'complete' and
+                isinstance(historical_quality, dict) and
+                historical_quality.get('interval_size_m') == grid_size and
+                historical_quality.get('profile_snapshot') == (profile.snapshot() if profile else {})):
+            self._show_quality_dialog(cloud, facade_copy, historical_quality)
+            return
         cached_quality = self._quality_result_cache.get(cache_key)
         if cached_quality:
             self.statusBar().showMessage('已命中质量结果缓存', 3000)
@@ -1791,6 +1798,12 @@ class MainWindow(QMainWindow):
             # Quality reports are self-contained; no results-domain NPZ is
             # needed for replay. Keep export context separate from persistence.
             artifact_path = None
+            current_fingerprint = quality.get('parameter_fingerprint')
+            if not current_fingerprint:
+                raise RuntimeError('质量服务未返回检测批次指纹')
+            quality['run_id'] = None
+            quality['station_id'] = f.get('station_id')
+            quality['cloud_name'] = cloud
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
@@ -1799,6 +1812,34 @@ class MainWindow(QMainWindow):
                 quality_artifact_path=artifact_path,
                 color=self.render_service.facade_color_for(f, facade_no),
             )
+            station_id = f.get('station_id')
+            profile_snapshot = quality.get('profile_snapshot') or {}
+            run_id = QualityRunRepo.upsert(
+                project_uuid,
+                station_id=station_id,
+                facade_id=int(f.get('id', 0)) or None,
+                facade_key=f.get('facade_db_id', f.get('id', facade_no)),
+                facade_display_no=facade_no,
+                cloud_name=cloud,
+                dataset_id=f.get('dataset_id'),
+                dataset_fingerprint=f.get('dataset_fingerprint'),
+                dataset_revision=getattr(dataset, 'revision', None),
+                profile_snapshot=profile_snapshot,
+                standard_id=(profile_snapshot.get('standard_id')
+                             or profile_snapshot.get('standard')
+                             or quality.get('standard_id')),
+                standard_name=(profile_snapshot.get('standard_name')
+                               or quality.get('standard_name')),
+                standard_version=(profile_snapshot.get('version')
+                                  or quality.get('standard_version')),
+                interval_size_m=float(quality.get('interval_size_m',
+                                                   quality.get('parameters', {}).get('interval_size_m', 0.0))),
+                parameter_fingerprint=quality.get('parameter_fingerprint'),
+                quality=quality)
+            quality['parameter_fingerprint'] = current_fingerprint
+            quality['run_id'] = run_id
+            quality['station_id'] = station_id
+            quality['cloud_name'] = cloud
             f['quality_status'] = 'complete'
             f['quality_report'] = quality
             # The worker receives a copy; update the canonical facade list so

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import time
 import numpy as np
 import open3d as o3d
 
@@ -51,28 +50,6 @@ def registration_metrics(source_points, target_points, transformation,
         'p95_error': p95,
         'max_error': maximum,
         'correspondence_count': int(len(errors)),
-    }
-
-
-def symmetric_registration_metrics(source_points, target_points, transformation,
-                                   max_correspondence_distance):
-    """Evaluate overlap in both directions; one-sided scores hide facade drift."""
-    forward = registration_metrics(source_points, target_points, transformation,
-                                    max_correspondence_distance)
-    t = np.asarray(transformation, dtype=np.float64).reshape(4, 4)
-    inverse = np.linalg.inv(t)
-    backward = registration_metrics(target_points, source_points, inverse,
-                                    max_correspondence_distance)
-    finite = np.isfinite([forward['rmse'], backward['rmse']]).all()
-    return {
-        'fitness': float((forward['fitness'] + backward['fitness']) / 2.0),
-        'forward_fitness': forward['fitness'], 'backward_fitness': backward['fitness'],
-        'rmse': float(np.sqrt((forward['rmse'] ** 2 + backward['rmse'] ** 2) / 2.0))
-                if finite else float('inf'),
-        'forward_rmse': forward['rmse'], 'backward_rmse': backward['rmse'],
-        'p95_error': float(max(forward['p95_error'], backward['p95_error'])),
-        'correspondence_count': int(min(forward['correspondence_count'],
-                                        backward['correspondence_count'])),
     }
 
 
@@ -129,122 +106,6 @@ class ICPResult:
     levels: list = field(default_factory=list)
     accepted: bool = True
     message: str = ''
-
-
-def _cloud(points):
-    return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(
-        np.asarray(points, dtype=np.float64).reshape(-1, 3)))
-
-
-def _prepare_feature_cloud(points, voxel_size):
-    """Build the downsampled cloud and FPFH once for a station pair."""
-    voxel = max(float(voxel_size), 1e-3)
-    down = _cloud(points).voxel_down_sample(voxel)
-    if len(down.points) < 10:
-        raise ValueError(f'FPFH 特征点不足: {len(down.points)} < 10')
-    radius_normal = voxel * 2.5
-    radius_feature = voxel * 5.0
-    down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
-        radius=radius_normal, max_nn=50))
-    down.normalize_normals()
-    feature = o3d.pipelines.registration.compute_fpfh_feature(
-        down, o3d.geometry.KDTreeSearchParamHybrid(
-            radius=radius_feature, max_nn=100))
-    return down, feature
-
-
-def fpfh_global_registration(source_points, target_points, *, voxel_size=0.10,
-                             max_correspondence_distance=None,
-                             ransac_iterations=100000, confidence=0.999,
-                             logger=None):
-    """Global registration using FPFH + mutual RANSAC correspondence matching."""
-    started = time.perf_counter()
-    source, source_feature = _prepare_feature_cloud(source_points, voxel_size)
-    target, target_feature = _prepare_feature_cloud(target_points, voxel_size)
-    distance = float(max_correspondence_distance or voxel_size * 1.5)
-    if logger:
-        logger('features', source_points=len(source.points), target_points=len(target.points),
-               voxel=voxel_size, elapsed_ms=round((time.perf_counter()-started)*1000, 2))
-    checker = [
-        o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-        o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance),
-    ]
-    criteria = o3d.pipelines.registration.RANSACConvergenceCriteria(
-        int(ransac_iterations), float(confidence))
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-        source, target, source_feature, target_feature, True, distance,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
-        4, checker, criteria)
-    report = {'fitness': float(result.fitness), 'rmse': float(result.inlier_rmse),
-              'correspondences': len(result.correspondence_set),
-              'iterations': int(ransac_iterations),
-              'elapsed_ms': round((time.perf_counter()-started)*1000, 2)}
-    if logger:
-        logger('ransac', **report)
-    return np.asarray(result.transformation), report
-
-
-def _transform_summary(transformation):
-    t = np.asarray(transformation, dtype=np.float64).reshape(4, 4)
-    angle = np.arccos(np.clip((np.trace(t[:3, :3]) - 1.0) / 2.0, -1.0, 1.0))
-    return {'translation': [round(float(x), 6) for x in t[:3, 3]],
-            'translation_norm': round(float(np.linalg.norm(t[:3, 3])), 6),
-            'rotation_deg': round(float(np.degrees(angle)), 6)}
-
-
-def auto_register(source_points, target_points, *, voxel_size=0.05,
-                  global_voxel_size=0.10, max_correspondence_distance=0.25,
-                  max_iteration=40, logger=None):
-    """FPFH/RANSAC candidates followed by fine ICP and symmetric acceptance."""
-    diagnostics = []
-    try:
-        fpfh_t, fpfh_report = fpfh_global_registration(
-            source_points, target_points, voxel_size=global_voxel_size,
-            max_correspondence_distance=global_voxel_size * 1.5,
-            logger=logger)
-    except Exception as exc:
-        if logger:
-            logger('rejected', candidate='fpfh', reason=str(exc))
-        raise
-    candidates = [('gps', np.eye(4, dtype=np.float64)), ('fpfh', fpfh_t)]
-    for name, initial in candidates:
-        started = time.perf_counter()
-        if logger:
-            logger('candidate', name=name, **_transform_summary(initial))
-        result = point_to_plane_icp(
-            source_points, target_points, init=initial, voxel_size=voxel_size,
-            max_correspondence_distance=max_correspondence_distance,
-            max_iteration=max_iteration, pyramid_scales=(4.0, 2.0, 1.0))
-        quality = symmetric_registration_metrics(
-            source_points, target_points, result.transformation,
-            max_correspondence_distance)
-        item = {'name': name, 'transformation': result.transformation.tolist(),
-                **quality, **_transform_summary(result.transformation),
-                'levels': result.levels,
-                'elapsed_ms': round((time.perf_counter()-started)*1000, 2)}
-        item['accepted'] = bool(result.accepted)
-        diagnostics.append(item)
-        if logger:
-            logger('quality', name=name, fitness=item['fitness'],
-                   forward_fitness=item['forward_fitness'],
-                   backward_fitness=item['backward_fitness'], rmse=item['rmse'],
-                   p95_error=item['p95_error'], accepted=result.accepted,
-                   elapsed_ms=item['elapsed_ms'])
-    valid = [x for x in diagnostics if np.isfinite(x['rmse']) and
-             x['fitness'] >= 0.05 and x['forward_fitness'] >= 0.03 and
-             x['backward_fitness'] >= 0.03 and x['p95_error'] <= max_correspondence_distance]
-    if not valid:
-        if logger:
-            logger('rejected', candidate='all', reason='bidirectional_quality_threshold')
-        raise ValueError('FPFH/GPS 候选均未通过双向配准质量验收')
-    chosen = min(valid, key=lambda x: (x['rmse'], -x['fitness'], x['p95_error']))
-    if logger:
-        logger('selected', name=chosen['name'], rmse=chosen['rmse'],
-               fitness=chosen['fitness'], **_transform_summary(chosen['transformation']))
-    return ICPResult(np.asarray(chosen['transformation'], dtype=np.float64), chosen['fitness'],
-                     chosen['rmse'], chosen['correspondence_count'], diagnostics,
-                     True, ''), {'fpfh': fpfh_report, 'candidates': diagnostics,
-                                 'selected': chosen['name']}
 
 
 def rigid_transform_from_correspondences(source_points, target_points):
@@ -388,7 +249,6 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
     base_source = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(src))
     base_target = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tgt))
     for scale in scales:
-        level_started = time.perf_counter()
         source = base_source.voxel_down_sample(scale)
         target = base_target.voxel_down_sample(scale)
         radius = max(scale * 2.5, 1e-3)
@@ -413,10 +273,7 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
         T = np.asarray(final.transformation)
         reports.append({'voxel': scale, 'fitness': float(final.fitness),
                         'rmse': float(final.inlier_rmse),
-                        'correspondences': len(final.correspondence_set),
-                        'estimator': ('point_to_point' if scale > scales[-1] * 1.01
-                                      else 'point_to_plane'),
-                        'elapsed_ms': round((time.perf_counter()-level_started)*1000, 2)})
+                        'correspondences': len(final.correspondence_set)})
 
     metric_distance = (float(max_correspondence_distance)
                        if max_correspondence_distance is not None
