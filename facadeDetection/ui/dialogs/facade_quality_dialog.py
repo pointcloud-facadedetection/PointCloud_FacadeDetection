@@ -4,7 +4,8 @@ from typing import Callable, Optional
 import math
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -40,8 +41,8 @@ class FacadeQualityDialog(QDialog):
 
         title = f"{project_name} - {facade_label} 质量评估" if project_name else f"{facade_label} 质量评估"
         self.setWindowTitle(title)
-        self.setMinimumSize(720, 520)
-        self.resize(900, 640)
+        self.setMinimumSize(720, 620)
+        self.resize(900, 780)
         self.setMaximumWidth(1200)
 
         self.setStyleSheet("""
@@ -280,6 +281,19 @@ class FacadeQualityDialog(QDialog):
         self._refresh_intervals()
         layout.addWidget(table, 1)
 
+        self._heatmap_caption = QLabel('点击「显示检测效果」后，热力图将显示在此处，并同步到着色三维点云。')
+        self._heatmap_caption.setStyleSheet('color: #64748b; font-size: 12px;')
+        layout.addWidget(self._heatmap_caption)
+
+        self._heatmap_image = QLabel()
+        self._heatmap_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._heatmap_image.setMinimumHeight(180)
+        self._heatmap_image.setMaximumHeight(320)
+        self._heatmap_image.setStyleSheet(
+            'background: #0f172a; border: 1px solid #e2e8f0; border-radius: 6px;')
+        self._heatmap_image.setVisible(False)
+        layout.addWidget(self._heatmap_image)
+
         # ── 底部按钮栏 ──
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -306,8 +320,12 @@ class FacadeQualityDialog(QDialog):
         has_valid_windows = bool(ok and n_quality > 0)
 
         if callable(self._on_show_colors) and has_valid_windows:
-            btn_show.clicked.connect(
-                lambda: self._on_show_colors(self._mode_combo.currentData() or 'flatness'))
+            def _on_show_clicked():
+                mode = self._mode_combo.currentData() or 'flatness'
+                path = self._on_show_colors(mode)
+                if isinstance(path, str) and path:
+                    self.set_heatmap_preview(path)
+            btn_show.clicked.connect(_on_show_clicked)
         else:
             btn_show.setEnabled(False)
             if not ok:
@@ -321,6 +339,21 @@ class FacadeQualityDialog(QDialog):
             btn_restore.clicked.connect(self._on_restore_colors)
         else:
             btn_restore.setEnabled(False)
+
+    def set_heatmap_preview(self, image_path: str) -> None:
+        reader = QImageReader(image_path)
+        target = QSize(max(self._heatmap_image.width(), 640), 280)
+        source = reader.size()
+        if source.isValid() and source.width() > 0 and source.height() > 0:
+            reader.setScaledSize(source.scaled(target, Qt.AspectRatioMode.KeepAspectRatio))
+        image = reader.read()
+        if image.isNull():
+            self._heatmap_caption.setText(
+                '热力图已生成，但无法在此加载预览。请查看三维视口中的黄-红缺陷着色。')
+            return
+        self._heatmap_image.setPixmap(QPixmap.fromImage(image))
+        self._heatmap_image.setVisible(True)
+        self._heatmap_caption.setText('检测效果热力图（不合格区域：黄 → 红）')
 
     def _refresh_intervals(self):
         intervals = self._quality.get('intervals') or []

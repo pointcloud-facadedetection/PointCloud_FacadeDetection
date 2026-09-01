@@ -4,7 +4,12 @@ from pathlib import Path
 import numpy as np
 import cv2
 from algorithms.facade.projection import rasterize_facade
-from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
+from services.heatmap_spec import (
+    defect_excess_colors,
+    heatmap_limit_and_scale_mm,
+    heatmap_spec,
+    normalize_heatmap_mode,
+)
 
 
 class ResultExportService:
@@ -65,20 +70,11 @@ class ResultExportService:
             pixel_size = max(float(pixel_size), 0.01)
             heatmap_path = self._export_window_heatmap(
                 root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
-            max_value = overall.get(spec['value_key'])
-            if max_value is None:
-                limit_for_legend = float(quality.get('parameters', {}).get(
-                    spec['limit_key'], quality.get('thresholds', {}).get(
-                        spec['limit_key'], 4.0)))
-                max_value = max((float(w.get(spec['value_key'])) for w in windows
-                                 if np.isfinite(float(w.get(spec['value_key'], np.nan)))),
-                                default=limit_for_legend)
+            limit_mm, scale_mm = heatmap_limit_and_scale_mm(quality, spec)
             legend_path = self._create_heatmap_legend(
                 root,
-                quality.get('parameters', {}).get(
-                    heatmap_spec(heatmap_mode)['limit_key'],
-                    quality.get('thresholds', {}).get(heatmap_spec(heatmap_mode)['limit_key'], 4.0)),
-                float(max_value),
+                limit_mm,
+                float(limit_mm + scale_mm),
                 heatmap_mode)
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
@@ -214,48 +210,10 @@ class ResultExportService:
         if len(centers) == 0 or len(values) == 0 or len(centers) != len(values):
             raise ValueError('质量结果没有有效窗口，无法导出热力图')
 
-        # Get limit
-        limit_key = spec['limit_key']
-        limit_mm = float(quality.get('parameters', {}).get(
-            limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
-        
-        # 修复: 统一单位 - 与视口保持一致
-        values_mm = values  # 保持 mm 单位用于颜色计算
-        limit_m = limit_mm / 1000.0  # 阈值转为 m
-        
-        # 统一缩放因子 - 使用全局最大缺陷值
-        excess_mm = np.maximum(np.abs(values_mm) - limit_mm, 0.0)
-        
-        # 使用全局最大超标量作为缩放基准（与视口一致）
-        # 如果所有值都低于limit，使用limit的10%作为最小缩放
-        global_max_excess = float(np.nanmax(excess_mm)) if np.any(np.isfinite(excess_mm)) else limit_mm * 0.1
-        scale_mm = max(global_max_excess, limit_mm * 0.05)  # 至少保留5%的limit作为缩放
-        
-        t = np.clip(excess_mm / scale_mm, 0.0, 1.0)
-
-        # 统一配色 - 青→黄→橙→红 (与3D视口一致)
-        defect_colors = np.zeros((len(values_mm), 3), dtype=float)
-        
-        # 青色 (0.0, 0.75, 1.0) at t=0 -> 黄色 (1, 1, 0) at t=0.33
-        # -> 橙色 (1, 0.5, 0) at t=0.66 -> 红色 (1, 0, 0) at t=1.0
-        
-        mask1 = t <= 0.33
-        tt1 = t[mask1] / 0.33
-        defect_colors[mask1, 0] = 0.0 + 1.0 * tt1          # R: 0 -> 1
-        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1         # G: 0.75 -> 1
-        defect_colors[mask1, 2] = 1.0 - 1.0 * tt1            # B: 1 -> 0
-        
-        mask2 = (t > 0.33) & (t <= 0.66)
-        tt2 = (t[mask2] - 0.33) / 0.33
-        defect_colors[mask2, 0] = 1.0
-        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2            # G: 1 -> 0.5
-        defect_colors[mask2, 2] = 0.0
-        
-        mask3 = t > 0.66
-        tt3 = (t[mask3] - 0.66) / 0.34
-        defect_colors[mask3, 0] = 1.0
-        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3            # G: 0.5 -> 0
-        defect_colors[mask3, 2] = 0.0
+        limit_mm, scale_mm = heatmap_limit_and_scale_mm(quality, spec)
+        limit_m = limit_mm / 1000.0
+        excess_mm = np.maximum(np.abs(values) - limit_mm, 0.0)
+        defect_colors = defect_excess_colors(excess_mm, scale_mm)
 
         base_points, _ = self._filter_base_points(pts_local, colors, plane_model, quality)
         
@@ -270,7 +228,7 @@ class ResultExportService:
         base_colors = np.clip(base_colors + noise, 0.08, 0.18)
 
         # 转换为米单位传入 rasterize_facade
-        values_m = values_mm / 1000.0
+        values_m = values / 1000.0
         
         projection = quality.get('projection') or {}
         projection_origin = quality.get('projection_origin')
@@ -350,36 +308,20 @@ class ResultExportService:
         bar_x_start = 60
         bar_width = w - 120
         n_segments = bar_width
-
-        for i in range(n_segments):
-            t = i / max(n_segments - 1, 1)
-
-            # 图例配色与热力图一致 - 青→黄→橙→红
-            if t <= 0.33:
-                tt = t / 0.33
-                r = int(np.clip((0.0 + 1.0 * tt) * 255, 0, 255))
-                g = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
-                b = int(np.clip((1.0 - 1.0 * tt) * 255, 0, 255))
-            elif t <= 0.66:
-                tt = (t - 0.33) / 0.33
-                r = 255
-                g = int(np.clip((1.0 - 0.5 * tt) * 255, 0, 255))
-                b = 0
-            else:
-                tt = (t - 0.66) / 0.34
-                r = 255
-                g = int(np.clip((0.5 - 0.5 * tt) * 255, 0, 255))
-                b = 0
-
-            legend[bar_y:bar_y + bar_h, bar_x_start + i] = [b, g, r]
+        t = np.linspace(0.0, 1.0, n_segments)
+        bar = defect_excess_colors(t * max(float(max_mm) - float(limit_mm), 1.0),
+                                   max(float(max_mm) - float(limit_mm), 1.0))
+        legend[bar_y:bar_y + bar_h, bar_x_start:bar_x_start + n_segments] = (
+            np.clip(bar[:, ::-1] * 255, 0, 255).astype(np.uint8)[None, :, :]
+        )
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.45
         color = (60, 60, 60)
         thickness = 1
 
-        cv2.putText(legend, "合格", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"<{limit_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
+        cv2.putText(legend, "刚超限", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
+        cv2.putText(legend, f"{limit_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
         mid_x = w // 2 - 30
         cv2.putText(legend, "警告", (mid_x, bar_y + bar_h + 20), font, font_scale, color, thickness)

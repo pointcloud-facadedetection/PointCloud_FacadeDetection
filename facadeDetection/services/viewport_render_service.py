@@ -5,13 +5,19 @@ from __future__ import annotations
 
 import time
 import hashlib
+import threading
 from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
 from config.settings import Config
 from utils.array_utils import as_array
 from utils.logging_utils import trace
-from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
+from services.heatmap_spec import (
+    defect_excess_colors,
+    heatmap_limit_and_scale_mm,
+    heatmap_spec,
+    normalize_heatmap_mode,
+)
 
 
 class ViewportRenderService:
@@ -490,6 +496,19 @@ class ViewportRenderService:
             print(f"colorize_by_scalar failed: {e}", flush=True)
 
     def _update_cloud_color(self, cloud_name: str, colors: np.ndarray) -> None:
+        adapter = getattr(self.viewport, '_adapter', None)
+        owner = getattr(adapter, '_owner_thread_id', None) if adapter is not None else None
+        on_owner = owner is None or threading.get_ident() == owner
+        if on_owner and hasattr(self.viewport, 'update_cloud_color'):
+            self.viewport.update_cloud_color(cloud_name, colors)
+            present = getattr(self.viewport, 'present_scene', None)
+            if callable(present):
+                present()
+            elif adapter is not None:
+                adapter._last_render_time = 0.0
+                adapter.request_render('color.direct')
+                adapter.poll()
+            return
         queue = getattr(self.viewport, 'queue_update_cloud_color', None)
         if callable(queue):
             queue(cloud_name, colors)
@@ -977,9 +996,7 @@ class ViewportRenderService:
             centers = centers[valid]
             values = values[valid]
 
-            # Get limit for scaling
-            limit = float((quality_result.get('thresholds') or {}).get(
-                spec['limit_key'], 4.0))
+            limit, scale = heatmap_limit_and_scale_mm(quality_result, spec)
 
             # Domain mapping
             domain_raw = np.asarray(quality_result.get('__global_indices', []), dtype=np.int64)
@@ -1052,33 +1069,8 @@ class ViewportRenderService:
                 return
 
             finite = values_arr[valid_rows]
-            
-            # Scale only the excess over the applicable limit.
             excess = np.maximum(np.abs(finite) - limit, 0.0)
-            scale = max(float(np.nanpercentile(excess, 97)) if len(excess) else 0.0, 1e-6)
-            t = np.clip(excess / scale, 0, 1)
-            
-            heat_colors = np.zeros((len(t), 3), dtype=np.float32)
-            
-            # Gray (0.75, 0.75, 0.75) -> Yellow (1, 1, 0) -> Orange (1, 0.5, 0) -> Red (1, 0, 0)
-            mask1 = t <= 0.33
-            tt1 = t[mask1] / 0.33
-            heat_colors[mask1, 0] = 0.75 + 0.25 * tt1
-            heat_colors[mask1, 1] = 0.75 + 0.25 * tt1
-            heat_colors[mask1, 2] = 0.75 - 0.75 * tt1
-            
-            mask2 = (t > 0.33) & (t <= 0.66)
-            tt2 = (t[mask2] - 0.33) / 0.33
-            heat_colors[mask2, 0] = 1.0
-            heat_colors[mask2, 1] = 1.0 - 0.5 * tt2
-            heat_colors[mask2, 2] = 0.0
-            
-            mask3 = t > 0.66
-            tt3 = (t[mask3] - 0.66) / 0.34
-            heat_colors[mask3, 0] = 1.0
-            heat_colors[mask3, 1] = 0.5 - 0.5 * tt3
-            heat_colors[mask3, 2] = 0.0
-
+            heat_colors = defect_excess_colors(excess, scale)
             colors[rows[valid_rows]] = np.clip(heat_colors, 0, 1)
 
             trace('quality.heatmap', mode=mode,

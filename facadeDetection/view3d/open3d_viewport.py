@@ -820,6 +820,31 @@ class Open3DViewport(BaseViewport):
             return
         self._scene.update_cloud_color(name, colors)
 
+    def present_scene(self):
+        """Apply queued updates and present a frame immediately."""
+        try:
+            pending = self._pending_point_updates
+            self._pending_point_updates = {}
+            for name, (sequence, positions, colors) in pending.items():
+                if sequence == self._render_sequences.get(name):
+                    self.update_cloud_points(name, positions, colors)
+            pending_colors = self._pending_color_updates
+            self._pending_color_updates = {}
+            for name, (sequence, colors) in pending_colors.items():
+                if sequence == self._render_sequences.get(name):
+                    self.update_cloud_color(name, colors)
+            adapter = self._adapter
+            adapter._last_render_time = 0.0
+            adapter.request_render('present')
+            vis = adapter.vis
+            if vis is not None and not adapter._destroyed:
+                vis.poll_events()
+                vis.update_renderer()
+                adapter._render_pending = False
+                adapter._scene_dirty = False
+        except Exception as exc:
+            print(f'[PCFD] viewport.present_failed error={exc!r}', flush=True)
+
     def update_cloud_points(self, name, positions, colors=None):
         if name not in self._scene.point_data:
             return

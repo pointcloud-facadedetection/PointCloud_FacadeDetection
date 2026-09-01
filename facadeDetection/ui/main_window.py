@@ -3295,12 +3295,15 @@ class MainWindow(QMainWindow):
                         artifacts = quality_report.setdefault('heatmap_artifacts', {})
                         artifacts[exported.get('mode', mode)] = artifact
                         self._refresh_report_preview()
+                    preview = exported.get('overlay') or exported.get('heatmap')
                     self.statusBar().showMessage(
                         f'热力图已保存：{exported["heatmap"]}', 6000)
-                else:
-                    self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
+                    return preview
+                self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
+                return None
             except Exception as e:
                 print(f'[PCFD] ui.show_effect_error facade_id={facade_id} error={e}', flush=True)
+                return None
 
         def _restore():
             try:
