@@ -11,6 +11,18 @@ from db.connection import project_session
 from models import Facade, QualityMetric, Project, ResultScene
 
 
+def _sqlite_scalar_text(value):
+    """Convert metadata to a value accepted by SQLite TEXT columns."""
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    elif isinstance(value, (np.floating, np.integer)):
+        value = value.item()
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
 class ResultsRepo:
     @staticmethod
     def persist_quality_artifact(results_dir, facade_id: int, quality: dict) -> str | None:
@@ -56,6 +68,15 @@ class ResultsRepo:
                 return [serializable(v) for v in value]
             return value
 
+        def scalar_int(value, name):
+            """Reject container values before they reach a scalar SQL bind."""
+            if value is None:
+                return None
+            value = serializable(value)
+            if isinstance(value, (dict, list, tuple)):
+                raise ValueError(f'{name} 必须是标量，实际为 {type(value).__name__}')
+            return int(value)
+
         report = serializable(quality)
         report.pop('__export_context', None)
         # 在 SQLite 中保留质量域。
@@ -69,6 +90,7 @@ class ResultsRepo:
             if isinstance(facade_data, dict) and facade_data.get('facade_db_id'):
                 facade = s.execute(select(Facade).where(
                     Facade.id == int(facade_data['facade_db_id']),
+                    Facade.project_id == select(Project.id).where(Project.uuid == project_uuid).scalar_subquery(),
                     Facade.is_deleted == 0,
                 )).scalar_one_or_none()
 
@@ -106,19 +128,32 @@ class ResultsRepo:
                         bbox_json=facade_data.get('bbox_2d'),
                         area=float(facade_data.get('area', 0.0) or 0.0),
                         orientation=facade_data.get('type_label') or facade_data.get('type'),
+                        dataset_id=_sqlite_scalar_text(facade_data.get('dataset_id')),
+                        dataset_fingerprint=_sqlite_scalar_text(facade_data.get('dataset_fingerprint')),
                     )
                     s.add(facade)
                     s.flush()
             if facade is None:
                 raise ValueError(
                     f'立面不存在: facade_id={facade_id}, display_no={display_no}')
+            if isinstance(facade_data, dict):
+                expected_station = facade_data.get('station_id')
+                expected_station = scalar_int(expected_station, 'station_id')
+                if expected_station is not None and int(facade.station_id or -1) != expected_station:
+                    raise ValueError('立面与当前站点不匹配，拒绝保存质量结果')
+                if expected_station is not None:
+                    facade.station_id = expected_station
+                if facade_data.get('dataset_id') is not None:
+                    facade.dataset_id = _sqlite_scalar_text(facade_data.get('dataset_id'))
+                if facade_data.get('dataset_fingerprint') is not None:
+                    facade.dataset_fingerprint = _sqlite_scalar_text(facade_data.get('dataset_fingerprint'))
             facade.quality_report_json = report
             if display_no is not None:
                 facade.display_no = int(display_no)
             facade.quality_status = 'complete'
             facade.quality_completed_at = datetime.now()
             if dataset_revision is not None:
-                facade.dataset_revision = str(dataset_revision)
+                facade.dataset_revision = _sqlite_scalar_text(dataset_revision)
             if color is not None:
                 facade.color_json = serializable(color)
             # 在重复评估时替换指标，而不是累积行。
@@ -179,9 +214,20 @@ class ResultsRepo:
                 s.flush()
 
             items = list(items)
+            station_ids = {int(item['station_id']) for item in items
+                           if item.get('station_id') is not None}
+            if not items:
+                return []
+            if len(station_ids) != 1:
+                raise ValueError('检测结果必须全部属于同一个站点')
+            station_id = next(iter(station_ids))
+            dataset_ids = {str(item['dataset_id']) for item in items
+                           if item.get('dataset_id')}
+            dataset_id = next(iter(dataset_ids), None)
             # 新的检测结果将替换当前场景之前的有效数据集。
             old_rows = s.execute(select(Facade).where(
-                Facade.scene_id == scene.id, Facade.is_deleted == 0)).scalars().all()
+                Facade.scene_id == scene.id, Facade.station_id == station_id,
+                Facade.is_deleted == 0)).scalars().all()
             for old in old_rows:
                 s.delete(old)
             s.flush()
@@ -211,6 +257,9 @@ class ResultsRepo:
                     bbox_json=item.get("bbox_2d"),
                     area=float(item.get("area", 0.0)),
                     orientation=item.get("type_label") or item.get("type"),
+                    station_id=station_id,
+                    dataset_id=_sqlite_scalar_text(item.get('dataset_id') or dataset_id),
+                    dataset_fingerprint=_sqlite_scalar_text(item.get('dataset_fingerprint')),
                 )
                 s.add(facade)
                 s.flush()

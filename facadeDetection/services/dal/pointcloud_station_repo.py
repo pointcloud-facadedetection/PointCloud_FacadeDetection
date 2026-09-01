@@ -7,6 +7,34 @@ from services.dal.file_repo import FileRepo
 
 class PointCloudStationRepo:
     @staticmethod
+    def get_asset_fingerprint(project_uuid, station_id):
+        """返回某个站点的持久化source fingerprint
+
+        将此查找操作保存在存储库中，既避免了依赖脱离的 ORM关系，
+        又使运行时缓存键与文件名无关。
+        """
+        with project_session(project_uuid) as s:
+            row = s.get(PointCloudStation, int(station_id))
+            if row is None or row.is_deleted:
+                return None
+            asset = s.get(FileAsset, row.file_asset_id) if row.file_asset_id else None
+            if asset is None:
+                return (str(row.source_path), None, None)
+            return (str(asset.path), asset.sha256, asset.size_bytes)
+
+    @staticmethod
+    def get_by_asset_id(project_uuid, asset_id):
+        """Find the active station projection created for a FileAsset."""
+        with project_session(project_uuid) as s:
+            p = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()
+            if p is None:
+                return None
+            return s.execute(select(PointCloudStation).where(
+                PointCloudStation.project_id == p.id,
+                PointCloudStation.file_asset_id == int(asset_id),
+                PointCloudStation.is_deleted == False,
+            )).scalar_one_or_none()
+    @staticmethod
     def get_denoise_state(project_uuid, station_id):
         with project_session(project_uuid) as s:
             row = s.get(PointCloudStation, int(station_id))
@@ -39,19 +67,15 @@ class PointCloudStationRepo:
 
     @staticmethod
     def sync_assets(project_uuid):
-        """Reconcile FileAsset rows into the station projection.
+        """将 FileAsset 行与站点投影进行对齐。
 
-        Return counts so the caller can distinguish a valid empty project from
-        a failed restore.  This is intentionally one transaction: the UI must
-        never continue with a partially refreshed station list.
+        返回计数，以便调用方能够区分有效的空项目与恢复失败的情况。
         """
         with project_session(project_uuid) as s:
             p = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one()
             assets = s.execute(select(FileAsset).where(
                 FileAsset.project_id == p.id, FileAsset.is_deleted == False,
             ).order_by(FileAsset.id)).scalars().all()
-            # Older project databases used inconsistent kind values.  The
-            # extension is the authoritative fallback for PLY station assets.
             assets = [asset for asset in assets if (
                 str(asset.kind) in (FileKind.raw_pointcloud.value, 'raw_pointcloud')
                 or Path(asset.path or '').suffix.lower() == '.ply'
@@ -73,9 +97,7 @@ class PointCloudStationRepo:
                     row.display_name = asset.original_name or Path(asset.path).name
                     row.display_order = order
                     continue
-                # Legacy databases may contain a station with the same key but
-                # a missing/stale file_asset_id. Reuse it instead of inserting
-                # into the globally-unique station_key column.
+                # 兼容旧数据库
                 if key in by_key:
                     row = by_key[key]
                     row.file_asset_id = asset.id
@@ -125,9 +147,6 @@ class PointCloudStationRepo:
             for sid in station_ids:
                 row = s.get(PointCloudStation, sid)
                 if row:
-                    # Keep the legacy soft-delete flag for old databases, but
-                    # also unlink the asset so the station cannot reappear on
-                    # the next synchronization.
                     row.is_deleted = True
                     if row.file_asset_id is not None:
                         asset = s.get(FileAsset, row.file_asset_id)

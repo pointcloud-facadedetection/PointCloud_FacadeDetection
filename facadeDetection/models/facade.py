@@ -32,12 +32,18 @@ class Facade(Base):
     quality_report_json = Column(JSON, nullable=True)
     color_json = Column(JSON, nullable=True)
     dataset_revision = Column(String, nullable=True)
+    # 检测结果的所有权明确归属。
+    # 允许为空的设置可确保旧版数据库仍可读取；新的检测批次必须填充这些字段。
+    station_id = Column(Integer, ForeignKey('pointcloud_stations.id'), nullable=True, index=True)
+    dataset_id = Column(String, nullable=True, index=True)
+    dataset_fingerprint = Column(String, nullable=True, index=True)
     quality_completed_at = Column(DateTime, nullable=True)
     display_no = Column(Integer, nullable=False, default=1)
     point_count = Column(Integer, nullable=False, default=0)
     raw_point_count = Column(Integer, nullable=False, default=0)
 
     scene = relationship("ResultScene", back_populates="facades")
+    station = relationship("PointCloudStation")
     metrics = relationship("QualityMetric", back_populates="facade", cascade="all, delete-orphan")
 
 
