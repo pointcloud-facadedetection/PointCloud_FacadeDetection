@@ -19,6 +19,7 @@ env/
 *.db-wal
 *.lock
 uploads/
+data/projects/
 
 *.ply
 *.fls
@@ -28,6 +29,3 @@ uploads/
 
 .DS_Store
 Thumbs.db
-
-.json
-.md
