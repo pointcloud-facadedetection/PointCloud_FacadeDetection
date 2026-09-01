@@ -64,6 +64,7 @@ class FacadeHeatmapOverlay:
         threshold=None,
         draw_colorbar=True,
         boundary_points_3d=None,
+        draw_boundary=False,
         border_color=(0, 0, 255),
         border_thickness=3,
     ):
@@ -197,7 +198,7 @@ class FacadeHeatmapOverlay:
             0,
             255,
         ).astype(np.uint8)
-        if boundary_pixels is not None:
+        if draw_boundary and boundary_pixels is not None:
             cv2.polylines(
                 blended,
                 [np.rint(boundary_pixels).astype(np.int32)],

@@ -471,14 +471,18 @@ class MainWindow(QMainWindow):
         self.photo_match_service = PhotoMatchService()
         self._photo_match_display_image = None
         self._photo_heatmap_image = None
+        self._photo_angle_adjusted_image = None
+        self._cloud_angle_adjusted_image = None
         self._latest_facade_results = []
         self._saved_match_view = None
         self._saved_match_view_path = None
         self._projection_enabled = False
         self._match_denoise_busy = False
+        self._match_preprocessed_cloud = None
         self._view_export_worker = None
         self._live_projection_view = None
         self._heatmap_scale = None
+        self._heatmap_projection_data = None
         self._show_match_markers = True
         self._projection_sliders = {}
         self._projection_value_labels = {}
@@ -1301,7 +1305,7 @@ class MainWindow(QMainWindow):
         match_layout.addWidget(cloud_view_title)
         self.cloud_match_view = PhotoViewWidget(
             match_container,
-            placeholder='请点击“投影到二维视图”',
+            placeholder='请点击“点云映射”',
         )
         self.cloud_match_view.setMinimumHeight(280)
         self.cloud_match_view.set_interactive(False)
@@ -1352,7 +1356,7 @@ class MainWindow(QMainWindow):
         match_layout.addWidget(grid_title)
         self.facade_heatmap_grid_view = PhotoViewWidget(
             match_container,
-            placeholder='请先选择立面并点击“生成热力图”',
+            placeholder='请先选择立面并点击“热力图映射”',
         )
         self.facade_heatmap_grid_view.setMinimumHeight(300)
         self.facade_heatmap_grid_view.set_interactive(False)
@@ -1448,6 +1452,7 @@ class MainWindow(QMainWindow):
         self.project_operation_service._last_facade_results = results
         if hasattr(self, 'facade_heatmap_grid_view'):
             self.facade_heatmap_grid_view.clear_image()
+        self._heatmap_projection_data = None
         self._populate_photo_match_facades(results)
         if not results:
             self.list_facades.clear()
@@ -1545,16 +1550,43 @@ class MainWindow(QMainWindow):
             )
             item.setIcon(QIcon(swatch))
             item.setData(Qt.ItemDataRole.UserRole, facade)
-            item.setToolTip('选择该立面后可将其平整度热力图映射回照片')
+            item.setToolTip('选择该立面后可将其平整度热力图映射到照片')
             self.photo_match_facade_list.addItem(item)
             if selected_id is not None and int(facade.get('id', -2)) == selected_id:
                 selected_item = item
         if selected_item is not None:
             self.photo_match_facade_list.setCurrentItem(selected_item)
 
+    def _clear_facade_angle_adjustment(self, restore=False):
+        had_adjusted_view = (
+            self._photo_angle_adjusted_image is not None
+            or self._cloud_angle_adjusted_image is not None
+        )
+        self._photo_angle_adjusted_image = None
+        self._cloud_angle_adjusted_image = None
+        if not restore or not had_adjusted_view:
+            return
+        state = self.photo_match_service.state
+        source = (
+            self._photo_rectified_image
+            if state.annotation_space == 'rectified'
+            and self._photo_rectified_image is not None
+            else self._photo_raw_image
+        )
+        if source is not None and not source.isNull():
+            self._photo_heatmap_image = None
+            self._photo_match_display_image = source
+            self.photo_view.set_image(source)
+        if self._live_projection_view is not None:
+            cloud_bgr = self._live_projection_view.get('view_bgr')
+            if cloud_bgr is not None:
+                self.cloud_match_view.set_image(bgr_to_qimage(cloud_bgr))
+
     def _on_photo_match_facade_clicked(self, item):
         facade = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         cloud = self._active_cloud_name()
+        self._clear_facade_angle_adjustment(restore=True)
+        self._heatmap_projection_data = None
         if facade and cloud:
             if hasattr(self, 'facade_heatmap_grid_view'):
                 self.facade_heatmap_grid_view.clear_image()
@@ -1688,6 +1720,7 @@ class MainWindow(QMainWindow):
                 '已进入 2D-3D 匹配工作区',
                 4000,
             )
+            self._auto_preprocess_match_cloud()
         else:
             self._leave_photo_match_workspace()
         self._refresh_photo_match_controls()
@@ -1723,6 +1756,7 @@ class MainWindow(QMainWindow):
         self._last_upload_directory = str(Path(file_path).parent)
         self._photo_match_display_image = image
         self._photo_heatmap_image = None
+        self._clear_facade_angle_adjustment()
         # 新上传的照片使摆正结果失效，自动匹配需要重新回退到用原图。
         self._photo_raw_image = image
         self._photo_rectified_image = None
@@ -1925,21 +1959,21 @@ class MainWindow(QMainWindow):
         self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
 
-    def _apply_scan_pose_view(self):
+    def _apply_scan_pose_view(self, *, title='调整点云视角', announce=True):
         cloud_name = self._active_cloud_name()
         if not cloud_name:
-            QMessageBox.information(self, '调整点云视角', '请先加载点云。')
-            return
+            QMessageBox.information(self, title, '请先加载点云。')
+            return False
         data = self.viewport.get_cloud_data(cloud_name)
         points = None if not data else data.get('pos')
         if points is None or len(points) == 0:
-            QMessageBox.warning(self, '调整点云视角', '当前点云为空。')
-            return
+            QMessageBox.warning(self, title, '当前点云为空。')
+            return False
         points = np.asarray(points, dtype=np.float64)
         finite_points = points[np.isfinite(points).all(axis=1)]
         if len(finite_points) == 0:
-            QMessageBox.warning(self, '调整点云视角', '当前点云不包含有效坐标。')
-            return
+            QMessageBox.warning(self, title, '当前点云不包含有效坐标。')
+            return False
         try:
             projection_params = self.photo_match_service.initialize_projection(
                 finite_points,
@@ -1955,11 +1989,11 @@ class MainWindow(QMainWindow):
                 zoom=float(getattr(Config, 'INITIAL_VIEW_ZOOM', 0.45)),
             )
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, '调整点云视角', str(exc))
-            return
+            QMessageBox.warning(self, title, str(exc))
+            return False
         if not applied:
-            QMessageBox.warning(self, '调整点云视角', '视口相机设置失败。')
-            return
+            QMessageBox.warning(self, title, '视口相机设置失败。')
+            return False
         self._saved_match_view = None
         self._saved_match_view_path = None
         self._live_projection_view = None
@@ -1967,21 +2001,40 @@ class MainWindow(QMainWindow):
         self._set_projection_controls(projection_params)
         self.cloud_match_view.clear_image()
         self._refresh_photo_match_controls()
-        self.statusBar().showMessage(
-            '已调整三维点云视角；可点击“投影到二维视图”生成投影', 5000
-        )
+        if announce:
+            self.statusBar().showMessage(
+                '已调整三维点云视角；可点击“点云映射”生成投影', 5000
+            )
+        return True
 
-    def _remove_match_cloud_outliers(self):
+    def _map_cloud_to_view(self):
+        if not self._apply_scan_pose_view(title='点云映射', announce=False):
+            return
+        self._save_cloud_match_view(title='点云映射')
+
+    def _auto_preprocess_match_cloud(self):
+        cloud_name = self._active_cloud_name()
+        if not cloud_name or self._match_denoise_busy:
+            return
+        if self._match_preprocessed_cloud == cloud_name:
+            return
+        self._remove_match_cloud_outliers(silent=True)
+
+    def _remove_match_cloud_outliers(self, silent=False):
+        if self._match_denoise_busy:
+            return
         if not self._active_cloud_name():
-            QMessageBox.information(self, '点云消除离群点', '请先加载点云。')
+            if not silent:
+                QMessageBox.information(self, '点云消除离群点', '请先加载点云。')
             return
         self._match_denoise_busy = True
-        self.btn_remove_match_outliers.setEnabled(False)
-        self.btn_remove_match_outliers.setText('正在消除离群点…')
+        if hasattr(self, 'btn_remove_match_outliers'):
+            self.btn_remove_match_outliers.setEnabled(False)
+            self.btn_remove_match_outliers.setText('正在消除离群点…')
         self._saved_match_view = None
         self._saved_match_view_path = None
         self._live_projection_view = None
-        self.statusBar().showMessage('正在加载离群点缓存或执行离群点过滤…')
+        self.statusBar().showMessage('正在消除离群点并下采样…')
         self.project_operation_service.denoise(
             trim_far=True,
             far_bin_width=5.0,
@@ -1989,6 +2042,8 @@ class MainWindow(QMainWindow):
             absolute_max_range=200.0,
             display_voxel_size=0.10,
         )
+        if getattr(self.project_operation_service, '_denoise_thread', None) is None:
+            self._on_match_cloud_denoised(None)
 
     def _on_match_cloud_denoised(self, stats):
         self._match_denoise_busy = False
@@ -1996,6 +2051,8 @@ class MainWindow(QMainWindow):
             self.btn_remove_match_outliers.setText('点云消除离群点')
         self._saved_match_view = None
         self._saved_match_view_path = None
+        if stats:
+            self._match_preprocessed_cloud = stats.get('name') or self._active_cloud_name()
         if (
             self._projection_enabled
             and self.photo_match_service.state.projection_params
@@ -2005,12 +2062,12 @@ class MainWindow(QMainWindow):
         if stats:
             if stats.get('loaded_from_cache'):
                 message = (
-                    f"已加载离群点缓存："
+                    f"已加载离群点与下采样缓存："
                     f"{stats.get('points_after', 0)} 个代理点"
                 )
             else:
                 message = (
-                    f"离群点处理完成并已缓存："
+                    f"离群点消除与下采样完成并已缓存："
                     f"{stats.get('points_before', 0)} → "
                     f"{stats.get('points_after', 0)} 个代理点"
                 )
@@ -2131,11 +2188,12 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _save_cloud_match_view(self):
+    def _save_cloud_match_view(self, *, title='投影到二维视图'):
         if not self._active_cloud_name():
-            QMessageBox.information(self, '投影到二维视图', '请先加载点云。')
+            QMessageBox.information(self, title, '请先加载点云。')
             return
 
+        self._clear_facade_angle_adjustment(restore=True)
         self.render_service.exit_pick_mode()
         self.render_service.clear_pick_markers()
         try:
@@ -2152,7 +2210,7 @@ class MainWindow(QMainWindow):
             )
             view_image = bgr_to_qimage(captured['view_bgr'])
         except (KeyError, OSError, RuntimeError, ValueError) as exc:
-            QMessageBox.warning(self, '投影到二维视图', str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
 
         self._projection_enabled = True
@@ -2164,7 +2222,7 @@ class MainWindow(QMainWindow):
         self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
         self.statusBar().showMessage(
-            '点云已投影到右侧二维视图', 5000
+            '点云已映射到右侧二维视图', 5000
         )
 
     def _export_current_cloud_view_images(self):
@@ -2176,7 +2234,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 '保存点云视图',
-                '请先点击“投影到二维视图”。',
+                '请先点击“点云映射”。',
             )
             return
         if self._view_export_worker is not None:
@@ -2279,7 +2337,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 '自动匹配',
-                '请先调整点云视角，然后按“投影到二维视图”。',
+                '请先点击“点云映射”。',
             )
             return
 
@@ -2289,6 +2347,7 @@ class MainWindow(QMainWindow):
         self.photo_view.set_markers([])
         self.photo_view.set_remap_markers([])
         self.cloud_match_view.set_markers([])
+        self._clear_facade_angle_adjustment(restore=True)
         self._show_match_markers = True
         self.btn_auto_match_view.setEnabled(False)
         self.photo_match_status.setText(
@@ -2355,41 +2414,50 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _generate_selected_facade_heatmap(self):
+    def _generate_selected_facade_heatmap(self, *, title='生成热力图', announce=True):
         selected = self.photo_match_facade_list.currentItem()
         if selected is None:
             QMessageBox.information(
                 self,
-                '生成热力图',
+                title,
                 '请先从右侧立面列表中选择一个立面。',
             )
-            return
+            return False
         cloud_name = self._active_cloud_name()
         if not cloud_name:
-            QMessageBox.information(self, '生成热力图', '请先加载点云。')
-            return
+            QMessageBox.information(self, title, '请先加载点云。')
+            return False
         facade = selected.data(Qt.ItemDataRole.UserRole)
         if not isinstance(facade, dict):
             QMessageBox.warning(
                 self,
-                '生成热力图',
+                title,
                 '所选立面缓存数据无效，请重新选择立面。',
             )
-            return
+            return False
         try:
             stats = self.render_service.render_selected_facade_flatness(
                 cloud_name,
                 facade,
             )
         except (TypeError, ValueError) as exc:
-            QMessageBox.warning(self, '生成热力图', str(exc))
-            return
+            QMessageBox.warning(self, title, str(exc))
+            return False
         self._heatmap_scale = {
             'facade_id': facade.get('id'),
             'neutral_mm': float(stats.get('neutral_mm', 5.0)),
             'limit_mm': float(stats.get('limit_mm', 10.0)),
             'vmin_mm': float(stats.get('vmin_mm', -stats.get('limit_mm', 10.0))),
             'vmax_mm': float(stats.get('vmax_mm', stats.get('limit_mm', 10.0))),
+        }
+        self._heatmap_projection_data = {
+            key: stats.get(key)
+            for key in (
+                'facade_id',
+                'points_3d',
+                'values_mm',
+                'plane_model',
+            )
         }
         grid_bgr = stats.get('grid_bgr')
         if grid_bgr is not None:
@@ -2399,11 +2467,146 @@ class MainWindow(QMainWindow):
         self._show_match_markers = False
         self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
+        if announce:
+            self.statusBar().showMessage(
+                f"立面 {int(facade.get('display_no', 1))} 平整度热力图已生成："
+                '灰色=平整（±5 mm），蓝色=凹陷，红色=凸起；'
+                f"范围 ±{float(stats.get('limit_mm', 0.0)):.1f} mm。"
+                '匹配点对已隐藏。',
+                8000,
+            )
+        return True
+
+    def _map_heatmap_to_photo_and_cloud(self):
+        selected = self.photo_match_facade_list.currentItem()
+        facade = (
+            selected.data(Qt.ItemDataRole.UserRole)
+            if selected is not None
+            else None
+        )
+        cached_id = (
+            (self._heatmap_projection_data or {}).get('facade_id')
+        )
+        if (
+            not facade
+            or int(cached_id if cached_id is not None else -1)
+            != int(facade.get('id', -2))
+        ):
+            if not self._generate_selected_facade_heatmap(
+                title='热力图映射',
+                announce=False,
+            ):
+                return
+        self._map_heatmap_back_to_photo(title='热力图映射')
+
+    def _adjust_photo_to_facade_angle(self):
+        title = '调整照片角度'
+        state = self.photo_match_service.state
+        selected = self.photo_match_facade_list.currentItem()
+        if selected is None:
+            QMessageBox.information(
+                self, title, '请先从右侧立面列表中选择一个立面。'
+            )
+            return
+        if state.pose is None:
+            QMessageBox.information(self, title, '请先完成自动匹配。')
+            return
+        if self._live_projection_view is None or not self._projection_enabled:
+            QMessageBox.information(self, title, '请先点击“点云映射”。')
+            return
+        facade = selected.data(Qt.ItemDataRole.UserRole)
+        cached_id = (
+            (self._heatmap_projection_data or {}).get('facade_id')
+        )
+        if (
+            int(cached_id if cached_id is not None else -1)
+            != int((facade or {}).get('id', -2))
+            and not self._generate_selected_facade_heatmap(
+                title=title,
+                announce=False,
+            )
+        ):
+            return
+
+        source = (
+            self._photo_rectified_image
+            if state.annotation_space == 'rectified'
+            and self._photo_rectified_image is not None
+            else self._photo_raw_image
+        )
+        if source is None or source.isNull():
+            QMessageBox.information(self, title, '请先上传 2D 照片。')
+            return
+
+        cloud_name = self._active_cloud_name()
+        cloud_data = (
+            self.viewport.get_cloud_data(cloud_name) if cloud_name else None
+        )
+        dataset_id = cloud_data.get('dataset_id') if cloud_data else None
+        dataset = (
+            self.pointcloud_service.get_dataset(dataset_id)
+            if dataset_id
+            else None
+        )
+        if dataset is None or dataset.proxy_points is None:
+            QMessageBox.warning(
+                self, title, '当前点云处理数据不可用，请重新加载点云。'
+            )
+            return
+
+        facade_revision = (facade or {}).get('dataset_revision')
+        if facade_revision and str(facade_revision) != str(dataset.revision):
+            QMessageBox.warning(
+                self,
+                title,
+                '所选立面属于旧点云处理版本，请重新执行立面检测。',
+            )
+            return
+
+        self.btn_adjust_photo_angle.setEnabled(False)
+        self.btn_adjust_photo_angle.setText('正在调整照片角度…')
+        QApplication.processEvents()
+        try:
+            scale = self._heatmap_scale or {}
+            same_facade = scale.get('facade_id') == facade.get('id')
+            result = self.photo_match_service.align_facade_view_heatmaps(
+                self._qimage_to_bgr(source),
+                dataset.proxy_points,
+                facade,
+                cloud_projection=self._live_projection_view,
+                heatmap_data=self._heatmap_projection_data,
+                neutral_mm=scale.get('neutral_mm') if same_facade else None,
+                limit_mm=scale.get('limit_mm') if same_facade else None,
+                vmin_mm=scale.get('vmin_mm') if same_facade else None,
+                vmax_mm=scale.get('vmax_mm') if same_facade else None,
+            )
+            photo_image = bgr_to_qimage(result['image_bgr'])
+            cloud_image = bgr_to_qimage(result['cloud_image_bgr'])
+        except (
+            ImportError,
+            KeyError,
+            RuntimeError,
+            ValueError,
+            np.linalg.LinAlgError,
+        ) as exc:
+            QMessageBox.warning(self, title, str(exc))
+            return
+        finally:
+            self.btn_adjust_photo_angle.setText('调整照片角度')
+            self._refresh_photo_match_controls()
+
+        self._photo_angle_adjusted_image = photo_image
+        self._cloud_angle_adjusted_image = cloud_image
+        self._photo_heatmap_image = photo_image
+        self._photo_match_display_image = photo_image
+        self.photo_view.set_image(photo_image)
+        self.cloud_match_view.set_image(cloud_image)
+        self._show_match_markers = False
+        self._refresh_manual_match_markers()
+        width, height = result.get('output_size', (0, 0))
         self.statusBar().showMessage(
-            f"立面 {int(facade.get('display_no', 1))} 平整度热力图已生成："
-            '灰色=平整（±5 mm），蓝色=凹陷，红色=凸起；'
-            f"范围 ±{float(stats.get('limit_mm', 0.0)):.1f} mm。"
-            '匹配点对已隐藏。',
+            f"立面 {int(facade.get('display_no', 1))} 已调整为正视角度；"
+            f"热力图已重新显示（{int(width)}×{int(height)}）",
             8000,
         )
 
@@ -2419,28 +2622,28 @@ class MainWindow(QMainWindow):
         rgb = rows[:, :width * 3].reshape(height, width, 3).copy()
         return rgb[:, :, ::-1]
 
-    def _map_heatmap_back_to_photo(self):
+    def _map_heatmap_back_to_photo(self, *, title='热力图映射回照片'):
         state = self.photo_match_service.state
         selected = self.photo_match_facade_list.currentItem()
         if selected is None:
             QMessageBox.information(
                 self,
-                '热力图映射回照片',
+                title,
                 '请先从右侧立面列表中选择一个立面。',
             )
             return
         if state.pose is None:
             QMessageBox.information(
                 self,
-                '热力图映射回照片',
+                title,
                 '请先完成二维-三维匹配并估算匹配矩阵。',
             )
             return
         if self._live_projection_view is None:
             QMessageBox.information(
                 self,
-                '热力图映射回照片',
-                '请先点击“投影到二维视图”，以生成点云二维映射图。',
+                title,
+                '请先点击“点云映射”，以生成点云二维映射图。',
             )
             return
 
@@ -2453,7 +2656,7 @@ class MainWindow(QMainWindow):
         if source is None or source.isNull():
             QMessageBox.information(
                 self,
-                '热力图映射回照片',
+                title,
                 '请先上传 2D 照片。',
             )
             return
@@ -2469,7 +2672,7 @@ class MainWindow(QMainWindow):
         if dataset is None or dataset.proxy_points is None:
             QMessageBox.warning(
                 self,
-                '热力图映射回照片',
+                title,
                 '当前点云处理数据不可用，请重新加载点云。',
             )
             return
@@ -2482,12 +2685,16 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.warning(
                 self,
-                '热力图映射回照片',
+                title,
                 '所选立面属于旧点云处理版本，请重新执行立面检测。',
             )
             return
-        self.btn_map_heatmap_to_photo.setEnabled(False)
-        self.btn_map_heatmap_to_photo.setText('正在映射热力图…')
+        mapping_button = getattr(self, 'btn_heatmap_map', None)
+        if mapping_button is None:
+            mapping_button = getattr(self, 'btn_map_heatmap_to_photo', None)
+        if mapping_button is not None:
+            mapping_button.setEnabled(False)
+            mapping_button.setText('正在映射热力图…')
         QApplication.processEvents()
         try:
             scale = self._heatmap_scale or {}
@@ -2497,6 +2704,7 @@ class MainWindow(QMainWindow):
                 dataset.proxy_points,
                 facade,
                 cloud_projection=self._live_projection_view,
+                heatmap_data=self._heatmap_projection_data,
                 neutral_mm=scale.get('neutral_mm') if same_facade else None,
                 limit_mm=scale.get('limit_mm') if same_facade else None,
                 vmin_mm=scale.get('vmin_mm') if same_facade else None,
@@ -2505,10 +2713,13 @@ class MainWindow(QMainWindow):
             image = bgr_to_qimage(result['image_bgr'])
             cloud_image = bgr_to_qimage(result['cloud_image_bgr'])
         except (ImportError, KeyError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
-            QMessageBox.warning(self, '热力图映射回照片', str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         finally:
-            self.btn_map_heatmap_to_photo.setText('热力图映射回照片')
+            if hasattr(self, 'btn_map_heatmap_to_photo'):
+                self.btn_map_heatmap_to_photo.setText('热力图映射回照片')
+            if hasattr(self, 'btn_heatmap_map'):
+                self.btn_heatmap_map.setText('热力图映射')
             self._refresh_photo_match_controls()
 
         self._photo_heatmap_image = image
@@ -2579,9 +2790,14 @@ class MainWindow(QMainWindow):
 
         self.btn_rectify_photo.setEnabled(has_photo and not state.annotating)
         self.btn_grayscale_photo.setEnabled(has_photo and not state.annotating)
-        self.btn_apply_scan_pose.setEnabled(
+        can_map_cloud = (
             bool(state.scan_pose_path) and has_cloud and not state.annotating
         )
+        self.btn_apply_scan_pose.setEnabled(can_map_cloud)
+        if hasattr(self, 'btn_map_cloud'):
+            self.btn_map_cloud.setEnabled(
+                can_map_cloud and not self._match_denoise_busy
+            )
         if hasattr(self, 'btn_remove_match_outliers'):
             self.btn_remove_match_outliers.setEnabled(
                 not self._match_denoise_busy
@@ -2646,6 +2862,24 @@ class MainWindow(QMainWindow):
                 and has_generated_heatmap
                 and selected_facade
                 and state.pose is not None
+                and not state.annotating
+            )
+        if hasattr(self, 'btn_heatmap_map'):
+            self.btn_heatmap_map.setEnabled(
+                has_photo
+                and has_cloud
+                and selected_facade
+                and state.pose is not None
+                and not state.annotating
+            )
+        if hasattr(self, 'btn_adjust_photo_angle'):
+            self.btn_adjust_photo_angle.setEnabled(
+                has_photo
+                and has_cloud
+                and selected_facade
+                and state.pose is not None
+                and self._projection_enabled
+                and self._live_projection_view is not None
                 and not state.annotating
             )
         if not has_photo:
@@ -3262,58 +3496,65 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        title = QLabel('2D-3D 照片与点云匹配')
+        title = QLabel('2D照片-3D点云匹配')
         title.setProperty('uiRole', 'sectionTitle')
         layout.addWidget(title)
 
-        hint = QLabel(
-            '自动匹配：调整点云视角后先投影到二维视图，再执行自动匹配。'
-            '手动标注至少完成 6 对后可估计匹配矩阵。'
-        )
-        hint.setWordWrap(True)
-        hint.setProperty('uiRole', 'supportingText')
-        layout.addWidget(hint)
-
         self.btn_upload_photo = QPushButton('上传 2D 照片')
+        # 摆正 / 黑白化功能保留，暂不在面板上显示。
         self.btn_rectify_photo = QPushButton('摆正照片')
         self.btn_grayscale_photo = QPushButton('黑白化照片')
+        self.btn_rectify_photo.hide()
+        self.btn_grayscale_photo.hide()
         self.btn_upload_scan_pose = QPushButton('上传扫描仪位姿')
+        self.btn_map_cloud = QPushButton('点云映射')
+        self.btn_map_cloud.setToolTip(
+            '按扫描仪位姿调整三维视角，并将点云投影到右侧二维视图'
+        )
+        # 调整视角 / 投影到二维功能保留，由“点云映射”一并执行。
         self.btn_apply_scan_pose = QPushButton('调整点云视角')
+        self.btn_apply_scan_pose.hide()
+        # 消除离群点 / 下采样功能保留，进入对齐工作区时自动执行。
         self.btn_remove_match_outliers = QPushButton('点云消除离群点')
+        self.btn_remove_match_outliers.hide()
         self.btn_save_cloud_match_view = QPushButton('投影到二维视图')
+        self.btn_save_cloud_match_view.hide()
+        # 导出当前视图图片功能保留，暂不在面板上显示。
         self.btn_export_cloud_view_images = QPushButton('保存点云当前视图图片')
-        self.btn_auto_match_view = QPushButton('使用二维视图自动匹配')
+        self.btn_export_cloud_view_images.hide()
+        self.btn_auto_match_view = QPushButton('自动匹配')
+        # 手动匹配功能保留，暂不在面板上显示。
         self.btn_start_manual_match = QPushButton('进入标注模式')
         self.btn_undo_match_point = QPushButton('撤销上一个标注点')
         self.btn_exit_manual_match = QPushButton('退出标注')
         self.btn_estimate_match_matrix = QPushButton('粗略估计匹配矩阵')
         self.btn_remap_match_points = QPushButton('重映射 3D 标注点')
+        self.btn_start_manual_match.hide()
+        self.btn_undo_match_point.hide()
+        self.btn_exit_manual_match.hide()
+        self.btn_estimate_match_matrix.hide()
+        self.btn_remap_match_points.hide()
+        self.btn_heatmap_map = QPushButton('热力图映射')
+        self.btn_heatmap_map.setToolTip(
+            '为右侧选中的立面生成平整度热力图，并映射回照片'
+        )
+        self.btn_adjust_photo_angle = QPushButton('调整照片角度')
+        self.btn_adjust_photo_angle.setToolTip(
+            '按选中立面的法向量，将照片和点云映射图调整为正视角度'
+        )
+        # 生成 / 映射回照片功能保留，由“热力图映射”一并执行。
         self.btn_generate_facade_heatmap = QPushButton('生成热力图')
-        self.btn_generate_facade_heatmap.setToolTip(
-            '为右侧选中的立面生成平整度热力图'
-        )
+        self.btn_generate_facade_heatmap.hide()
         self.btn_map_heatmap_to_photo = QPushButton('热力图映射回照片')
-        self.btn_map_heatmap_to_photo.setToolTip(
-            '先执行立面检测并完成二维-三维匹配，再从右侧选择一个立面'
-        )
+        self.btn_map_heatmap_to_photo.hide()
 
         for button in (
             self.btn_upload_photo,
-            self.btn_rectify_photo,
-            self.btn_grayscale_photo,
             self.btn_upload_scan_pose,
-            self.btn_apply_scan_pose,
-            self.btn_remove_match_outliers,
-            self.btn_save_cloud_match_view,
-            self.btn_export_cloud_view_images,
+            self.btn_map_cloud,
             self.btn_auto_match_view,
-            self.btn_start_manual_match,
-            self.btn_undo_match_point,
-            self.btn_exit_manual_match,
-            self.btn_estimate_match_matrix,
-            self.btn_remap_match_points,
-            self.btn_generate_facade_heatmap,
-            self.btn_map_heatmap_to_photo,
+            self.btn_heatmap_map,
+            self.btn_adjust_photo_angle,
         ):
             button.setMinimumHeight(32)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3329,6 +3570,7 @@ class MainWindow(QMainWindow):
         self.btn_rectify_photo.clicked.connect(self._rectify_match_photo)
         self.btn_grayscale_photo.clicked.connect(self._grayscale_match_photo)
         self.btn_upload_scan_pose.clicked.connect(self._upload_scan_pose)
+        self.btn_map_cloud.clicked.connect(self._map_cloud_to_view)
         self.btn_apply_scan_pose.clicked.connect(self._apply_scan_pose_view)
         self.btn_remove_match_outliers.clicked.connect(
             self._remove_match_cloud_outliers
@@ -3352,6 +3594,12 @@ class MainWindow(QMainWindow):
         )
         self.btn_remap_match_points.clicked.connect(
             self._remap_manual_match_points
+        )
+        self.btn_heatmap_map.clicked.connect(
+            self._map_heatmap_to_photo_and_cloud
+        )
+        self.btn_adjust_photo_angle.clicked.connect(
+            self._adjust_photo_to_facade_angle
         )
         self.btn_generate_facade_heatmap.clicked.connect(
             self._generate_selected_facade_heatmap

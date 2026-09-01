@@ -20,6 +20,7 @@ from .manual_match import (
     remap_cloud_points_to_photo,
 )
 from .auto_view_match import match_photo_to_cloud_view
+from .facade_view_rectifier import rectify_facade_views
 from .perspective_camera import (
     default_projection_params,
     projection_camera,
@@ -40,6 +41,7 @@ __all__ = [
     'estimate_match_matrix',
     'remap_cloud_points_to_photo',
     'match_photo_to_cloud_view',
+    'rectify_facade_views',
     'default_projection_params',
     'projection_camera',
     'projection_viewport_camera',
