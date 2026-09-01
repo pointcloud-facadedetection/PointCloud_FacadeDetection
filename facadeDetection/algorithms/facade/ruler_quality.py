@@ -209,6 +209,7 @@ def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0, step):
     distance = float(np.hypot(base_u - snap_u, base_v - snap_v))
     return (ku, kv), snap_u, snap_v, snap_xyz, distance
 
+
 def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis, 
                              u_min_full, v_min_full, params):
     """Aggregate four directional ruler results using physical coordinate clustering.
