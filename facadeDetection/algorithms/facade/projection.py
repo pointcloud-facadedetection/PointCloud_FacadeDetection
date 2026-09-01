@@ -54,7 +54,10 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     
     # ==================== 统一缺陷热力图 ====================
     abs_gap = np.abs(gaps)
-    defect = np.isfinite(abs_gap) & (abs_gap > float(defect_limit))
+    if defect_colors is not None:
+        defect = np.isfinite(abs_gap)
+    else:
+        defect = np.isfinite(abs_gap) & (abs_gap > float(defect_limit))
     values = abs_gap[defect]  # Always use absolute values
 
     if vmax is not None:
@@ -99,18 +102,18 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
         heat[mask3, 1] = 0.5 - 0.5 * tt3
         heat[mask3, 2] = 0.0
     
-    defect_indices = np.flatnonzero(defect)
-    
-    # 像素级聚合：保留每个像素的最大缺陷值
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
-    pixel_values = np.full(h*w, -np.inf, dtype=float)
-    pixel_ids = flat[defect_indices]
-    
-    for p, value, colour in zip(pixel_ids, values, heat):
-        if value > pixel_values[p]:
-            pixel_values[p] = value
-            overlay.reshape(-1, 4)[p, :3] = np.clip(colour, 0, 1) * 255
-            overlay.reshape(-1, 4)[p, 3] = 255
+    pixel_values = np.full(h * w, -np.inf, dtype=float)
+    if values.size:
+        pixel_ids = flat[np.flatnonzero(defect)]
+        order = np.argsort(values)
+        pixel_ids = pixel_ids[order]
+        heat_u8 = np.clip(heat[order] * 255.0, 0, 255).astype(np.uint8)
+        values_sorted = values[order]
+        overlay_flat = overlay.reshape(-1, 4)
+        overlay_flat[pixel_ids, :3] = heat_u8
+        overlay_flat[pixel_ids, 3] = 255
+        pixel_values[pixel_ids] = values_sorted
     
     return {
         'base_rgb': (np.clip(base, 0, 1) * 255).astype(np.uint8),

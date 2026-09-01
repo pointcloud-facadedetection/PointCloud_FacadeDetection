@@ -31,10 +31,11 @@ def heatmap_spec(mode):
 
 
 def heatmap_limit_and_scale_mm(quality, spec, default_limit=4.0):
-    """Return (limit_mm, excess_scale_mm) from the active inspection profile.
+    """Return (limit_mm, scale_mm) from the active inspection profile.
 
-    Colour must be anchored to the standard limit, not the sample maximum.
-    A 570 mm outlier would otherwise crush typical 10–30 mm defects to grey.
+    Colour is anchored to the standard limit, not the sample maximum.
+    ``scale_mm`` is the absolute millimetre value that maps to red
+    (default ``fail_ratio`` × limit, i.e. 2×limit).
     """
     params = quality.get('parameters') or {}
     thresholds = quality.get('thresholds') or {}
@@ -53,12 +54,30 @@ def heatmap_limit_and_scale_mm(quality, spec, default_limit=4.0):
     return limit, scale
 
 
-def defect_excess_colors(excess_mm, scale_mm):
-    """Yellow at just-over-limit, red at ``scale_mm``. Failed cells stay visible."""
-    excess = np.asarray(excess_mm, dtype=np.float64).reshape(-1)
-    t = np.clip(excess / max(float(scale_mm), 1e-6), 0.0, 1.0).astype(np.float32)
-    colors = np.empty((len(t), 3), dtype=np.float32)
-    colors[:, 0] = 1.0
-    colors[:, 1] = 1.0 - t
-    colors[:, 2] = 0.0
+def heatmap_error_colors(values_mm, limit_mm, scale_mm=None):
+    """Grey at 0 mm, yellow at the standard limit, red at ``scale_mm``.
+
+    ``scale_mm`` defaults to 2×limit so the pass/fail boundary sits at yellow.
+    """
+    mag = np.abs(np.asarray(values_mm, dtype=np.float64).reshape(-1))
+    if mag.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    limit = max(float(limit_mm), 1e-6)
+    top = max(float(scale_mm) if scale_mm is not None else (2.0 * limit), limit * 1.01)
+    gray = np.array((0.58, 0.58, 0.58), dtype=np.float32)
+    yellow = np.array((1.0, 0.90, 0.12), dtype=np.float32)
+    red = np.array((0.90, 0.10, 0.08), dtype=np.float32)
+    colors = np.empty((len(mag), 3), dtype=np.float32)
+    below = mag <= limit
+    u = (mag[below] / limit).astype(np.float32)[:, None]
+    colors[below] = gray + (yellow - gray) * u
+    span = max(top - limit, 1e-6)
+    u = np.clip((mag[~below] - limit) / span, 0.0, 1.0).astype(np.float32)[:, None]
+    colors[~below] = yellow + (red - yellow) * u
     return colors
+
+
+def defect_excess_colors(excess_mm, scale_mm):
+    """Backward-compatible wrapper: treat excess as error above a unit limit."""
+    scale = max(float(scale_mm), 1e-6)
+    return heatmap_error_colors(np.asarray(excess_mm) + scale, scale, scale)

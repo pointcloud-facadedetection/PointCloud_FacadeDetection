@@ -285,14 +285,18 @@ class FacadeQualityDialog(QDialog):
         self._heatmap_caption.setStyleSheet('color: #64748b; font-size: 12px;')
         layout.addWidget(self._heatmap_caption)
 
+        self._heatmap_scroll = QScrollArea()
+        self._heatmap_scroll.setWidgetResizable(False)
+        self._heatmap_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._heatmap_scroll.setMinimumHeight(220)
+        self._heatmap_scroll.setMaximumHeight(380)
+        self._heatmap_scroll.setStyleSheet(
+            'QScrollArea { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; }')
         self._heatmap_image = QLabel()
         self._heatmap_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._heatmap_image.setMinimumHeight(180)
-        self._heatmap_image.setMaximumHeight(320)
-        self._heatmap_image.setStyleSheet(
-            'background: #0f172a; border: 1px solid #e2e8f0; border-radius: 6px;')
-        self._heatmap_image.setVisible(False)
-        layout.addWidget(self._heatmap_image)
+        self._heatmap_scroll.setWidget(self._heatmap_image)
+        self._heatmap_scroll.setVisible(False)
+        layout.addWidget(self._heatmap_scroll)
 
         # ── 底部按钮栏 ──
         btn_row = QHBoxLayout()
@@ -342,18 +346,38 @@ class FacadeQualityDialog(QDialog):
 
     def set_heatmap_preview(self, image_path: str) -> None:
         reader = QImageReader(image_path)
-        target = QSize(max(self._heatmap_image.width(), 640), 280)
         source = reader.size()
+        box_w = max(self._heatmap_scroll.viewport().width(), 640)
+        box_h = 360
         if source.isValid() and source.width() > 0 and source.height() > 0:
-            reader.setScaledSize(source.scaled(target, Qt.AspectRatioMode.KeepAspectRatio))
+            if source.height() > source.width() * 1.25:
+                # 高层立面通常是狭长图。按高度塞进预览框会导致图例和立面
+                # 缩成一条细线；此处保持可读宽度，使用滚动条查看完整高度。
+                target_w = min(source.width(), box_w)
+                target_h = max(
+                    1,
+                    int(round(source.height() * target_w / source.width())),
+                )
+                reader.setScaledSize(QSize(target_w, target_h))
+            else:
+                reader.setScaledSize(
+                    source.scaled(
+                        QSize(box_w, box_h),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                    )
+                )
         image = reader.read()
         if image.isNull():
             self._heatmap_caption.setText(
-                '热力图已生成，但无法在此加载预览。请查看三维视口中的黄-红缺陷着色。')
+                '热力图已生成，但无法在此加载预览。请查看三维视口中的灰-黄-红着色。')
             return
-        self._heatmap_image.setPixmap(QPixmap.fromImage(image))
-        self._heatmap_image.setVisible(True)
-        self._heatmap_caption.setText('检测效果热力图（不合格区域：黄 → 红）')
+        pixmap = QPixmap.fromImage(image)
+        self._heatmap_image.setPixmap(pixmap)
+        self._heatmap_image.adjustSize()
+        self._heatmap_scroll.setVisible(True)
+        self._heatmap_caption.setText(
+            '检测效果热力图：灰色接近 0，黄色为标准限值，红色表示超限；'
+            '狭长立面可上下滚动查看。')
 
     def _refresh_intervals(self):
         intervals = self._quality.get('intervals') or []

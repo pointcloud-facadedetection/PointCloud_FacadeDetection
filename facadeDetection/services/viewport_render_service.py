@@ -13,7 +13,7 @@ from config.settings import Config
 from utils.array_utils import as_array
 from utils.logging_utils import trace
 from services.heatmap_spec import (
-    defect_excess_colors,
+    heatmap_error_colors,
     heatmap_limit_and_scale_mm,
     heatmap_spec,
     normalize_heatmap_mode,
@@ -986,10 +986,7 @@ class ViewportRenderService:
             values_key = spec['value_key']
             values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
 
-            pass_key = spec['pass_key']
-            failed = np.asarray([not bool(r.get(pass_key, True)) for r in windows], dtype=bool)
-
-            valid = np.isfinite(centers).all(axis=1) & np.isfinite(values) & failed
+            valid = np.isfinite(centers).all(axis=1) & np.isfinite(values)
             if not np.any(valid):
                 return
 
@@ -1069,8 +1066,7 @@ class ViewportRenderService:
                 return
 
             finite = values_arr[valid_rows]
-            excess = np.maximum(np.abs(finite) - limit, 0.0)
-            heat_colors = defect_excess_colors(excess, scale)
+            heat_colors = heatmap_error_colors(finite, limit, scale)
             colors[rows[valid_rows]] = np.clip(heat_colors, 0, 1)
 
             trace('quality.heatmap', mode=mode,

@@ -129,9 +129,16 @@ class _PickCaptureOverlay(QWidget):
             return
         # 到 activate 时 container 已加入主窗口，此时才能取得正确 owner。
         # 绑定 owner 后，覆盖层会随主窗口最小化和关闭。
+        # 子控件的 setGeometry 使用父窗口坐标；若误用屏幕坐标，覆盖层会
+        # 向右下偏移，挡住右侧立面列表，点击会全部落到三维捕获层上。
         if self.parentWidget() is not owner:
             self.setParent(owner, self._window_flags)
-        top_left = self._container.mapToGlobal(QPoint(0, 0))
+        parent = self.parentWidget()
+        top_left = (
+            self._container.mapTo(parent, QPoint(0, 0))
+            if parent is not None
+            else self._container.mapToGlobal(QPoint(0, 0))
+        )
         self.setGeometry(
             top_left.x(), top_left.y(),
             self._container.width(), self._container.height(),

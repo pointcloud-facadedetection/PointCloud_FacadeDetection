@@ -1583,6 +1583,14 @@ class MainWindow(QMainWindow):
             row.setMaximumHeight(48)
             self.list_facades.setItemWidget(item, row)
 
+            def _on_row_pressed(event, list_item=item, host=row):
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.list_facades.setCurrentItem(list_item)
+                    self._on_facade_item_clicked(list_item)
+                QWidget.mousePressEvent(host, event)
+
+            row.mousePressEvent = _on_row_pressed
+
         self._latest_facade_results = results
         self.project_operation_service._last_facade_results = results
         self._refresh_heatmap_button_state()
@@ -1590,6 +1598,17 @@ class MainWindow(QMainWindow):
 
     def _compatible_quality_results(self):
         results = getattr(self.project_operation_service, '_last_facade_results', None) or []
+        cloud = self._active_cloud_name()
+        if not cloud or not results:
+            return []
+        try:
+            return self.render_service.compatible_quality_reports(
+                cloud, results,
+                index_service=self.facade_service._index_service,
+            )
+        except Exception:
+            return []
+
     def _populate_photo_match_facades(self, results):
         """把检测结果同步到 2D-3D 工作区右侧的可选立面列表。"""
         if not hasattr(self, 'photo_match_facade_list'):
@@ -1747,7 +1766,7 @@ class MainWindow(QMainWindow):
         item = self.list_facades.currentItem()
         if item is not None and int((item.data(Qt.ItemDataRole.UserRole) or {}).get('id', -1)) == int(facade.get('id', -2)):
             item.setData(Qt.ItemDataRole.UserRole, facade)
-        button.setText('完整' if status == 'complete' else '不完整')
+        button.setText('完整' if status == 'complete' else '确认完整')
         if hasattr(self.project_operation_service, 'persist_facade_review_status'):
             self.project_operation_service.persist_facade_review_status(facade)
 
@@ -1755,7 +1774,17 @@ class MainWindow(QMainWindow):
         """Toggle pending/incomplete -> complete, complete -> incomplete."""
         current = self._facade_review_status(facade)
         target = 'incomplete' if current == 'complete' else 'complete'
+        print(
+            f'[PCFD] ui.facade_review facade_id={int((facade or {}).get("id", 0))} '
+            f'{current}->{target}',
+            flush=True,
+        )
         self._set_facade_preview_status(facade, button, target)
+        cloud = self._active_cloud_name()
+        if cloud and facade:
+            self.render_service.select_facade(
+                cloud, int(facade.get('id', 0)), facade=facade)
+            self._focus_view_on_facade(facade)
 
     @staticmethod
     def _facade_review_status(facade):
@@ -3289,13 +3318,14 @@ class MainWindow(QMainWindow):
                     # Persist only small, portable artifact metadata. Runtime
                     # point arrays stay in __export_context and are not stored.
                     artifact = {key: exported.get(key) for key in
-                                ('mode', 'title', 'heatmap', 'overlay', 'legend')}
+                                ('mode', 'title', 'heatmap', 'overlay', 'preview', 'legend')}
                     quality_report = facade.get('quality_report')
                     if isinstance(quality_report, dict):
                         artifacts = quality_report.setdefault('heatmap_artifacts', {})
                         artifacts[exported.get('mode', mode)] = artifact
                         self._refresh_report_preview()
-                    preview = exported.get('overlay') or exported.get('heatmap')
+                    preview = (exported.get('preview') or exported.get('overlay')
+                               or exported.get('heatmap'))
                     self.statusBar().showMessage(
                         f'热力图已保存：{exported["heatmap"]}', 6000)
                     return preview
@@ -3356,22 +3386,30 @@ class MainWindow(QMainWindow):
                 f'显示质量结果时出错：\n{e}')
 
     def _on_facade_item_clicked(self, item):
-        f = item.data(Qt.ItemDataRole.UserRole)
+        f = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not f:
+            print('[PCFD] ui.facade_click ignored: empty payload', flush=True)
             return
         cloud = self._active_cloud_name()
+        facade_no = int(f.get('display_no', 1))
+        print(
+            f'[PCFD] ui.facade_click facade_no={facade_no} '
+            f'facade_id={int(f.get("id", 0))} cloud={cloud!r}',
+            flush=True,
+        )
         if not cloud:
+            self.statusBar().showMessage('当前没有可显示的点云，无法定位立面', 4000)
             return
-        # Selection remains an explicit, non-expensive interaction.
-        self.render_service.select_facade(cloud, int(f.get('id', 0)))
-        self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
+        self.statusBar().showMessage(
+            f'已选中立面 {facade_no}，请使用“评估选中立面”执行质量检测', 3000)
         self.render_service.select_facade(
             cloud,
             int(f.get('id', 0)),
             facade=f,
         )
-        self._focus_view_on_facade(f)
-        return
+        focused = self._focus_view_on_facade(f)
+        if not focused:
+            print(f'[PCFD] ui.facade_focus_failed facade_no={facade_no}', flush=True)
 
     def _evaluate_facade(self, f):
         cloud = self._active_cloud_name()

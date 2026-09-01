@@ -5,7 +5,7 @@ import numpy as np
 import cv2
 from algorithms.facade.projection import rasterize_facade
 from services.heatmap_spec import (
-    defect_excess_colors,
+    heatmap_error_colors,
     heatmap_limit_and_scale_mm,
     heatmap_spec,
     normalize_heatmap_mode,
@@ -50,14 +50,12 @@ class ResultExportService:
 
             heatmap_mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
 
-            # 只有同时具有实际测量值且质量检测结果为失败的窗口才可绘制。
             n_valid = 0
             spec = heatmap_spec(heatmap_mode)
             for w in windows:
                 fgm = w.get(spec['value_key'], np.nan)
                 try:
-                    if (not bool(w.get(spec['pass_key'], True)) and
-                            np.isfinite(float(fgm))):
+                    if np.isfinite(float(fgm)):
                         n_valid += 1
                 except (TypeError, ValueError):
                     pass
@@ -68,24 +66,26 @@ class ResultExportService:
 
             # 确保栅格图像尺寸在限定范围内。  
             pixel_size = max(float(pixel_size), 0.01)
-            heatmap_path = self._export_window_heatmap(
+            heatmap_path, preview_path = self._export_window_heatmap(
                 root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
             limit_mm, scale_mm = heatmap_limit_and_scale_mm(quality, spec)
             legend_path = self._create_heatmap_legend(
                 root,
                 limit_mm,
-                float(limit_mm + scale_mm),
+                float(scale_mm),
                 heatmap_mode)
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
                   f'heatmap={heatmap_path.name if heatmap_path else None}', flush=True)
 
+            overlay_path = root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'
             return {
                 'root': str(root),
                 'mode': heatmap_mode,
                 'title': heatmap_spec(heatmap_mode)['title'],
                 'heatmap': str(heatmap_path) if heatmap_path else None,
-                'overlay': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'),
+                'overlay': str(overlay_path),
+                'preview': str(preview_path) if preview_path else str(overlay_path),
                 'legend': str(legend_path) if legend_path else None,
             }
 
@@ -167,168 +167,360 @@ class ResultExportService:
         
         return base_points, colors
 
-    def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
-        """将窗口结果导出为热力图 PNG 文件，并采用统一的缺陷配色方案。"""
-        mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
-        spec = heatmap_spec(mode)
-        
-        # 提取中心和缺陷值
+    def _window_centers_and_values(self, windows, spec):
         centers_list = []
         values_list = []
-        
         for r in windows:
-            pass_key = spec['pass_key']
-            if bool(r.get(pass_key, True)):
-                continue
             cx = r.get('center_xyz')
-            # 只有当窗口的几何信息和尺寸均有效时，该窗口才可绘制。
-            if cx is not None and len(cx) == 3:
-                try:
-                    if all(np.isfinite(float(x)) for x in cx):
-                        center = [float(x) for x in cx]
-                    else:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-            else:
+            if cx is None or len(cx) != 3:
                 continue
-
-            val = r.get(spec['value_key'], np.nan)
-            
             try:
-                val = float(val)
-                if not np.isfinite(val):
+                center = [float(x) for x in cx]
+                if not all(np.isfinite(x) for x in center):
                     continue
+                val = float(r.get(spec['value_key'], np.nan))
             except (TypeError, ValueError):
+                continue
+            if not np.isfinite(val):
                 continue
             centers_list.append(center)
             values_list.append(val)
+        return (np.asarray(centers_list, dtype=float).reshape(-1, 3),
+                np.asarray(values_list, dtype=float))
 
-        centers = np.asarray(centers_list, dtype=float).reshape(-1, 3)
-        values = np.asarray(values_list, dtype=float)
+    def _values_on_facade_points(self, base_points, centers, values, quality, plane_model):
+        """Assign each facade point the max-abs window value of its UV cell."""
+        origin = quality.get('projection_origin')
+        u_axis = quality.get('projection_u_axis')
+        v_axis = quality.get('projection_v_axis')
+        if origin is None or u_axis is None or v_axis is None:
+            from algorithms.geometry import plane_axes
+            normal = np.asarray(plane_model[:3], dtype=float)
+            normal /= np.linalg.norm(normal) + 1e-12
+            u_axis, v_axis = plane_axes(normal, 'vertical_facade')
+            origin = np.mean(base_points, axis=0)
+        origin = np.asarray(origin, dtype=float).reshape(3)
+        u_axis = np.asarray(u_axis, dtype=float).reshape(3)
+        v_axis = np.asarray(v_axis, dtype=float).reshape(3)
+        u_axis = u_axis / (np.linalg.norm(u_axis) + 1e-12)
+        v_axis = v_axis / (np.linalg.norm(v_axis) + 1e-12)
 
-        if len(centers) == 0 or len(values) == 0 or len(centers) != len(values):
+        step = max(float((quality.get('parameters') or {}).get('scan_step_m')
+                         or quality.get('step_size_m') or 0.05), 1e-6)
+        proj = quality.get('projection') or {}
+        cu = (centers - origin) @ u_axis
+        cv = (centers - origin) @ v_axis
+        bu = (base_points - origin) @ u_axis
+        bv = (base_points - origin) @ v_axis
+        u_min = float(proj.get('u_min_m', min(float(cu.min()), float(bu.min()))))
+        v_min = float(proj.get('v_min_m', min(float(cv.min()), float(bv.min()))))
+
+        pack = 1_000_003
+        ck = (np.floor((cu - u_min) / step).astype(np.int64) * pack
+              + np.floor((cv - v_min) / step).astype(np.int64))
+        bk = (np.floor((bu - u_min) / step).astype(np.int64) * pack
+              + np.floor((bv - v_min) / step).astype(np.int64))
+
+        uniq, inv = np.unique(ck, return_inverse=True)
+        cell_abs = np.full(len(uniq), -np.inf, dtype=np.float64)
+        np.maximum.at(cell_abs, inv, np.abs(values))
+        sorter = np.argsort(uniq)
+        pos = np.searchsorted(uniq[sorter], bk)
+        pos = np.clip(pos, 0, len(uniq) - 1)
+        idx = sorter[pos]
+        match = uniq[idx] == bk
+        point_values = np.full(len(base_points), np.nan, dtype=np.float64)
+        point_values[match] = cell_abs[idx[match]]
+        return point_values
+
+    def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
+        """Export a grey→yellow→red facade heatmap covering all measured windows."""
+        mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
+        spec = heatmap_spec(mode)
+        centers, values = self._window_centers_and_values(windows, spec)
+        if len(centers) == 0 or len(values) == 0:
             raise ValueError('质量结果没有有效窗口，无法导出热力图')
 
         limit_mm, scale_mm = heatmap_limit_and_scale_mm(quality, spec)
-        limit_m = limit_mm / 1000.0
-        excess_mm = np.maximum(np.abs(values) - limit_mm, 0.0)
-        defect_colors = defect_excess_colors(excess_mm, scale_mm)
-
         base_points, _ = self._filter_base_points(pts_local, colors, plane_model, quality)
-        
         if len(base_points) == 0:
             raise ValueError('过滤后立面点云为空，无法导出叠加图')
 
-        # 纯色深色背景 - 与3D视口一致
-        # 深色背景: RGB(0.12, 0.13, 0.15) - 深蓝灰色
-        base_colors = np.full((len(base_points), 3), 0.13, dtype=float)
-        # 给背景添加轻微噪点纹理，避免过于平坦
-        noise = np.random.RandomState(42).uniform(-0.02, 0.02, base_colors.shape)
-        base_colors = np.clip(base_colors + noise, 0.08, 0.18)
+        point_values = self._values_on_facade_points(
+            base_points, centers, values, quality, plane_model)
+        finite = np.isfinite(point_values)
+        if np.any(finite):
+            heat_pts = base_points[finite]
+            heat_vals = point_values[finite]
+        else:
+            heat_pts = centers
+            heat_vals = np.abs(values)
 
-        # 转换为米单位传入 rasterize_facade
-        values_m = values / 1000.0
-        
-        projection = quality.get('projection') or {}
-        projection_origin = quality.get('projection_origin')
-        projection_u_axis = quality.get('projection_u_axis')
-        projection_v_axis = quality.get('projection_v_axis')
+        defect_colors = heatmap_error_colors(heat_vals, limit_mm, scale_mm)
+        base_colors = np.full((len(base_points), 3), 0.84, dtype=float)
 
-        # 传入与视口一致的参数
-        global_vmax_m = (limit_mm + scale_mm) / 1000.0
-        
         raster = rasterize_facade(
-            centers, np.full((len(centers), 3), 0.7), plane_model, 
-            values_m, limit_m,
-            pixel_size=pixel_size, 
-            defect_colors=defect_colors, 
-            vmin=limit_m,
-            vmax=global_vmax_m,  # 传入全局vmax确保内部映射一致
-            base_points=base_points, 
+            heat_pts, np.full((len(heat_pts), 3), 0.7), plane_model,
+            heat_vals, 0.0,
+            pixel_size=pixel_size,
+            defect_colors=defect_colors,
+            vmin=0.0,
+            vmax=scale_mm,
+            base_points=base_points,
             base_colors=base_colors,
-            projection_origin=projection_origin,
-            projection_u_axis=projection_u_axis,
-            projection_v_axis=projection_v_axis)
+            projection_origin=quality.get('projection_origin'),
+            projection_u_axis=quality.get('projection_u_axis'),
+            projection_v_axis=quality.get('projection_v_axis'))
 
-        overlay = raster['overlay_rgba'].copy()
-        alpha = overlay[:, :, 3].astype(np.float32) / 255.0
-
-        if np.any(alpha > 0):
-            rgb = overlay[:, :, :3].astype(np.float32)
-
-            # 优化模糊处理 - 保持缺陷边缘清晰
-            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
-            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
-            
-            # RGB使用更小的模糊核，保持边缘清晰
-            premul = rgb * alpha[:, :, None]
-            premul_blur = cv2.GaussianBlur(premul, (3, 3), 0.5)
-            
-            rgb_smooth = premul_blur / alpha_blur[:, :, None]
-            overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
-            overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
-
-        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)
-        base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
-
+        overlay = raster['overlay_rgba']
+        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGR)
+        base_bgr = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
         visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
-
-        # 缺陷层使用更高权重，确保颜色鲜明
-        defect_boost = 1.15  # 缺陷层增强系数
-        
-        # 对base进行轻微暗化，进一步突出缺陷
-        base_darkened = base_rgb.astype(np.float32) * 0.85
-        
-        boosted_overlay = overlay[:, :, :3].astype(np.float32) * defect_boost
-        boosted_overlay = np.clip(boosted_overlay, 0, 255)
-        
         composite = (
-            base_darkened * (1.0 - visible[:, :, :1]) +
-            boosted_overlay * visible[:, :, :1]
+            base_bgr.astype(np.float32) * (1.0 - visible) +
+            overlay_bgr.astype(np.float32) * visible
         ).astype(np.uint8)
 
         heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
         overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
-
-        if not cv2.imwrite(str(heatmap_path), overlay_bgr):
+        legend = self._render_heatmap_legend(
+            limit_mm,
+            scale_mm,
+            mode=mode,
+        )
+        preview = self._compose_heatmap_preview(composite, legend)
+        if not cv2.imwrite(str(heatmap_path), preview):
             raise RuntimeError('热力图 PNG 写入失败')
-        if not cv2.imwrite(str(overlay_path), composite):
+        if not cv2.imwrite(str(overlay_path), preview):
             raise RuntimeError('合成图 PNG 写入失败')
 
-        return heatmap_path
+        preview_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_preview.png'
+        if not cv2.imwrite(str(preview_path), preview):
+            preview_path = overlay_path
+        return heatmap_path, preview_path
 
-    def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
-        """Create unified heatmap color legend PNG."""
-        h, w = 80, 500
+    def _compose_heatmap_preview(self, composite, legend):
+        """Place a vertical legend over the lower-right corner of the heatmap."""
+        h, w = composite.shape[:2]
+        max_w, max_h = 720, 1400
+        scale = min(max_w / max(w, 1), max_h / max(h, 1), 1.0)
+        if scale < 0.999:
+            small = cv2.resize(
+                composite,
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                interpolation=cv2.INTER_AREA)
+        else:
+            small = composite
+        base_canvas_w = max(480, small.shape[1])
+        image_x = (base_canvas_w - small.shape[1]) // 2
+        legend_x = image_x + small.shape[1] + 16
+        canvas_w = max(
+            base_canvas_w,
+            legend_x + legend.shape[1] + 12,
+        )
+        canvas_h = max(small.shape[0], legend.shape[0] + 24)
+        image_panel = np.full(
+            (canvas_h, canvas_w, 3),
+            245,
+            dtype=np.uint8,
+        )
+        image_y = (canvas_h - small.shape[0]) // 2
+        image_panel[
+            image_y:image_y + small.shape[0],
+            image_x:image_x + small.shape[1],
+        ] = small
+        legend_y = canvas_h - legend.shape[0] - 12
+        image_panel[
+            legend_y:legend_y + legend.shape[0],
+            legend_x:legend_x + legend.shape[1],
+        ] = legend
+        return image_panel
+
+    def _render_heatmap_legend(
+        self,
+        limit_mm,
+        max_mm,
+        width=210,
+        mode='flatness',
+    ):
+        """Render a vertical legend without changing the colour mapping."""
+        h, w = 330, max(190, min(int(width), 240))
         legend = np.ones((h, w, 3), dtype=np.uint8) * 245
-
-        bar_h = 28
-        bar_y = 16
-        bar_x_start = 60
-        bar_width = w - 120
-        n_segments = bar_width
-        t = np.linspace(0.0, 1.0, n_segments)
-        bar = defect_excess_colors(t * max(float(max_mm) - float(limit_mm), 1.0),
-                                   max(float(max_mm) - float(limit_mm), 1.0))
-        legend[bar_y:bar_y + bar_h, bar_x_start:bar_x_start + n_segments] = (
-            np.clip(bar[:, ::-1] * 255, 0, 255).astype(np.uint8)[None, :, :]
+        legend[[0, -1], :] = (210, 210, 210)
+        legend[:, [0, -1]] = (210, 210, 210)
+        bar_h = 210
+        bar_w = 28
+        bar_y = 52
+        bar_x_start = 24
+        values = np.linspace(float(max_mm), 0.0, bar_h)
+        bar = heatmap_error_colors(values, limit_mm, max_mm)
+        legend[bar_y:bar_y + bar_h, bar_x_start:bar_x_start + bar_w] = (
+            np.clip(bar[:, ::-1] * 255, 0, 255).astype(np.uint8)[:, None, :]
+        )
+        tick_y = bar_y + int(round(
+            bar_h * (1.0 - float(limit_mm) / max(float(max_mm), 1e-6))))
+        tick_y = min(max(tick_y, bar_y), bar_y + bar_h - 1)
+        legend[tick_y:tick_y + 2, bar_x_start - 4:bar_x_start + bar_w + 5] = (
+            65,
+            65,
+            65,
+        )
+        return self._put_legend_texts(
+            legend,
+            mode=mode,
+            text_x=bar_x_start + 42,
+            bar_bottom=bar_y + bar_h,
+            limit_y=tick_y,
+            limit_mm=float(limit_mm),
+            max_mm=float(max_mm),
         )
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.45
-        color = (60, 60, 60)
-        thickness = 1
+    def _put_legend_texts(
+        self,
+        legend,
+        *,
+        mode,
+        text_x,
+        bar_bottom,
+        limit_y,
+        limit_mm,
+        max_mm,
+    ):
+        rgb = cv2.cvtColor(legend, cv2.COLOR_BGR2RGB)
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            image = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(image)
+            title_font = None
+            font_path = None
+            for candidate in (
+                r'C:\Windows\Fonts\msyh.ttc',
+                r'C:\Windows\Fonts\msyh.ttf',
+                r'C:\Windows\Fonts\simhei.ttf',
+                r'C:\Windows\Fonts\simsun.ttc',
+            ):
+                try:
+                    title_font = ImageFont.truetype(candidate, 17)
+                    font_path = candidate
+                    break
+                except OSError:
+                    continue
+            if title_font is None:
+                raise RuntimeError('no CJK font')
+            label_font = ImageFont.truetype(font_path, 14)
+            small_font = ImageFont.truetype(font_path, 13)
+            metric = '垂直度偏差' if mode == 'verticality' else '平整度偏差'
+            draw.text(
+                (12, 12),
+                metric,
+                fill=(45, 55, 72),
+                font=title_font,
+            )
+            draw.text(
+                (text_x, 45),
+                f'显示上限 {max_mm:.1f} mm',
+                fill=(75, 85, 99),
+                font=small_font,
+                anchor='lm',
+            )
+            draw.text(
+                (text_x, limit_y),
+                f'标准限值 {limit_mm:.1f} mm',
+                fill=(55, 65, 81),
+                font=label_font,
+                anchor='lm',
+            )
+            draw.text(
+                (text_x, bar_bottom),
+                '0 mm',
+                fill=(75, 85, 99),
+                font=small_font,
+                anchor='lm',
+            )
+            draw.text(
+                (12, 280),
+                f'合格：0–{limit_mm:.1f} mm',
+                fill=(78, 86, 98),
+                font=small_font,
+            )
+            draw.text(
+                (12, 304),
+                f'超限：>{limit_mm:.1f} mm',
+                fill=(184, 50, 42),
+                font=small_font,
+            )
+            return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+        except Exception:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            metric = 'Verticality deviation' if mode == 'verticality' else 'Flatness deviation'
+            cv2.putText(
+                legend,
+                f'{metric} (mm)',
+                (12, 27),
+                font,
+                0.48,
+                (55, 55, 55),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                legend,
+                f'max {max_mm:.1f}',
+                (text_x, 57),
+                font,
+                0.42,
+                (80, 80, 80),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                legend,
+                f'limit {limit_mm:.1f}',
+                (text_x, limit_y + 5),
+                font,
+                0.42,
+                (70, 70, 70),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                legend,
+                '0',
+                (text_x, bar_bottom + 5),
+                font,
+                0.42,
+                (80, 80, 80),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                legend,
+                f'PASS 0-{limit_mm:.1f} mm',
+                (12, 292),
+                font,
+                0.43,
+                (70, 70, 70),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                legend,
+                f'EXCEEDS >{limit_mm:.1f} mm',
+                (12, 316),
+                font,
+                0.43,
+                (70, 70, 70),
+                1,
+                cv2.LINE_AA,
+            )
+            return legend
 
-        cv2.putText(legend, "刚超限", (10, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"{limit_mm:.1f}mm", (10, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
-
-        mid_x = w // 2 - 30
-        cv2.putText(legend, "警告", (mid_x, bar_y + bar_h + 20), font, font_scale, color, thickness)
-
-        cv2.putText(legend, "严重", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
-        cv2.putText(legend, f"{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
-
+    def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
+        legend = self._render_heatmap_legend(
+            limit_mm,
+            max_mm,
+            mode=mode,
+        )
         legend_path = Path(root) / f'{Path(root).name}_{normalize_heatmap_mode(mode)}_legend.png'
         cv2.imwrite(str(legend_path), legend)
         return legend_path
