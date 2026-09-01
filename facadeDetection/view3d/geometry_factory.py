@@ -46,6 +46,18 @@ def make_sphere(point, color, radius):
     return mesh
 
 
+def make_closed_polyline(points, color=(1.0, 0.0, 0.0)):
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(pts) < 2:
+        return None
+    lines = o3d.geometry.LineSet()
+    lines.points = o3d.utility.Vector3dVector(pts)
+    edges = [[i, (i + 1) % len(pts)] for i in range(len(pts))]
+    lines.lines = o3d.utility.Vector2iVector(edges)
+    lines.colors = o3d.utility.Vector3dVector(np.tile([list(color)], (len(edges), 1)))
+    return lines
+
+
 def make_pair_lines(src_points, tgt_points):
     src = np.asarray(src_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(tgt_points, dtype=np.float64).reshape(-1, 3)

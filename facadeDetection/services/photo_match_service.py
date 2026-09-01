@@ -25,67 +25,13 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
 
 
 def _robust_uv_quadrilateral(uv):
-    """过滤 UV 离群点，并将分位裁剪后的凸包简化为四边形。"""
-    import cv2
-
+    """与网格图、点云着色使用同一套立面范围：全部有效检测点的 UV 包围盒。"""
     coordinates = np.asarray(uv, dtype=np.float64).reshape(-1, 2)
     finite = np.isfinite(coordinates).all(axis=1)
-    if int(finite.sum()) < 4:
+    if int(finite.sum()) < 3:
         raise ValueError('立面 UV 坐标不足，无法生成边界')
-
-    robust = finite.copy()
-    finite_coordinates = coordinates[finite]
-    for axis in range(2):
-        values = finite_coordinates[:, axis]
-        median = float(np.median(values))
-        mad = float(np.median(np.abs(values - median)))
-        scale = 1.4826 * mad
-        if scale < 1e-9:
-            q25, q75 = np.percentile(values, (25.0, 75.0))
-            scale = float(q75 - q25) / 1.349
-        if scale >= 1e-9:
-            robust &= np.abs(coordinates[:, axis] - median) <= 6.0 * scale
-    if int(robust.sum()) < 4:
-        robust = finite.copy()
-
-    lower, upper = np.percentile(
-        coordinates[robust],
-        (1.0, 99.0),
-        axis=0,
-    )
-    trimmed = (
-        robust
-        & (coordinates[:, 0] >= lower[0])
-        & (coordinates[:, 0] <= upper[0])
-        & (coordinates[:, 1] >= lower[1])
-        & (coordinates[:, 1] <= upper[1])
-    )
-    if int(trimmed.sum()) < 4:
-        raise ValueError('分位裁剪后的立面点不足，无法生成边界')
-
-    hull = cv2.convexHull(
-        np.ascontiguousarray(coordinates[trimmed], dtype=np.float32)
-    ).reshape(-1, 2)
-    if len(hull) < 4:
-        raise ValueError('立面 UV 凸包退化，无法生成四边形边界')
-    if len(hull) == 4:
-        return trimmed, hull.astype(np.float64)
-
-    perimeter = float(
-        cv2.arcLength(np.ascontiguousarray(hull[:, None, :]), True)
-    )
-    for fraction in np.linspace(0.002, 0.12, 120):
-        polygon = cv2.approxPolyDP(
-            np.ascontiguousarray(hull[:, None, :]),
-            fraction * perimeter,
-            True,
-        ).reshape(-1, 2)
-        if len(polygon) == 4:
-            return trimmed, polygon.astype(np.float64)
-        if len(polygon) < 4:
-            break
-
-    # 极端形状无法稳定简化为四边形时，退回分位边界，避免重新引入离群点。
+    lower = np.min(coordinates[finite], axis=0)
+    upper = np.max(coordinates[finite], axis=0)
     quadrilateral = np.asarray(
         [
             (lower[0], lower[1]),
@@ -95,7 +41,7 @@ def _robust_uv_quadrilateral(uv):
         ],
         dtype=np.float64,
     )
-    return trimmed, quadrilateral
+    return finite, quadrilateral
 
 
 @dataclass
@@ -335,27 +281,23 @@ class PhotoMatchService:
             oriented_plane,
             unit='mm',
         )
+        from algorithms.geometry import plane_axes
+
         plane_normal = oriented_plane[:3]
-        vertical_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        if abs(float(np.dot(plane_normal, vertical_axis))) > 0.95:
-            vertical_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        v_axis = (
-            vertical_axis
-            - plane_normal * float(np.dot(vertical_axis, plane_normal))
+        facade_type = (
+            'horizontal'
+            if abs(float(plane_normal[2])) > 0.85
+            else 'vertical_facade'
         )
-        v_axis /= np.linalg.norm(v_axis) + 1e-12
-        u_axis = np.cross(v_axis, plane_normal)
-        u_axis /= np.linalg.norm(u_axis) + 1e-12
-        plane_origin = (
-            center
-            - plane_normal
-            * float(np.dot(plane_normal, center) + oriented_plane[3])
-        )
-        relative = facade_points - plane_origin
-        facade_u = relative @ u_axis
-        facade_v = relative @ v_axis
+        u_axis, v_axis = plane_axes(plane_normal, facade_type)
+        plane_origin = np.mean(facade_points, axis=0)
         uv_inliers, boundary_uv = _robust_uv_quadrilateral(
-            np.column_stack((facade_u, facade_v))
+            np.column_stack(
+                (
+                    (facade_points - plane_origin) @ u_axis,
+                    (facade_points - plane_origin) @ v_axis,
+                )
+            )
         )
         facade_points = facade_points[uv_inliers]
         scalars_mm = scalars_mm[uv_inliers]
@@ -398,9 +340,6 @@ class PhotoMatchService:
             val_range=(scale_vmin, scale_vmax),
             threshold=scale_threshold,
             draw_colorbar=True,
-            boundary_points_3d=boundary_points,
-            border_color=(0, 0, 255),
-            border_thickness=3,
         )
         result = {
             'image_bgr': blended,
@@ -424,13 +363,6 @@ class PhotoMatchService:
             projection_intrinsic = np.asarray(
                 cloud_projection.get('camera_matrix'), dtype=np.float64
             ).reshape(3, 3)
-            photo_h, photo_w = np.asarray(photo_bgr).shape[:2]
-            proj_h, proj_w = projection_image.shape[:2]
-            size_scale = min(
-                proj_w / max(photo_w, 1),
-                proj_h / max(photo_h, 1),
-            )
-            cloud_border = max(1, int(round(3 * size_scale)))
             cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay(
                 projection_image,
                 facade_points,
@@ -441,9 +373,6 @@ class PhotoMatchService:
                 val_range=(scale_vmin, scale_vmax),
                 threshold=scale_threshold,
                 draw_colorbar=True,
-                boundary_points_3d=boundary_points,
-                border_color=(0, 0, 255),
-                border_thickness=cloud_border,
             )
             result.update({
                 'cloud_image_bgr': cloud_blended,
