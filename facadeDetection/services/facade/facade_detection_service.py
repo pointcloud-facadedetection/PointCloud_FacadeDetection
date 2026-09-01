@@ -117,13 +117,16 @@ class FacadeDetectionService:
             self._index_service.normalize_facade_indices(facades, proxy_ids)
             self._index_service.populate_voxel_ids(facades, cloud_name)
 
-        # Every persisted/rendered result is tied to the exact processing
-        # dataset.  This prevents a result from a previous denoise revision
-        # being applied to the new proxy rows after project restore.
+        # 每个已持久化/渲染的结果都与具体的处理数据集相关联。
         revision = getattr(dataset, 'revision', str(dataset.dataset_id))
+        station_id = (data or {}).get('station_id') or (dataset.metadata or {}).get('station_id')
+        if project_uuid and station_id is None:
+            raise ValueError('当前处理点云未绑定站点，拒绝保存立面结果')
         for facade in facades:
             facade['dataset_id'] = dataset.dataset_id
             facade['dataset_revision'] = revision
+            facade['station_id'] = int(station_id) if station_id is not None else None
+            facade['dataset_fingerprint'] = (dataset.metadata or {}).get('asset_fingerprint')
             facade['index_space'] = 'proxy_global'
             facade['review_status'] = facade.get('review_status',
                                                  facade.get('preview_status', 'pending'))
@@ -260,6 +263,9 @@ class FacadeDetectionService:
         for facade in facades:
             facade['dataset_id'] = dataset.dataset_id
             facade['dataset_revision'] = revision
+            facade['station_id'] = int((data or {}).get('station_id') or
+                                       (dataset.metadata or {}).get('station_id'))
+            facade['dataset_fingerprint'] = (dataset.metadata or {}).get('asset_fingerprint')
             facade['index_space'] = 'proxy_global'
             facade['review_status'] = facade.get('review_status',
                                                  facade.get('preview_status', 'pending'))
