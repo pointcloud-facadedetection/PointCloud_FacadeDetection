@@ -188,17 +188,34 @@ class _PickCaptureOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(QColor(255, 220, 80), 1))
-        painter.drawText(
-            12, 22,
-            '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
-        )
-        for index, (x, y) in enumerate(self._pick_labels, start=1):
+        if self._pick_active:
+            painter.setPen(QPen(QColor(255, 220, 80), 1))
+            painter.drawText(
+                12, 22,
+                '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
+            )
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(11)
+        painter.setFont(font)
+        for item in self._pick_labels:
+            if len(item) == 3:
+                index, x, y = item
+            else:
+                continue
+            center = QPoint(int(round(x)), int(round(y)))
             painter.setPen(QPen(QColor(255, 255, 255), 1))
             painter.setBrush(QColor(220, 40, 40))
-            painter.drawEllipse(QPoint(int(x), int(y)), 8, 8)
+            painter.drawEllipse(center, 8, 8)
             painter.setPen(QColor(255, 255, 255))
-            painter.drawText(int(x) - 8, int(y) - 12, 16, 16, Qt.AlignCenter, str(index))
+            painter.drawText(
+                int(round(x)) - 8,
+                int(round(y)) - 8,
+                16,
+                16,
+                Qt.AlignCenter,
+                str(index),
+            )
         painter.end()
 
     def mousePressEvent(self, event):
@@ -595,6 +612,10 @@ class Open3DViewport(BaseViewport):
             overlay = getattr(self, '_pick_capture_overlay', None)
             if overlay is not None and getattr(overlay, '_active', False):
                 overlay.sync_geometry()
+            if getattr(self, '_pick_marker_xyz', None) is not None and len(
+                getattr(self, '_pick_marker_xyz')
+            ):
+                self._refresh_pick_overlay_labels()
         except Exception:
             pass
 
@@ -1109,9 +1130,13 @@ class Open3DViewport(BaseViewport):
             projected = self.project_points(pts)
             if projected is not None:
                 screen, valid = projected
-                for point, is_valid in zip(screen, valid):
+                for index, (point, is_valid) in enumerate(
+                    zip(screen, valid), start=1
+                ):
                     if is_valid:
-                        labels.append((float(point[0]), float(point[1])))
+                        labels.append(
+                            (index, float(point[0]), float(point[1]))
+                        )
         overlay._pick_labels = labels
         overlay.update()
 

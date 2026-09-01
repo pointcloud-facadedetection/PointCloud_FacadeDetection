@@ -1898,8 +1898,8 @@ class MainWindow(QMainWindow):
             return
         self._live_projection_view = rendered
         self.cloud_match_view.set_image(image)
-        if self.photo_match_service.state.remapped_photo_points:
-            self._refresh_manual_match_markers()
+        self.photo_match_service.clear_projection_view_points()
+        self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
 
     def _apply_scan_pose_view(self):
@@ -2140,8 +2140,8 @@ class MainWindow(QMainWindow):
         self._saved_match_view = None
         self._saved_match_view_path = None
         self.cloud_match_view.set_image(view_image)
-        if self.photo_match_service.state.remapped_photo_points:
-            self._refresh_manual_match_markers()
+        self.photo_match_service.clear_projection_view_points()
+        self._refresh_manual_match_markers()
         self._refresh_photo_match_controls()
         self.statusBar().showMessage(
             '点云已投影到右侧二维视图', 5000
@@ -2268,6 +2268,7 @@ class MainWindow(QMainWindow):
         self.render_service.clear_pick_markers()
         self.photo_view.set_markers([])
         self.photo_view.set_remap_markers([])
+        self.cloud_match_view.set_markers([])
         self.btn_auto_match_view.setEnabled(False)
         self.photo_match_status.setText(
             f'正在使用 SuperPoint + LightGlue 匹配'
@@ -2665,7 +2666,16 @@ class MainWindow(QMainWindow):
             src_points=cloud_points,
             labels=labels,
         )
-        self._update_reprojection_links()
+        rendered = self._live_projection_view
+        camera_matrix = None if rendered is None else rendered.get('camera_matrix')
+        extrinsic = None if rendered is None else rendered.get('extrinsic')
+        if hasattr(self, 'cloud_match_view'):
+            self.cloud_match_view.set_markers(
+                self.photo_match_service.projection_marker_points(
+                    camera_matrix,
+                    extrinsic,
+                )
+            )
 
     def _refresh_photo_match_controls(self):
         state = self.photo_match_service.state

@@ -284,8 +284,7 @@ class CameraController:
         """
         使用 Open3D 当前渲染相机将 3D 点投影到 Qt 视口坐标。
 
-        Open3D 正交视图不能导出针孔参数；调用方应先通过
-        ``ensure_pinhole_projection`` 切换到可精确投影的透视视图。
+        透视视图走针孔参数；正交视图不能导出针孔矩阵，改用 lookat / zoom。
         """
         ctr = self.adapter.get_view_control()
         if ctr is None or self.viewport_widget is None:
@@ -295,7 +294,8 @@ class CameraController:
             pts = np.asarray(points, dtype=np.float64)
             if pts.ndim != 2 or pts.shape[1] != 3:
                 return None
-
+            if self.is_orthographic():
+                return self._project_points_orthographic(pts)
             params = ctr.convert_to_pinhole_camera_parameters()
             intrinsic = np.asarray(params.intrinsic.intrinsic_matrix, dtype=np.float64)
             extrinsic = np.asarray(params.extrinsic, dtype=np.float64)
@@ -322,7 +322,35 @@ class CameraController:
                 screen[:, :2] /= dpr
             return screen, valid
         except Exception:
+            try:
+                return self._project_points_orthographic(
+                    np.asarray(points, dtype=np.float64)
+                )
+            except Exception:
+                return None
+
+    def _project_points_orthographic(self, pts):
+        """把世界点投到正交视图的逻辑像素坐标。"""
+        ctr = self.adapter.get_view_control()
+        front, up, right = self.get_camera_basis()
+        if ctr is None or front is None:
             return None
+        lookat = np.asarray(self._safe_get(ctr, 'get_lookat', [0, 0, 0]), dtype=float)
+        world_per_pixel = self.get_world_per_pixel()
+        if world_per_pixel is None or world_per_pixel <= 0:
+            return None
+        width, height, dpr = self._viewport_metrics()
+        relative = pts - lookat
+        screen = np.zeros((len(pts), 3), dtype=np.float64)
+        screen[:, 0] = (
+            width * dpr * 0.5 + (relative @ right) / world_per_pixel
+        ) / max(dpr, 1e-6)
+        screen[:, 1] = (
+            height * dpr * 0.5 - (relative @ up) / world_per_pixel
+        ) / max(dpr, 1e-6)
+        screen[:, 2] = relative @ front
+        valid = np.isfinite(screen).all(axis=1)
+        return screen, valid
 
     # ---------------- 内部辅助函数 ----------------
     def _safe_get(self, ctr, attr, default):
