@@ -2550,7 +2550,8 @@ class MainWindow(QMainWindow):
             return
 
         self._last_upload_directory = str(Path(file_paths[0]).parent)
-        self._prepare_project_activation(self.current_project.project_id)
+        # 当前项目的新增上传是增量操作；不能先销毁运行时，否则已有站点
+        # 会被重新读取。项目切换仍由打开/选择项目入口负责销毁。
         self._start_load('upload', self.current_project.project_id,
                          file_paths=file_paths)
     def _open_import_fls_directory(self):
@@ -2562,7 +2563,6 @@ class MainWindow(QMainWindow):
         if not directory_path:
             return
         self._last_upload_directory = directory_path
-        self._prepare_project_activation(getattr(self.current_project, 'project_id', None))
         project_id = getattr(self.current_project, 'project_id', None)
         if project_id:
             self._start_load('fls', project_id, directory=directory_path)
@@ -2970,9 +2970,10 @@ class MainWindow(QMainWindow):
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 uploaded = self.project_overview_service.upload_files(file_paths, project_id)
                 if uploaded:
-                    self._activate_project(self.current_project)
-                    # Upload is an explicit user mutation: do not restore the
-                    # previous project view over the newly imported station.
+                    # 只同步站点投影；已有运行时 dataset 保持不变。
+                    self.station_service.refresh()
+                    # Upload is an explicit user mutation: show one newly
+                    # imported station, without restoring the whole project.
                     stations = self.station_service.list_stations()
                     new_station = next(
                         (row for row in reversed(stations) if row.id not in before_ids),
@@ -2987,9 +2988,8 @@ class MainWindow(QMainWindow):
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 payload = self.project_overview_service.import_fls_directory(directory, project_id)
                 if payload.get('success'):
-                    # FLS import already persists and synchronizes its assets.
-                    # Activate once, then render exactly one newly imported
-                    # station instead of restoring and switching twice.
+                    # FLS import already persists and synchronizes its assets;
+                    # only display one new station.
                     self.station_service.refresh()
                     new_station = next(
                         (row for row in reversed(self.station_service.list_stations())
@@ -3025,14 +3025,23 @@ class MainWindow(QMainWindow):
             uploaded = result.get('uploaded') or []
             if uploaded:
                 self._refresh_project_list()
-                self._activate_project(self.current_project)
+                # 上传完成后只同步站点投影，不重新激活项目。重新激活会
+                # 让已有站点再次走 PLY 恢复链路；新增站点由用户点击时
+                # 按 station_id 懒加载，已有 dataset 保持不变。
+                self.station_service.refresh()
+                self._refresh_station_panel()
+                self.statusBar().showMessage(
+                    f'已增量添加 {len(uploaded)} 个文件，已有站点资源未重新加载。', 5000)
             else:
                 QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
         elif operation == 'fls':
             payload = result.get('result') or {}
             if payload.get('success'):
                 self._refresh_project_list()
-                self._activate_project(self.current_project)
+                self.station_service.refresh()
+                self._refresh_station_panel()
+                self.statusBar().showMessage(
+                    f'已增量导入 {payload.get("uploaded", 0)} 个站点，已有资源未重新加载。', 5000)
             else:
                 QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
 
@@ -3072,7 +3081,9 @@ class MainWindow(QMainWindow):
             pass
         try:
             if project_uuid:
-                historical = self.project_overview_service.load_historical_facades(project_uuid)
+                active_station_id = getattr(self.station_service, '_active_station_id', None)
+                historical = self.project_overview_service.load_historical_facades(
+                    project_uuid, active_station_id)
                 # Restore historical facades through the same state path as a
                 # fresh detection. This synchronizes the list, renderer cache,
                 # heatmap availability and report snapshot, including the

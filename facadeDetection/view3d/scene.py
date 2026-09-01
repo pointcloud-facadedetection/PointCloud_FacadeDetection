@@ -27,6 +27,7 @@ class PointCloudScene:
             "pos": positions,
             "color": colors,
             "size": max(self.MIN_POINT_SIZE, min(float(point_size), self.MAX_POINT_SIZE)),
+            "_render_sequence": 0,
         }
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=reset_view or not had_clouds)
@@ -57,6 +58,7 @@ class PointCloudScene:
             return
         data = self.point_data[name]
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(data["pos"])).astype(np.float32))
+        data.pop('display_proxy_lookup', None)
         geometry = self.clouds.get(name)
         if geometry is None:
             self.refresh_cloud(name, reset_bounding_box=False)
@@ -77,6 +79,7 @@ class PointCloudScene:
         if colors is None:
             colors = data.get("color")
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
+        data.pop('display_proxy_lookup', None)
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=False)
 
@@ -92,9 +95,24 @@ class PointCloudScene:
         data["color"] = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
         if metadata:
             data.update(metadata)
+            data.pop('display_proxy_lookup', None)
         self.active_name = name
         self.refresh_cloud(name, reset_bounding_box=False)
         return True
+
+    def commit_cloud_snapshot(self, name, positions, colors=None, metadata=None,
+                              point_size=0.3, reset_view=False):
+        """Create or atomically replace a cloud owned by the GUI thread."""
+        if name not in self.point_data:
+            self.add_cloud(name, positions, colors, point_size=point_size,
+                           reset_view=reset_view)
+            data = self.point_data.get(name)
+            if data is not None and metadata:
+                data.update(metadata)
+                data.pop('display_proxy_lookup', None)
+            return len(data.get('pos', [])) if data is not None else 0
+        self.replace_cloud_snapshot(name, positions, colors, metadata)
+        return len(self.point_data[name].get('pos', []))
 
     def remove_cloud(self, name):
         self.adapter.remove_geometry(name)
@@ -124,4 +142,9 @@ class PointCloudScene:
         return list(self.point_data.keys())
 
     def get_cloud_data(self, name):
-        return self.point_data.get(name)
+        data = self.point_data.get(name)
+        if data is not None and 'display_proxy_lookup' not in data:
+            displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
+            if len(displayed) == len(data.get('pos', [])):
+                data['display_proxy_lookup'] = {int(v): i for i, v in enumerate(displayed)}
+        return data
