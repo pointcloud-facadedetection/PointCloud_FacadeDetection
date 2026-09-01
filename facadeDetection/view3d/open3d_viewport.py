@@ -131,6 +131,7 @@ class Open3DViewport(BaseViewport):
         self._destroyed = False
         self._pending_point_updates = {}
         self._pending_color_updates = {}
+        self._render_sequences = {}
 
         self.native = self
         self._render_queue = _RenderQueue(self._root)
@@ -153,12 +154,22 @@ class Open3DViewport(BaseViewport):
         self._render_queue.points.emit(name, positions, colors)
 
     def _queue_cloud_color(self, name, colors):
-        self._pending_color_updates[name] = colors
+        sequence = self._render_sequences.get(name, 0) + 1
+        self._render_sequences[name] = sequence
+        old = self._pending_color_updates.get(name)
+        if old is not None:
+            del old
+        self._pending_color_updates[name] = (sequence, colors)
         self._adapter.request_render('color.queued')
 
     def _queue_cloud_points(self, name, positions, colors=None):
         # 仅保留最新的工作进程快照。
-        self._pending_point_updates[name] = (positions, colors)
+        sequence = self._render_sequences.get(name, 0) + 1
+        self._render_sequences[name] = sequence
+        old = self._pending_point_updates.get(name)
+        if old is not None:
+            del old
+        self._pending_point_updates[name] = (sequence, positions, colors)
         self._adapter.request_render('points.queued')
 
     @property
@@ -387,12 +398,14 @@ class Open3DViewport(BaseViewport):
         try:
             pending = self._pending_point_updates
             self._pending_point_updates = {}
-            for name, (positions, colors) in pending.items():
-                self.update_cloud_points(name, positions, colors)
+            for name, (sequence, positions, colors) in pending.items():
+                if sequence == self._render_sequences.get(name):
+                    self.update_cloud_points(name, positions, colors)
             pending_colors = self._pending_color_updates
             self._pending_color_updates = {}
-            for name, colors in pending_colors.items():
-                self.update_cloud_color(name, colors)
+            for name, (sequence, colors) in pending_colors.items():
+                if sequence == self._render_sequences.get(name):
+                    self.update_cloud_color(name, colors)
             self._adapter.poll()
         except Exception:
             pass
@@ -410,6 +423,7 @@ class Open3DViewport(BaseViewport):
             self._timer.stop()
         self._pending_point_updates.clear()
         self._pending_color_updates.clear()
+        self._render_sequences.clear()
         try:
             if self._roi_controller is not None:
                 self._roi_controller.cancel()
@@ -558,6 +572,18 @@ class Open3DViewport(BaseViewport):
     def replace_cloud_snapshot(self, name, positions, colors=None, metadata=None):
         """GUI-thread atomic point/colour/metadata replacement."""
         return self._scene.replace_cloud_snapshot(name, positions, colors, metadata)
+
+    def commit_processing_snapshot(self, name, positions, colors=None,
+                                   metadata=None, reset_view=False):
+        """Commit the latest processing snapshot once, on the GUI thread."""
+        sequence = self._render_sequences.get(name, 0) + 1
+        self._render_sequences[name] = sequence
+        self._pending_point_updates.pop(name, None)
+        self._pending_color_updates.pop(name, None)
+        count = self._scene.commit_cloud_snapshot(
+            name, positions, colors, metadata, reset_view=reset_view)
+        self._adapter.request_render('snapshot.committed')
+        return count
 
     def remove_cloud(self, name):
         self._scene.remove_cloud(name)
