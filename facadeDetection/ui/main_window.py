@@ -2518,6 +2518,7 @@ class MainWindow(QMainWindow):
                 'points_3d',
                 'values_mm',
                 'plane_model',
+                'grid_layout',
             )
         }
         grid_bgr = stats.get('grid_bgr')

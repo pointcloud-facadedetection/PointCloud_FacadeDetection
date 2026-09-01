@@ -72,6 +72,38 @@ def _cached_heatmap_samples(heatmap_data, facade):
     return points[finite], values[finite], plane
 
 
+def _cached_heatmap_grid(heatmap_data, points, values, plane, threshold, vmin, vmax):
+    """优先使用侧栏已生成的网格像素，缺失时按同一算法重建。"""
+    from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
+        build_plane_grid_heatmap,
+    )
+
+    layout = (heatmap_data or {}).get('grid_layout') or {}
+    patch = layout.get('patch_bgr')
+    mask = layout.get('patch_mask')
+    corners = layout.get('corners_3d')
+    if patch is not None and mask is not None and corners is not None:
+        patch = np.asarray(patch, dtype=np.uint8)
+        mask = np.asarray(mask, dtype=np.uint8)
+        corners = np.asarray(corners, dtype=np.float64).reshape(4, 3)
+        if (
+            patch.ndim == 3
+            and patch.shape[2] == 3
+            and mask.shape[:2] == patch.shape[:2]
+            and np.isfinite(corners).all()
+        ):
+            return patch, mask, corners
+    built = build_plane_grid_heatmap(
+        points,
+        values,
+        plane,
+        threshold,
+        vmin,
+        vmax,
+    )
+    return built['patch_bgr'], built['patch_mask'], built['corners_3d']
+
+
 @dataclass
 class MatchPair:
     photo: Optional[tuple[float, float]] = None
@@ -365,10 +397,20 @@ class PhotoMatchService:
             point_radius=point_radius,
             blur_size=blur_size,
         )
-        blended, heatmap, meta = overlay.overlay(
-            photo_bgr,
+        grid_bgr, grid_mask, grid_corners = _cached_heatmap_grid(
+            heatmap_data,
             facade_points,
             scalars_mm,
+            oriented_plane,
+            scale_threshold,
+            scale_vmin,
+            scale_vmax,
+        )
+        blended, heatmap, meta = overlay.overlay_grid(
+            photo_bgr,
+            grid_bgr,
+            grid_mask,
+            grid_corners,
             rotation,
             translation.reshape(3, 1),
             camera_matrix,
@@ -399,10 +441,11 @@ class PhotoMatchService:
             projection_intrinsic = np.asarray(
                 cloud_projection.get('camera_matrix'), dtype=np.float64
             ).reshape(3, 3)
-            cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay(
+            cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay_grid(
                 projection_image,
-                facade_points,
-                scalars_mm,
+                grid_bgr,
+                grid_mask,
+                grid_corners,
                 projection_extrinsic[:3, :3],
                 projection_extrinsic[:3, 3].reshape(3, 1),
                 projection_intrinsic,
@@ -535,26 +578,38 @@ class PhotoMatchService:
             point_radius=point_radius,
             blur_size=blur_size,
         )
-        overlay_args = (
+        grid_bgr, grid_mask, grid_corners = _cached_heatmap_grid(
+            heatmap_data,
             facade_points,
             scalars_mm,
-            aligned['rotation_matrix'],
-            aligned['translation_vector'].reshape(3, 1),
-            aligned['camera_matrix'],
+            aligned['plane_model'],
+            threshold,
+            scale_vmin,
+            scale_vmax,
         )
         overlay_options = {
             'val_range': (scale_vmin, scale_vmax),
             'threshold': threshold,
             'draw_colorbar': False,
         }
-        photo_image, photo_heatmap, photo_meta = overlay.overlay(
+        photo_image, photo_heatmap, photo_meta = overlay.overlay_grid(
             aligned['photo_bgr'],
-            *overlay_args,
+            grid_bgr,
+            grid_mask,
+            grid_corners,
+            aligned['rotation_matrix'],
+            aligned['translation_vector'].reshape(3, 1),
+            aligned['camera_matrix'],
             **overlay_options,
         )
-        cloud_image, cloud_heatmap, cloud_meta = overlay.overlay(
+        cloud_image, cloud_heatmap, cloud_meta = overlay.overlay_grid(
             aligned['cloud_bgr'],
-            *overlay_args,
+            grid_bgr,
+            grid_mask,
+            grid_corners,
+            aligned['rotation_matrix'],
+            aligned['translation_vector'].reshape(3, 1),
+            aligned['camera_matrix'],
             **overlay_options,
         )
         return {

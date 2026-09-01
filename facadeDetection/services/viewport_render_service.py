@@ -738,6 +738,9 @@ class ViewportRenderService:
         rows = rows[finite]
         deviations_mm = deviations_mm[finite]
         from algorithms.facade.heatmap_colors import compute_heatmap_scale
+        from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
+            build_plane_grid_heatmap,
+        )
 
         neutral_mm, vmin_mm, vmax_mm = compute_heatmap_scale(
             deviations_mm,
@@ -763,7 +766,7 @@ class ViewportRenderService:
             vmin_mm,
             vmax_mm,
         )
-        grid_bgr = self._flatness_grid_image(
+        grid = build_plane_grid_heatmap(
             positions[rows],
             deviations_mm,
             plane,
@@ -783,7 +786,12 @@ class ViewportRenderService:
             'vmax_mm': float(vmax_mm),
             'min_mm': float(np.min(deviations_mm)),
             'max_mm': float(np.max(deviations_mm)),
-            'grid_bgr': grid_bgr,
+            'grid_bgr': grid['canvas_bgr'],
+            'grid_layout': {
+                'patch_bgr': grid['patch_bgr'],
+                'patch_mask': grid['patch_mask'],
+                'corners_3d': grid['corners_3d'],
+            },
             # 映射阶段必须复用这里已显示在网格和点云上的同一批数据，
             # 不能按另一套索引或相机方向重新计算点到平面的偏差。
             'points_3d': np.ascontiguousarray(positions[rows]),
@@ -819,119 +827,18 @@ class ViewportRenderService:
         vmax_mm=None,
     ):
         """生成正视立面网格图，并附带凹凸毫米色标。"""
-        import cv2
-        from algorithms.geometry import plane_axes
+        from algorithms.View_aligned_photo_pointcloud_matching.heatmap_overlay import (
+            build_plane_grid_heatmap,
+        )
 
-        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
-        normal = np.asarray(plane[:3], dtype=np.float64).reshape(3)
-        facade_type = (
-            'horizontal'
-            if abs(float(normal[2])) > 0.85
-            else 'vertical_facade'
-        )
-        u_axis, v_axis = plane_axes(normal, facade_type)
-        origin = np.mean(points, axis=0)
-        uv = np.column_stack(
-            ((points - origin) @ u_axis, (points - origin) @ v_axis)
-        )
-        lower = np.min(uv, axis=0)
-        upper = np.max(uv, axis=0)
-        span = np.maximum(upper - lower, 0.1)
-        pixel_size = max(
-            0.02,
-            float(span[0]) / 600.0,
-            float(span[1]) / 1000.0,
-        )
-        width = max(24, int(np.ceil(span[0] / pixel_size)) + 1)
-        height = max(24, int(np.ceil(span[1] / pixel_size)) + 1)
-        x = np.clip(
-            ((uv[:, 0] - lower[0]) / pixel_size).astype(np.int64),
-            0,
-            width - 1,
-        )
-        y = np.clip(
-            height - 1
-            - ((uv[:, 1] - lower[1]) / pixel_size).astype(np.int64),
-            0,
-            height - 1,
-        )
-        flat = y * width + x
-
-        # 同一格保留绝对偏差最大的点，避免缺陷被周围平整点平均掉。
-        order = np.lexsort((np.abs(values), flat))
-        sorted_flat = flat[order]
-        keep = np.r_[
-            sorted_flat[1:] != sorted_flat[:-1],
-            True,
-        ]
-        selected = order[keep]
-        if vmax_mm is None:
-            bound = abs(float(vmin_mm))
-            vmin_mm, vmax_mm = -bound, bound
-        cell_colors = cls._signed_flatness_colors(
-            values[selected],
+        return build_plane_grid_heatmap(
+            points,
+            values_mm,
+            plane,
             neutral_mm,
             vmin_mm,
             vmax_mm,
-        )
-
-        from algorithms.facade.heatmap_colors import draw_signed_colorbar
-
-        margin = 36
-        legend_width = 168
-        canvas = np.full(
-            (height + margin * 2, width + margin * 2 + legend_width, 3),
-            245,
-            dtype=np.uint8,
-        )
-        facade_rgb = np.full((height, width, 3), 225, dtype=np.uint8)
-        facade_rgb.reshape(-1, 3)[flat[selected]] = np.clip(
-            cell_colors * 255.0,
-            0,
-            255,
-        ).astype(np.uint8)
-        canvas[
-            margin:margin + height,
-            margin:margin + width,
-        ] = facade_rgb
-
-        grid_step_px = max(1, int(round(1.0 / pixel_size)))
-        grid_color = (175, 175, 175)
-        for grid_x in range(margin, margin + width, grid_step_px):
-            cv2.line(
-                canvas,
-                (grid_x, margin),
-                (grid_x, margin + height - 1),
-                grid_color,
-                1,
-                cv2.LINE_AA,
-            )
-        for grid_y in range(margin + height - 1, margin - 1, -grid_step_px):
-            cv2.line(
-                canvas,
-                (margin, grid_y),
-                (margin + width - 1, grid_y),
-                grid_color,
-                1,
-                cv2.LINE_AA,
-            )
-        legend_height = min(height, max(120, min(300, int(height * 0.42))))
-        draw_signed_colorbar(
-            canvas,
-            margin + width + 18,
-            margin + height - legend_height,
-            22,
-            legend_height,
-            neutral_mm,
-            vmin=float(vmin_mm),
-            vmax=float(vmax_mm),
-            text_color=(40, 40, 40),
-            font_scale=0.62,
-            thickness=1,
-            output_bgr=False,
-        )
-        return np.ascontiguousarray(canvas[:, :, ::-1])
+        )['canvas_bgr']
 
     def render_flatness_heatmap(self, cloud_name: str, facades: list[dict],
                                 vmin: float | None = None,
