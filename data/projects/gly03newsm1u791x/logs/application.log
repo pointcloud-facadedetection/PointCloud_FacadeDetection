@@ -1,0 +1,7 @@
+2026-09-01 07:29:31,028 INFO [results.loaded] facades=0
+2026-09-01 07:30:41,565 INFO [station.switch] station_id=1
+2026-09-01 07:30:41,684 INFO [results.loaded] facades=0
+2026-09-01 08:03:16,981 INFO [asset.validate] path='C:\\Users\\Gao Liying\\Documents\\WeChat Files\\wxid_gcfsfzjcpi4d22\\FileStorage\\File\\2026-08\\bllygg03.ply' result='ok'
+2026-09-01 08:03:37,442 INFO [asset.loaded] path='C:\\Users\\Gao Liying\\Documents\\WeChat Files\\wxid_gcfsfzjcpi4d22\\FileStorage\\File\\2026-08\\bllygg03.ply'
+2026-09-01 08:03:45,833 INFO [station.switch] station_id=1
+2026-09-01 08:03:45,979 INFO [results.loaded] facades=0

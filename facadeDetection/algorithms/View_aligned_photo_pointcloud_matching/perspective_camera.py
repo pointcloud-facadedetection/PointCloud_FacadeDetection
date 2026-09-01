@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
-
 
 def _rot_x(angle):
     c, s = np.cos(angle), np.sin(angle)
@@ -30,6 +31,111 @@ def _local_points(points, transform_to_global):
     inverse = np.linalg.inv(transform)
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     return pts @ inverse[:3, :3].T + inverse[:3, 3]
+
+
+def _prepare_projection_for_lines(image_bgr):
+    """闭运算补点云投影空洞，便于 Canny / LSD 找竖线。"""
+    image = np.asarray(image_bgr, dtype=np.uint8)
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if int((gray > 0).sum()) > 100:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def _estimate_vertical_vanishing_point(image_bgr):
+    """Canny + LSD + RANSAC，与 tiaozheng_roll.estimate_vertical_vp 相同。"""
+    image = np.asarray(image_bgr, dtype=np.uint8)
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    detected = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD).detect(edges)[0]
+    if detected is None:
+        raise RuntimeError('Cannot estimate vertical VP')
+
+    height = gray.shape[0]
+    lines = []
+    for segment in detected[:, 0]:
+        x1, y1, x2, y2 = segment
+        dx = float(x2 - x1)
+        dy = float(y2 - y1)
+        length = math.hypot(dx, dy)
+        if length < 0.08 * height:
+            continue
+        angle = math.degrees(math.atan2(dy, dx)) % 180.0
+        if not (55.0 < angle < 125.0):
+            continue
+        line = np.cross(
+            np.array((x1, y1, 1.0), dtype=np.float64),
+            np.array((x2, y2, 1.0), dtype=np.float64),
+        )
+        norm = float(np.linalg.norm(line[:2]))
+        if norm < 1e-8:
+            continue
+        lines.append({'line': line / norm, 'length': length})
+    if len(lines) < 2:
+        raise RuntimeError('Cannot estimate vertical VP')
+
+    line_matrix = np.array([item['line'] for item in lines], dtype=np.float64)
+    lengths = np.array([item['length'] for item in lines], dtype=np.float64)
+    rng = np.random.default_rng(0)
+    best_score = -1.0
+    best_inliers = None
+    for _ in range(3000):
+        i, j = rng.choice(len(lines), 2, replace=False)
+        point = np.cross(line_matrix[i], line_matrix[j])
+        if abs(float(point[2])) < 1e-10:
+            continue
+        point = point / point[2]
+        inliers = np.abs(line_matrix @ point) < 4.0
+        score = float(lengths[inliers].sum())
+        if score > best_score:
+            best_score = score
+            best_inliers = inliers
+    if best_inliers is None:
+        raise RuntimeError('Cannot estimate vertical VP')
+
+    weights = np.sqrt(lengths[best_inliers])[:, None]
+    _u, _s, vt = np.linalg.svd(line_matrix[best_inliers] * weights)
+    vanishing = vt[-1]
+    if abs(float(vanishing[2])) < 1e-10:
+        raise RuntimeError('Cannot estimate vertical VP')
+    vanishing = vanishing / vanishing[2]
+    return vanishing[:2]
+
+
+def _roll_from_vertical_vanishing_point(image_bgr, principal_x=None):
+    """由竖直消失点计算 roll，使竖线延长线落在图像中轴上。"""
+    image = _prepare_projection_for_lines(image_bgr)
+    vx, vy = _estimate_vertical_vanishing_point(image)
+    height, width = image.shape[:2]
+    cx = float(width * 0.5 if principal_x is None else principal_x)
+    cy = height * 0.5
+    roll_deg = float(np.degrees(np.arctan2(vx - cx, -(vy - cy))))
+    return float((roll_deg + 180.0) % 360.0 - 180.0)
+
+
+def _refine_roll_from_projection(points, colors, transform_to_global, params, image_size):
+    """渲染 roll=0 的点云图，按竖直消失点把竖线会聚到图像中轴。"""
+    width, height = map(int, image_size)
+    scale = min(1.0, 768.0 / max(width, height))
+    detect_size = (
+        max(160, int(round(width * scale))),
+        max(160, int(round(height * scale))),
+    )
+    preview = dict(params)
+    preview['roll'] = 0.0
+    preview['point_size'] = max(5, int(params.get('point_size', 3)))
+    rendered = render_projection(
+        points,
+        colors,
+        transform_to_global,
+        preview,
+        image_size=detect_size,
+        crop_subject=False,
+    )
+    return _roll_from_vertical_vanishing_point(rendered['view_bgr'])
 
 
 def default_projection_params(
@@ -170,6 +276,16 @@ def default_projection_params(
         np.clip(np.percentile(distance, 99.0) * 1.15, 10.0, 300.0)
     )
     best.pop('_score', None)
+    try:
+        best['roll'] = _refine_roll_from_projection(
+            points,
+            None,
+            transform_to_global,
+            best,
+            image_size,
+        )
+    except (RuntimeError, ValueError, AttributeError, cv2.error):
+        best['roll'] = 0.0
     return best
 
 

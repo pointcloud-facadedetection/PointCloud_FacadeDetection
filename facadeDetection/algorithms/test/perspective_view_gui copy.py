@@ -1,17 +1,8 @@
-import sys
-from pathlib import Path
-
-import cv2
 import open3d as o3d
 import numpy as np
 import json
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button, RadioButtons, CheckButtons
-
-_TEST_DIR = Path(__file__).resolve().parent
-if str(_TEST_DIR) not in sys.path:
-    sys.path.insert(0, str(_TEST_DIR))
-from tiaozheng_roll import estimate_roll_correction
 
 EYE_HEIGHT = 1.75          # camera height, held fixed (never touched by auto-fit)
 
@@ -95,7 +86,7 @@ def focal_from_fov(W, H, fov_deg):
 
 def render_perspective(points, values, W, H, fov_deg, yaw, pitch, roll,
                        tx, ty, tz, near, far, splat=1, center_h=True, center_v=False):
-    """Pinhole camera looking down +x. Returns (image with NaN holes, hfov, vfov, n_px, cx)."""
+    """Pinhole camera looking down +x. Returns (image with NaN holes, hfov, vfov, n_px)."""
     R_cam = rot_z(np.radians(yaw)) @ rot_y(np.radians(pitch)) @ rot_x(np.radians(roll))
     p = (points - np.array([tx, ty, tz])) @ R_cam
 
@@ -109,7 +100,7 @@ def render_perspective(points, values, W, H, fov_deg, yaw, pitch, roll,
     hfov = 2 * np.degrees(np.arctan((W / 2) / fx))
     vfov = 2 * np.degrees(np.arctan((H / 2) / fx))
     if x.size == 0:
-        return img, hfov, vfov, 0, float(W / 2)
+        return img, hfov, vfov, 0
 
     px, py = -fx * y / x, -fy * z / x
     # Points very close to the lens produce huge pixel offsets; clip before taking
@@ -133,38 +124,7 @@ def render_perspective(points, values, W, H, fov_deg, yaw, pitch, roll,
         for dv in range(-r, r + 1):
             for du in range(-r, r + 1):
                 img[np.clip(v + dv, 0, H - 1), np.clip(u + du, 0, W - 1)] = val
-    return img, hfov, vfov, int(u.size), float(cx)
-
-
-def projection_to_bgr(img):
-    """Turn a NaN-holed float projection into a BGR image for LSD."""
-    vis = np.nan_to_num(np.asarray(img, dtype=np.float32), nan=0.0)
-    finite = np.isfinite(img)
-    if finite.any():
-        lo, hi = np.percentile(vis[finite], [2, 98])
-        vis = np.clip((vis - lo) / (hi - lo + 1e-6), 0, 1)
-    u8 = np.rint(vis * 255.0).astype(np.uint8)
-    if int((u8 > 0).sum()) > 100:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        u8 = cv2.morphologyEx(u8, cv2.MORPH_CLOSE, kernel)
-    return cv2.cvtColor(u8, cv2.COLOR_GRAY2BGR)
-
-
-def estimate_roll_from_projection(points, values, W, H, params, center_h, center_v):
-    """Render at roll=0 and estimate the roll that puts the vertical VP on the midline."""
-    splat = max(int(params.get("splat", 3)), 5)
-    img, *_rest = render_perspective(
-        points, values, W, H, params["hfov"], params["yaw"], params["pitch"], 0.0,
-        params["tx"], params["ty"], params["tz"], params["near"], params["far"],
-        splat, center_h, center_v,
-    )
-    bgr = projection_to_bgr(img)
-    try:
-        roll = float(estimate_roll_correction(bgr))
-    except RuntimeError as exc:
-        print(f"[auto-roll] {exc}; roll left at 0")
-        return 0.0
-    return float((roll + 180.0) % 360.0 - 180.0)
+    return img, hfov, vfov, int(u.size)
 
 
 # ----------------------------------------------------------------- auto-fit ----
@@ -280,10 +240,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
     P = dict(hfov=fit["hfov"], yaw=fit["yaw"], pitch=fit["pitch"], roll=0.0,
              tx=fit["tx"], ty=fit["ty"], tz=EYE_HEIGHT,
              near=0.3, far=fit["far"], gamma=1.0, splat=3)
-    values0 = inten01 if inten01 is not None else np.clip(
-        np.linalg.norm(points - np.array([P["tx"], P["ty"], P["tz"]]), axis=1) / P["far"], 0, 1)
-    P["roll"] = estimate_roll_from_projection(
-        points, values0, W0, H0, P, S["center_h"], S["center_v"])
 
     fig = plt.figure(figsize=(16, 9))
     fig.subplots_adjust(left=0.03, right=0.70, top=0.94, bottom=0.04)
@@ -291,7 +247,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
     im = ax.imshow(np.full((H0, W0), np.nan), cmap=S["cmap"], vmin=0, vmax=1,
                    aspect="equal", interpolation="nearest")
     im.cmap.set_bad("black")
-    midline = ax.axvline(W0 / 2.0, color="cyan", lw=0.7, ls="--", alpha=0.55)
     cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.01)
     ax.set_xlabel("u (px)")
     ax.set_ylabel("v (px)")
@@ -303,7 +258,7 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
         ("hfov",  "FOV, long side (deg)",         40, 170, 1),
         ("yaw",   "Yaw / pan (deg)",             -180, 180, 1),
         ("pitch", "Pitch / tilt (deg)  (- = up)", -90, 90, 1),
-        ("roll",  "Roll (deg)",                  -180, 180, 0.1),
+        ("roll",  "Roll (deg)",                  -180, 180, 1),
         ("tx",    "Camera X (m)",                -span, span, 0.1),
         ("ty",    "Camera Y (m)",                -span, span, 0.1),
         ("near",  "Near clip (m)",                0.1, 10, 0.1),
@@ -331,10 +286,8 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
     ax_ck = fig.add_axes([x0, y - 0.37, w, 0.07])
     ck = CheckButtons(ax_ck, ["Center H", "Center V"], [S["center_h"], S["center_v"]])
 
-    ax_af = fig.add_axes([x0, y - 0.42, w * 0.48, 0.04])
+    ax_af = fig.add_axes([x0, y - 0.42, w, 0.04])
     btn_af = Button(ax_af, "Auto-fit")
-    ax_ar = fig.add_axes([x0 + w * 0.52, y - 0.42, w * 0.48, 0.04])
-    btn_ar = Button(ax_ar, "Auto-roll")
 
     updating = {"busy": False}
 
@@ -353,41 +306,22 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
                                             axis=1) / P["far"], 0, 1)
             label = f"Depth / {P['far']:.0f} m"
 
-        img, hfov, vfov, n, _cx = render_perspective(
-            points, values, W, H, P["hfov"], P["yaw"],
-            P["pitch"], P["roll"], P["tx"], P["ty"], P["tz"],
-            P["near"], P["far"], P["splat"],
-            S["center_h"], S["center_v"])
+        img, hfov, vfov, n = render_perspective(points, values, W, H, P["hfov"], P["yaw"],
+                                                P["pitch"], P["roll"], P["tx"], P["ty"], P["tz"],
+                                                P["near"], P["far"], P["splat"],
+                                                S["center_h"], S["center_v"])
         img = np.power(img, P["gamma"])
         im.set_data(np.ma.masked_invalid(img))
         im.set_extent((-0.5, W - 0.5, H - 0.5, -0.5))
         im.set_cmap(S["cmap"]); im.cmap.set_bad("black")
         im.set_clim(0, 1)
-        midline.set_xdata([W / 2.0, W / 2.0])
         cbar.set_label(label)
         ax.set_xlim(-0.5, W - 0.5); ax.set_ylim(H - 0.5, -0.5)
         back = np.hypot(P["tx"], P["ty"])
         title.set_text(f"{S['orient']} {W}x{H}   FOV {P['hfov']:.0f}° (H {hfov:.0f}° / V {vfov:.0f}°)   "
-                       f"yaw {P['yaw']:.0f}°  pitch {P['pitch']:.0f}°  roll {P['roll']:.1f}°   "
+                       f"yaw {P['yaw']:.0f}°  pitch {P['pitch']:.0f}°  roll {P['roll']:.0f}°   "
                        f"eye {EYE_HEIGHT} m, back {back:.1f} m   {n} px")
         fig.canvas.draw_idle()
-
-    def detect_values():
-        if inten01 is not None:
-            return inten01
-        return np.clip(
-            np.linalg.norm(points - np.array([P["tx"], P["ty"], P["tz"]]), axis=1) / P["far"],
-            0, 1,
-        )
-
-    def apply_auto_roll(_=None):
-        for k in sliders:
-            P[k] = sliders[k].val
-        P["tz"] = EYE_HEIGHT
-        W, H = dims()
-        roll = estimate_roll_from_projection(
-            points, detect_values(), W, H, P, S["center_h"], S["center_v"])
-        sliders["roll"].set_val(float(np.clip(roll, sliders["roll"].valmin, sliders["roll"].valmax)))
 
     def apply_fit(_=None):
         W, H = dims()
@@ -397,11 +331,8 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
             s = sliders[k]
             s.set_val(float(np.clip(f[k], s.valmin, s.valmax)))
         sliders["roll"].set_val(0.0)
-        for k in sliders:
-            P[k] = sliders[k].val
-        P["tz"] = EYE_HEIGHT
         updating["busy"] = False
-        apply_auto_roll()
+        redraw()
 
     def on_orient(lbl):
         S["orient"] = lbl
@@ -421,7 +352,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
     r_cmap.on_clicked(on_cmap)
     ck.on_clicked(on_check)
     btn_af.on_clicked(apply_fit)
-    btn_ar.on_clicked(apply_auto_roll)
 
     def on_key(ev):
         step = {"left": ("yaw", 5), "right": ("yaw", -5),
@@ -436,8 +366,6 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
             r_orient.set_active(1 if S["orient"] == "Landscape" else 0)
         elif ev.key == "f":
             apply_fit()
-        elif ev.key == "l":
-            apply_auto_roll()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
     redraw()
@@ -445,11 +373,5 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
 
 
 if __name__ == "__main__":
-    # launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.ply", "../data/bllygg01.json",
-    #               long_side=1024, short_side=576, voxel_size=0.1)
-
-    # launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg03.fls/bllygg03.ply", "../data/bllygg03.json",
-    #               long_side=1024, short_side=576, voxel_size=0.1)
-    
-    launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bly03_new/bllygg03.ply", "../data/bllygg03.json",
+    launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.ply", "../data/bllygg01.json",
                   long_side=1024, short_side=576, voxel_size=0.1)

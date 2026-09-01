@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "project": {
+    "uuid": "76c45875-f976-4229-add6-c4b4d91ad394",
+    "name_cn": "gly测试03-new",
+    "pinyin_abbr": "gly03newsm1u791x",
+    "org_unit": null,
+    "address": null,
+    "created_at": "2026-09-01T07:29:30"
+  },
+  "paths": {
+    "root_dir": "C:\\Users\\Gao Liying\\Documents\\GitHub\\PointCloud_FacadeDetection\\data\\projects\\gly03newsm1u791x",
+    "raw": "raw/",
+    "cache": "cache/",
+    "results": "results/",
+    "reports": "reports/"
+  },
+  "assets": {
+    "raw_pointclouds": [
+      "C:\\Users\\Gao Liying\\Documents\\WeChat Files\\wxid_gcfsfzjcpi4d22\\FileStorage\\File\\2026-08\\bllygg03.ply"
+    ],
+    "raw_images": [],
+    "fls_folders": [],
+    "generated_ply": [],
+    "result_pdfs": []
+  }
+}

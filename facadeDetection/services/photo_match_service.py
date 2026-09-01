@@ -102,6 +102,7 @@ def _robust_uv_quadrilateral(uv):
 class MatchPair:
     photo: Optional[tuple[float, float]] = None
     cloud: Optional[tuple[float, float, float]] = None
+    view: Optional[tuple[float, float]] = None
 
 
 @dataclass
@@ -525,6 +526,48 @@ class PhotoMatchService:
             if pair.photo is not None
         ]
 
+    def view_points(self) -> list[tuple[float, float]]:
+        return [
+            pair.view
+            for pair in self.state.correspondences
+            if pair.photo is not None and pair.cloud is not None and pair.view is not None
+        ]
+
+    def clear_projection_view_points(self) -> None:
+        for pair in self.state.correspondences:
+            pair.view = None
+
+    @staticmethod
+    def _project_world_point(xyz, camera_matrix, extrinsic):
+        intrinsic = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+        pose = np.asarray(extrinsic, dtype=np.float64).reshape(4, 4)
+        camera = pose[:3, :3] @ np.asarray(xyz, dtype=np.float64).reshape(3) + pose[:3, 3]
+        if (not np.isfinite(camera).all()) or float(camera[2]) <= 1e-8:
+            return None
+        u = intrinsic[0, 0] * camera[0] / camera[2] + intrinsic[0, 2]
+        v = intrinsic[1, 1] * camera[1] / camera[2] + intrinsic[1, 2]
+        if not np.isfinite([u, v]).all():
+            return None
+        return (float(u), float(v))
+
+    def projection_marker_points(self, camera_matrix=None, extrinsic=None):
+        """完整点对在点云映射图上的像素，优先用匹配时的 view 坐标。"""
+        markers = []
+        for pair in self.state.correspondences:
+            if pair.photo is None or pair.cloud is None:
+                continue
+            if pair.view is not None:
+                markers.append(pair.view)
+                continue
+            if camera_matrix is None or extrinsic is None:
+                continue
+            projected = self._project_world_point(
+                pair.cloud, camera_matrix, extrinsic
+            )
+            if projected is not None:
+                markers.append(projected)
+        return markers
+
     def solve_pose(self) -> dict:
         if self.state.annotating:
             raise ValueError('请先退出标注，再估算匹配矩阵')
@@ -738,7 +781,13 @@ class PhotoMatchService:
                 continue
             photo_xy = tuple(float(v) for v in np.asarray(image_point, dtype=float).reshape(2))
             cloud_xyz = tuple(float(v) for v in np.asarray(object_point, dtype=float).reshape(3))
-            pairs.append(MatchPair(photo=photo_xy, cloud=cloud_xyz))
+            view_source = item.get('view_point') or item.get('depth_point')
+            view_xy = None
+            if view_source is not None:
+                view_xy = tuple(
+                    float(v) for v in np.asarray(view_source, dtype=float).reshape(2)
+                )
+            pairs.append(MatchPair(photo=photo_xy, cloud=cloud_xyz, view=view_xy))
         has_pose = bool(result.get('pose_estimated')) and bool(
             result.get('match_matrix') or result.get('projection_matrix')
         )
