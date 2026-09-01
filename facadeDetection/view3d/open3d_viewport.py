@@ -153,6 +153,21 @@ class Open3DViewport(BaseViewport):
         """Thread-safe geometry replacement for worker completion callbacks."""
         self._render_queue.points.emit(name, positions, colors)
 
+    def invalidate_render_queue(self):
+        """Invalidate queued worker updates before replacing the scene.
+
+        A queued Qt signal can outlive the geometry that originated it.  The
+        sequence bump makes such an update harmless even when it is delivered
+        after a station switch.
+        """
+        self._pending_point_updates.clear()
+        self._pending_color_updates.clear()
+        self._render_sequences = {
+            name: sequence + 1
+            for name, sequence in self._render_sequences.items()
+        }
+        self._adapter.request_render('queue.invalidated')
+
     def _queue_cloud_color(self, name, colors):
         sequence = self._render_sequences.get(name, 0) + 1
         self._render_sequences[name] = sequence
@@ -421,6 +436,7 @@ class Open3DViewport(BaseViewport):
         self._init_success = False
         if hasattr(self, '_timer') and self._timer is not None:
             self._timer.stop()
+        self.invalidate_render_queue()
         self._pending_point_updates.clear()
         self._pending_color_updates.clear()
         self._render_sequences.clear()
