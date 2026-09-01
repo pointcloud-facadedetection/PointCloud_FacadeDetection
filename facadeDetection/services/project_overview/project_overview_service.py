@@ -173,10 +173,15 @@ class ProjectOverviewService:
         stats = PointCloudStationRepo.sync_assets(project_id)
         log_event(project_id, 'stations.synced', **stats)
 
-    def load_historical_facades(self, project_id: str) -> list[dict]:
+    def load_historical_facades(self, project_id: str, station_id: int | None = None) -> list[dict]:
         from config.storage import Storage
         with project_session(project_id) as s:
-            rows = s.execute(select(Facade).where(Facade.is_deleted == 0).order_by(Facade.display_no, Facade.id)).scalars().all()
+            query = select(Facade).where(Facade.is_deleted == 0)
+            # 旧数据行的 station_id 为 NULL，绝不能将其推测为当前活动站；
+            # 否则可能会再次引入跨站的颜色和索引。
+            if station_id is not None:
+                query = query.where(Facade.station_id == int(station_id))
+            rows = s.execute(query.order_by(Facade.display_no, Facade.id)).scalars().all()
             result = []
             for row in rows:
                 metrics = s.execute(select(QualityMetric).where(QualityMetric.facade_id == row.id)).scalars().all()
@@ -195,8 +200,6 @@ class ProjectOverviewService:
                                'type': row.label, 'type_label': row.label,
                                'area': row.area or 0.0, 'plane': row.plane_json,
                                'bbox': row.bbox_json,
-                               # Historical results must remain valid quality
-                               # inputs, not merely display summaries.
                                **{key: geometry[key] for key in (
                                    'plane_model', 'normal', 'center', 'inlier_indices',
                                     'proxy_indices', 'measurement_indices', 'voxel_ids',
@@ -286,9 +289,8 @@ class ProjectOverviewService:
         if not project_uuid:
             raise ValueError('请先新建或选择项目，再上传点云文件。')
         svc = self._ensure_file_service()
-        # 这是项目首次载入入口；避免旧项目 geometry 影响 Open3D 初始 fit。
-        if self.viewport is not None and hasattr(self.viewport, 'clear'):
-            self.viewport.clear()
+        # 增量上传不能清空当前场景；项目切换由 MainWindow 的统一销毁门
+        # 处理，当前方法只负责导入本批资源。
         normalized = [str(Path(p).expanduser().resolve()) for p in file_paths if p]
         # 将同名 PLY/.dist 组合成一个上传任务；.dist 不是独立点云资产。
         dist_by_stem = {
@@ -312,8 +314,7 @@ class ProjectOverviewService:
 
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
         svc = self._ensure_file_service()
-        if self.viewport is not None and hasattr(self.viewport, 'clear'):
-            self.viewport.clear()
+        # FLS 也采用增量导入语义，避免已有站点被清空后重新读取。
         res = svc.import_fls_directory(dir_path, project_uuid)
         # FLS 导入会为每个生成的 PLY 文件创建一个 FileAsset。
         if project_uuid and res.get('success'):

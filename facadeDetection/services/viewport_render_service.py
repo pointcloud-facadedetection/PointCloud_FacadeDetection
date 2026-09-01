@@ -37,9 +37,6 @@ class ViewportRenderService:
             self.viewport.add_cloud(name, points, colors)
         else:
             raise RuntimeError('Viewport does not support adding point cloud data')
-        # Do not rely on the renderer to preserve business metadata.  The
-        # FileService normally binds this immediately; this fallback also
-        # covers alternative viewport adapters and makes the contract visible.
         try:
             data = self.viewport.get_cloud_data(name)
             if data is not None:
@@ -50,10 +47,6 @@ class ViewportRenderService:
             pass
 
     def clear_station_scene(self):
-        # The whole visible scene is disposable.  Preserving the registration
-        # result here is incorrect because this method is also used by a
-        # station switch/denoise refresh and would leave result geometry
-        # overlaid with the proxy station.
         for name in list(self.viewport.get_cloud_names()
                          if hasattr(self.viewport, 'get_cloud_names') else []):
             self.viewport.remove_cloud(name)
@@ -129,7 +122,10 @@ class ViewportRenderService:
         displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64).reshape(-1)
         n = len(data.get('pos', []))
         if len(displayed) == n:
-            lookup = {int(value): row for row, value in enumerate(displayed.tolist())}
+            lookup = data.get('display_proxy_lookup')
+            if lookup is None:
+                lookup = {int(value): row for row, value in enumerate(displayed.tolist())}
+                data['display_proxy_lookup'] = lookup
             return np.asarray([lookup.get(int(value), -1) for value in ids], dtype=np.int64)
         # Freshly loaded clouds use identity proxy rows.
         return ids
@@ -340,10 +336,7 @@ class ViewportRenderService:
             valid = (idx >= 0) & (idx < n)
             if not np.any(valid):
                 return
-            # Do not blend source RGB here.  A previous heatmap/highlight may
-            # otherwise be used as the next base and produces the observed
-            # white gradient.  Rendering always starts from a deterministic
-            # neutral base.
+            # 此处勿混合源RGB。
             colors = np.tile(np.asarray(base_color, dtype=np.float32), (n, 1))
             colors[idx[valid]] = np.clip(rgb[valid] * 1.15, 0.0, 1.0)
             self._update_cloud_color(cloud_name, colors)
@@ -549,7 +542,6 @@ class ViewportRenderService:
                     min_bound[i], max_bound[i] = max_bound[i], min_bound[i]
 
             elapsed = time.monotonic() - t_start
-            final_extent = max_bound - min_bound
             print(
                 f"[ROI-BBox] 成功: Bbox=[{min_bound[0]:.2f},{min_bound[1]:.2f},{min_bound[2]:.2f}] ~ "
                 f"[{max_bound[0]:.2f},{max_bound[1]:.2f},{max_bound[2]:.2f}], 耗时={elapsed:.3f}s",
@@ -697,8 +689,8 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
-            # Rebuild from the persisted facade segmentation colours. A gray
-            # fallback is used only for points that do not belong to a facade.
+            # 根据已保存的立面分割颜色进行重建。
+            # 仅对不属于立面的点使用灰色作为备用颜色。
             colors = (_colors if _colors is not None else self._facade_base_colors(
                 cloud_name, self._facades_cache.get(cloud_name, []), base_color))
             mode = normalize_heatmap_mode(quality_result.get('heatmap_mode'))
@@ -874,9 +866,6 @@ class ViewportRenderService:
         reports = self.compatible_quality_reports(cloud_name, facades or [], index_service=index_service)
         if not reports:
             return False
-        # apply_quality_colors is intentionally per-report for compatibility;
-        # render all reports into one base array so later facades do not erase
-        # earlier heatmap pixels.
         data = self.viewport.get_cloud_data(cloud_name)
         colors = self._facade_base_colors(cloud_name, facades or [])
         for _facade, report in reports:
@@ -889,9 +878,6 @@ class ViewportRenderService:
 
     def restore_highlight(self, cloud_name: str, facades: list[dict]) -> None:
         try:
-            # Restoring facade colors is an explicit visual action.  Keep it
-            # disabled by default for large processing clouds; callers can
-            # opt in after the UI is idle if that visual layer is required.
             self.highlight_facades(cloud_name, facades)
         except Exception:
             pass

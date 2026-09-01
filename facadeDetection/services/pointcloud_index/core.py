@@ -101,6 +101,7 @@ class VoxelCascadeIndex:
         self.origin = np.asarray(origin, dtype=np.float32).reshape(3)
         self.voxel_size = float(voxel_size or VOXEL_SIZE_M)
         self._raw_to_voxel = None
+        self._source_to_proxy = None
         self._is_stratified = bool(is_stratified)
 
         # === Source 映射 (CSR 格式唯一) ===
@@ -336,14 +337,22 @@ class VoxelCascadeIndex:
     def source_to_proxy_ids(self, source_ids) -> np.ndarray:
         if not self.has_source_mapping():
             return self.raw_to_voxel_ids(source_ids)
-        wanted = set(np.asarray(source_ids, dtype=np.int64).reshape(-1).tolist())
-        if not wanted:
+        wanted = np.asarray(source_ids, dtype=np.int64).reshape(-1)
+        if not len(wanted):
             return np.empty(0, dtype=np.int32)
-        hits = []
-        for pid, (start, end) in enumerate(zip(self.source_raw_offsets[:-1], self.source_raw_offsets[1:])):
-            if any(int(value) in wanted for value in self.source_raw_indices[start:end]):
-                hits.append(pid)
-        return np.asarray(hits, dtype=np.int32)
+        if self._source_to_proxy is None:
+            source_ids_sorted = self.source_raw_indices
+            proxy_ids = np.repeat(np.arange(len(self.proxy_points), dtype=np.int32),
+                                  np.diff(self.source_raw_offsets))
+            order = np.argsort(source_ids_sorted, kind='mergesort')
+            self._source_to_proxy = (source_ids_sorted[order], proxy_ids[order])
+        source_sorted, proxy_sorted = self._source_to_proxy
+        if len(source_sorted) == 0:
+            return np.empty(0, dtype=np.int32)
+        positions = np.searchsorted(source_sorted, wanted)
+        valid = positions < len(source_sorted)
+        valid &= source_sorted[np.minimum(positions, len(source_sorted) - 1)] == wanted
+        return np.unique(proxy_sorted[positions[valid]]).astype(np.int32, copy=False)
 
     def get_source_points(self):
         return self.source_points
