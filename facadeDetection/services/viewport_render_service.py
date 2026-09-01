@@ -117,6 +117,9 @@ class ViewportRenderService:
         palette = getattr(Config, 'FACADE_INSTANCE_COLORS', []) or []
         if palette:
             try:
+                display_no = facade.get('display_no')
+                if display_no is not None:
+                    return tuple(palette[(int(display_no) - 1) % len(palette)])
                 return tuple(palette[int(facade.get('id', order)) % len(palette)])
             except Exception:
                 return tuple(palette[order % len(palette)])
@@ -263,8 +266,13 @@ class ViewportRenderService:
         if highlight is not None:
             self._highlight_color = tuple(highlight)
 
-    def select_facade(self, cloud_name: str, facade_id: int) -> bool:
-        """恢复检测前底色，仅用该立面的实例颜色进行高亮。"""
+    def select_facade(
+        self,
+        cloud_name: str,
+        facade_id: int,
+        facade: dict | None = None,
+    ) -> bool:
+        """恢复检测前底色，仅用该立面在列表中的对应颜色高亮。"""
         try:
             self._selected_facade_id = int(facade_id)
         except Exception:
@@ -277,13 +285,22 @@ class ViewportRenderService:
         positions = data['pos']
         count = len(positions)
         facades = self._facades_cache.get(cloud_name) or []
-        selected = None
+        selected = facade if isinstance(facade, dict) else None
         selected_order = 0
-        for order, facade in enumerate(facades):
-            if int(facade.get('id', -1)) == self._selected_facade_id:
-                selected = facade
-                selected_order = order
-                break
+        if selected is None:
+            for order, item in enumerate(facades):
+                if int(item.get('id', -1)) == self._selected_facade_id:
+                    selected = item
+                    selected_order = order
+                    break
+        else:
+            selected_order = max(0, int(selected.get('display_no', 1)) - 1)
+            for order, item in enumerate(facades):
+                if int(item.get('id', -1)) == self._selected_facade_id:
+                    selected_order = order
+                    break
+            if not facades:
+                self._facades_cache[cloud_name] = [selected]
         if selected is None:
             return False
 
@@ -617,7 +634,7 @@ class ViewportRenderService:
         cloud_name: str,
         facade: dict,
         *,
-        neutral_mm: float = 2.0,
+        neutral_mm: float = 5.0,
     ) -> dict:
         """仅为选中立面生成凹冷、平灰、凸暖的有符号平整度热力图。"""
         data = self.viewport.get_cloud_data(cloud_name)
@@ -659,11 +676,13 @@ class ViewportRenderService:
             raise ValueError('所选立面没有有效平整度数据')
         rows = rows[finite]
         deviations_mm = deviations_mm[finite]
-        limit_mm = max(
-            10.0,
-            float(np.percentile(np.abs(deviations_mm), 98.0)),
+        from algorithms.facade.heatmap_colors import compute_heatmap_scale
+
+        neutral_mm, vmin_mm, vmax_mm = compute_heatmap_scale(
+            deviations_mm,
+            neutral_mm=neutral_mm,
         )
-        neutral_mm = max(0.1, min(float(neutral_mm), limit_mm * 0.5))
+        limit_mm = max(abs(vmin_mm), abs(vmax_mm))
 
         base = self._pre_facade_colors.get(cloud_name)
         if base is None or base.shape != (len(positions), 3):
@@ -680,64 +699,43 @@ class ViewportRenderService:
         colors[rows] = self._signed_flatness_colors(
             deviations_mm,
             neutral_mm,
-            limit_mm,
+            vmin_mm,
+            vmax_mm,
         )
         grid_bgr = self._flatness_grid_image(
             positions[rows],
             deviations_mm,
             plane,
             neutral_mm,
-            limit_mm,
+            vmin_mm,
+            vmax_mm,
         )
         self._update_cloud_color(cloud_name, colors)
         return {
             'point_count': int(len(rows)),
             'neutral_mm': float(neutral_mm),
             'limit_mm': float(limit_mm),
+            'vmin_mm': float(vmin_mm),
+            'vmax_mm': float(vmax_mm),
             'min_mm': float(np.min(deviations_mm)),
             'max_mm': float(np.max(deviations_mm)),
             'grid_bgr': grid_bgr,
         }
 
     @staticmethod
-    def _signed_flatness_colors(values_mm, neutral_mm, limit_mm):
-        """负值蓝色、近零灰色、正值黄橙红。"""
-        values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
-        colors = np.tile(
-            np.asarray((0.50, 0.52, 0.52), dtype=np.float32),
-            (len(values), 1),
+    def _signed_flatness_colors(values_mm, neutral_mm, vmin_mm, vmax_mm=None):
+        """平整灰、凹陷 Blues、凸起 autumn_r。"""
+        from algorithms.facade.heatmap_colors import signed_deviation_colors
+
+        if vmax_mm is None:
+            bound = abs(float(vmin_mm))
+            vmin_mm, vmax_mm = -bound, bound
+        return signed_deviation_colors(
+            values_mm,
+            threshold=neutral_mm,
+            vmin=float(vmin_mm),
+            vmax=float(vmax_mm),
         )
-        negative = values < -neutral_mm
-        positive = values > neutral_mm
-
-        if np.any(negative):
-            t = np.clip(
-                (-values[negative] - neutral_mm)
-                / max(limit_mm - neutral_mm, 1e-6),
-                0.0,
-                1.0,
-            )
-            near_cold = np.asarray((0.25, 0.45, 1.0), dtype=np.float32)
-            deep_cold = np.asarray((0.00, 0.00, 0.82), dtype=np.float32)
-            colors[negative] = (
-                near_cold[None, :] * (1.0 - t[:, None])
-                + deep_cold[None, :] * t[:, None]
-            )
-
-        if np.any(positive):
-            t = np.clip(
-                (values[positive] - neutral_mm)
-                / max(limit_mm - neutral_mm, 1e-6),
-                0.0,
-                1.0,
-            )
-            near_red = np.asarray((1.0, 0.38, 0.38), dtype=np.float32)
-            deep_red = np.asarray((0.85, 0.00, 0.00), dtype=np.float32)
-            colors[positive] = (
-                near_red[None, :] * (1.0 - t[:, None])
-                + deep_red[None, :] * t[:, None]
-            )
-        return np.clip(colors, 0.0, 1.0)
 
     @classmethod
     def _flatness_grid_image(
@@ -746,7 +744,8 @@ class ViewportRenderService:
         values_mm,
         plane,
         neutral_mm,
-        limit_mm,
+        vmin_mm,
+        vmax_mm=None,
     ):
         """生成正视立面网格图，并附带凹凸毫米色标。"""
         import cv2
@@ -796,14 +795,20 @@ class ViewportRenderService:
             True,
         ]
         selected = order[keep]
+        if vmax_mm is None:
+            bound = abs(float(vmin_mm))
+            vmin_mm, vmax_mm = -bound, bound
         cell_colors = cls._signed_flatness_colors(
             values[selected],
             neutral_mm,
-            limit_mm,
+            vmin_mm,
+            vmax_mm,
         )
 
-        margin = 24
-        legend_width = 76
+        from algorithms.facade.heatmap_colors import draw_signed_colorbar
+
+        margin = 36
+        legend_width = 168
         canvas = np.full(
             (height + margin * 2, width + margin * 2 + legend_width, 3),
             245,
@@ -848,50 +853,20 @@ class ViewportRenderService:
             1,
         )
 
-        bar_x = margin + width + 18
-        bar_width = 16
-        gradient_values = np.linspace(
-            limit_mm,
-            -limit_mm,
-            height,
-            dtype=np.float32,
-        )
-        gradient_rgb = np.clip(
-            cls._signed_flatness_colors(
-                gradient_values,
-                neutral_mm,
-                limit_mm,
-            )
-            * 255.0,
-            0,
-            255,
-        ).astype(np.uint8)
-        canvas[
-            margin:margin + height,
-            bar_x:bar_x + bar_width,
-        ] = gradient_rgb[:, None, :]
-        cv2.rectangle(
+        draw_signed_colorbar(
             canvas,
-            (bar_x, margin),
-            (bar_x + bar_width, margin + height - 1),
-            (80, 80, 80),
-            1,
+            margin + width + 18,
+            margin,
+            22,
+            height,
+            neutral_mm,
+            vmin=float(vmin_mm),
+            vmax=float(vmax_mm),
+            text_color=(40, 40, 40),
+            font_scale=0.74,
+            thickness=2,
+            output_bgr=False,
         )
-        for label, label_y in (
-            (f'+{limit_mm:.1f}', margin + 9),
-            ('0', margin + height // 2 + 4),
-            (f'-{limit_mm:.1f}', margin + height - 2),
-        ):
-            cv2.putText(
-                canvas,
-                label,
-                (bar_x + bar_width + 4, label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.34,
-                (40, 40, 40),
-                1,
-                cv2.LINE_AA,
-            )
         return np.ascontiguousarray(canvas[:, :, ::-1])
 
     def render_flatness_heatmap(self, cloud_name: str, facades: list[dict],

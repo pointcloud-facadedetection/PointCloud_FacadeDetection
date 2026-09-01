@@ -193,28 +193,6 @@ class _PickCaptureOverlay(QWidget):
                 12, 22,
                 '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
             )
-        font = painter.font()
-        font.setBold(True)
-        font.setPixelSize(11)
-        painter.setFont(font)
-        for item in self._pick_labels:
-            if len(item) == 3:
-                index, x, y = item
-            else:
-                continue
-            center = QPoint(int(round(x)), int(round(y)))
-            painter.setPen(QPen(QColor(255, 255, 255), 1))
-            painter.setBrush(QColor(220, 40, 40))
-            painter.drawEllipse(center, 8, 8)
-            painter.setPen(QColor(255, 255, 255))
-            painter.drawText(
-                int(round(x)) - 8,
-                int(round(y)) - 8,
-                16,
-                16,
-                Qt.AlignCenter,
-                str(index),
-            )
         painter.end()
 
     def mousePressEvent(self, event):
@@ -229,10 +207,6 @@ class _PickCaptureOverlay(QWidget):
 
     def mouseMoveEvent(self, event):
         self._viewport._interactor.handle_mouse_move(event)
-        try:
-            self._viewport._refresh_pick_overlay_labels()
-        except Exception:
-            pass
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -594,10 +568,6 @@ class Open3DViewport(BaseViewport):
             overlay = getattr(self, '_pick_capture_overlay', None)
             if overlay is not None and getattr(overlay, '_active', False):
                 overlay.sync_geometry()
-            if getattr(self, '_pick_marker_xyz', None) is not None and len(
-                getattr(self, '_pick_marker_xyz')
-            ):
-                self._refresh_pick_overlay_labels()
         except Exception:
             pass
 
@@ -887,26 +857,16 @@ class Open3DViewport(BaseViewport):
             self._adapter.poll()
         except Exception:
             pass
-        self._refresh_pick_overlay_labels()
+        overlay = getattr(self, '_pick_capture_overlay', None)
+        if overlay is not None and overlay._pick_labels:
+            overlay._pick_labels = []
+            overlay.update()
 
     def _refresh_pick_overlay_labels(self):
         overlay = getattr(self, '_pick_capture_overlay', None)
         if overlay is None:
             return
-        pts = getattr(self, '_pick_marker_xyz', None)
-        labels = []
-        if pts is not None and len(pts) > 0:
-            projected = self.project_points(pts)
-            if projected is not None:
-                screen, valid = projected
-                for index, (point, is_valid) in enumerate(
-                    zip(screen, valid), start=1
-                ):
-                    if is_valid:
-                        labels.append(
-                            (index, float(point[0]), float(point[1]))
-                        )
-        overlay._pick_labels = labels
+        overlay._pick_labels = []
         overlay.update()
 
     def clear_pick_markers(self):

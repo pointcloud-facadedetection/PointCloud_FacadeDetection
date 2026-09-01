@@ -3,6 +3,8 @@
 import cv2
 import numpy as np
 
+from algorithms.facade.heatmap_colors import signed_deviation_colors
+
 
 def _normalize_distortion(distortion):
     if distortion is None:
@@ -53,15 +55,19 @@ def _project_points(points, camera_matrix, rotation, translation, distortion=Non
 
 
 def _heat_color(value, limit):
-    """连续色带：负偏差蓝色，零偏差灰色，正偏差红色。"""
-    ratio = float(np.clip(value / max(limit, 1e-12), -1.0, 1.0))
-    blue = np.array([0.03, 0.22, 1.0])
-    gray = np.array([0.48, 0.48, 0.48])
-    red = np.array([1.0, 0.08, 0.02])
-    if ratio < 0:
-        weight = -ratio
-        return gray * (1.0 - weight) + blue * weight
-    return gray * (1.0 - ratio) + red * ratio
+    """平整灰、凹陷 Blues、凸起 autumn_r。"""
+    from algorithms.facade.heatmap_colors import (
+        compute_heatmap_scale,
+    )
+
+    span = abs(float(limit))
+    threshold, vmin, vmax = compute_heatmap_scale([-span, span])
+    return signed_deviation_colors(
+        [value],
+        threshold=threshold,
+        vmin=vmin,
+        vmax=vmax,
+    )[0]
 
 
 def _points_inside_polygon(points_2d, polygon):

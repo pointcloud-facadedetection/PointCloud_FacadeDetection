@@ -61,6 +61,7 @@ class FacadeHeatmapOverlay:
         *,
         dist_coeffs=None,
         val_range=None,
+        threshold=None,
         draw_colorbar=True,
         boundary_points_3d=None,
         border_color=(0, 0, 255),
@@ -102,18 +103,31 @@ class FacadeHeatmapOverlay:
         if not np.any(valid):
             raise ValueError('所选立面不在照片视野内，请检查匹配矩阵')
 
+        from algorithms.facade.heatmap_colors import (
+            GRAY_BGR,
+            compute_heatmap_scale,
+            signed_deviation_colors_bgr,
+        )
+
         if val_range is None:
-            limit = max(4.0, float(np.percentile(np.abs(values[valid]), 98.0)))
-            min_value, max_value = -limit, limit
+            scale_threshold, min_value, max_value = compute_heatmap_scale(
+                values[valid]
+            )
         else:
             min_value, max_value = (float(val_range[0]), float(val_range[1]))
-        point_colors = self._signed_colors_bgr(
+            scale_threshold, min_value, max_value = compute_heatmap_scale(
+                (min_value, max_value),
+            )
+        if threshold is not None:
+            scale_threshold = float(threshold)
+        point_colors = signed_deviation_colors_bgr(
             values,
+            scale_threshold,
             min_value,
             max_value,
         )
 
-        heatmap = np.zeros_like(photo)
+        heatmap = np.full_like(photo, GRAY_BGR)
         mask = np.zeros((height, width), dtype=np.uint8)
         valid_indices = np.flatnonzero(valid)
         if len(valid_indices) > 200_000:
@@ -199,7 +213,12 @@ class FacadeHeatmapOverlay:
                 cv2.LINE_AA,
             )
         if draw_colorbar:
-            self._draw_colorbar(blended, min_value, max_value)
+            self._draw_colorbar(
+                blended,
+                min_value,
+                max_value,
+                scale_threshold,
+            )
         meta = {
             'projected_point_count': int(len(order)),
             'visible_point_count': int(np.sum(valid)),
@@ -211,84 +230,38 @@ class FacadeHeatmapOverlay:
             meta['facade_boundary_pixels'] = boundary_pixels.tolist()
         return blended, heatmap, meta
 
-    @staticmethod
-    def _signed_colors_bgr(values, min_value, max_value):
-        """凹陷为蓝色、平整为灰色、凸起为红色。"""
-        values = np.asarray(values, dtype=np.float32).reshape(-1)
-        limit = max(abs(float(min_value)), abs(float(max_value)), 1e-6)
-        neutral = min(2.0, limit * 0.25)
-        rgb = np.tile(
-            np.asarray((0.50, 0.52, 0.52), dtype=np.float32),
-            (len(values), 1),
-        )
-        negative = values < -neutral
-        positive = values > neutral
-        if np.any(negative):
-            t = np.clip(
-                (-values[negative] - neutral) / max(limit - neutral, 1e-6),
-                0.0,
-                1.0,
-            )
-            rgb[negative] = (
-                np.asarray((0.25, 0.45, 1.0))[None, :] * (1.0 - t[:, None])
-                + np.asarray((0.00, 0.00, 0.82))[None, :] * t[:, None]
-            )
-        if np.any(positive):
-            t = np.clip(
-                (values[positive] - neutral) / max(limit - neutral, 1e-6),
-                0.0,
-                1.0,
-            )
-            rgb[positive] = (
-                np.asarray((1.0, 0.38, 0.38))[None, :] * (1.0 - t[:, None])
-                + np.asarray((0.85, 0.00, 0.00))[None, :] * t[:, None]
-            )
-        return np.clip(rgb[:, ::-1] * 255.0, 0, 255).astype(np.uint8)
-
     @classmethod
-    def _draw_colorbar(cls, image, min_value, max_value):
+    def _draw_colorbar(cls, image, min_value, max_value, threshold):
+        from algorithms.facade.heatmap_colors import draw_signed_colorbar
+
         height, width = image.shape[:2]
-        bar_height = max(80, min(260, int(height * 0.34)))
-        bar_width = max(14, min(24, width // 40))
-        x0 = max(8, width - bar_width - 48)
-        y0 = max(8, height - bar_height - 26)
-        gradient = np.linspace(
-            max_value,
-            min_value,
+        bar_height = max(200, min(380, int(height * 0.48)))
+        bar_width = 22
+        panel_width = 148
+        x0 = max(8, width - panel_width - 10)
+        y0 = max(24, height - bar_height - 28)
+        y1 = min(height - 8, y0 + bar_height + 16)
+        x1 = width - 6
+        panel = image[y0 - 16:y1, x0 - 8:x1]
+        if panel.size:
+            image[y0 - 16:y1, x0 - 8:x1] = cv2.addWeighted(
+                panel,
+                0.22,
+                np.full_like(panel, 245),
+                0.78,
+                0,
+            )
+        draw_signed_colorbar(
+            image,
+            x0,
+            y0,
+            bar_width,
             bar_height,
-            dtype=np.float32,
-        )
-        colors = cls._signed_colors_bgr(
-            gradient,
-            min_value,
-            max_value,
-        ).reshape(bar_height, 1, 3)
-        colors = np.repeat(colors, bar_width, axis=1)
-        image[y0:y0 + bar_height, x0:x0 + bar_width] = colors
-        cv2.rectangle(
-            image,
-            (x0, y0),
-            (x0 + bar_width, y0 + bar_height),
-            (255, 255, 255),
-            1,
-        )
-        cv2.putText(
-            image,
-            f'{max_value:+.1f}',
-            (x0 + bar_width + 4, y0 + 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.35,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            image,
-            f'{min_value:+.1f}',
-            (x0 + bar_width + 4, y0 + bar_height),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.35,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
+            threshold,
+            vmin=float(min_value),
+            vmax=float(max_value),
+            text_color=(40, 40, 40),
+            font_scale=0.68,
+            thickness=2,
+            output_bgr=True,
         )
