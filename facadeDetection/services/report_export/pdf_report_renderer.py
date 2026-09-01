@@ -202,6 +202,8 @@ class PdfReportRenderer:
             </section>
             """)
 
+        sections_html = ''.join(sections) or '<p class="muted">暂无立面检测结果</p>'
+
         return f"""<!doctype html><html><head><meta charset='utf-8'><style>
         @page {{ size:A4; margin:12mm 14mm 14mm; }}
         
@@ -479,7 +481,7 @@ class PdfReportRenderer:
         {top_section_html}
         
         <h2>建筑立面检测结果</h2>
-        {''.join(sections) or '<p class=\"muted\">暂无立面检测结果</p>'}
+        {sections_html}
         </body></html>"""
 
     @staticmethod
