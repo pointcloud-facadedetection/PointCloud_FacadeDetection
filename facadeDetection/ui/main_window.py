@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
@@ -510,7 +511,6 @@ class MainWindow(QMainWindow):
         self.project_operation_service.denoise_completed_callback = (
             self._on_match_cloud_denoised
         )
-        self.station_service = PointCloudStationService(self.render_service)
         self.project_operation_service.set_station_service(self.station_service)
         self.inspection_review_service = InspectionReviewService()
         self.report_export_service = ReportExportService()
@@ -1009,10 +1009,7 @@ class MainWindow(QMainWindow):
         self.left_dock = self._create_sidebar('leftDock', 'left')
         self.right_dock = self._create_sidebar('rightDock', 'right')
         # Prepare right panel layout for results
-        try:
-            self._init_right_panel_widgets()
-        except Exception:
-            pass
+        self._init_right_panel_widgets()
 
         viewport_panel = QWidget()
         viewport_panel.setObjectName('viewportPanel')
@@ -1160,7 +1157,6 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.btn_heatmap_toggle)
         
         # 立面列表
-        from PySide6.QtWidgets import QListWidget
         self.list_facades = QListWidget()
         self.list_facades.setObjectName('lstFacades')
         self.list_facades.setSpacing(4)
@@ -1344,6 +1340,20 @@ class MainWindow(QMainWindow):
         match_title = QLabel('二维视口')
         match_title.setProperty('uiRole', 'sectionTitle')
         match_layout.addWidget(match_title)
+
+        facade_title = QLabel('检测立面（选择后生成并映射热力图）')
+        facade_title.setProperty('uiRole', 'supportingText')
+        self.photo_match_facade_list = QListWidget()
+        self.photo_match_facade_list.setObjectName('photoMatchFacadeList')
+        self.photo_match_facade_list.setIconSize(QSize(16, 16))
+        self.photo_match_facade_list.setMinimumHeight(96)
+        self.photo_match_facade_list.setMaximumHeight(160)
+        self.photo_match_facade_list.itemClicked.connect(
+            self._on_photo_match_facade_clicked
+        )
+        self.photo_match_facade_list.currentItemChanged.connect(
+            lambda _current, _previous: self._refresh_photo_match_controls()
+        )
 
         photo_title = QLabel('上传的 2D 照片')
         photo_title.setProperty('uiRole', 'supportingText')
@@ -1642,6 +1652,40 @@ class MainWindow(QMainWindow):
             if cloud_bgr is not None:
                 self.cloud_match_view.set_image(bgr_to_qimage(cloud_bgr))
 
+    def _focus_view_on_facade(self, facade):
+        """正对并缩放到选中的立面。"""
+        if not facade or not hasattr(self.viewport, 'focus_on_plane'):
+            return False
+        try:
+            center = np.asarray(facade.get('center'), dtype=np.float64).reshape(3)
+            normal_value = facade.get('normal')
+            if normal_value is None:
+                plane = np.asarray(
+                    facade.get('plane_model'), dtype=np.float64
+                ).reshape(-1)
+                normal_value = plane[:3] if len(plane) >= 3 else None
+            normal = np.asarray(normal_value, dtype=np.float64).reshape(3)
+            if not np.isfinite(center).all() or not np.isfinite(normal).all():
+                return False
+
+            bbox = facade.get('bbox_2d') or {}
+            u_span = abs(float(bbox.get('u_max', 0.0))
+                         - float(bbox.get('u_min', 0.0)))
+            v_span = abs(float(bbox.get('v_max', 0.0))
+                         - float(bbox.get('v_min', 0.0)))
+            area_extent = np.sqrt(max(float(facade.get('area', 0.0)), 0.0))
+            extent = max(u_span, v_span, area_extent, 1.0)
+            return bool(
+                self.viewport.focus_on_plane(
+                    center,
+                    normal,
+                    extent=extent,
+                    zoom=0.55,
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _on_photo_match_facade_clicked(self, item):
         facade = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         cloud = self._active_cloud_name()
@@ -1749,6 +1793,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_photo_match_workspace(self):
         opening = not self.photo_match_panel.isVisible()
+        if not opening:
+            return
         if opening:
             self.station_panel.hide()
             self.pointcloud_controls.hide()
@@ -1763,6 +1809,13 @@ class MainWindow(QMainWindow):
                 self._expand_sidebar('right', self.right_dock)
             else:
                 self.right_dock.show()
+            self._populate_photo_match_facades(
+                getattr(
+                    self.project_operation_service,
+                    '_last_facade_results',
+                    None,
+                ) or []
+            )
             self.statusBar().showMessage(
                 '已进入 2D-3D 匹配工作区',
                 4000,
@@ -1771,6 +1824,28 @@ class MainWindow(QMainWindow):
         else:
             self._leave_photo_match_workspace()
         self._refresh_photo_match_controls()
+
+    def _activate_default_operation_workspace(self, module_name):
+        """显示点云处理和立面分析功能共用的左右面板。"""
+        self._leave_photo_match_workspace()
+        if self._sidebar_collapsed.get('left'):
+            self._expand_sidebar('left', self.left_dock)
+        else:
+            self.left_dock.show()
+        if self._sidebar_collapsed.get('right'):
+            self._expand_sidebar('right', self.right_dock)
+        else:
+            self.right_dock.show()
+        self.statusBar().showMessage(f'已切换到{module_name}模块', 3000)
+
+    def _run_default_operation(self, module_name, callback):
+        self._activate_default_operation_workspace(module_name)
+        callback()
+
+    def _run_facade_detection(self):
+        """切换到立面检测工作区后执行检测或加载缓存。"""
+        self._activate_default_operation_workspace('立面检测')
+        self.project_operation_service.facade_detection()
 
     def _leave_photo_match_workspace(self):
         if self.photo_match_service.state.annotating:
@@ -2832,30 +2907,6 @@ class MainWindow(QMainWindow):
             message += '\n匹配点超过 10 对，已随机显示其中 10 对。'
         QMessageBox.information(self, '重映射', message)
 
-    def _project_cloud_points_to_match_view(self, points):
-        captured = self._live_projection_view
-        if captured is None:
-            return [None] * len(points)
-        intrinsic = np.asarray(captured['camera_matrix'], dtype=np.float64)
-        extrinsic = np.asarray(captured['extrinsic'], dtype=np.float64)
-        cloud = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        camera = cloud @ extrinsic[:3, :3].T + extrinsic[:3, 3]
-        depth = camera[:, 2]
-        width = int(captured['view_bgr'].shape[1])
-        height = int(captured['view_bgr'].shape[0])
-        result = []
-        for point, z in zip(camera, depth):
-            if not np.isfinite(point).all() or z <= 1e-8:
-                result.append(None)
-                continue
-            x = intrinsic[0, 0] * point[0] / z + intrinsic[0, 2]
-            y = intrinsic[1, 1] * point[1] / z + intrinsic[1, 2]
-            if 0 <= x < width and 0 <= y < height:
-                result.append((float(x), float(y)))
-            else:
-                result.append(None)
-        return result
-
     def _on_3d_marker_projection_changed(self, labels):
         self._projected_3d_labels = list(labels or [])
         self._update_reprojection_links()
@@ -2918,6 +2969,51 @@ class MainWindow(QMainWindow):
                 links.append((photo, projection, cloud, label))
         overlay.set_links(links)
 
+    def _match_overlay_points(self, pairs=None, labels=None):
+        """完整点对在照片与点云映射图上的同号标注。"""
+        captured = getattr(self, '_live_projection_view', None)
+        camera_matrix = None if captured is None else captured.get('camera_matrix')
+        extrinsic = None if captured is None else captured.get('extrinsic')
+        source = (
+            pairs
+            if pairs is not None
+            else self.photo_match_service.state.correspondences
+        )
+        photo_points = []
+        photo_labels = []
+        cloud_points = []
+        cloud_labels = []
+        projection_points = []
+        sequence = 0
+        for index, pair in enumerate(source):
+            if pair.photo is None:
+                continue
+            if labels is None:
+                sequence += 1
+                label = sequence
+            else:
+                label = int(labels[index])
+            photo_points.append(pair.photo)
+            photo_labels.append(label)
+            if pair.cloud is None:
+                continue
+            view = pair.view
+            if view is None and camera_matrix is not None and extrinsic is not None:
+                view = self.photo_match_service._project_world_point(
+                    pair.cloud, camera_matrix, extrinsic
+                )
+            if view is not None:
+                cloud_points.append(view)
+                cloud_labels.append(label)
+                projection_points.append((label, view))
+        return {
+            'photo_points': photo_points,
+            'photo_labels': photo_labels,
+            'cloud_points': cloud_points,
+            'cloud_labels': cloud_labels,
+            'projection_points': projection_points,
+        }
+
     def _refresh_manual_match_markers(self):
         if not getattr(self, '_show_match_markers', True):
             self.photo_view.set_markers([])
@@ -2936,10 +3032,15 @@ class MainWindow(QMainWindow):
             self._reprojection_display_indices = None
         indices = self._reprojection_display_indices
         if indices is None:
-            self.photo_view.set_markers(self.photo_match_service.photo_points())
+            overlay = self._match_overlay_points()
+            self.photo_view.set_markers(
+                overlay['photo_points'], overlay['photo_labels']
+            )
             self.photo_view.set_remap_markers([])
-            self.cloud_match_view.set_markers([])
-            self._projection_marker_points = []
+            self.cloud_match_view.set_markers(
+                overlay['cloud_points'], overlay['cloud_labels']
+            )
+            self._projection_marker_points = overlay['projection_points']
             self.viewport.update_pick_markers(
                 src_points=self.photo_match_service.cloud_points()
             )
@@ -2947,49 +3048,27 @@ class MainWindow(QMainWindow):
             return
 
         indices = [index for index in indices if index < len(pairs)]
+        selected = [pairs[index] for index in indices]
         labels = [index + 1 for index in indices]
-        photo_points = [pairs[index].photo for index in indices]
-        cloud_points = [pairs[index].cloud for index in indices]
+        cloud_points = [pair.cloud for pair in selected]
         remapped = [
             state.remapped_photo_points[index]
             if index < len(state.remapped_photo_points)
             else None
             for index in indices
         ]
-        projected = self._project_cloud_points_to_match_view(cloud_points)
-        self._projection_marker_points = [
-            (label, point)
-            for label, point in zip(labels, projected)
-            if point is not None
-        ]
-        self.photo_view.set_markers(photo_points, labels)
+        overlay = self._match_overlay_points(selected, labels)
+        self._projection_marker_points = overlay['projection_points']
+        self.photo_view.set_markers(overlay['photo_points'], overlay['photo_labels'])
         self.photo_view.set_remap_markers(remapped, labels)
         self.cloud_match_view.set_markers(
-            [
-                point
-                for point in projected
-                if point is not None
-            ],
-            [
-                label
-                for label, point in zip(labels, projected)
-                if point is not None
-            ],
+            overlay['cloud_points'], overlay['cloud_labels']
         )
         self.viewport.update_pick_markers(
             src_points=cloud_points,
             labels=labels,
         )
-        rendered = self._live_projection_view
-        camera_matrix = None if rendered is None else rendered.get('camera_matrix')
-        extrinsic = None if rendered is None else rendered.get('extrinsic')
-        if hasattr(self, 'cloud_match_view'):
-            self.cloud_match_view.set_markers(
-                self.photo_match_service.projection_marker_points(
-                    camera_matrix,
-                    extrinsic,
-                )
-            )
+        self._update_reprojection_links()
 
     def _refresh_photo_match_controls(self):
         state = self.photo_match_service.state
@@ -3958,7 +4037,7 @@ class MainWindow(QMainWindow):
         self._refresh_photo_match_controls()
         return panel
 
-    def _refresh_station_panel(self):
+    def _refresh_station_panel(self, active_station_id=None):
         if not hasattr(self, 'station_list'):
             return
         self.station_list.blockSignals(True)
@@ -4110,6 +4189,63 @@ class MainWindow(QMainWindow):
             button.setChecked(True)
         self._update_window_title(page_key)
 
+    def _enter_project_operation(self):
+        """点云加载完成后进入项目操作页，三维视口只在这一页。"""
+        operation_index = next(
+            index
+            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
+            if key == 'project_operation'
+        )
+        self.set_current_page(operation_index)
+
+    def _bind_active_project_to_operations(self):
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            return
+        current = getattr(self.project_operation_service, '_project_uuid', None)
+        if current == project_uuid:
+            return
+        try:
+            self.project_operation_service.set_active_project_uuid(project_uuid)
+        except Exception:
+            pass
+
+    def _display_imported_station(self, before_ids):
+        self.station_service.refresh()
+        new_station = next(
+            (row for row in reversed(self.station_service.list_stations())
+             if row.id not in before_ids),
+            None,
+        )
+        if new_station is not None:
+            self.station_service.show_single(new_station)
+            self._refresh_station_panel(new_station.id)
+        else:
+            self._refresh_station_panel()
+        self._bind_active_project_to_operations()
+        self._enter_project_operation()
+        self._notify_project_files_loaded()
+        return new_station
+
+    def _notify_project_files_loaded(self):
+        loaded = []
+        try:
+            rows = self.station_service.list_stations()
+            active_id = getattr(self.station_service, '_active_station_id', None)
+            shown = [row for row in rows if row.id == active_id] or rows[:1]
+            for row in shown:
+                source = Path(row.source_path)
+                loaded.append(str(source))
+                dist = source.with_suffix('.dist')
+                if dist.exists():
+                    loaded.append(str(dist))
+        except Exception:
+            pass
+        print('加载项目文件完成', flush=True)
+        for path in loaded:
+            print(f'  {path}', flush=True)
+        self.statusBar().showMessage('加载项目文件完成', 5000)
+
     def _set_report_navigation(self, page_index):
         """切换报告页内部内容，不改变底部四个主页面。"""
         if not 0 <= page_index < self.report_navigation_stack.count():
@@ -4142,22 +4278,38 @@ class MainWindow(QMainWindow):
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
-            'btn_denoise': self.project_operation_service.denoise,
-            'btn_registration': self._run_station_registration,
+            'btn_denoise': lambda _checked=False: self._run_default_operation(
+                '点云去噪', self.project_operation_service.denoise
+            ),
+            'btn_registration': (
+                lambda _checked=False: self._run_default_operation(
+                    '点云配准', self._run_station_registration
+                )
+            ),
             'btn_select_detection_area': (
-                self.project_operation_service.select_detection_area
+                lambda _checked=False: self._run_default_operation(
+                    '框选检测区域',
+                    self.project_operation_service.select_detection_area,
+                )
             ),
-            'btn_facade_detection': (
-                self.project_operation_service.facade_detection
-            ),
+            'btn_facade_detection': self._run_facade_detection,
             'btn_quality_inspection': (
-                self.project_operation_service.quality_inspection
+                lambda _checked=False: self._run_default_operation(
+                    '质量检测',
+                    self.project_operation_service.quality_inspection,
+                )
             ),
             'btn_box_segmentation': (
-                self.project_operation_service.box_segmentation
+                lambda _checked=False: self._run_default_operation(
+                    '框选分割',
+                    self.project_operation_service.box_segmentation,
+                )
             ),
             'btn_calculate_detail': (
-                self.project_operation_service.calculate_detail
+                lambda _checked=False: self._run_default_operation(
+                    '计算细节',
+                    self.project_operation_service.calculate_detail,
+                )
             ),
             'btn_align_2d_3d': self._toggle_photo_match_workspace,
         }
@@ -4761,41 +4913,30 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '点云加载', '已有加载任务正在执行，请稍候。')
             return
         self._load_in_progress = True
+        done_message = None
         try:
             self.statusBar().showMessage('正在加载点云，请稍候...')
             if operation == 'activate':
                 self._activate_project(project)
+                if self.station_service.list_stations():
+                    done_message = '加载项目文件完成'
             elif operation == 'upload':
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 uploaded = self.project_overview_service.upload_files(file_paths, project_id)
                 if uploaded:
                     # 只同步站点投影；已有运行时 dataset 保持不变。
-                    self.station_service.refresh()
-                    # Upload is an explicit user mutation: show one newly
-                    # imported station, without restoring the whole project.
-                    stations = self.station_service.list_stations()
-                    new_station = next(
-                        (row for row in reversed(stations) if row.id not in before_ids),
-                        None,
-                    )
-                    if new_station is not None:
-                        self.station_service.show_single(new_station)
-                        self._refresh_station_panel(new_station.id)
+                    # 三维视口在项目操作页，加载完成后必须切过去。
+                    self._display_imported_station(before_ids)
+                    done_message = '加载项目文件完成'
                 else:
                     QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
             elif operation == 'fls':
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 payload = self.project_overview_service.import_fls_directory(directory, project_id)
                 if payload.get('success'):
-                    # FLS import already persists and synchronizes its assets;
-                    # only display one new station.
-                    self.station_service.refresh()
-                    new_station = next(
-                        (row for row in reversed(self.station_service.list_stations())
-                         if row.id not in before_ids), None)
-                    if new_station is not None:
-                        self.station_service.show_single(new_station)
-                        self._refresh_station_panel(new_station.id)
+                    # FLS 导入已经持久化并同步资产；显示一个新站点后进入操作页。
+                    self._display_imported_station(before_ids)
+                    done_message = '加载项目文件完成'
                 else:
                     QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
             self._refresh_project_list()
@@ -4803,7 +4944,10 @@ class MainWindow(QMainWindow):
             self._on_load_failed(self._project_generation, str(exc))
         finally:
             self._load_in_progress = False
-            self.statusBar().clearMessage()
+            if done_message:
+                self.statusBar().showMessage(done_message, 5000)
+            else:
+                self.statusBar().clearMessage()
 
     def _on_load_failed(self, generation, error):
         if generation != self._project_generation:
@@ -4824,23 +4968,16 @@ class MainWindow(QMainWindow):
             uploaded = result.get('uploaded') or []
             if uploaded:
                 self._refresh_project_list()
-                # 上传完成后只同步站点投影，不重新激活项目。重新激活会
-                # 让已有站点再次走 PLY 恢复链路；新增站点由用户点击时
-                # 按 station_id 懒加载，已有 dataset 保持不变。
-                self.station_service.refresh()
-                self._refresh_station_panel()
-                self.statusBar().showMessage(
-                    f'已增量添加 {len(uploaded)} 个文件，已有站点资源未重新加载。', 5000)
+                self._display_imported_station(set())
+                self.statusBar().showMessage('加载项目文件完成', 5000)
             else:
                 QMessageBox.warning(self, '直接上传文件', '未成功绑定任何点云文件。')
         elif operation == 'fls':
             payload = result.get('result') or {}
             if payload.get('success'):
                 self._refresh_project_list()
-                self.station_service.refresh()
-                self._refresh_station_panel()
-                self.statusBar().showMessage(
-                    f'已增量导入 {payload.get("uploaded", 0)} 个站点，已有资源未重新加载。', 5000)
+                self._display_imported_station(set())
+                self.statusBar().showMessage('加载项目文件完成', 5000)
             else:
                 QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
 
@@ -4865,6 +5002,7 @@ class MainWindow(QMainWindow):
             if not self.station_service.list_stations():
                 self.render_service.clear_scene_display()
                 self._set_current_project(project)
+                self._bind_active_project_to_operations()
                 self.statusBar().showMessage('项目已打开，但未发现可用 PLY 站点。', 5000)
                 return
             self.station_service.restore_view()
@@ -4892,12 +5030,8 @@ class MainWindow(QMainWindow):
                 self._refresh_report_preview()
         except Exception as exc:
             self.statusBar().showMessage(f'项目历史数据恢复部分失败：{exc}', 5000)
-        operation_index = next(
-            index
-            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
-            if key == 'project_operation'
-        )
-        self.set_current_page(operation_index)
+        self._enter_project_operation()
+        self._notify_project_files_loaded()
 
     def _prepare_project_activation(self, project_id):
         """Dispose the old session before a restore/import loads new arrays."""

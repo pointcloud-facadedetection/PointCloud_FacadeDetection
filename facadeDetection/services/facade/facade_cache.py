@@ -37,6 +37,9 @@ def save_facade_snapshot(
     project_uuid: str,
     cloud_name: str,
     facades: list[dict],
+    dataset_id: str | None = None,
+    dataset_revision: str | None = None,
+    roi_key: dict | None = None,
 ) -> Path:
     """原子写入最近一次立面检测结果。"""
     target = snapshot_path(project_uuid)
@@ -45,8 +48,10 @@ def save_facade_snapshot(
         'schema': 1,
         'kind': 'facade_detection',
         'cloud_name': str(cloud_name),
-        'dataset_id': first_facade.get('dataset_id'),
-        'dataset_revision': first_facade.get('dataset_revision'),
+        'dataset_id': first_facade.get('dataset_id') or dataset_id,
+        'dataset_revision': (
+            first_facade.get('dataset_revision') or dataset_revision),
+        'roi_key': _jsonable(roi_key),
         'saved_at': datetime.now().isoformat(timespec='seconds'),
         'facade_count': len(facades or []),
         'facades': _jsonable(facades or []),

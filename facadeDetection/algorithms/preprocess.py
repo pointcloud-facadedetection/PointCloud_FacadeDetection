@@ -83,8 +83,14 @@ def denoise(pcd: o3d.geometry.PointCloud,
             np.asarray(ranges, dtype=np.float64).reshape(-1),
             std_ratio=float(kwargs.get("std_ratio", 2.5)),
             n_shells=int(kwargs.get("n_shells", 8)),
+            trim_far=bool(kwargs.get("trim_far", False)),
+            far_bin_width=float(kwargs.get("far_bin_width", 5.0)),
+            far_min_fraction=float(kwargs.get("far_min_fraction", 0.002)),
+            absolute_max_range=float(
+                kwargs.get("absolute_max_range", 250.0)
+            ),
         )
-        clean_pcd = pcd.select_by_index(np.where(keep)[0].tolist())
+        clean_pcd = pcd.select_by_index(keep.tolist())
     else:
         raise ValueError(f"unsupported denoise method: {method}")
 

@@ -68,32 +68,78 @@ def fit_plane_weighted(points, weights=None, irls_iters=0):
     return model
 
 
-def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=8):
-    """按距离分壳统计滤波，保留非离群点索引。"""
+def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=8,
+                             trim_far=False, far_bin_width=5.0,
+                             far_min_fraction=0.002,
+                             absolute_max_range=250.0):
+    """按距离分壳统计滤波，返回保留点在原输入中的行索引。
+
+    ``trim_far`` 会剔除超过 ``absolute_max_range`` 的点，并只裁掉最后
+    一个有足够支持度的距离分箱之后的稀疏尾部。这样不会因为中间某个
+    距离分箱较稀疏而误删其后的正常表面。
+    """
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     ranges = np.asarray(ranges, dtype=float).reshape(-1)
     n = len(pts)
-    if n < 2:
-        return np.arange(n, dtype=np.int32)
-    
-    # 全局最近邻距离（一次性计算）
+    if len(ranges) != n:
+        raise ValueError(
+            f"ranges must have one value per point: points={n}, ranges={len(ranges)}"
+        )
+    if n == 0:
+        return np.empty(0, dtype=np.int32)
+
+    keep = np.isfinite(pts).all(axis=1) & np.isfinite(ranges) & (ranges >= 0)
+
+    if trim_far and np.any(keep):
+        max_range = float(absolute_max_range)
+        if np.isfinite(max_range) and max_range > 0:
+            keep &= ranges <= max_range
+        bin_width = max(float(far_bin_width), 1e-6)
+        min_fraction = max(float(far_min_fraction), 0.0)
+        candidate_ids = np.flatnonzero(keep)
+        bin_ids = np.floor(ranges[candidate_ids] / bin_width).astype(np.int64)
+        unique_bins, counts = np.unique(bin_ids, return_counts=True)
+        min_count = max(2, int(np.ceil(n * min_fraction)))
+        supported_bins = unique_bins[counts >= min_count]
+        # 小点集或所有分箱都很稀疏时不做密度尾裁剪，仅应用绝对距离上限。
+        if len(supported_bins):
+            last_supported_bin = int(supported_bins[-1])
+            keep[candidate_ids[bin_ids > last_supported_bin]] = False
+
+    candidate_ids = np.flatnonzero(keep)
+    if len(candidate_ids) < 2:
+        return candidate_ids.astype(np.int32)
+
+    # 仅在通过距离裁剪的点上计算最近邻，最后映射回原输入行号。
     cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(pts)
+    cloud.points = o3d.utility.Vector3dVector(pts[candidate_ids])
     nn = np.asarray(cloud.compute_nearest_neighbor_distance())
-    
-    keep = np.ones(n, dtype=bool)
-    edges = np.quantile(ranges, np.linspace(0, 1, max(1, int(n_shells)) + 1))
-    
+
+    keep_local = np.ones(len(candidate_ids), dtype=bool)
+    candidate_ranges = ranges[candidate_ids]
+    edges = np.quantile(
+        candidate_ranges,
+        np.linspace(0, 1, max(1, int(n_shells)) + 1),
+    )
+
     for i in range(len(edges) - 1):
-        mask = (ranges >= edges[i]) & ((ranges <= edges[i + 1]) if i == len(edges)-2 else (ranges < edges[i+1]))
+        mask = (
+            (candidate_ranges >= edges[i])
+            & (
+                (candidate_ranges <= edges[i + 1])
+                if i == len(edges) - 2
+                else (candidate_ranges < edges[i + 1])
+            )
+        )
         if mask.sum() < 30:
             continue
         d = nn[mask]
-        med = float(np.median(d)); mad = 1.4826 * float(np.median(np.abs(d-med)))
+        med = float(np.median(d))
+        mad = 1.4826 * float(np.median(np.abs(d - med)))
         threshold = med + std_ratio * max(mad, .15 * med, 1e-6)
-        keep[np.where(mask)[0][d > threshold]] = False
-    
-    return np.flatnonzero(keep).astype(np.int32)
+        keep_local[np.flatnonzero(mask)[d > threshold]] = False
+
+    return candidate_ids[keep_local].astype(np.int32)
 
 
 def fast_shell_outlier_mask(points, ranges, shells=((10., .10), (20., .08), (35., .06),

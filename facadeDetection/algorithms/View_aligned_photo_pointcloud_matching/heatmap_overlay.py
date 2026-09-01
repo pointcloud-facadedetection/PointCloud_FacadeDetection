@@ -33,6 +33,51 @@ def orient_plane_toward_camera(plane_model, facade_center, camera_center):
     return plane
 
 
+def _tight_interval(values, coverage=0.99, pad_ratio=0.03, min_pad=0.08):
+    """取覆盖绝大多数点的最短区间，避免离群点把网格拉得过宽。"""
+    samples = np.sort(np.asarray(values, dtype=np.float64).reshape(-1))
+    if samples.size == 0:
+        raise ValueError('立面投影坐标为空')
+    if samples.size < 8:
+        lo, hi = float(samples[0]), float(samples[-1])
+    else:
+        keep = max(8, int(np.ceil(samples.size * float(coverage))))
+        keep = min(keep, samples.size)
+        widths = samples[keep - 1:] - samples[: samples.size - keep + 1]
+        start = int(np.argmin(widths))
+        lo = float(samples[start])
+        hi = float(samples[start + keep - 1])
+    if hi <= lo:
+        hi = lo + 0.1
+    pad = max(float(min_pad), (hi - lo) * float(pad_ratio))
+    return lo - pad, hi + pad
+
+
+def _trim_empty_borders(patch_rgb, patch_mask, lower, pixel_size, pad_cells=2):
+    """裁掉四周没有热力像素的网格，并同步平面坐标原点。"""
+    occupied = np.asarray(patch_mask) > 0
+    cols = np.flatnonzero(occupied.any(axis=0))
+    rows = np.flatnonzero(occupied.any(axis=1))
+    if cols.size == 0 or rows.size == 0:
+        return patch_rgb, patch_mask, np.asarray(lower, dtype=np.float64)
+    height, width = occupied.shape
+    pad = max(0, int(pad_cells))
+    c0 = max(0, int(cols[0]) - pad)
+    c1 = min(width, int(cols[-1]) + 1 + pad)
+    r0 = max(0, int(rows[0]) - pad)
+    r1 = min(height, int(rows[-1]) + 1 + pad)
+    trimmed_rgb = np.ascontiguousarray(patch_rgb[r0:r1, c0:c1])
+    trimmed_mask = np.ascontiguousarray(patch_mask[r0:r1, c0:c1])
+    new_lower = np.asarray(
+        (
+            float(lower[0]) + c0 * float(pixel_size),
+            float(lower[1]) + (height - r1) * float(pixel_size),
+        ),
+        dtype=np.float64,
+    )
+    return trimmed_rgb, trimmed_mask, new_lower
+
+
 def _draw_metre_grid(image, pixel_size):
     height, width = image.shape[:2]
     step = max(1, int(round(1.0 / float(pixel_size))))
@@ -85,8 +130,22 @@ def build_plane_grid_heatmap(
     uv = np.column_stack(
         ((points - origin) @ u_axis, (points - origin) @ v_axis)
     )
-    lower = np.min(uv, axis=0)
-    upper = np.max(uv, axis=0)
+    u0, u1 = _tight_interval(uv[:, 0])
+    v0, v1 = _tight_interval(uv[:, 1])
+    inside = (
+        (uv[:, 0] >= u0)
+        & (uv[:, 0] <= u1)
+        & (uv[:, 1] >= v0)
+        & (uv[:, 1] <= v1)
+    )
+    if int(np.count_nonzero(inside)) >= 8:
+        uv = uv[inside]
+        values = values[inside]
+        lower = np.asarray((u0, v0), dtype=np.float64)
+        upper = np.asarray((u1, v1), dtype=np.float64)
+    else:
+        lower = np.min(uv, axis=0)
+        upper = np.max(uv, axis=0)
     span = np.maximum(upper - lower, 0.1)
     pixel_size = max(
         0.02,
@@ -124,13 +183,6 @@ def build_plane_grid_heatmap(
         vmax=float(vmax_mm),
     )
 
-    margin = 36
-    legend_width = 168
-    canvas_rgb = np.full(
-        (height + margin * 2, width + margin * 2 + legend_width, 3),
-        245,
-        dtype=np.uint8,
-    )
     facade_rgb = np.full((height, width, 3), 225, dtype=np.uint8)
     facade_rgb.reshape(-1, 3)[flat[selected]] = np.clip(
         cell_colors * 255.0,
@@ -139,8 +191,20 @@ def build_plane_grid_heatmap(
     ).astype(np.uint8)
     patch_mask = np.zeros((height, width), dtype=np.uint8)
     patch_mask.reshape(-1)[flat[selected]] = 255
+    facade_rgb, patch_mask, lower = _trim_empty_borders(
+        facade_rgb, patch_mask, lower, pixel_size
+    )
+    height, width = patch_mask.shape[:2]
     patch_rgb = facade_rgb.copy()
     _draw_metre_grid(patch_rgb, pixel_size)
+
+    margin = 36
+    legend_width = 168
+    canvas_rgb = np.full(
+        (height + margin * 2, width + margin * 2 + legend_width, 3),
+        245,
+        dtype=np.uint8,
+    )
     canvas_rgb[margin:margin + height, margin:margin + width] = patch_rgb
     legend_height = min(height, max(120, min(300, int(height * 0.42))))
     draw_signed_colorbar(

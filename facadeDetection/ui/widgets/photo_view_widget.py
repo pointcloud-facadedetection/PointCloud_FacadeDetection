@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 
 class PhotoViewWidget(QLabel):
     point_clicked = Signal(float, float)
+    view_changed = Signal()
 
     _MIN_ZOOM = 1.0
     _MAX_ZOOM = 8.0
@@ -26,8 +27,8 @@ class PhotoViewWidget(QLabel):
         self._source = QImage()
         self._scaled = QPixmap()
         self._draw_rect = QRectF()
-        self._markers: list[tuple[float, float]] = []
-        self._remap_markers: list[tuple[float, float]] = []
+        self._markers: list[tuple[float, float, int]] = []
+        self._remap_markers: list[tuple[float, float, int]] = []
         self._interactive = False
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
@@ -54,6 +55,7 @@ class PhotoViewWidget(QLabel):
         self.setText('')
         self._rebuild_scaled()
         self.update()
+        self.view_changed.emit()
 
     def clear_image(self):
         self._source = QImage()
@@ -65,14 +67,30 @@ class PhotoViewWidget(QLabel):
         self._offset = QPointF(0, 0)
         self.setText(self._placeholder)
         self.update()
+        self.view_changed.emit()
 
-    def set_markers(self, points):
-        self._markers = [(float(x), float(y)) for x, y in points]
+    def set_markers(self, points, labels=None):
+        self._markers = self._normalize_markers(points, labels)
         self.update()
 
-    def set_remap_markers(self, points):
-        self._remap_markers = [(float(x), float(y)) for x, y in (points or [])]
+    def set_remap_markers(self, points, labels=None):
+        self._remap_markers = self._normalize_markers(points, labels)
         self.update()
+
+    def pixel_to_widget(self, px: float, py: float) -> QPointF | None:
+        return self._pixel_to_display(px, py)
+
+    @staticmethod
+    def _normalize_markers(points, labels=None):
+        markers = []
+        sequence = 0
+        for index, point in enumerate(points or []):
+            if point is None:
+                continue
+            sequence += 1
+            label = sequence if labels is None else int(labels[index])
+            markers.append((float(point[0]), float(point[1]), label))
+        return markers
 
     def has_image(self) -> bool:
         return not self._source.isNull()
@@ -81,6 +99,7 @@ class PhotoViewWidget(QLabel):
         super().resizeEvent(event)
         if not self._source.isNull():
             self._rebuild_scaled()
+            self.view_changed.emit()
 
     def wheelEvent(self, event):
         if self._source.isNull() or self._draw_rect.width() <= 0:
@@ -106,6 +125,7 @@ class PhotoViewWidget(QLabel):
                 self._rebuild_scaled()
         event.accept()
         self.update()
+        self.view_changed.emit()
 
     def mousePressEvent(self, event):
         if self._source.isNull():
@@ -136,6 +156,7 @@ class PhotoViewWidget(QLabel):
             self._offset += delta
             self._rebuild_scaled()
             self.update()
+            self.view_changed.emit()
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -163,7 +184,7 @@ class PhotoViewWidget(QLabel):
         font.setPixelSize(11)
         font.setBold(True)
         painter.setFont(font)
-        for index, (px, py) in enumerate(self._markers, start=1):
+        for px, py, label in self._markers:
             display = self._pixel_to_display(px, py)
             if display is None:
                 continue
@@ -174,9 +195,9 @@ class PhotoViewWidget(QLabel):
             painter.drawText(
                 QRectF(display.x() - 8, display.y() - 8, 16, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                str(index),
+                str(label),
             )
-        for index, (px, py) in enumerate(self._remap_markers, start=1):
+        for px, py, label in self._remap_markers:
             display = self._pixel_to_display(px, py)
             if display is None:
                 continue
@@ -187,7 +208,7 @@ class PhotoViewWidget(QLabel):
             painter.drawText(
                 QRectF(display.x() - 8, display.y() - 8, 16, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                str(index),
+                str(label),
             )
 
     def _rebuild_scaled(self):

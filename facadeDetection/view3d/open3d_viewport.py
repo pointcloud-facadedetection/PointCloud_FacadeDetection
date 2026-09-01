@@ -1,7 +1,7 @@
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint, Slot, Signal
-from PySide6.QtGui import QImage, QWindow
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtGui import QImage, QWindow, QPainter, QPen, QColor
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from .base_viewport import BaseViewport
 from .camera import CameraController

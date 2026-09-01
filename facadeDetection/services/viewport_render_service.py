@@ -30,6 +30,7 @@ class ViewportRenderService:
         self._selected_facade_id: Optional[int] = None
         self._facades_cache: Dict[str, list[dict]] = {}
         self._facade_color_signatures: Dict[str, str] = {}
+        self._pre_facade_colors: Dict[str, np.ndarray] = {}
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
@@ -67,6 +68,7 @@ class ViewportRenderService:
             invalidate()
         self.clear_station_scene()
         self._facade_color_signatures.clear()
+        self._pre_facade_colors.clear()
         try:
             if hasattr(self.viewport, 'clear_roi_visuals'):
                 self.viewport.clear_roi_visuals()
@@ -109,6 +111,7 @@ class ViewportRenderService:
         self._selected_facade_id = None
         self._facades_cache.clear()
         self._facade_color_signatures.clear()
+        self._pre_facade_colors.clear()
         if hasattr(self.viewport, 'exit_pick_mode'):
             try:
                 self.viewport.exit_pick_mode()

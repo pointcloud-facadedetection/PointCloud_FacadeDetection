@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import time
 from typing import Optional
 import numpy as np
@@ -13,8 +14,6 @@ class _GuiDispatcher(QObject):
     """Queued signal boundary owned by the Qt GUI thread."""
     denoise_finished = Signal(object)
     denoise_failed = Signal(str)
-    detection_finished = Signal(object)
-    detection_failed = Signal(str)
 
 
 class ProjectOperationService:
@@ -37,10 +36,6 @@ class ProjectOperationService:
             self._on_denoise_finished, Qt.ConnectionType.QueuedConnection)
         self._gui_dispatcher.denoise_failed.connect(
             self._on_denoise_failed, Qt.ConnectionType.QueuedConnection)
-        self._gui_dispatcher.detection_finished.connect(
-            self._on_detection_finished, Qt.ConnectionType.QueuedConnection)
-        self._gui_dispatcher.detection_failed.connect(
-            self._on_detection_failed, Qt.ConnectionType.QueuedConnection)
         self._task_scheduler = RuntimeTaskScheduler(parent)
 
     def set_station_service(self, service):
@@ -566,47 +561,191 @@ class ProjectOperationService:
                        if self._last_roi_indices else None)
         roi_bounds = self._last_roi_bounds
         project_uuid = self._project_uuid
+        project_generation = int(getattr(
+            self._pointcloud_service, 'project_generation', 0))
+        cloud_data = self._viewport.get_cloud_data(cloud_name) or {}
+        dataset_id = cloud_data.get('dataset_id')
+        dataset = (
+            self._pointcloud_service.get_dataset(dataset_id)
+            if self._pointcloud_service is not None and dataset_id
+            else None
+        )
+        dataset_revision = (
+            getattr(dataset, 'revision', str(dataset_id))
+            if dataset is not None
+            else None
+        )
+        roi_key = self._detection_roi_key(roi_indices, roi_bounds)
+        if self._load_cached_detection(
+            project_uuid,
+            cloud_name,
+            dataset_id,
+            dataset_revision,
+            roi_key,
+        ):
+            return
 
         def run_detection(context):
             context.check_cancelled()
             if roi_indices or roi_bounds is not None:
-                return self._facade_service.detect_on_roi(
+                results = self._facade_service.detect_on_roi(
                     cloud_name=cloud_name, roi_indices=roi_indices,
                     roi_bounds=roi_bounds, project_uuid=project_uuid,
                     roi_scope='seed')
             else:
                 results = self._facade_service.detect(
-                    cloud_name=cloud_name, project_uuid=self._project_uuid)
-            self._last_facade_results = results
-            # 立面检测结果属于后续 2D-3D 热力图映射的必要输入。检测完成后
-            # 立即写入项目 results 目录，项目重新打开后无需重复执行检测。
-            if self._project_uuid:
-                try:
-                    from services.facade.facade_cache import save_facade_snapshot
-                    save_facade_snapshot(
-                        self._project_uuid,
-                        cloud_name,
-                        results or [],
-                    )
-                except Exception as exc:
-                    print(
-                        f'[PCFD] facade.cache_save_failed reason={exc}',
-                        flush=True,
-                    )
-            if callable(self.on_facade_results):
-                try:
-                    self.on_facade_results(results)
-                except Exception:
-                    pass
-            # 启用点击选择：在视口中点击立面点，高亮对应立面
+                    cloud_name=cloud_name, project_uuid=project_uuid)
+            context.check_cancelled()
+            return {
+                'cloud_name': cloud_name,
+                'project_uuid': project_uuid,
+                'results': results or [],
+                'roi_key': roi_key,
+            }
+
+        self._task_scheduler.submit(
+            kind='facade_detection',
+            project_uuid=project_uuid,
+            project_generation=project_generation,
+            dataset_id=dataset_id,
+            dataset_revision=dataset_revision,
+            operation=run_detection,
+            on_success=self._on_detection_finished,
+            on_error=self._on_detection_error,
+            on_cancelled=self._on_detection_cancelled,
+        )
+
+    @staticmethod
+    def _detection_roi_key(roi_indices, roi_bounds):
+        """生成稳定的 ROI 缓存键；全局检测返回 None。"""
+        if roi_bounds is not None:
+            lower = np.asarray(roi_bounds[0], dtype=np.float64).reshape(3)
+            upper = np.asarray(roi_bounds[1], dtype=np.float64).reshape(3)
+            return {
+                'bounds': [
+                    np.minimum(lower, upper).tolist(),
+                    np.maximum(lower, upper).tolist(),
+                ],
+            }
+        if roi_indices:
+            indices = np.asarray(roi_indices, dtype=np.int64).reshape(-1)
+            indices = np.unique(indices)
+            return {
+                'indices_count': int(len(indices)),
+                'indices_sha256': hashlib.sha256(
+                    indices.tobytes()).hexdigest(),
+            }
+        return None
+
+    def _load_cached_detection(
+        self,
+        project_uuid,
+        cloud_name,
+        dataset_id,
+        dataset_revision,
+        roi_key,
+    ) -> bool:
+        """加载与当前项目和处理数据集完全匹配的最近检测结果。"""
+        if not project_uuid or not cloud_name or not dataset_id:
+            return False
+        try:
+            from services.facade.facade_cache import load_facade_snapshot
+            snapshot = load_facade_snapshot(project_uuid)
+        except Exception as exc:
+            print(
+                f'[PCFD] facade.cache_load_failed reason={exc}',
+                flush=True,
+            )
+            return False
+        if snapshot is None:
+            return False
+        if str(snapshot.get('cloud_name')) != str(cloud_name):
+            return False
+        if str(snapshot.get('dataset_id')) != str(dataset_id):
+            return False
+        if str(snapshot.get('dataset_revision')) != str(dataset_revision):
+            return False
+        if snapshot.get('roi_key') != roi_key:
+            return False
+
+        results = list(snapshot.get('facades') or [])
+        self._publish_facade_results(cloud_name, results)
+        print(
+            f'[PCFD] facade.cache_hit cloud={cloud_name!r} '
+            f'facades={len(results)}',
+            flush=True,
+        )
+        return True
+
+    def _publish_facade_results(self, cloud_name, results):
+        """将检测结果发布到当前 UI 和视口。"""
+        results = list(results or [])
+        self._last_facade_results = results
+        if callable(self.on_facade_results):
             try:
                 self.on_facade_results(results)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f'[PCFD] facade.result_callback_failed reason={exc}',
+                    flush=True,
+                )
+        try:
+            self._enable_facade_click_select(cloud_name, results)
+        except Exception as exc:
+            print(
+                f'[PCFD] facade.pick_enable_failed reason={exc}',
+                flush=True,
+            )
+
+    @Slot(object, object)
+    def _on_detection_finished(self, context, payload):
+        if not self._task_scheduler.is_current(context):
+            return
+        current_generation = int(getattr(
+            self._pointcloud_service, 'project_generation', 0))
+        if (context.project_uuid != self._project_uuid
+                or context.project_generation != current_generation):
+            print('[PCFD] facade.detect.stale_result_ignored', flush=True)
+            return
+
+        payload = payload or {}
+        cloud_name = payload.get('cloud_name')
+        results = list(payload.get('results') or [])
+
+        # 立面检测结果属于后续 2D-3D 热力图映射的必要输入。只允许当前
+        # 项目的当前任务写快照，避免切换项目后旧任务覆盖新状态。
+        if self._project_uuid:
+            try:
+                from services.facade.facade_cache import save_facade_snapshot
+                save_facade_snapshot(
+                    self._project_uuid,
+                    cloud_name,
+                    results,
+                    dataset_id=context.dataset_id,
+                    dataset_revision=context.dataset_revision,
+                    roi_key=payload.get('roi_key'),
+                )
+            except Exception as exc:
+                print(
+                    f'[PCFD] facade.cache_save_failed reason={exc}',
+                    flush=True,
+                )
+
+        self._publish_facade_results(cloud_name, results)
 
     @Slot(str)
     def _on_detection_failed(self, message):
         print(f'立面检测失败: {message}', flush=True)
+
+    @Slot(object, str)
+    def _on_detection_error(self, context, message):
+        if self._task_scheduler.is_current(context):
+            self._on_detection_failed(message)
+
+    @Slot(object)
+    def _on_detection_cancelled(self, context):
+        if context.project_uuid == self._project_uuid:
+            print('[PCFD] facade.detect.cancelled', flush=True)
 
     def quality_inspection(self):
         self._notify('quality_inspection')
