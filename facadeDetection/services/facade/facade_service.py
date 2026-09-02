@@ -73,7 +73,7 @@ class FacadeService:
             ruler_size=ruler_size,
             ruler_step=ruler_step,
             profile=profile,
-            results_dir=results_dir)
+            results_dir=None)
 
     # ==================== 索引映射接口 ====================
 

@@ -138,6 +138,7 @@ class Open3DAdapter:
             self.vis.get_render_option().point_size = pixel_size
             self.request_render('point_size')
 
+    # TODO(poll): [视口渲染刷新]
     def poll(self):
         if not self._assert_owner():
             return False

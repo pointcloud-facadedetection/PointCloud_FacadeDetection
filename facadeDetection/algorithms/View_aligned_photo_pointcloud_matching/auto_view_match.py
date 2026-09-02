@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from pathlib import Path
 
 from .manual_match import MIN_MATCH_PAIRS, estimate_match_matrix
 
@@ -11,6 +12,9 @@ _MAX_PROCESSING_SIDE = 1600
 _MAX_KEYPOINTS = 4096
 _MATCH_CONFIDENCE = 0.10
 _LIGHTGLUE_ENGINE = None
+_CHECKPOINT_DIR = Path(__file__).resolve().parents[2] / 'checkpoints'
+_SUPERPOINT_CHECKPOINT = _CHECKPOINT_DIR / 'superpoint_v1.pth'
+_LIGHTGLUE_CHECKPOINT = _CHECKPOINT_DIR / 'superpoint_lightglue_v0-1_arxiv.pth'
 
 
 def _resize_for_matching(image):
@@ -27,7 +31,7 @@ def _resize_for_matching(image):
 
 
 def _get_lightglue_engine():
-    """延迟加载 SuperPoint + LightGlue，并复用模型实例。"""
+    """延迟加载本地 SuperPoint + LightGlue，并复用模型实例。"""
     global _LIGHTGLUE_ENGINE
     if _LIGHTGLUE_ENGINE is not None:
         return _LIGHTGLUE_ENGINE
@@ -39,13 +43,38 @@ def _get_lightglue_engine():
             '缺少 SuperPoint + LightGlue 依赖，请在项目根目录执行：\n'
             'pip install -r facadeDetection/requirements.txt'
         ) from exc
+
+    missing = [
+        str(path)
+        for path in (_SUPERPOINT_CHECKPOINT, _LIGHTGLUE_CHECKPOINT)
+        if not path.is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            '缺少本地 SuperPoint + LightGlue checkpoint：\n'
+            + '\n'.join(missing)
+        )
+
+    def load_local_checkpoint(url, *args, **kwargs):
+        """将 LightGlue 构造函数的默认在线加载重定向到本地文件。"""
+        checkpoint = (
+            _SUPERPOINT_CHECKPOINT
+            if 'superpoint_v1' in str(url)
+            else _LIGHTGLUE_CHECKPOINT
+        )
+        return torch.load(checkpoint, map_location='cpu', weights_only=False)
+
+    original_loader = torch.hub.load_state_dict_from_url
+    torch.hub.load_state_dict_from_url = load_local_checkpoint
+    try:
+        extractor = SuperPoint(max_num_keypoints=_MAX_KEYPOINTS).eval()
+        matcher = LightGlue(features='superpoint', filter_threshold=0.0).eval()
+    finally:
+        torch.hub.load_state_dict_from_url = original_loader
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    extractor = SuperPoint(max_num_keypoints=_MAX_KEYPOINTS).eval().to(device)
-    matcher = (
-        LightGlue(features='superpoint', filter_threshold=0.0)
-        .eval()
-        .to(device)
-    )
+    extractor = extractor.to(device)
+    matcher = matcher.to(device)
     _LIGHTGLUE_ENGINE = (torch, extractor, matcher, device)
     return _LIGHTGLUE_ENGINE
 

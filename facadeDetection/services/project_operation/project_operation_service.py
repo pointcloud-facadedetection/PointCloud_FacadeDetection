@@ -1,5 +1,4 @@
 from __future__ import annotations
-import hashlib
 import time
 from typing import Optional
 import numpy as np
@@ -208,12 +207,12 @@ class ProjectOperationService:
             if stats:
                 render = self._get_render_service()
                 points = np.asarray(stats.get('proxy_points'), dtype=np.float32).reshape(-1, 3)
-                # 仅保留重建元数据；坐标仍保存在源资源中，并在下次加载项目时重新构建。
+                # Persist only index mappings and metadata; the source PLY remains
+                # the sole point-storage authority and is rehydrated on reopen.
                 if self._project_uuid and stats.get('station_id'):
                     from services.dal.pointcloud_station_repo import PointCloudStationRepo
                     state = {
                         'version': 1,
-                        'source_sha256': None,
                         'method': stats.get('method', 'adaptive'),
                         'voxel_size': float(stats.get('voxel_size', 0.05)),
                         'keep_proxy_indices': np.asarray(
@@ -227,6 +226,10 @@ class ProjectOperationService:
                     }
                     PointCloudStationRepo.save_denoise_state(
                         self._project_uuid, stats['station_id'], state)
+                # A denoise result replaces the processing cloud, never layers on
+                # top of the old station/result geometry.
+                if render is not None:
+                    render.clear_scene_display()
                 station = None
                 if self._station_service is not None:
                     station = next((row for row in self._station_service.list_stations()
@@ -575,16 +578,6 @@ class ProjectOperationService:
             if dataset is not None
             else None
         )
-        roi_key = self._detection_roi_key(roi_indices, roi_bounds)
-        if self._load_cached_detection(
-            project_uuid,
-            cloud_name,
-            dataset_id,
-            dataset_revision,
-            roi_key,
-        ):
-            return
-
         def run_detection(context):
             context.check_cancelled()
             if roi_indices or roi_bounds is not None:
@@ -600,7 +593,6 @@ class ProjectOperationService:
                 'cloud_name': cloud_name,
                 'project_uuid': project_uuid,
                 'results': results or [],
-                'roi_key': roi_key,
             }
 
         self._task_scheduler.submit(
@@ -614,68 +606,6 @@ class ProjectOperationService:
             on_error=self._on_detection_error,
             on_cancelled=self._on_detection_cancelled,
         )
-
-    @staticmethod
-    def _detection_roi_key(roi_indices, roi_bounds):
-        """生成稳定的 ROI 缓存键；全局检测返回 None。"""
-        if roi_bounds is not None:
-            lower = np.asarray(roi_bounds[0], dtype=np.float64).reshape(3)
-            upper = np.asarray(roi_bounds[1], dtype=np.float64).reshape(3)
-            return {
-                'bounds': [
-                    np.minimum(lower, upper).tolist(),
-                    np.maximum(lower, upper).tolist(),
-                ],
-            }
-        if roi_indices:
-            indices = np.asarray(roi_indices, dtype=np.int64).reshape(-1)
-            indices = np.unique(indices)
-            return {
-                'indices_count': int(len(indices)),
-                'indices_sha256': hashlib.sha256(
-                    indices.tobytes()).hexdigest(),
-            }
-        return None
-
-    def _load_cached_detection(
-        self,
-        project_uuid,
-        cloud_name,
-        dataset_id,
-        dataset_revision,
-        roi_key,
-    ) -> bool:
-        """加载与当前项目和处理数据集完全匹配的最近检测结果。"""
-        if not project_uuid or not cloud_name or not dataset_id:
-            return False
-        try:
-            from services.facade.facade_cache import load_facade_snapshot
-            snapshot = load_facade_snapshot(project_uuid)
-        except Exception as exc:
-            print(
-                f'[PCFD] facade.cache_load_failed reason={exc}',
-                flush=True,
-            )
-            return False
-        if snapshot is None:
-            return False
-        if str(snapshot.get('cloud_name')) != str(cloud_name):
-            return False
-        if str(snapshot.get('dataset_id')) != str(dataset_id):
-            return False
-        if str(snapshot.get('dataset_revision')) != str(dataset_revision):
-            return False
-        if snapshot.get('roi_key') != roi_key:
-            return False
-
-        results = list(snapshot.get('facades') or [])
-        self._publish_facade_results(cloud_name, results)
-        print(
-            f'[PCFD] facade.cache_hit cloud={cloud_name!r} '
-            f'facades={len(results)}',
-            flush=True,
-        )
-        return True
 
     def _publish_facade_results(self, cloud_name, results):
         """将检测结果发布到当前 UI 和视口。"""
@@ -711,25 +641,6 @@ class ProjectOperationService:
         payload = payload or {}
         cloud_name = payload.get('cloud_name')
         results = list(payload.get('results') or [])
-
-        # 立面检测结果属于后续 2D-3D 热力图映射的必要输入。只允许当前
-        # 项目的当前任务写快照，避免切换项目后旧任务覆盖新状态。
-        if self._project_uuid:
-            try:
-                from services.facade.facade_cache import save_facade_snapshot
-                save_facade_snapshot(
-                    self._project_uuid,
-                    cloud_name,
-                    results,
-                    dataset_id=context.dataset_id,
-                    dataset_revision=context.dataset_revision,
-                    roi_key=payload.get('roi_key'),
-                )
-            except Exception as exc:
-                print(
-                    f'[PCFD] facade.cache_save_failed reason={exc}',
-                    flush=True,
-                )
 
         self._publish_facade_results(cloud_name, results)
 

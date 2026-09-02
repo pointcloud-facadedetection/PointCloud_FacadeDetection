@@ -254,14 +254,6 @@ class FacadeQualityService:
             if profile is not None:
                 result['profile_snapshot'] = profile.snapshot()
 
-            # Keep only a lightweight export descriptor.  The worker result can
-            # contain millions of points; retaining another points/colors copy
-            # here keeps the entire quality domain alive after the dialog opens.
-            result['__export_context'] = {
-                'results_dir': str(results_dir) if results_dir else None,
-                'facade_no': facade_no,
-            }
-
             total_elapsed = time.perf_counter() - started
             trace("quality.finish", facade_no=facade_no, 
                   total_seconds=f"{total_elapsed:.2f}")
