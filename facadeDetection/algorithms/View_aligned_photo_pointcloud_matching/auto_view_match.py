@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -15,6 +18,59 @@ _LIGHTGLUE_ENGINE = None
 _CHECKPOINT_DIR = Path(__file__).resolve().parents[2] / 'checkpoints'
 _SUPERPOINT_CHECKPOINT = _CHECKPOINT_DIR / 'superpoint_v1.pth'
 _LIGHTGLUE_CHECKPOINT = _CHECKPOINT_DIR / 'superpoint_lightglue_v0-1_arxiv.pth'
+_CHECKPOINT_URLS = {
+    _SUPERPOINT_CHECKPOINT: (
+        'https://github.com/cvg/LightGlue/releases/download/'
+        'v0.1_arxiv/superpoint_v1.pth'
+    ),
+    _LIGHTGLUE_CHECKPOINT: (
+        'https://github.com/cvg/LightGlue/releases/download/'
+        'v0.1_arxiv/superpoint_lightglue.pth'
+    ),
+}
+
+
+def _ensure_checkpoints():
+    """本地缺失时从 LightGlue 官方 Release 下载权重，并写入 checkpoints 目录。"""
+    missing = [
+        (path, url)
+        for path, url in _CHECKPOINT_URLS.items()
+        if not path.is_file()
+    ]
+    if not missing:
+        return
+    try:
+        _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f'无法创建 SuperPoint + LightGlue 权重目录：{_CHECKPOINT_DIR}\n'
+            f'原始错误：{exc}'
+        ) from exc
+    for path, url in missing:
+        temporary = path.with_suffix(path.suffix + '.tmp')
+        print(f'[PCFD] checkpoint.download url={url} dest={path}', flush=True)
+        try:
+            urllib.request.urlretrieve(url, temporary)
+            temporary.replace(path)
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                'SuperPoint + LightGlue 权重下载失败。\n'
+                '首次自动匹配需要连接网络；下载成功后会保存到本地并离线复用。\n'
+                f'目标目录：{_CHECKPOINT_DIR}\n'
+                f'失败文件：{path.name}\n'
+                f'下载地址：{url}\n'
+                f'原始错误：{exc}'
+            ) from exc
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError(
+                'SuperPoint + LightGlue 权重下载后文件无效。\n'
+                f'目标文件：{path}\n'
+                f'下载地址：{url}'
+            )
 
 
 def _resize_for_matching(image):
@@ -44,16 +100,7 @@ def _get_lightglue_engine():
             'pip install -r facadeDetection/requirements.txt'
         ) from exc
 
-    missing = [
-        str(path)
-        for path in (_SUPERPOINT_CHECKPOINT, _LIGHTGLUE_CHECKPOINT)
-        if not path.is_file()
-    ]
-    if missing:
-        raise RuntimeError(
-            '缺少本地 SuperPoint + LightGlue checkpoint：\n'
-            + '\n'.join(missing)
-        )
+    _ensure_checkpoints()
 
     def load_local_checkpoint(url, *args, **kwargs):
         """将 LightGlue 构造函数的默认在线加载重定向到本地文件。"""
@@ -69,6 +116,12 @@ def _get_lightglue_engine():
     try:
         extractor = SuperPoint(max_num_keypoints=_MAX_KEYPOINTS).eval()
         matcher = LightGlue(features='superpoint', filter_threshold=0.0).eval()
+    except Exception as exc:
+        raise RuntimeError(
+            'SuperPoint + LightGlue 权重加载失败。\n'
+            f'本地目录：{_CHECKPOINT_DIR}\n'
+            f'原始错误：{exc}'
+        ) from exc
     finally:
         torch.hub.load_state_dict_from_url = original_loader
 
