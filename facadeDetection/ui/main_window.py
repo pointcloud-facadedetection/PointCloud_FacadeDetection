@@ -2026,8 +2026,17 @@ class MainWindow(QMainWindow):
     def _projection_cloud_source(self, data):
         """优先返回原始 PLY 的实点云及 intensity，保持测试查看器效果。"""
         points = data.get('pos')
-        values = data.get('color')
         dataset_id = data.get('dataset_id')
+        if (
+            not dataset_id
+            and self.pointcloud_service is not None
+            and hasattr(self.pointcloud_service, 'bind_processing_cloud')
+        ):
+            cloud_name = self._active_cloud_name()
+            if cloud_name:
+                dataset_id = self.pointcloud_service.bind_processing_cloud(
+                    cloud_name
+                )
         dataset = (
             self.pointcloud_service.get_dataset(dataset_id)
             if dataset_id and self.pointcloud_service is not None
@@ -2050,7 +2059,13 @@ class MainWindow(QMainWindow):
                     f'path={source_path} error={exc}',
                     flush=True,
                 )
-        return points, values
+        else:
+            print(
+                f'[PCFD] projection.no_source_ply dataset={dataset_id}',
+                flush=True,
+            )
+        # 视口显示色不是 LiDAR intensity；缺文件时用 depth，与测试查看器一致。
+        return points, None
 
     def _on_projection_slider_changed(self, _value):
         sender = self.sender()

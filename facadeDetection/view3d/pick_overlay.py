@@ -23,10 +23,9 @@ class PointPickOverlay(QWidget):
     """
 
     def __init__(self, viewport, container, parent=None):
-        # Keep this as a passive sibling of the embedded QWindow.  A Tool
-        # window that grabs the mouse/keyboard competes with GLFW on Windows.
-        super().__init__(parent, Qt.FramelessWindowHint |
-                         Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+        # 不要使用 WindowStaysOnTopHint：独立置顶窗会盖住三维视口，
+        # 或在切换其他软件时继续浮在桌面上。
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
         self.viewport = viewport
         self.container = container
         self.setMouseTracking(True)
@@ -40,7 +39,7 @@ class PointPickOverlay(QWidget):
 
     def sync_geometry(self):
         """将覆盖层对齐到容器全局几何。"""
-        if self.container is None:
+        if self.container is None or not self._active:
             return
         try:
             # 使用 container 的顶级窗口作为父窗口参考，确保坐标正确

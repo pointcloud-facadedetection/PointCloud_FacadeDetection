@@ -318,38 +318,53 @@ def projection_viewport_camera(params, transform_to_global):
     }
 
 
-def _intensity_rgb(colors, point_count):
-    """将 PLY colors 统一转换为测试查看器使用的归一化灰度强度。"""
-    if colors is None or len(colors) != point_count:
-        return np.full((point_count, 3), 220, dtype=np.uint8)
-    values = np.asarray(colors, dtype=np.float32)
-    if values.ndim == 1:
-        intensity = values.reshape(-1)
-    elif values.ndim == 2 and values.shape[1] >= 3:
-        intensity = (
-            0.299 * values[:, 0]
-            + 0.587 * values[:, 1]
-            + 0.114 * values[:, 2]
-        )
-    else:
-        raise ValueError('点云颜色格式无效，无法转换为 intensity')
-    finite = np.isfinite(intensity)
-    normalized = np.zeros(point_count, dtype=np.float32)
-    if finite.any():
-        low, high = np.percentile(intensity[finite], (1.0, 99.0))
-        if high - low > 1e-6:
-            normalized[finite] = np.clip(
-                (intensity[finite] - low) / (high - low), 0.0, 1.0
+def _projection_scalars(colors, points, params, camera_xyz):
+    """与测试查看器一致：有 intensity/RGB 则 1–99 分位归一化，否则用 depth。"""
+    count = len(points)
+    far = max(float(params.get('far', 300.0)), 1e-6)
+    intensity = None
+    if colors is not None and len(colors) == count:
+        values = np.asarray(colors, dtype=np.float32)
+        if values.ndim == 1 or (values.ndim == 2 and values.shape[1] == 1):
+            intensity = values.reshape(-1)
+        elif values.ndim == 2 and values.shape[1] >= 3:
+            intensity = (
+                0.299 * values[:, 0]
+                + 0.587 * values[:, 1]
+                + 0.114 * values[:, 2]
             )
         else:
-            # 统一着色点云没有可拉伸的灰度范围；保留其原始亮度，
-            # 避免 (value - low) 将全部有效投影点变成黑色。
-            scale = 1.0 if high <= 1.5 else 255.0
-            normalized[finite] = np.clip(
-                intensity[finite] / scale, 0.0, 1.0
-            )
-    gray = np.rint(normalized * 255.0).astype(np.uint8)
-    return np.repeat(gray[:, None], 3, axis=1)
+            raise ValueError('点云颜色格式无效，无法转换为 intensity')
+    if intensity is not None:
+        finite = np.isfinite(intensity)
+        normalized = np.zeros(count, dtype=np.float32)
+        if finite.any():
+            low, high = np.percentile(intensity[finite], (1.0, 99.0))
+            if high - low > 1e-6:
+                normalized[finite] = np.clip(
+                    (intensity[finite] - low) / (high - low), 0.0, 1.0
+                )
+            else:
+                scale = 1.0 if high <= 1.5 else 255.0
+                normalized[finite] = np.clip(
+                    intensity[finite] / scale, 0.0, 1.0
+                )
+        return normalized
+    distance = np.linalg.norm(
+        np.asarray(camera_xyz, dtype=np.float64).reshape(-1, 3), axis=1
+    )
+    return np.clip(distance / far, 0.0, 1.0).astype(np.float32)
+
+
+def _intensity_image_to_bgr(image, gamma=1.0):
+    """把带 NaN 空洞的 float intensity 图转成测试查看器同款灰阶 BGR。"""
+    vis = np.asarray(image, dtype=np.float32)
+    gamma = float(gamma)
+    if np.isfinite(gamma) and abs(gamma - 1.0) > 1e-6:
+        vis = np.power(vis, gamma)
+    vis = np.nan_to_num(vis, nan=0.0)
+    gray = np.rint(np.clip(vis, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
 def projection_camera(params, transform_to_global, width, height):
@@ -392,13 +407,14 @@ def render_projection(
     *,
     crop_subject=False,
 ):
-    """将全局点云渲染为彩色针孔投影，并返回深度、索引图及相机参数。"""
+    """将全局点云渲染为与测试查看器一致的灰阶 intensity 针孔投影。"""
     width, height = map(int, image_size)
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     intrinsic, extrinsic = projection_camera(
         params, transform_to_global, width, height
     )
     camera = pts @ extrinsic[:3, :3].T + extrinsic[:3, 3]
+    scalars_all = _projection_scalars(colors, pts, params, camera)
     z = camera[:, 2]
     finite = np.isfinite(camera).all(axis=1)
     distance = np.linalg.norm(camera, axis=1)
@@ -427,10 +443,9 @@ def render_projection(
     v = np.rint(offset_v + intrinsic[1, 2]).astype(np.int32)
     inside = (u >= 0) & (u < width) & (v >= 0) & (v < height)
     u, v, z, indices = u[inside], v[inside], z[inside], indices[inside]
+    scalars = scalars_all[indices]
 
-    rgb = _intensity_rgb(colors, len(pts))[indices]
-
-    image = np.zeros((height, width, 3), dtype=np.uint8)
+    intensity = np.full((height, width), np.nan, dtype=np.float32)
     depth = np.zeros((height, width), dtype=np.float64)
     point_index = np.full((height, width), -1, dtype=np.int32)
     order = np.argsort(z)[::-1]
@@ -439,9 +454,10 @@ def render_projection(
         for du in range(-radius, radius + 1):
             px = np.clip(u[order] + du, 0, width - 1)
             py = np.clip(v[order] + dv, 0, height - 1)
-            image[py, px] = rgb[order, ::-1]
+            intensity[py, px] = scalars[order]
             depth[py, px] = z[order]
             point_index[py, px] = indices[order]
+    image = _intensity_image_to_bgr(intensity, params.get('gamma', 1.0))
 
     if crop_subject:
         image, depth, point_index, intrinsic = _crop_subject(

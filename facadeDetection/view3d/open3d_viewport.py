@@ -13,7 +13,7 @@ from .open3d_adapter import Open3DAdapter
 from .roi_selection import ROISelectionController
 from .pick_overlay import PointPickOverlay
 from .scene import PointCloudScene
-from .window_embed import NativeWindowFinder
+from .window_embed import NativeResizeWatcher, NativeWindowFinder, embed_as_child
 
 
 class _ContainerEventBridge(QObject):
@@ -110,7 +110,9 @@ class Open3DViewport(BaseViewport):
         self._qwindow = None
         self._fallback_label = None
         self._event_bridge = None
-        self._window_title = "PointCloud FacadeDetection"
+        self._window_title = f'PCFD-O3D-{id(self)}'
+        self._native_hwnd = None
+        self._native_resize_watcher = None
         self._pick_markers = []
         self._pick_lines = []
         self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
@@ -253,45 +255,26 @@ class Open3DViewport(BaseViewport):
 
             self._qwindow = QWindow.fromWinId(int(handle))
             self._container = QWidget.createWindowContainer(self._qwindow, self._root)
+            self._container.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
             self._container.setFocusPolicy(Qt.StrongFocus)
             self._container.setMouseTracking(True)
+            self._native_hwnd = int(handle)
+            embed_as_child(self._native_hwnd, self._container)
+            self._native_resize_watcher = NativeResizeWatcher(
+                self._native_hwnd, self._container
+            )
+            self._container.installEventFilter(self._native_resize_watcher)
+            QTimer.singleShot(
+                0,
+                lambda: embed_as_child(self._native_hwnd, self._container)
+                if self._native_hwnd and self._container is not None
+                else None,
+            )
 
             # PICK 使用独立顶层覆盖层；旧的内嵌 _Overlay 会与 GLFW 子窗口竞争输入，
             # 因此不再实例化。ROI 仍由 ROISelectionController 独立接管。
             self._overlay = None
             self._pick_overlay = PointPickOverlay(self, self._container)
-
-            def _sync_overlay_size():
-                try:
-                    if self._pick_overlay is None or self._container is None:
-                        return
-                    if not self._container.isVisible():
-                        return
-
-                        # 获取容器在屏幕上的精确位置
-                    container_global = self._container.mapToGlobal(QPoint(0, 0))
-                    self._pick_overlay.setGeometry(
-                            container_global.x(),
-                            container_global.y(),
-                            self._container.width(),
-                            self._container.height()
-                        )
-                    self._pick_overlay.raise_()
-
-                        # 如果处于激活状态，确保焦点
-                    if getattr(self._pick_overlay, '_active', False):
-                        self._pick_overlay.setFocus(Qt.OtherFocusReason)
-                except RuntimeError:
-                    pass
-
-            original_resize = self._root.resizeEvent
-            def _on_root_resize(event):
-                if callable(original_resize):
-                    original_resize(event)
-                _sync_overlay_size()
-            self._root.resizeEvent = _on_root_resize
-
-            QTimer.singleShot(0, _sync_overlay_size)
 
             self._event_bridge = _ContainerEventBridge(
                 self._interactor, overlay=None, parent=self._root
@@ -449,6 +432,14 @@ class Open3DViewport(BaseViewport):
         except Exception:
             pass
         self._roi_on_complete = None
+        watcher = getattr(self, '_native_resize_watcher', None)
+        if self._container is not None and watcher is not None:
+            try:
+                self._container.removeEventFilter(watcher)
+            except Exception:
+                pass
+        self._native_resize_watcher = None
+        self._native_hwnd = None
         for watched, bridge_name in (
             (self._qwindow, '_qwindow_event_bridge'),
             (self._container, '_event_bridge'),
@@ -796,8 +787,7 @@ class Open3DViewport(BaseViewport):
             pass
         if callback is not None:
             self.point_pick_callback = callback
-        if self._pick_overlay is not None:
-            self._pick_overlay.activate()
+        # 立面点选走 QWindow 事件桥，不弹出置顶覆盖层，避免挡住三维视口。
 
     def _handle_pick_screen(self, pos):
         """Handle a click from the top-level PICK overlay."""

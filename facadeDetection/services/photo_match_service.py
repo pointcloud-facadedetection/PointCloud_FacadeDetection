@@ -25,6 +25,75 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
     render_projection,
 )
 
+_INTENSITY_ATTRIBUTE_KEYS = (
+    'intensity',
+    'intensities',
+    'scalar_intensity',
+    'Intensity',
+)
+
+
+def _tensor_point_names(cloud):
+    try:
+        return [str(name) for name in cloud.point]
+    except Exception:
+        return []
+
+
+def _extract_tensor_intensity(cloud):
+    """按测试查看器相同的属性名列表读取 intensity，否则用 RGB 灰度。"""
+    names = list(dict.fromkeys(_tensor_point_names(cloud) + list(
+        _INTENSITY_ATTRIBUTE_KEYS
+    )))
+    for key in names:
+        if 'intens' not in key.lower():
+            continue
+        try:
+            return cloud.point[key].numpy().reshape(-1).astype(np.float32)
+        except Exception:
+            continue
+    try:
+        colors = cloud.point['colors'].numpy().astype(np.float32)
+    except Exception:
+        return None
+    if colors.ndim != 2 or colors.shape[1] < 3:
+        return None
+    return (
+        0.299 * colors[:, 0]
+        + 0.587 * colors[:, 1]
+        + 0.114 * colors[:, 2]
+    )
+
+
+def _voxel_downsample_with_values(points, values, voxel_size):
+    """下采样时把 intensity 编码进颜色，避免 tensor voxel 丢掉自定义属性。"""
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(
+        np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    )
+    scale = offset = None
+    if values is not None:
+        intensity = np.asarray(values, dtype=np.float64).reshape(-1)
+        if len(intensity) == len(points):
+            finite = np.isfinite(intensity)
+            if finite.any():
+                offset = float(np.min(intensity[finite]))
+                peak = float(np.max(intensity[finite]))
+                scale = peak - offset if peak > offset else 1.0
+                gray = np.zeros(len(intensity), dtype=np.float64)
+                gray[finite] = np.clip(
+                    (intensity[finite] - offset) / scale, 0.0, 1.0
+                )
+                cloud.colors = o3d.utility.Vector3dVector(
+                    np.repeat(gray[:, None], 3, axis=1)
+                )
+    downsampled = cloud.voxel_down_sample(float(voxel_size))
+    points = np.asarray(downsampled.points, dtype=np.float64)
+    if scale is None or not downsampled.has_colors():
+        return points, None
+    recovered = np.asarray(downsampled.colors)[:, 0] * scale + offset
+    return points, recovered.astype(np.float32)
+
 
 def _robust_uv_quadrilateral(uv):
     """与网格图、点云着色使用同一套立面范围：全部有效检测点的 UV 包围盒。"""
@@ -238,29 +307,16 @@ class PhotoMatchService:
         points = values = None
         try:
             cloud = o3d.t.io.read_point_cloud(str(path))
-            if voxel_size > 0:
-                cloud = cloud.voxel_down_sample(float(voxel_size))
             points = cloud.point['positions'].numpy().astype(
                 np.float64, copy=False
             )
-            keys = list(cloud.point)
-            intensity_key = next(
-                (name for name in keys if 'intens' in str(name).lower()),
-                None,
+            values = _extract_tensor_intensity(cloud)
+        except (KeyError, RuntimeError, OSError, ValueError) as exc:
+            print(
+                f'[PCFD] projection.tensor_read_failed path={path} error={exc}',
+                flush=True,
             )
-            if intensity_key is not None:
-                values = cloud.point[intensity_key].numpy().reshape(-1)
-            elif 'colors' in keys:
-                colors = cloud.point['colors'].numpy()
-                values = (
-                    0.299 * colors[:, 0]
-                    + 0.587 * colors[:, 1]
-                    + 0.114 * colors[:, 2]
-                )
-        except (KeyError, RuntimeError):
             cloud = o3d.io.read_point_cloud(str(path))
-            if voxel_size > 0:
-                cloud = cloud.voxel_down_sample(float(voxel_size))
             points = np.asarray(cloud.points, dtype=np.float64)
             if cloud.has_colors():
                 colors = np.asarray(cloud.colors, dtype=np.float32)
@@ -273,14 +329,23 @@ class PhotoMatchService:
         points = np.ascontiguousarray(
             np.asarray(points, dtype=np.float64).reshape(-1, 3)
         )
-        if len(points) == 0:
-            raise ValueError('点云文件不包含有效点')
         if values is not None:
             values = np.ascontiguousarray(
                 np.asarray(values, dtype=np.float32).reshape(-1)
             )
             if len(values) != len(points):
                 values = None
+        if voxel_size > 0:
+            points, values = _voxel_downsample_with_values(
+                points, values, voxel_size
+            )
+        if len(points) == 0:
+            raise ValueError('点云文件不包含有效点')
+        print(
+            f'[PCFD] projection.cloud n={len(points)} '
+            f'intensity={"yes" if values is not None else "no"} path={path}',
+            flush=True,
+        )
 
         self._projection_cloud_cache.clear()
         self._projection_cloud_cache[key] = (points, values)
