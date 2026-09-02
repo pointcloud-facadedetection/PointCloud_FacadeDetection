@@ -13,7 +13,7 @@ class ResultExportService:
     """
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
-                       pixel_size=0.01):
+                       pixel_size=0.05):
         """Generate defect heatmap PNG. """
         root = None
         try:
@@ -90,6 +90,7 @@ class ResultExportService:
                 'title': heatmap_spec(heatmap_mode)['title'],
                 'heatmap': str(heatmap_path) if heatmap_path else None,
                 'overlay': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'),
+                'report': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_report.png'),
                 'legend': str(legend_path) if legend_path else None,
             }
 
@@ -262,12 +263,9 @@ class ResultExportService:
         if len(base_points) == 0:
             raise ValueError('过滤后立面点云为空，无法导出叠加图')
 
-        # 纯色深色背景 - 与3D视口一致
-        # 深色背景: RGB(0.12, 0.13, 0.15) - 深蓝灰色
-        base_colors = np.full((len(base_points), 3), 0.13, dtype=float)
-        # 给背景添加轻微噪点纹理，避免过于平坦
-        noise = np.random.RandomState(42).uniform(-0.02, 0.02, base_colors.shape)
-        base_colors = np.clip(base_colors + noise, 0.08, 0.18)
+        # Export background is intentionally light so the point-cloud silhouette
+        # remains visible after PDF downscaling.
+        base_colors = np.full((len(base_points), 3), [0.65, 0.70, 0.78], dtype=float)
 
         # 转换为米单位传入 rasterize_facade
         values_m = values_mm / 1000.0
@@ -287,6 +285,7 @@ class ResultExportService:
             defect_colors=defect_colors, 
             vmin=limit_m,
             vmax=global_vmax_m,  # 传入全局vmax确保内部映射一致
+            max_size=2400,
             base_points=base_points, 
             base_colors=base_colors,
             projection_origin=projection_origin,
@@ -300,7 +299,9 @@ class ResultExportService:
             rgb = overlay[:, :, :3].astype(np.float32)
 
             # 优化模糊处理 - 保持缺陷边缘清晰
-            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 1.0)
+            # A small dilation keeps sparse defect windows legible in print.
+            alpha = cv2.dilate(alpha, np.ones((3, 3), np.uint8), iterations=1)
+            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 0.8)
             alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
             
             # RGB使用更小的模糊核，保持边缘清晰
@@ -316,11 +317,9 @@ class ResultExportService:
 
         visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
 
-        # 缺陷层使用更高权重，确保颜色鲜明
-        defect_boost = 1.15  # 缺陷层增强系数
-        
-        # 对base进行轻微暗化，进一步突出缺陷
-        base_darkened = base_rgb.astype(np.float32) * 0.85
+        # Keep the neutral point-cloud layer subdued while preserving detail.
+        defect_boost = 1.35
+        base_darkened = np.clip(base_rgb.astype(np.float32) * 1.02, 0, 255)
         
         boosted_overlay = overlay[:, :, :3].astype(np.float32) * defect_boost
         boosted_overlay = np.clip(boosted_overlay, 0, 255)
@@ -338,7 +337,27 @@ class ResultExportService:
         if not cv2.imwrite(str(overlay_path), composite):
             raise RuntimeError('合成图 PNG 写入失败')
 
+        report_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_report.png'
+        report_image = self._fit_report_image(composite)
+        if not cv2.imwrite(str(report_path), report_image):
+            raise RuntimeError('PDF 报告热力图写入失败')
+
         return heatmap_path
+
+    @staticmethod
+    def _fit_report_image(image, max_width=800, max_height=520):
+        """Create a bounded, letterboxed image for the fixed PDF image box."""
+        source = np.asarray(image, dtype=np.uint8)
+        if source.ndim != 3 or source.shape[0] == 0 or source.shape[1] == 0:
+            raise ValueError('报告图像为空')
+        h, w = source.shape[:2]
+        scale = min(float(max_width) / w, float(max_height) / h, 1.0)
+        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        resized = cv2.resize(source, (nw, nh), interpolation=cv2.INTER_AREA)
+        canvas = np.full((max_height, max_width, 3), [245, 247, 250], dtype=np.uint8)
+        x, y = (max_width - nw) // 2, (max_height - nh) // 2
+        canvas[y:y + nh, x:x + nw] = resized
+        return canvas
 
     def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
         """Create unified heatmap color legend PNG."""

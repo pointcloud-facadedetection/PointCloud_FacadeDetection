@@ -125,8 +125,10 @@ class PdfReportRenderer:
                 ("质量有效窗口数", overall.get("quality_valid_window_count"), "个"),
                 ("检测窗口总数", overall.get("window_count") or overall.get("total_window_count"), "个"),
                 ("平整度最大间隙", overall.get("flatness_max_gap_mm"), "mm"),
+                ("平整度窗口平均间隙", overall.get("flatness_avg_gap_mm"), "mm"),
                 ("平整度原始最大间隙", overall.get("flatness_raw_max_gap_mm"), "mm"),
                 ("垂直度最大偏差", overall.get("verticality_deviation_mm"), "mm"),
+                ("垂直度窗口平均偏差", overall.get("verticality_avg_deviation_mm"), "mm"),
                 ("检测靠尺长度", parameters.get("ruler_length_m"), "m")
             ]
             detail_rows = []
@@ -290,7 +292,7 @@ class PdfReportRenderer:
            统计摘要 - 2列2行（右侧紧凑布局）
            ============================================ */
         table.summary-panel {{
-            width: 150%;
+            width: 100%;
             border-collapse: separate;
             border-spacing: 12px;
         }}
@@ -407,12 +409,15 @@ class PdfReportRenderer:
            ============================================ */
         table.image-gallery {{
             width: 100%;
+            table-layout: fixed;
             border-collapse: separate;
             border-spacing: 10px;
             margin: 8px 0;
         }}
         td.image-cell {{
             width: 50%;
+            max-width: 50%;
+            overflow: hidden;
             vertical-align: top;
         }}
         .image-card {{
@@ -428,24 +433,28 @@ class PdfReportRenderer:
             text-align: center;
         }}
         .image-frame {{
-            background: #0f172a;
+            background: #f5f7fa;
             text-align: center;
             padding: 2px;
+            width: 80%;
+            height: 50mm;
+            overflow: hidden;
+            page-break-inside: avoid;
         }}
         .image-frame img {{
             display: block;
             width: 100%;
-            height: auto;
-            max-height: 50mm;
+            max-width: 100%;
+            height: 48mm;
         }}
         .image-legend {{
-            margin-top: 6px;
-            padding-top: 4px;
+            margin-top: 2px;
+            padding-top: 2px;
             border-top: 1px solid #f1f5f9;
         }}
         .legend-bar {{
             height: 6px;
-            background: #3b82f6;
+            background: linear-gradient(to right, #1677c8 0%, #16b8c4 25%, #f2d12e 50%, #f28c28 75%, #c91f2b 100%);
             margin-bottom: 3px;
         }}
         .legend-labels {{

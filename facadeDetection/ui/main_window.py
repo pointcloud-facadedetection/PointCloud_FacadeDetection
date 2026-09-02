@@ -1558,7 +1558,7 @@ class MainWindow(QMainWindow):
                     # Persist only small, portable artifact metadata. Runtime
                     # point arrays stay in __export_context and are not stored.
                     artifact = {key: exported.get(key) for key in
-                                ('mode', 'title', 'heatmap', 'overlay', 'legend')}
+                                ('mode', 'title', 'heatmap', 'overlay', 'report', 'legend')}
                     quality_report = facade.get('quality_report')
                     if isinstance(quality_report, dict):
                         artifacts = quality_report.setdefault('heatmap_artifacts', {})

@@ -683,6 +683,9 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     # ===================================================================
     finite_rows = [r for r in rows if np.isfinite(r['verticality_deviation_mm'])]
     pass_rows = [r['verticality_pass'] for r in finite_rows]
+    deviation_values = [r['verticality_deviation_mm'] for r in finite_rows]
+    average_deviation = (float(np.mean(deviation_values))
+                         if deviation_values else np.nan)
 
     elapsed = time.perf_counter() - started
     print(f'[PCFD] verticality.summary '
@@ -690,6 +693,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
           f'valid_windows={len(rows)} '
           f'rows={len(finite_rows)} '
           f'max_deviation_mm={max((r["verticality_deviation_mm"] for r in finite_rows), default=np.nan):.3f} '
+          f'avg_deviation_mm={average_deviation:.3f} '
           f'max_angle_deg={max((r["verticality_angle_deg"] for r in finite_rows), default=np.nan):.3f} '
           f'pass_rate={float(np.mean(pass_rows)) if pass_rows else 0.0:.3f} '
           f'seconds={elapsed:.2f}', flush=True)
@@ -698,6 +702,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
         'ok': bool(rows),
         'reason': '' if rows else 'no_verticality_rows',
         'verticality_deviation_mm': max((r['verticality_deviation_mm'] for r in finite_rows), default=np.nan),
+        'verticality_avg_deviation_mm': average_deviation,
         'verticality_max_angle_deg': max((r['verticality_angle_deg'] for r in finite_rows), default=np.nan),
         'verticality_pass': bool(pass_rows and all(pass_rows)),
         'verticality_pass_rate': float(np.mean(pass_rows)) if pass_rows else 0.0,
@@ -912,6 +917,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
                 'valid_window_count': len(valid_interval_rows),
                 'point_count': int(np.count_nonzero(point_mask)),
                 'flatness_max_gap_mm': float(np.nanmax(gaps)) if gaps else 0.0,
+                'flatness_avg_gap_mm': float(np.mean(gaps)) if gaps else np.nan,
                 'flatness_raw_max_gap_mm': float(np.nanmax(raw_gaps)) if raw_gaps else 0.0,
                 'flatness_pass_rate': float(np.mean(passes)) if passes else 0.0,
                 'quality_pass_rate': float(np.mean(passes)) if passes else 0.0,
@@ -952,6 +958,10 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
             interval['verticality_max_deviation_mm'] = (
                 float(np.nanmax([row['verticality_deviation_mm'] for row in vrows])) if vrows else 0.0
             )
+            interval['verticality_avg_deviation_mm'] = (
+                float(np.mean([row['verticality_deviation_mm'] for row in vrows]))
+                if vrows else np.nan
+            )
             interval['verticality_pass_rate'] = float(np.mean([row['verticality_pass'] for row in vrows])) if vrows else 0.0
 
     total_elapsed = time.perf_counter() - started
@@ -973,6 +983,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         'quality_valid_window_count': n_quality,
         'failed_window_count': n_failed,
         'flatness_max_gap_mm': max((r['flatness_gap_mm'] for r in finite_rows), default=0.),
+        'flatness_avg_gap_mm': float(np.mean([r['flatness_gap_mm'] for r in finite_rows])) if finite_rows else np.nan,
         'flatness_raw_max_gap_mm': max((r['flatness_raw_max_gap_mm'] for r in raw_rows), default=0.),
         'flatness_pass_rate': float(np.mean([r['flatness_pass'] for r in valid_rows])) if valid_rows else 0.,
         'quality_pass_rate': float(np.mean([r['flatness_pass'] for r in valid_rows])) if valid_rows else 0.,
@@ -980,6 +991,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         'max_hole_ratio': max((r['hole_ratio'] for r in rows), default=0.),
         # FIX: Ensure verticality fields use correct names and have valid values
         'verticality_deviation_mm': verticality.get('verticality_deviation_mm', np.nan),
+        'verticality_avg_deviation_mm': verticality.get('verticality_avg_deviation_mm', np.nan),
         'verticality_max_deviation_mm':verticality.get('verticality_deviation_mm', np.nan),
         'verticality_max_angle_deg': verticality.get('verticality_max_angle_deg', np.nan),
         'verticality_pass': verticality.get('verticality_pass', False),

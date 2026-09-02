@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import math
 
 
 class ReportDataService:
@@ -26,6 +27,7 @@ class ReportDataService:
                 number = index
             item["report_no"] = number
             item["quality"] = quality
+            ReportDataService._ensure_quality_averages(quality)
             item["images"] = ReportDataService._images(project_root, number, item["quality"])
             rows.append(item)
         rows.sort(key=lambda value: (value["report_no"], str(value.get("id", ""))))
@@ -64,7 +66,7 @@ class ReportDataService:
             artifacts = context.get("heatmaps") or {}
             for mode in ("flatness", "verticality"):
                 artifact = artifacts.get(mode) if isinstance(artifacts, dict) else None
-                value = ((artifact.get("overlay") or artifact.get("heatmap"))
+                value = ((artifact.get("report") or artifact.get("overlay") or artifact.get("heatmap"))
                          if isinstance(artifact, dict) else None)
                 if value and Path(value).is_file():
                     paths.append({"mode": mode, "title": artifact.get("title", mode),
@@ -81,7 +83,7 @@ class ReportDataService:
         if isinstance(artifacts, dict):
             for mode in ("flatness", "verticality"):
                 artifact = artifacts.get(mode)
-                value = ((artifact.get("overlay") or artifact.get("heatmap"))
+                value = ((artifact.get("report") or artifact.get("overlay") or artifact.get("heatmap"))
                          if isinstance(artifact, dict) else None)
                 if value and Path(value).is_file() and not any(
                         (item.get("path") if isinstance(item, dict) else item) == str(Path(value))
@@ -92,6 +94,9 @@ class ReportDataService:
             folder = Path(project_root) / "results" / f"facade_{number:03d}"
             for mode in ("flatness", "verticality"):
                 path = folder / f"facade_{number:03d}_{mode}_overlay.png"
+                report_path = folder / f"facade_{number:03d}_{mode}_report.png"
+                if report_path.is_file():
+                    path = report_path
                 if not path.is_file():
                     path = folder / f"facade_{number:03d}_{mode}_heatmap.png"
                 if path.is_file() and not any((item.get("path") if isinstance(item, dict) else item) == str(path)
@@ -108,3 +113,33 @@ class ReportDataService:
         # mode has been exported, do not fill the second slot with a legacy
         # duplicate image.
         return paths[:2]
+
+    @staticmethod
+    def _ensure_quality_averages(quality):
+        """Fill statistics for legacy results without mutating persisted data."""
+        overall = quality.setdefault("overall", {})
+        windows = quality.get("windows") or []
+
+        if "flatness_avg_gap_mm" not in overall:
+            values = []
+            for row in windows:
+                if not row.get("coverage_valid", False):
+                    continue
+                try:
+                    value = float(row.get("flatness_gap_mm"))
+                    if math.isfinite(value):
+                        values.append(value)
+                except (TypeError, ValueError):
+                    pass
+            overall["flatness_avg_gap_mm"] = sum(values) / len(values) if values else math.nan
+
+        if "verticality_avg_deviation_mm" not in overall:
+            values = []
+            for row in windows:
+                try:
+                    value = float(row.get("verticality_deviation_mm"))
+                    if math.isfinite(value):
+                        values.append(value)
+                except (TypeError, ValueError):
+                    pass
+            overall["verticality_avg_deviation_mm"] = sum(values) / len(values) if values else math.nan
