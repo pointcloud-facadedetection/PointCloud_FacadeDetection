@@ -40,6 +40,7 @@ class FileService:
         self.pointcloud_service = getattr(render_service, "pointcloud_service", None)
 
     # Public API
+    # TODO(upload_files): [文件加载读取] 读取、预处理、索引注册和 UI 渲染耗时
     def upload_files(
         self,
         project_uuid: Optional[str],
@@ -80,57 +81,10 @@ class FileService:
             dist_file = Path(distance_path).resolve() if distance_path else load_path.with_suffix('.dist')
             dist_exists = dist_file.exists()
 
-            # 若该项目此前已对该点云执行过去噪并缓存，优先直接加载缓存的
-            # 去噪结果，跳过分层降采样与去噪计算，也无需用户重新点击"去噪"。
-            cached = None
-            if project_uuid and self.pointcloud_service is not None:
-                try:
-                    from services import denoise_cache
-                    cached = denoise_cache.load(project_uuid, str(load_path))
-                except Exception:
-                    cached = None
-            cached_has_mapping = bool(cached and (cached.get('metadata') or {}).get('proxy_source_offsets'))
-
-            if cached is not None and cached_has_mapping:
-                # 分层代理点云的去噪缓存：raw 展开仍依赖原始点云，因此仍需读取，
-                # 但跳过 stratified_proxy_build 与去噪本身。
-                pts, cols = self._load_point_cloud(str(load_path))
-                print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
-                metadata = dict(cached['metadata'])
-                source_id = metadata.get('source_id') or (dataset_metadata or {}).get(
-                    'source_id', f"{project_uuid or 'local'}:source:{load_path.stem}")
-                metadata['source_id'] = source_id
-                metadata.setdefault('source_ply_path', str(load_path))
-
-                self.pointcloud_service.register_source_asset(
-                    source_id, pts, cols,
-                    {'ply_path': str(load_path), 'dist_path': str(dist_file)})
-
-                dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
-                dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, cached['points'], cached['colors'], metadata=metadata)
-                pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
-                print(f"[PCFD] load.denoise_cache_hit proxy={len(pts_ds)} "
-                      f"source={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
-
-            elif cached is not None and self.pointcloud_service is not None:
-                # 普通点云（无 .dist）的去噪缓存本身就是完整的 proxy/raw 点集，
-                # 无需再读取原始文件。
-                metadata = dict(dataset_metadata or {})
-                metadata.update(cached['metadata'])
-                metadata.setdefault('source_ply_path', str(load_path))
-                dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
-                dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, cached['points'], cached['colors'], metadata=metadata)
-                pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
-                print(f"[PCFD] load.denoise_cache_hit proxy={len(pts_ds)} "
-                      f"seconds={time.perf_counter()-started:.2f}", flush=True)
-
-            else:
-                pts, cols = self._load_point_cloud(str(load_path))
-                print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
-                print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
-                if dist_exists and self.pointcloud_service is not None:
+            pts, cols = self._load_point_cloud(str(load_path))
+            print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+            print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
+            if dist_exists and self.pointcloud_service is not None:
                     dist = read_dist(dist_file, pts, dataset_metadata or {})
                     print(
                         f"[PCFD] load.dist loaded source={dist.source} "
@@ -193,17 +147,17 @@ class FileService:
                           f"source={len(pts)} proxy={len(pts_ds)}",
                           flush=True)
 
-                elif self.pointcloud_service is not None:
-                    metadata = dict(dataset_metadata or {})
-                    metadata.setdefault('source_ply_path', str(load_path))
-                    dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
-                    dataset = self.pointcloud_service.register_dataset(
-                        dataset_id, pts, cols, metadata=metadata)
-                    pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
-                    print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} "
-                          f"seconds={time.perf_counter()-started:.2f}", flush=True)
-                else:
-                    pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
+            elif self.pointcloud_service is not None:
+                metadata = dict(dataset_metadata or {})
+                metadata.setdefault('source_ply_path', str(load_path))
+                dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
+                dataset = self.pointcloud_service.register_dataset(
+                    dataset_id, pts, cols, metadata=metadata)
+                pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
+                print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} "
+                      f"seconds={time.perf_counter()-started:.2f}", flush=True)
+            else:
+                pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
 
             name = asset.original_name if asset else src.name
             self.render_service.show_point_cloud(name=name, points=pts_ds, colors=cols_ds)
@@ -249,6 +203,7 @@ class FileService:
         return asset
 
     # New: unified FLS import workflow (folder -> convert -> persist -> render)
+    # TODO(import_fls_directory): [文件加载读取] FLS 批量导入逐文件同步读取会放大主线程卡顿。
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
         """
         通过基于子进程的转换器将 FARO FLS 目录转换为 PLY 格式进行导入，随后通过
@@ -423,6 +378,7 @@ class FileService:
         return None
 
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        # TODO(_load_point_cloud): [文件加载读取] o3d.io.read_point_cloud 一次性读入完整文件；应支持异步后台加载、流式分块/增量解析及可取消进度，并避免 IO 线程直接触碰 UI。
         pcd = o3d.io.read_point_cloud(path)
         try:
             pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)

@@ -25,33 +25,38 @@ def _sqlite_scalar_text(value):
 
 class ResultsRepo:
     @staticmethod
-    def persist_quality_artifact(results_dir, facade_id: int, quality: dict) -> str | None:
-        """Persist only the raw-index vector needed to replay a heatmap."""
-        indices = quality.get('__global_indices') if isinstance(quality, dict) else None
-        if indices is None or len(indices) == 0 or not results_dir:
-            return None
-        from pathlib import Path
-        root = Path(results_dir)
-        root.mkdir(parents=True, exist_ok=True)
-        path = root / f'facade_{int(facade_id):03d}_quality_domain.npz'
-        np.savez_compressed(path, global_indices=np.asarray(indices, dtype=np.int64))
-        # 将项目相对的构建产物名称存储在 SQLite 中
-        return path.name
-
-    @staticmethod
-    def load_quality_artifact(path) -> np.ndarray:
-        if not path:
-            return np.empty(0, dtype=np.int64)
-        try:
-            with np.load(path, allow_pickle=False) as data:
-                return np.asarray(data['global_indices'], dtype=np.int64)
-        except Exception:
-            return np.empty(0, dtype=np.int64)
+    def update_quality_artifacts(project_uuid: str, facade_id: int,
+                                 artifacts: dict) -> None:
+        """Persist only report image metadata after a preview/export action."""
+        if not project_uuid or not isinstance(artifacts, dict):
+            raise ValueError('质量 artifact 参数无效')
+        safe = {}
+        for mode, artifact in artifacts.items():
+            if not isinstance(artifact, dict):
+                continue
+            safe[str(mode)] = {
+                str(key): (value.item() if isinstance(value, np.generic) else value)
+                for key, value in artifact.items()
+                if key in {'mode', 'title', 'heatmap', 'overlay', 'legend'}
+                and isinstance(value, (str, int, float, bool, type(None), np.generic))
+            }
+        with project_session(project_uuid) as session:
+            facade = session.execute(
+                select(Facade).where(
+                    Facade.id == int(facade_id), Facade.is_deleted == 0,
+                )
+            ).scalar_one_or_none()
+            if facade is None:
+                raise ValueError(f'立面不存在: {facade_id}')
+            report = dict(facade.quality_report_json or {})
+            report['heatmap_artifacts'] = safe
+            facade.quality_report_json = report
+            session.flush()
 
     @staticmethod
     def commit_quality_success(project_uuid: str, facade_id: int, quality: dict,
                                 *, display_no=None, facade_data=None, color=None,
-                                dataset_revision=None, quality_artifact_path=None) -> None:
+                                 dataset_revision=None, quality_artifact_path=None) -> None:
         """Atomically persist a successful report without persisting point clouds."""
         if not isinstance(quality, dict) or not quality.get('ok', True):
             raise ValueError('只能持久化成功的质量结果')
@@ -79,9 +84,6 @@ class ResultsRepo:
 
         report = serializable(quality)
         report.pop('__export_context', None)
-        # 在 SQLite 中保留质量域。
-        if quality_artifact_path and not report.get('__global_indices'):
-            report['quality_artifact_path'] = str(quality_artifact_path)
         # 在开启事务之前进行验证，以防止格式错误的算法输出
         json.dumps(report, ensure_ascii=False)
         with project_session(project_uuid) as s:

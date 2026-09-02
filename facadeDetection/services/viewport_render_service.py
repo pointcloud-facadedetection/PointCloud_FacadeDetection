@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-# OpenCV 的 Python API 由二进制扩展动态导出。
-# pylint: disable=no-member
-
 import time
 import hashlib
 import threading
@@ -75,6 +72,8 @@ class ViewportRenderService:
         self.clear_station_scene()
         self._facade_color_signatures.clear()
         self._pre_facade_colors.clear()
+        self._facades_cache.clear()
+        self._selected_facade_id = None
         try:
             if hasattr(self.viewport, 'clear_roi_visuals'):
                 self.viewport.clear_roi_visuals()

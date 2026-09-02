@@ -100,6 +100,7 @@ class ProjectOverviewService:
 
     def open_project(self, directory_path: str) -> ProjectCard:
         path = Path(directory_path).expanduser().resolve()
+        # TODO(open_project): [项目生命周期] 新建/打开/切换前仅直接清空视口，缺少统一状态机和事务边界；应协调保存状态、后台任务取消、旧项目资源回收与新项目激活。
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
         # 如果该文件夹中存在 pcfd 索引，则采用该索引并将其更新或插入到索引数据库中，然后加载资源
@@ -212,17 +213,6 @@ class ProjectOverviewService:
                                'quality_report': row.quality_report_json,
                                'color': row.color_json,
                                 'dataset_revision': row.dataset_revision}
-                artifact = (row.quality_report_json or {}).get('quality_artifact_path')
-                if artifact:
-                    path = Path(artifact)
-                    if not path.is_absolute():
-                        path = Path(Storage.ensure_project_dirs(project_id)['results']) / path
-                    from services.dal.results_repo import ResultsRepo
-                    ids = ResultsRepo.load_quality_artifact(path)
-                    if len(ids):
-                        item['quality_report'] = dict(item.get('quality_report') or {})
-                        item['quality_report']['__global_indices'] = ids
-                        item['quality_report']['__index_space'] = 'facade_local_to_raw_global'
                 result.append(item)
             log_event(project_id, 'results.loaded', facades=len(result))
             return result

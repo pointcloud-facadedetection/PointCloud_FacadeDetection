@@ -24,7 +24,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -69,8 +68,8 @@ from services.pointcloud_service import PointCloudService
 from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService, ReportDataService, PdfReportRenderer
-from services.dal.report_repo import ReportRepo
 from services.result_export_service import ResultExportService
+from services.dal.report_repo import ReportRepo
 from config.settings import Config
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
@@ -2248,17 +2247,11 @@ class MainWindow(QMainWindow):
                 f"{stats.get('points_after', 0)} 个代理点",
                 8000,
             )
-            if stats.get('loaded_from_cache'):
-                message = (
-                    f"已加载离群点与下采样缓存："
-                    f"{stats.get('points_after', 0)} 个代理点"
-                )
-            else:
-                message = (
-                    f"离群点消除与下采样完成并已缓存："
-                    f"{stats.get('points_before', 0)} → "
-                    f"{stats.get('points_after', 0)} 个代理点"
-                )
+            message = (
+                f"离群点消除与下采样完成（仅当前会话）："
+                f"{stats.get('points_before', 0)} → "
+                f"{stats.get('points_after', 0)} 个代理点"
+            )
             self.statusBar().showMessage(message, 8000)
 
     def _enter_manual_match_mode(self):
@@ -3282,56 +3275,6 @@ class MainWindow(QMainWindow):
 
         print(f'[PCFD] ui.show_dialog facade_id={facade_id} facade_no={facade_no}', flush=True)
 
-        def _export_context(display_quality):
-            context = display_quality.get('__export_context') or {}
-            if context.get('points') is not None and context.get('results_dir'):
-                return context
-            # Historical reports intentionally do not persist large point arrays.
-            # Rebuild the export input from the active processing dataset.
-            try:
-                dataset = self.facade_service._index_service._get_dataset(cloud)
-                # Export the segmented facade domain as the front-facing base.
-                # Quality indices are measurement support only and must not
-                # define the image extent.
-                proxy_ids = np.asarray(
-                    facade.get('proxy_indices') or facade.get('inlier_indices') or [],
-                    dtype=np.int64)
-                if len(proxy_ids) and dataset.index.has_source_mapping():
-                    raw_indices = dataset.index.proxy_to_source_ids(
-                        proxy_ids, deduplicate=True)
-                else:
-                    raw_indices = proxy_ids
-                raw_indices = raw_indices[(raw_indices >= 0) &
-                                          (raw_indices < len(dataset.processed_raw_points))]
-                if len(raw_indices) == 0:
-                    print(f'[PCFD] export_context_failed facade_id={facade_id} '
-                          'reason=no_facade_source_indices', flush=True)
-                    return context
-                points = np.asarray(dataset.processed_raw_points)[raw_indices]
-                source_colors = dataset.index.get_source_colors()
-                colors = (np.asarray(source_colors)[raw_indices]
-                          if source_colors is not None and
-                          len(source_colors) > int(raw_indices.max()) else None)
-                if colors is None:
-                    colors = np.tile(np.asarray(
-                        self.render_service.facade_color_for(facade), dtype=float),
-                        (len(points), 1))
-                else:
-                    colors = np.asarray(colors, dtype=float).reshape(-1, 3)
-                    # Ensure the segmented facade colour is visible in the
-                    # exported base, independent of source RGB availability.
-                    colors[:] = np.asarray(
-                        self.render_service.facade_color_for(facade), dtype=float)
-                project_uuid = getattr(self.current_project, 'project_id', None)
-                results_dir = (Storage.ensure_project_dirs(project_uuid)['results']
-                               if project_uuid else None)
-                return {'results_dir': results_dir, 'points': points,
-                        'colors': colors}
-            except Exception as exc:
-                print(f'[PCFD] export_context_failed facade_id={facade_id} '
-                      f'error={exc!r}', flush=True)
-                return context
-
         def _show_effect(mode='flatness'):
             try:
                 display_quality = dict(quality) if isinstance(quality, dict) else {}
@@ -3339,26 +3282,10 @@ class MainWindow(QMainWindow):
                 self.render_service.apply_quality_colors(
                     cloud, display_quality,
                     index_service=self.facade_service._index_service)
-                context = _export_context(display_quality)
-                exported = ResultExportService().export_heatmap(
-                    context.get('results_dir'), facade_no,
-                    context.get('points'), context.get('colors'), display_quality)
-                if exported and exported.get('heatmap'):
-                    # Persist only small, portable artifact metadata. Runtime
-                    # point arrays stay in __export_context and are not stored.
-                    artifact = {key: exported.get(key) for key in
-                                ('mode', 'title', 'heatmap', 'overlay', 'preview', 'legend')}
-                    quality_report = facade.get('quality_report')
-                    if isinstance(quality_report, dict):
-                        artifacts = quality_report.setdefault('heatmap_artifacts', {})
-                        artifacts[exported.get('mode', mode)] = artifact
-                        self._refresh_report_preview()
-                    preview = (exported.get('preview') or exported.get('overlay')
-                               or exported.get('heatmap'))
-                    self.statusBar().showMessage(
-                        f'热力图已保存：{exported["heatmap"]}', 6000)
-                    return preview
-                self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
+                # Only update the in-memory viewport. Derived heatmap files
+                # are not part of the project lifecycle or PDF data source.
+                self.statusBar().showMessage('热力图已显示（仅当前会话）', 5000)
+                self._export_quality_heatmap(cloud, facade, display_quality)
                 return None
             except Exception as e:
                 print(f'[PCFD] ui.show_effect_error facade_id={facade_id} error={e}', flush=True)
@@ -3414,6 +3341,40 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, '质量评估', 
                 f'显示质量结果时出错：\n{e}')
 
+    def _export_quality_heatmap(self, cloud, facade, quality):
+        """Export the exact 3D heatmap source used by the dialog and report."""
+        try:
+            data = self.viewport.get_cloud_data(cloud)
+            dataset_id = data.get('dataset_id') if data else None
+            dataset = self.pointcloud_service.get_dataset(dataset_id)
+            if dataset is None:
+                return None
+            points = dataset.index.get_source_points()
+            if points is None or len(points) == 0:
+                points = dataset.proxy_points
+            colors = dataset.index.get_source_colors()
+            if points is None or len(points) == 0:
+                return None
+            result = ResultExportService().export_heatmap(
+                Path(self.current_project.directory_path) / 'results',
+                int(facade.get('display_no', facade.get('id', 1))),
+                points, colors, quality,
+            )
+            if result:
+                artifacts = dict(quality.get('heatmap_artifacts') or {})
+                artifacts[result['mode']] = result
+                quality['heatmap_artifacts'] = artifacts
+                ResultsRepo.update_quality_artifacts(
+                    self.current_project.project_id,
+                    int(facade.get('id', 0)),
+                    artifacts,
+                )
+                self._refresh_report_preview()
+            return result
+        except Exception as exc:
+            print(f'[PCFD] heatmap.export_failed error={exc!r}', flush=True)
+            return None
+
     def _on_facade_item_clicked(self, item):
         f = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not f:
@@ -3447,11 +3408,6 @@ class MainWindow(QMainWindow):
         project_uuid = getattr(self.current_project, 'project_id', None)
         if not project_uuid:
             QMessageBox.warning(self, '质量评估', '请先选择项目。')
-            return
-        # Quality PNG export is written to the active project's results folder.
-        # The folder is created here, while actual export remains user-triggered
-        # from the result dialog.
-        results_dir = Storage.ensure_project_dirs(project_uuid)['results']
 
         # FIX: Ensure facade dict has stable id and display_no
         facade_copy = dict(f)
@@ -3483,9 +3439,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('已命中质量结果缓存', 3000)
             self._show_quality_dialog(cloud, facade_copy, cached_quality)
             return
-        kwargs = {'profile': profile,
-                  'grid_size': grid_size,
-                  'results_dir': results_dir}
+        kwargs = {'profile': profile, 'grid_size': grid_size}
         self._quality_request_token = getattr(self, '_quality_request_token', 0) + 1
         token = self._quality_request_token
         self._quality_request_cache_key = cache_key
@@ -3590,20 +3544,12 @@ class MainWindow(QMainWindow):
             project_uuid = getattr(self.current_project, 'project_id', None)
             if not project_uuid:
                 raise RuntimeError('当前项目已失效，无法保存质量结果')
-            # results_dir belongs to the evaluation request, but the finished
-            # callback must not read a local variable from _evaluate_facade.
-            # Resolve it here so asynchronous completion has an independent,
-            # valid persistence context.
             dataset = self.facade_service._index_service._get_dataset(cloud)
-            # Quality reports are self-contained; no results-domain NPZ is
-            # needed for replay. Keep export context separate from persistence.
-            artifact_path = None
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
                 facade_data=f,
                 dataset_revision=getattr(dataset, 'revision', None),
-                quality_artifact_path=artifact_path,
                 color=self.render_service.facade_color_for(f, facade_no),
             )
             f['quality_status'] = 'complete'
@@ -4258,6 +4204,9 @@ class MainWindow(QMainWindow):
         if button is not None:
             button.setChecked(True)
         self._update_window_title(page_key)
+        viewport = getattr(self, 'viewport', None)
+        if viewport is not None and hasattr(viewport, 'set_workspace_active'):
+            viewport.set_workspace_active(page_key == 'project_operation')
 
     def _enter_project_operation(self):
         """点云加载完成后进入项目操作页，三维视口只在这一页。"""
@@ -4588,6 +4537,7 @@ class MainWindow(QMainWindow):
         if project_id:
             self._start_load('fls', project_id, directory=directory_path)
 
+    # TODO(_open_project_directory): [项目生命周期] 打开项目应先经过统一的保存确认、任务取消和旧项目资源回收状态转换，再激活新项目，避免新旧点云交叉存活。
     def _open_project_directory(self):
         directory_path = QFileDialog.getExistingDirectory(
             self,
@@ -5150,6 +5100,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """严格按顺序销毁，先停 timer，再断信号，再销毁 viewport，最后退出 app。"""
+        # TODO(closeEvent): [项目生命周期] 关闭流程应由显式状态机统一管理保存/取消、后台任务等待、视口销毁和点云内存释放，并保证重复关闭与异常路径均幂等。
         if getattr(self, '_closing', False):
             event.accept()
             return
@@ -5316,8 +5267,26 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            viewport = getattr(self, 'viewport', None)
+            if viewport is not None and hasattr(viewport, 'set_host_window_state'):
+                viewport.set_host_window_state(
+                    self.isVisible() and not self.isMinimized(),
+                    minimized=self.isMinimized(),
+                )
             self._update_maximize_button()
             QTimer.singleShot(0, self._position_resize_handles)
+
+    def hideEvent(self, event):
+        viewport = getattr(self, 'viewport', None)
+        if viewport is not None and hasattr(viewport, 'set_host_window_state'):
+            viewport.set_host_window_state(False, minimized=self.isMinimized())
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        viewport = getattr(self, 'viewport', None)
+        if viewport is not None and hasattr(viewport, 'set_host_window_state'):
+            viewport.set_host_window_state(True, minimized=False)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

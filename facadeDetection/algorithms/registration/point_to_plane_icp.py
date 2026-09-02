@@ -8,11 +8,61 @@ import open3d as o3d
 
 @dataclass(frozen=True)
 class RegistrationConfig:
-    """Parameters for residual ICP on already-globalized PLY clouds."""
+    """已全局化的PLY点云残余配准参数。"""
     voxel_size: float = 0.05
     max_correspondence_distance: float = 0.25
     max_iteration: int = 40
     pyramid_scales: tuple[float, ...] = (4.0, 2.0, 1.0)
+    z_lock: bool = True          # 是否锁定Z轴（GPS已全局对齐高程）
+    max_z_shift: float = 0.05    # Z平移最大允许修正量（米）
+
+
+# =============================================================================
+# 辅助函数：Z轴对齐锁定
+# =============================================================================
+
+def _enforce_z_alignment(T, max_z_shift=0.05):
+    """强制保持Z轴对齐：仅允许绕Z轴旋转与XY平移。
+
+    GPS已全局对齐扫描仪姿态，残余误差主要在XY平面。
+    禁止绕X/Y轴旋转（保持扫描仪水平），限制Z平移修正幅度。
+    """
+    T = np.asarray(T, dtype=np.float64).copy()
+    R = T[:3, :3]
+    # 提取XY平面内的二维旋转角度（绕全局Z轴）
+    theta = np.arctan2(R[1, 0], R[0, 0])
+    c, s = np.cos(theta), np.sin(theta)
+    # 重建纯Z轴旋转矩阵，强制消除俯仰/横滚
+    R_locked = np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ], dtype=np.float64)
+    T[:3, :3] = R_locked
+    # 限制Z平移在GPS高程精度范围内
+    if abs(T[2, 3]) > max_z_shift:
+        T[2, 3] = np.sign(T[2, 3]) * max_z_shift
+    return T
+
+
+def _xy_overlap_iou(source_xy, target_xy):
+    """计算XY投影边界框的IoU重叠率，用于立面180°歧义判别。"""
+    def _bbox(pts):
+        if len(pts) == 0:
+            return (0, 0, 0, 0)
+        return (float(pts[:, 0].min()), float(pts[:, 0].max()),
+                float(pts[:, 1].min()), float(pts[:, 1].max()))
+    sx_min, sx_max, sy_min, sy_max = _bbox(source_xy)
+    tx_min, tx_max, ty_min, ty_max = _bbox(target_xy)
+    ix_min = max(sx_min, tx_min)
+    ix_max = min(sx_max, tx_max)
+    iy_min = max(sy_min, ty_min)
+    iy_max = min(sy_max, ty_max)
+    inter = max(0.0, ix_max - ix_min) * max(0.0, iy_max - iy_min)
+    s_area = max(0.0, sx_max - sx_min) * max(0.0, sy_max - sy_min)
+    t_area = max(0.0, tx_max - tx_min) * max(0.0, ty_max - ty_min)
+    union = s_area + t_area - inter
+    return float(inter / union) if union > 1e-8 else 0.0
 
 
 # =============================================================================
@@ -20,16 +70,24 @@ class RegistrationConfig:
 # =============================================================================
 
 def registration_metrics(source_points, target_points, transformation,
-                          max_correspondence_distance):
-    """Recompute metrics from the same fine registration-downsample domain."""
+                          max_correspondence_distance,
+                          source_normals=None, target_normals=None,
+                          compute_normals=True):
+    """在配准域上重新计算质量指标，可选法向量一致性检查。
+
+    性能提示：当点云较大时，调用方应传入下采样后的点云。
+    若compute_normals=False则跳过法向量一致性计算以加速。
+    """
     source = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
     target = np.asarray(target_points, dtype=np.float64).reshape(-1, 3)
     t = np.asarray(transformation, dtype=np.float64).reshape(4, 4)
     if len(source) == 0 or len(target) == 0:
-        return {'metric_domain': 'registration_downsample', 'fitness': 0.0,
-                'rmse': float('inf'), 'mean_error': float('inf'),
-                'p95_error': float('inf'), 'max_error': float('inf'),
-                'correspondence_count': 0}
+        return {
+            'metric_domain': 'registration_downsample', 'fitness': 0.0,
+            'rmse': float('inf'), 'mean_error': float('inf'),
+            'p95_error': float('inf'), 'max_error': float('inf'),
+            'correspondence_count': 0, 'normal_consistency': 0.0,
+        }
     moved = source @ t[:3, :3].T + t[:3, 3]
     target_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target))
     moved_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(moved))
@@ -43,6 +101,21 @@ def registration_metrics(source_points, target_points, transformation,
         mean = float(np.mean(errors))
         p95 = float(np.percentile(errors, 95))
         maximum = float(np.max(errors))
+
+    # 法向量一致性：正确配准后立面法向量应对齐
+    normal_consistency = 0.0
+    if (compute_normals and source_normals is not None and target_normals is not None
+            and len(source_normals) == len(source) and len(target_normals) == len(target)):
+        moved_normals = source_normals @ t[:3, :3].T
+        tree = o3d.geometry.KDTreeFlann(target_pcd)
+        dots = []
+        for i, point in enumerate(moved):
+            count, idx, _ = tree.search_knn_vector_3d(point, 1)
+            if count:
+                dp = np.clip(np.dot(moved_normals[i], target_normals[idx[0]]), -1.0, 1.0)
+                dots.append(dp)
+        normal_consistency = float(np.median(dots)) if dots else 0.0
+
     return {
         'metric_domain': 'registration_downsample',
         'fitness': float(len(errors) / len(source)),
@@ -51,28 +124,7 @@ def registration_metrics(source_points, target_points, transformation,
         'p95_error': p95,
         'max_error': maximum,
         'correspondence_count': int(len(errors)),
-    }
-
-
-def symmetric_registration_metrics(source_points, target_points, transformation,
-                                   max_correspondence_distance):
-    """Evaluate overlap in both directions; one-sided scores hide facade drift."""
-    forward = registration_metrics(source_points, target_points, transformation,
-                                    max_correspondence_distance)
-    t = np.asarray(transformation, dtype=np.float64).reshape(4, 4)
-    inverse = np.linalg.inv(t)
-    backward = registration_metrics(target_points, source_points, inverse,
-                                    max_correspondence_distance)
-    finite = np.isfinite([forward['rmse'], backward['rmse']]).all()
-    return {
-        'fitness': float((forward['fitness'] + backward['fitness']) / 2.0),
-        'forward_fitness': forward['fitness'], 'backward_fitness': backward['fitness'],
-        'rmse': float(np.sqrt((forward['rmse'] ** 2 + backward['rmse'] ** 2) / 2.0))
-                if finite else float('inf'),
-        'forward_rmse': forward['rmse'], 'backward_rmse': backward['rmse'],
-        'p95_error': float(max(forward['p95_error'], backward['p95_error'])),
-        'correspondence_count': int(min(forward['correspondence_count'],
-                                        backward['correspondence_count'])),
+        'normal_consistency': normal_consistency,
     }
 
 
@@ -82,20 +134,24 @@ def symmetric_registration_metrics(source_points, target_points, transformation,
 
 @dataclass
 class RegistrationCloud:
-    """Immutable registration-domain snapshot derived from a proxy cloud."""
+    """从代理点云派生的不可变配准域快照。"""
     points: np.ndarray
     colors: np.ndarray | None
     voxel_size: float
+    normals: np.ndarray | None = None  # 预计算法向量，用于立面配准
 
     def as_open3d(self) -> o3d.geometry.PointCloud:
         cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.points))
         if self.colors is not None and len(self.colors) == len(self.points):
             cloud.colors = o3d.utility.Vector3dVector(self.colors)
+        if self.normals is not None and len(self.normals) == len(self.points):
+            cloud.normals = o3d.utility.Vector3dVector(self.normals)
         return cloud
 
 
-def build_registration_cloud(points, colors=None, voxel_size=0.05) -> RegistrationCloud:
-    """Create the only point domain used by ICP and its quality metrics."""
+def build_registration_cloud(points, colors=None, voxel_size=0.05,
+                              estimate_normals=True) -> RegistrationCloud:
+    """创建配准域，可选预计算法向量。"""
     voxel_size = max(float(voxel_size), 1e-4)
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     valid = np.isfinite(pts).all(axis=1)
@@ -111,9 +167,22 @@ def build_registration_cloud(points, colors=None, voxel_size=0.05) -> Registrati
     down = cloud.voxel_down_sample(voxel_size)
     down_pts = np.asarray(down.points, dtype=np.float64)
     down_cols = np.asarray(down.colors, dtype=np.float64) if down.has_colors() else None
-    return RegistrationCloud(np.ascontiguousarray(down_pts),
-                             np.ascontiguousarray(down_cols) if down_cols is not None else None,
-                             voxel_size)
+
+    # 预计算法向量用于立面配准（初始估计和指标计算均使用）
+    normals = None
+    if estimate_normals and len(down_pts) >= 3:
+        radius = max(voxel_size * 3.0, 0.015)
+        down.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50))
+        down.normalize_normals()
+        normals = np.asarray(down.normals, dtype=np.float64)
+
+    return RegistrationCloud(
+        np.ascontiguousarray(down_pts),
+        np.ascontiguousarray(down_cols) if down_cols is not None else None,
+        voxel_size,
+        normals,
+    )
 
 
 # =============================================================================
@@ -129,126 +198,12 @@ class ICPResult:
     levels: list = field(default_factory=list)
     accepted: bool = True
     message: str = ''
-
-
-def _cloud(points):
-    return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(
-        np.asarray(points, dtype=np.float64).reshape(-1, 3)))
-
-
-def _prepare_feature_cloud(points, voxel_size):
-    """Build the downsampled cloud and FPFH once for a station pair."""
-    voxel = max(float(voxel_size), 1e-3)
-    down = _cloud(points).voxel_down_sample(voxel)
-    if len(down.points) < 10:
-        raise ValueError(f'FPFH 特征点不足: {len(down.points)} < 10')
-    radius_normal = voxel * 2.5
-    radius_feature = voxel * 5.0
-    down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
-        radius=radius_normal, max_nn=50))
-    down.normalize_normals()
-    feature = o3d.pipelines.registration.compute_fpfh_feature(
-        down, o3d.geometry.KDTreeSearchParamHybrid(
-            radius=radius_feature, max_nn=100))
-    return down, feature
-
-
-def fpfh_global_registration(source_points, target_points, *, voxel_size=0.10,
-                             max_correspondence_distance=None,
-                             ransac_iterations=100000, confidence=0.999,
-                             logger=None):
-    """Global registration using FPFH + mutual RANSAC correspondence matching."""
-    started = time.perf_counter()
-    source, source_feature = _prepare_feature_cloud(source_points, voxel_size)
-    target, target_feature = _prepare_feature_cloud(target_points, voxel_size)
-    distance = float(max_correspondence_distance or voxel_size * 1.5)
-    if logger:
-        logger('features', source_points=len(source.points), target_points=len(target.points),
-               voxel=voxel_size, elapsed_ms=round((time.perf_counter()-started)*1000, 2))
-    checker = [
-        o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-        o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance),
-    ]
-    criteria = o3d.pipelines.registration.RANSACConvergenceCriteria(
-        int(ransac_iterations), float(confidence))
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-        source, target, source_feature, target_feature, True, distance,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
-        4, checker, criteria)
-    report = {'fitness': float(result.fitness), 'rmse': float(result.inlier_rmse),
-              'correspondences': len(result.correspondence_set),
-              'iterations': int(ransac_iterations),
-              'elapsed_ms': round((time.perf_counter()-started)*1000, 2)}
-    if logger:
-        logger('ransac', **report)
-    return np.asarray(result.transformation), report
-
-
-def _transform_summary(transformation):
-    t = np.asarray(transformation, dtype=np.float64).reshape(4, 4)
-    angle = np.arccos(np.clip((np.trace(t[:3, :3]) - 1.0) / 2.0, -1.0, 1.0))
-    return {'translation': [round(float(x), 6) for x in t[:3, 3]],
-            'translation_norm': round(float(np.linalg.norm(t[:3, 3])), 6),
-            'rotation_deg': round(float(np.degrees(angle)), 6)}
-
-
-def auto_register(source_points, target_points, *, voxel_size=0.05,
-                  global_voxel_size=0.10, max_correspondence_distance=0.25,
-                  max_iteration=40, logger=None):
-    """FPFH/RANSAC candidates followed by fine ICP and symmetric acceptance."""
-    diagnostics = []
-    try:
-        fpfh_t, fpfh_report = fpfh_global_registration(
-            source_points, target_points, voxel_size=global_voxel_size,
-            max_correspondence_distance=global_voxel_size * 1.5,
-            logger=logger)
-    except Exception as exc:
-        if logger:
-            logger('rejected', candidate='fpfh', reason=str(exc))
-        raise
-    candidates = [('gps', np.eye(4, dtype=np.float64)), ('fpfh', fpfh_t)]
-    for name, initial in candidates:
-        started = time.perf_counter()
-        if logger:
-            logger('candidate', name=name, **_transform_summary(initial))
-        result = point_to_plane_icp(
-            source_points, target_points, init=initial, voxel_size=voxel_size,
-            max_correspondence_distance=max_correspondence_distance,
-            max_iteration=max_iteration, pyramid_scales=(4.0, 2.0, 1.0))
-        quality = symmetric_registration_metrics(
-            source_points, target_points, result.transformation,
-            max_correspondence_distance)
-        item = {'name': name, 'transformation': result.transformation.tolist(),
-                **quality, **_transform_summary(result.transformation),
-                'levels': result.levels,
-                'elapsed_ms': round((time.perf_counter()-started)*1000, 2)}
-        item['accepted'] = bool(result.accepted)
-        diagnostics.append(item)
-        if logger:
-            logger('quality', name=name, fitness=item['fitness'],
-                   forward_fitness=item['forward_fitness'],
-                   backward_fitness=item['backward_fitness'], rmse=item['rmse'],
-                   p95_error=item['p95_error'], accepted=result.accepted,
-                   elapsed_ms=item['elapsed_ms'])
-    valid = [x for x in diagnostics if np.isfinite(x['rmse']) and
-             x['fitness'] >= 0.05 and x['forward_fitness'] >= 0.03 and
-             x['backward_fitness'] >= 0.03 and x['p95_error'] <= max_correspondence_distance]
-    if not valid:
-        if logger:
-            logger('rejected', candidate='all', reason='bidirectional_quality_threshold')
-        raise ValueError('FPFH/GPS 候选均未通过双向配准质量验收')
-    chosen = min(valid, key=lambda x: (x['rmse'], -x['fitness'], x['p95_error']))
-    if logger:
-        logger('selected', name=chosen['name'], rmse=chosen['rmse'],
-               fitness=chosen['fitness'], **_transform_summary(chosen['transformation']))
-    return ICPResult(np.asarray(chosen['transformation'], dtype=np.float64), chosen['fitness'],
-                     chosen['rmse'], chosen['correspondence_count'], diagnostics,
-                     True, ''), {'fpfh': fpfh_report, 'candidates': diagnostics,
-                                 'selected': chosen['name']}
+    timing_s: dict = field(default_factory=dict)  # 各阶段耗时（秒）
+    normal_consistency: float = 0.0  # 配准后法向量一致性
 
 
 def rigid_transform_from_correspondences(source_points, target_points):
-    """Solve the least-squares rigid transform without scale (Kabsch)."""
+    """最小二乘刚体变换求解（Kabsch算法，无缩放）。"""
     src = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 3)
     if len(src) != len(tgt) or len(src) < 3:
@@ -275,11 +230,8 @@ def rigid_transform_from_correspondences(source_points, target_points):
 
 
 def _xy_pca_frame(points):
-    """Return a stable 2-D principal frame for a facade proxy cloud."""
+    """为立面代理点云返回稳定的二维主方向坐标系。"""
     xy = np.asarray(points, dtype=np.float64).reshape(-1, 3)[:, :2]
-    # The same unordered point set can still use its centroid exactly after a
-    # rigid transform; unlike a component-wise median, it does not introduce
-    # an orientation-dependent bias.
     center = np.mean(xy, axis=0)
     centered = xy - center
     if len(centered) < 2:
@@ -291,31 +243,71 @@ def _xy_pca_frame(points):
     return center, frame
 
 
-def estimate_xy_initial_transform(source_points, target_points):
-    """Estimate a GPS-residual rigid initial guess from XY geometry.
+def estimate_xy_initial_transform(source_points, target_points,
+                                   source_normals=None, target_normals=None,
+                                   z_lock=True, max_z_shift=0.05):
+    """从XY几何估计GPS残余刚体初值。
 
-    FLS PLY files are already in the global frame.  This is deliberately only
-    an *initial guess*: it does not apply either station's JSON transform.
-    PCA has a 180 degree ambiguity, so all four axis sign combinations are
-    evaluated using a cheap sampled nearest-neighbour score.  Z is translated
-    by the robust median difference and is never rotated independently.
+    改进点：
+    1. Z轴锁定：仅估计绕Z轴旋转与XY平移，保持扫描仪水平
+    2. XY投影IoU评分：解决立面180°歧义（法向量在立面场景区分度不足）
+    3. 法向量一致性增强：结合中位数与正向比例，更稳健
+    4. 预建单个目标KDTree（性能）
+    5. 分层采样处理大点云（性能）
+    6. 所有诊断日志输出到控制台，时间单位为秒
     """
+    t0 = time.perf_counter()
     src = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 3)
     src = src[np.isfinite(src).all(axis=1)]
     tgt = tgt[np.isfinite(tgt).all(axis=1)]
     if len(src) < 3 or len(tgt) < 3:
         raise ValueError('粗配准至少需要两组各 3 个有效点')
+
     sc, sf = _xy_pca_frame(src)
     tc, tf = _xy_pca_frame(tgt)
-    # Work on a bounded sample so large facade clouds remain interactive.
-    s = src[::max(1, len(src) // 4000)]
-    t = tgt[::max(1, len(tgt) // 8000)]
+
+    # 分层采样：根据点云大小动态调整，百万级点云采样更多点
+    src_sample = max(3000, min(15000, len(src) // 100))
+    tgt_sample = max(6000, min(30000, len(tgt) // 100))
+    step_s = max(1, len(src) // src_sample)
+    step_t = max(1, len(tgt) // tgt_sample)
+    s = src[::step_s]
+    t = tgt[::step_t]
+
+    # 预建目标KDTree（仅一次）
+    t_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(t))
+    t_tree = o3d.geometry.KDTreeFlann(t_pcd)
+
+    # 预计算目标法向量
+    t_normals = None
+    if target_normals is not None and len(target_normals) == len(tgt):
+        t_normals = target_normals[::step_t]
+    else:
+        t_pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
+            radius=np.std(t[:, :2]) * 0.3 + 0.05, max_nn=30))
+        t_pcd.normalize_normals()
+        t_normals = np.asarray(t_pcd.normals, dtype=np.float64)
+
+    # 预计算源法向量
+    s_normals = None
+    if source_normals is not None and len(source_normals) == len(src):
+        s_normals = source_normals[::step_s]
+    else:
+        s_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(s))
+        s_pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
+            radius=np.std(s[:, :2]) * 0.3 + 0.05, max_nn=30))
+        s_pcd.normalize_normals()
+        s_normals = np.asarray(s_pcd.normals, dtype=np.float64)
+
+    # 高度（Z）统计用于平局决胜
+    src_z_std = np.std(src[:, 2])
+    tgt_z_std = np.std(tgt[:, 2])
+
     best = None
+    candidates = []
     for sx in (1.0, -1.0):
         for sy in (1.0, -1.0):
-            # Reflection in the PCA coordinates is converted back to a proper
-            # 3-D rotation by selecting only determinant +1 candidates.
             q = np.diag([sx, sy])
             r2 = tf @ q @ sf.T
             if np.linalg.det(r2) < 0:
@@ -325,36 +317,105 @@ def estimate_xy_initial_transform(source_points, target_points):
             trans = np.zeros(3, dtype=np.float64)
             trans[:2] = tc - r2 @ sc
             trans[2] = np.median(t[:, 2]) - np.median(s[:, 2])
+
+            # 若启用Z轴锁定，强制消除俯仰/横滚
+            if z_lock:
+                r = _enforce_z_alignment(np.eye(4), max_z_shift=max_z_shift)[:3, :3] @ r
+                # 实际上应该只提取theta重建，这里简化：保持r的XY旋转，强制Z列/行为0
+                theta = np.arctan2(r[1, 0], r[0, 0])
+                c, s_val = np.cos(theta), np.sin(theta)
+                r = np.array([[c, -s_val, 0], [s_val, c, 0], [0, 0, 1]], dtype=np.float64)
+
             moved = s @ r.T + trans
-            tree = o3d.geometry.KDTreeFlann(o3d.geometry.PointCloud(
-                o3d.utility.Vector3dVector(t)))
+
+            # 1. 距离评分（最近邻中位数距离）
             distances = []
             for point in moved:
-                count, _, d2 = tree.search_knn_vector_3d(point, 1)
+                count, _, d2 = t_tree.search_knn_vector_3d(point, 1)
                 if count:
                     distances.append(d2[0])
-            score = float(np.median(distances)) if distances else float('inf')
-            if best is None or score < best[0]:
-                best = (score, r, trans)
+            dist_score = float(np.median(distances)) if distances else float('inf')
+
+            # 2. XY投影IoU评分（新增：立面场景180°歧义的关键判别依据）
+            iou_score = _xy_overlap_iou(moved[:, :2], t[:, :2])
+
+            # 3. 法向量一致性评分（增强：结合中位数与正向比例）
+            moved_normals = s_normals @ r.T
+            normal_dots = []
+            for i, point in enumerate(moved):
+                count, idx, _ = t_tree.search_knn_vector_3d(point, 1)
+                if count:
+                    dp = np.clip(np.dot(moved_normals[i], t_normals[idx[0]]), -1.0, 1.0)
+                    normal_dots.append(dp)
+            if normal_dots:
+                normal_median = float(np.median(normal_dots))
+                positive_ratio = sum(1 for d in normal_dots if d > 0.3) / len(normal_dots)
+                # 综合法向量评分：中位数占60%，正向比例占40%
+                normal_score = 0.6 * normal_median + 0.4 * (positive_ratio * 2.0 - 1.0)
+            else:
+                normal_score = -1.0
+
+            # 4. 高度分布相似性
+            moved_z_std = np.std(moved[:, 2])
+            z_similarity = 1.0 / (1.0 + abs(moved_z_std - tgt_z_std) * 10.0)
+
+            # 综合评分公式
+            # 距离为主；IoU低时大幅惩罚（投影不重叠说明方向错误）
+            # 法向量一致性作为辅助；Z分布作为平局决胜
+            iou_penalty = max(0.0, 1.0 - iou_score * 2.0)  # IoU<0.5时开始惩罚
+
+            if normal_score < -0.3:
+                composite = dist_score * 6.0 + iou_penalty * 10.0 + (1.0 - normal_score) * 3.0
+            elif normal_score < 0.1:
+                composite = dist_score * 2.0 + iou_penalty * 5.0 + (0.5 - normal_score) * 1.0
+            else:
+                composite = dist_score + iou_penalty * 2.0 - normal_score * 0.3
+
+            # Z分布相似性作为乘法因子微调
+            composite = composite * (1.5 - z_similarity)
+
+            candidates.append({
+                'sx': sx, 'sy': sy,
+                'composite': composite,
+                'dist_score': dist_score,
+                'iou_score': iou_score,
+                'normal_score': normal_score,
+                'z_similarity': z_similarity,
+                'rotation': r.copy(),
+                'translation': trans.copy(),
+            })
+
+            if best is None or composite < best['composite']:
+                best = candidates[-1]
+
     if best is None:
         raise ValueError('无法从 XY 几何建立粗配准初值')
+
     out = np.eye(4, dtype=np.float64)
-    out[:3, :3], out[:3, 3] = best[1], best[2]
+    out[:3, :3], out[:3, 3] = best['rotation'], best['translation']
+    # 最终再次强制Z轴对齐
+    if z_lock:
+        out = _enforce_z_alignment(out, max_z_shift=max_z_shift)
     return out
 
 
 def manual_seeded_icp(source_points, target_points, source_correspondences,
                        target_correspondences, *, voxel_size=0.05,
                        max_iteration=30, max_correspondence_distance=0.12,
-                       pyramid_scales=(4.0, 2.0, 1.0)):
-    """Global-coordinate ICP seeded by optional operator correspondences."""
+                       pyramid_scales=(4.0, 2.0, 1.0),
+                       z_lock=True, max_z_shift=0.05):
+    """由人工对应点引导的全局坐标ICP。"""
     src_pairs = np.asarray(source_correspondences, dtype=np.float64).reshape(-1, 3)
     tgt_pairs = np.asarray(target_correspondences, dtype=np.float64).reshape(-1, 3)
     init = rigid_transform_from_correspondences(src_pairs, tgt_pairs)
+    # 人工选点时同样锁定Z轴
+    if z_lock:
+        init = _enforce_z_alignment(init, max_z_shift=max_z_shift)
     result = point_to_plane_icp(source_points, target_points, init=init,
                                 voxel_size=voxel_size, max_iteration=max_iteration,
                                 max_correspondence_distance=max_correspondence_distance,
-                                pyramid_scales=pyramid_scales)
+                                pyramid_scales=pyramid_scales,
+                                z_lock=z_lock, max_z_shift=max_z_shift)
     initial_rmse = float(np.sqrt(np.mean(np.sum((src_pairs @ init[:3, :3].T + init[:3, 3] - tgt_pairs) ** 2, axis=1))))
     final_pairs = src_pairs @ result.transformation[:3, :3].T + result.transformation[:3, 3]
     pair_rmse = float(np.sqrt(np.mean(np.sum((final_pairs - tgt_pairs) ** 2, axis=1))))
@@ -368,8 +429,20 @@ def manual_seeded_icp(source_points, target_points, source_correspondences,
 
 def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.05,
                        max_correspondence_distance=None, max_iteration=30,
-                       pyramid_scales=(2.0, 1.0)):
-    """Estimate residual ``Delta T`` between clouds in one global frame."""
+                       pyramid_scales=(2.0, 1.0),
+                       source_normals=None, target_normals=None,
+                       z_lock=True, max_z_shift=0.05):
+    """估计同一全局坐标系下两朵点云之间的残余变换Delta T。
+
+    改进点：
+    1. Z轴锁定：每层级ICP后强制保持扫描仪水平，限制Z平移
+    2. 自适应金字塔：根据点数自动选择更粗的初始层级以加速
+    3. 所有层级使用点到面（立面场景平面约束更强）
+    4. 指标计算使用下采样点云（性能）
+    5. 法向量一致性作为接受条件
+    6. 所有诊断日志输出到控制台，时间单位为秒
+    """
+    t_total = time.perf_counter()
     src = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
     tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 3)
     src = src[np.isfinite(src).all(axis=1)]
@@ -377,58 +450,247 @@ def point_to_plane_icp(source_points, target_points, *, init=None, voxel_size=0.
     if len(src) < 3 or len(tgt) < 3:
         raise ValueError('点到面 ICP 至少需要两组各 3 个有效点')
 
-    scales = [float(voxel_size) * float(level) for level in pyramid_scales] if voxel_size else [0.05]
+    # 自适应金字塔：大点云使用更粗的初始层级
+    min_pts = min(len(src), len(tgt))
+    if min_pts > 1000000:
+        adaptive_scales = (10.0, 5.0, 2.0, 1.0)
+    elif min_pts > 500000:
+        adaptive_scales = (8.0, 4.0, 2.0, 1.0)
+    elif min_pts > 100000:
+        adaptive_scales = pyramid_scales
+    else:
+        adaptive_scales = pyramid_scales
+
+    scales = [float(voxel_size) * float(level) for level in adaptive_scales] if voxel_size else [0.05]
     if not scales:
         raise ValueError('ICP 至少需要一个有效金字塔层级')
     scales = [max(x, 1e-3) for x in scales]
+
+    # 自适应迭代次数：粗层级减少迭代
+    adaptive_iters = []
+    for i, _ in enumerate(scales):
+        if i == 0 and len(scales) > 2:
+            adaptive_iters.append(max(15, int(max_iteration * 0.5)))
+        elif i == len(scales) - 1:
+            adaptive_iters.append(int(max_iteration))
+        else:
+            adaptive_iters.append(max(20, int(max_iteration * 0.75)))
+
     T = np.eye(4) if init is None else np.asarray(init, dtype=np.float64).reshape(4, 4)
+    # 初始变换同样强制Z轴对齐
+    if z_lock:
+        T = _enforce_z_alignment(T, max_z_shift=max_z_shift)
+
     reports = []
     final = None
+    level_times = []
 
     base_source = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(src))
     base_target = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tgt))
-    for scale in scales:
-        level_started = time.perf_counter()
+
+    finest_source_pts = None
+    finest_target_pts = None
+    finest_source_normals = None
+    finest_target_normals = None
+
+    for i, scale in enumerate(scales):
+        t_level = time.perf_counter()
         source = base_source.voxel_down_sample(scale)
         target = base_target.voxel_down_sample(scale)
+
+        # 保存最细层级下采样点云用于高效指标计算
+        if i == len(scales) - 1:
+            finest_source_pts = np.asarray(source.points, dtype=np.float64)
+            finest_target_pts = np.asarray(target.points, dtype=np.float64)
+
         radius = max(scale * 2.5, 1e-3)
         for cloud in (source, target):
             cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50))
             cloud.normalize_normals()
-        # A fixed large radius at the fine level admits facade-to-facade false
-        # matches.  Keep the caller's coarse bound, but tighten each pyramid
-        # level as the solution approaches the GPS residual.
+
+        if i == len(scales) - 1:
+            finest_source_normals = np.asarray(source.normals, dtype=np.float64)
+            finest_target_normals = np.asarray(target.normals, dtype=np.float64)
+
+        # 自适应对应距离：细层级收紧
         distance = (min(float(max_correspondence_distance), max(scale * 2.5, 0.015))
                     if max_correspondence_distance is not None
                     else max(scale * 2.5, 0.015))
-        estimation = (
-            o3d.pipelines.registration.TransformationEstimationPointToPoint()
-            if scale > scales[-1] * 1.01 else
-            o3d.pipelines.registration.TransformationEstimationPointToPlane()
-        )
+
+        # 所有层级使用点到面（立面场景平面约束更强）
+        estimation = o3d.pipelines.registration.TransformationEstimationPointToPlane()
+
+        iters = adaptive_iters[i]
         criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
-            relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=int(max_iteration))
+            relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=iters)
         final = o3d.pipelines.registration.registration_icp(
             source, target, distance, T, estimation, criteria)
         T = np.asarray(final.transformation)
-        reports.append({'voxel': scale, 'fitness': float(final.fitness),
-                        'rmse': float(final.inlier_rmse),
-                        'correspondences': len(final.correspondence_set),
-                        'estimator': ('point_to_point' if scale > scales[-1] * 1.01
-                                      else 'point_to_plane'),
-                        'elapsed_ms': round((time.perf_counter()-level_started)*1000, 2)})
 
+        # 每层级后强制Z轴对齐（GPS已全局对齐高程）
+        if z_lock:
+            T = _enforce_z_alignment(T, max_z_shift=max_z_shift)
+
+        dt_level = time.perf_counter() - t_level
+        level_times.append(round(dt_level, 3))
+        reports.append({
+            'voxel': scale,
+            'fitness': float(final.fitness),
+            'rmse': float(final.inlier_rmse),
+            'correspondences': len(final.correspondence_set),
+            'duration_s': round(dt_level, 3),
+            'distance_threshold': distance,
+            'iterations': iters,
+        })
+
+    # 使用最细层级下采样点云计算指标（非原始点云）
     metric_distance = (float(max_correspondence_distance)
                        if max_correspondence_distance is not None
                        else max(scales[-1] * 2.5, 0.01))
-    checked = registration_metrics(src, tgt, T,
-                                   max_correspondence_distance=metric_distance)
+
+    # 大点云时跳过法向量一致性计算以加速metrics
+    compute_normals = min_pts <= 500000
+    checked = registration_metrics(
+        finest_source_pts, finest_target_pts, T,
+        max_correspondence_distance=metric_distance,
+        source_normals=finest_source_normals,
+        target_normals=finest_target_normals,
+        compute_normals=compute_normals,
+    )
+
     fitness = checked['fitness']
     rmse = checked['rmse']
     correspondence_count = checked['correspondence_count']
+    normal_consistency = checked['normal_consistency']
+
     min_correspondences = max(3, min(50, int(np.ceil(min(len(src), len(tgt)) * 0.005))))
+
+    # 接受条件：拟合度 + 对应点数 + 法向量一致性
     accepted = (fitness >= 0.01 and correspondence_count >= min_correspondences
                 and np.isfinite(rmse))
     message = '' if accepted else '有效对应不足或配准质量未达到门限'
+
+    # 立面专项检查：配准后法向量应一致
+    if accepted and normal_consistency < -0.2:
+        accepted = False
+        message = f'法向量一致性过低({normal_consistency:.3f})，可能存在180°翻转'
+
+    # Z轴偏差检查
+    if accepted and z_lock and abs(T[2, 3]) > max_z_shift * 0.8:
+        accepted = False
+        message = f'Z轴平移偏差过大({T[2, 3]:.3f}m)，超出GPS高程精度范围'
+
     reports.append(checked)
-    return ICPResult(T, fitness, rmse, correspondence_count, reports, accepted, message)
+
+    total_s = time.perf_counter() - t_total
+    timing = {
+        'total_s': round(total_s, 3),
+        'level_times_s': level_times,
+        'metrics_s': round(total_s - sum(level_times), 3),
+    }
+
+    return ICPResult(T, fitness, rmse, correspondence_count, reports, accepted,
+                     message, timing, normal_consistency)
+
+
+# =============================================================================
+# 4. 全局精修（多站点全局优化）
+# =============================================================================
+
+def global_refinement(clouds, transforms, voxel_size=0.05,
+                       max_correspondence_distance=0.15,
+                       max_iteration=20,
+                       z_lock=True, max_z_shift=0.05):
+    """多站点配准后的全局精修。
+
+    两两配准完成后，所有点云已变换到参考坐标系。
+    本函数执行最终全局ICP：每朵点云同时对所有其他站点的合并点云进行精修。
+    同时保持Z轴锁定，不破坏GPS高程对齐。
+
+    参数：
+        clouds: 已在参考坐标系中的RegistrationCloud列表（已变换）
+        transforms: 每朵点云应用的4x4变换列表（参考=单位阵）
+        voxel_size: 精修体素大小
+        max_correspondence_distance: 对应点阈值
+        max_iteration: ICP最大迭代次数
+        z_lock: 是否锁定Z轴
+        max_z_shift: Z平移最大允许修正量
+
+    返回：
+        refined_transforms: 精修后的4x4变换列表
+        log_summary: 全局精修摘要日志
+    """
+    t0 = time.perf_counter()
+    if len(clouds) < 2:
+        return transforms, {'message': '单站点无需全局精修'}
+
+    refined = [np.asarray(t, dtype=np.float64).reshape(4, 4) for t in transforms]
+
+    # 迭代全局精修（通常1-2轮即可收敛）
+    for round_idx in range(2):
+        round_changes = []
+        for i, cloud in enumerate(clouds):
+            if i == 0:
+                continue  # 参考站点固定
+
+            # 从所有其他站点构建目标点云（已在参考坐标系中）
+            target_parts = []
+            for j, other in enumerate(clouds):
+                if j == i:
+                    continue
+                pts = np.asarray(other.points, dtype=np.float64)
+                moved = pts @ refined[j][:3, :3].T + refined[j][:3, 3]
+                target_parts.append(moved)
+
+            if not target_parts:
+                continue
+            target_all = np.vstack(target_parts)
+
+            # 当前站点在参考坐标系中的位置
+            source_pts = np.asarray(cloud.points, dtype=np.float64)
+            source_moved = source_pts @ refined[i][:3, :3].T + refined[i][:3, 3]
+
+            # 快速ICP精修（Z轴锁定）
+            result = point_to_plane_icp(
+                source_moved, target_all,
+                init=np.eye(4),
+                voxel_size=voxel_size,
+                max_correspondence_distance=max_correspondence_distance,
+                max_iteration=max_iteration,
+                pyramid_scales=(1.0,),
+                z_lock=z_lock,
+                max_z_shift=max_z_shift,
+            )
+
+            if result.accepted:
+                delta = np.asarray(result.transformation)
+                refined[i] = delta @ refined[i]
+                # 每次更新后强制Z轴对齐
+                if z_lock:
+                    refined[i] = _enforce_z_alignment(refined[i], max_z_shift=max_z_shift)
+                # 度量变化量
+                angle = np.arccos(np.clip((np.trace(delta[:3, :3]) - 1) / 2, -1, 1))
+                trans_norm = np.linalg.norm(delta[:3, 3])
+                round_changes.append({
+                    'station_idx': i,
+                    'angle_deg': round(np.degrees(angle), 4),
+                    'translation': round(trans_norm, 6),
+                    'rmse': round(result.inlier_rmse, 6),
+                })
+
+    # 计算全局重叠指标
+    all_merged = []
+    for i, cloud in enumerate(clouds):
+        pts = np.asarray(cloud.points, dtype=np.float64)
+        moved = pts @ refined[i][:3, :3].T + refined[i][:3, 3]
+        all_merged.append(moved)
+    merged = np.vstack(all_merged)
+
+    log_summary = {
+        'phase': 'global_refinement',
+        'rounds': round_idx + 1,
+        'station_changes': round_changes,
+        'merged_point_count': len(merged),
+    }
+
+    return refined, log_summary

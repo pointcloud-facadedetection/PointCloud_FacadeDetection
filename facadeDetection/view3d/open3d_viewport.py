@@ -91,7 +91,7 @@ class _RenderQueue(QObject):
     color = Signal(str, object)
     points = Signal(str, object, object)
 
-
+# TODO(Open3DViewport): [视口渲染刷新] 当前定时器持续驱动视口处理；应按视口可见性/焦点启停，结合 dirty 状态和渲染节流，避免 Windows 原生窗口抢占其他程序画面。
 class Open3DViewport(BaseViewport):
     def __init__(self, parent=None):
         self._root = QWidget(parent)
@@ -413,6 +413,7 @@ class Open3DViewport(BaseViewport):
         if not self._init_success:
             return
         try:
+            # TODO(process_events): [视口渲染刷新] 此处将队列处理、GLFW 事件轮询和渲染绑定在同一周期；应按需提交局部刷新，并在失焦/隐藏时暂停渲染、恢复时补帧。
             pending = self._pending_point_updates
             self._pending_point_updates = {}
             for name, (sequence, positions, colors) in pending.items():
@@ -431,6 +432,7 @@ class Open3DViewport(BaseViewport):
 
     def destroy(self):
         """Stop Qt delivery and release the embedded Open3D window once."""
+        # TODO(destroy): [项目生命周期] 销毁前应由统一生命周期状态机协调后台任务、视口覆盖层/几何体、渲染队列和 Open3D 资源，确保关闭流程幂等且无残留引用。
         if self._destroyed:
             return
         self._destroyed = True
@@ -659,6 +661,7 @@ class Open3DViewport(BaseViewport):
 
     def present_scene(self):
         """Apply queued updates and present a frame immediately."""
+        # TODO(present_scene): [视口渲染刷新] 当前接口强制立即渲染；应改为可合并的按需/局部刷新，并受焦点管控与帧率上限约束。
         try:
             pending = self._pending_point_updates
             self._pending_point_updates = {}
@@ -712,6 +715,7 @@ class Open3DViewport(BaseViewport):
             self.clear_pick_markers()
 
     def clear(self):
+        # TODO(clear): [项目生命周期] 清空场景时应与项目状态切换绑定，统一释放全部点云数组、Open3D 几何体及视口辅助对象，避免资源泄漏。
         if getattr(self._adapter, '_destroyed', False):
             self._scene.clear()
             return
