@@ -274,6 +274,18 @@ class ViewportRenderService:
             signature = digest.hexdigest()
             if self._facade_color_signatures.get(cloud_name) == signature:
                 return
+            current_colors = np.asarray(data.get('color'), dtype=np.float32)
+            if (
+                cloud_name not in self._pre_facade_colors
+                or self._pre_facade_colors[cloud_name].shape != (n, 3)
+            ):
+                if current_colors.shape == (n, 3):
+                    self._pre_facade_colors[cloud_name] = current_colors.copy()
+                else:
+                    self._pre_facade_colors[cloud_name] = np.tile(
+                        np.asarray(Config.FACADE_BASE_COLOR, dtype=np.float32),
+                        (n, 1),
+                    )
             colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
 
             try:
@@ -378,14 +390,10 @@ class ViewportRenderService:
 
         base = self._pre_facade_colors.get(cloud_name)
         if base is None or base.shape != (count, 3):
-            current = np.asarray(data.get('color'), dtype=np.float32)
-            if current.shape == (count, 3):
-                base = current.copy()
-            else:
-                base = np.tile(
-                    np.asarray((0.75, 0.75, 0.75), dtype=np.float32),
-                    (count, 1),
-                )
+            base = np.tile(
+                np.asarray(Config.FACADE_BASE_COLOR, dtype=np.float32),
+                (count, 1),
+            )
             self._pre_facade_colors[cloud_name] = base.copy()
 
         rows = self._proxy_rows_for_display(

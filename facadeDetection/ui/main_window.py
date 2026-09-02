@@ -2355,24 +2355,13 @@ class MainWindow(QMainWindow):
             data = self.viewport.get_cloud_data(cloud_name)
             if not data or data.get('pos') is None:
                 raise ValueError('当前点云为空')
-            state = self.photo_match_service.state
-            if state.scan_pose_path:
-                if not state.projection_params:
-                    params = self.photo_match_service.initialize_projection(
-                        data['pos']
-                    )
-                    self._set_projection_controls(params)
-                captured = self.photo_match_service.render_projection_view(
-                    data['pos'],
-                    data.get('color'),
-                    self._projection_params_from_controls(),
-                    crop_subject=True,
-                    image_size=self._projection_image_size(),
-                )
-            else:
-                # 未上传扫描仪位姿时直接复用当前三维视口相机，因此打开
-                # 二维-三维对齐模块后即可投影，不要求先执行视角调整。
-                captured = self.viewport.capture_match_view(cloud_name)
+            captured = self.photo_match_service.render_projection_view(
+                data['pos'],
+                data.get('color'),
+                self._projection_params_from_controls(),
+                crop_subject=False,
+                image_size=self._projection_image_size(),
+            )
             view_image = bgr_to_qimage(captured['view_bgr'])
         except (KeyError, OSError, RuntimeError, ValueError) as exc:
             QMessageBox.warning(self, title, str(exc))
