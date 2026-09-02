@@ -56,7 +56,10 @@ def _estimate_vertical_vanishing_point(image_bgr):
 
     height = gray.shape[0]
     lines = []
-    for segment in detected[:, 0]:
+    segments = np.asarray(detected, dtype=np.float64)
+    if segments.size == 0 or segments.size % 4 != 0:
+        raise RuntimeError('Cannot estimate vertical VP')
+    for segment in segments.reshape(-1, 4):
         x1, y1, x2, y2 = segment
         dx = float(x2 - x1)
         dy = float(y2 - y1)
