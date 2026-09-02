@@ -2389,6 +2389,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             '点云已映射到右侧二维视图', 5000
         )
+        QMessageBox.information(
+            self,
+            title,
+            '点云映射完成，映射结果已显示在右侧“针孔投影”区域。',
+        )
 
     def _export_current_cloud_view_images(self):
         cloud_name = self._active_cloud_name()

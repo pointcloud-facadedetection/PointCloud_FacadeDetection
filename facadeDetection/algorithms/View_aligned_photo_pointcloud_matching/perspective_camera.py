@@ -337,9 +337,17 @@ def _intensity_rgb(colors, point_count):
     normalized = np.zeros(point_count, dtype=np.float32)
     if finite.any():
         low, high = np.percentile(intensity[finite], (1.0, 99.0))
-        normalized[finite] = np.clip(
-            (intensity[finite] - low) / (high - low + 1e-9), 0.0, 1.0
-        )
+        if high - low > 1e-6:
+            normalized[finite] = np.clip(
+                (intensity[finite] - low) / (high - low), 0.0, 1.0
+            )
+        else:
+            # 统一着色点云没有可拉伸的灰度范围；保留其原始亮度，
+            # 避免 (value - low) 将全部有效投影点变成黑色。
+            scale = 1.0 if high <= 1.5 else 255.0
+            normalized[finite] = np.clip(
+                intensity[finite] / scale, 0.0, 1.0
+            )
     gray = np.rint(normalized * 255.0).astype(np.uint8)
     return np.repeat(gray[:, None], 3, axis=1)
 
