@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import open3d as o3d
 from PySide6.QtGui import QImage, QImageReader
 
 from algorithms.View_aligned_photo_pointcloud_matching import (
@@ -134,9 +135,11 @@ class PhotoMatchState:
 class PhotoMatchService:
     def __init__(self):
         self.state = PhotoMatchState()
+        self._projection_cloud_cache = {}
 
     def reset(self):
         self.state = PhotoMatchState()
+        self._projection_cloud_cache.clear()
 
     def load_photo(self, file_path: str) -> QImage:
         path = validate_photo_path(file_path)
@@ -210,6 +213,78 @@ class PhotoMatchService:
         self.state.scan_pose_meta = meta
         self.state.projection_params = {}
         return meta
+
+    def load_projection_cloud(
+        self,
+        file_path: str,
+        *,
+        voxel_size: float = 0.1,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """按测试查看器方式读取实点云坐标和 intensity/RGB 灰度值。"""
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f'点云文件不存在: {path}')
+        stat = path.stat()
+        key = (
+            str(path),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            float(voxel_size),
+        )
+        cached = self._projection_cloud_cache.get(key)
+        if cached is not None:
+            return cached
+
+        points = values = None
+        try:
+            cloud = o3d.t.io.read_point_cloud(str(path))
+            if voxel_size > 0:
+                cloud = cloud.voxel_down_sample(float(voxel_size))
+            points = cloud.point['positions'].numpy().astype(
+                np.float64, copy=False
+            )
+            keys = list(cloud.point)
+            intensity_key = next(
+                (name for name in keys if 'intens' in str(name).lower()),
+                None,
+            )
+            if intensity_key is not None:
+                values = cloud.point[intensity_key].numpy().reshape(-1)
+            elif 'colors' in keys:
+                colors = cloud.point['colors'].numpy()
+                values = (
+                    0.299 * colors[:, 0]
+                    + 0.587 * colors[:, 1]
+                    + 0.114 * colors[:, 2]
+                )
+        except (KeyError, RuntimeError):
+            cloud = o3d.io.read_point_cloud(str(path))
+            if voxel_size > 0:
+                cloud = cloud.voxel_down_sample(float(voxel_size))
+            points = np.asarray(cloud.points, dtype=np.float64)
+            if cloud.has_colors():
+                colors = np.asarray(cloud.colors, dtype=np.float32)
+                values = (
+                    0.299 * colors[:, 0]
+                    + 0.587 * colors[:, 1]
+                    + 0.114 * colors[:, 2]
+                )
+
+        points = np.ascontiguousarray(
+            np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        )
+        if len(points) == 0:
+            raise ValueError('点云文件不包含有效点')
+        if values is not None:
+            values = np.ascontiguousarray(
+                np.asarray(values, dtype=np.float32).reshape(-1)
+            )
+            if len(values) != len(points):
+                values = None
+
+        self._projection_cloud_cache.clear()
+        self._projection_cloud_cache[key] = (points, values)
+        return points, values
 
     def build_viewport_camera(self, lookat) -> dict:
         """按已上传的扫描位姿与观察目标计算视口相机。"""

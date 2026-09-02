@@ -2024,6 +2024,35 @@ class MainWindow(QMainWindow):
             max(320, int(round(height * scale))),
         )
 
+    def _projection_cloud_source(self, data):
+        """优先返回原始 PLY 的实点云及 intensity，保持测试查看器效果。"""
+        points = data.get('pos')
+        values = data.get('color')
+        dataset_id = data.get('dataset_id')
+        dataset = (
+            self.pointcloud_service.get_dataset(dataset_id)
+            if dataset_id and self.pointcloud_service is not None
+            else None
+        )
+        source_path = (
+            (dataset.metadata or {}).get('source_ply_path')
+            if dataset is not None
+            else None
+        )
+        if source_path:
+            try:
+                return self.photo_match_service.load_projection_cloud(
+                    source_path,
+                    voxel_size=0.1,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(
+                    f'[PCFD] projection.intensity_fallback '
+                    f'path={source_path} error={exc}',
+                    flush=True,
+                )
+        return points, values
+
     def _on_projection_slider_changed(self, _value):
         sender = self.sender()
         key = sender.property('projectionKey') if sender is not None else None
@@ -2053,6 +2082,7 @@ class MainWindow(QMainWindow):
         if points is None or len(points) == 0:
             QMessageBox.information(self, '针孔投影', '请先加载点云。')
             return
+        points, _values = self._projection_cloud_source(data)
         try:
             params = self.photo_match_service.initialize_projection(
                 points,
@@ -2087,7 +2117,8 @@ class MainWindow(QMainWindow):
         try:
             points = data['pos']
             colors = data.get('color')
-            # 滑块拖动时使用均匀代理，保存时仍使用完整显示点云。
+            points, colors = self._projection_cloud_source(data)
+            # 滑块拖动时对实点云均匀抽样，保持 intensity 外观并控制刷新开销。
             step = max(1, (len(points) + 349_999) // 350_000)
             preview_points = points[::step]
             preview_colors = colors[::step] if colors is not None else None
@@ -2123,6 +2154,9 @@ class MainWindow(QMainWindow):
         if len(finite_points) == 0:
             QMessageBox.warning(self, title, '当前点云不包含有效坐标。')
             return False
+        source_points, _values = self._projection_cloud_source(data)
+        source_points = np.asarray(source_points, dtype=np.float64)
+        finite_points = source_points[np.isfinite(source_points).all(axis=1)]
         try:
             projection_params = self.photo_match_service.initialize_projection(
                 finite_points,
@@ -2355,9 +2389,10 @@ class MainWindow(QMainWindow):
             data = self.viewport.get_cloud_data(cloud_name)
             if not data or data.get('pos') is None:
                 raise ValueError('当前点云为空')
+            points, values = self._projection_cloud_source(data)
             captured = self.photo_match_service.render_projection_view(
-                data['pos'],
-                data.get('color'),
+                points,
+                values,
                 self._projection_params_from_controls(),
                 crop_subject=False,
                 image_size=self._projection_image_size(),
