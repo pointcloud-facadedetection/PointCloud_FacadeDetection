@@ -1,7 +1,7 @@
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, QPoint, Slot, Signal
-from PySide6.QtGui import QImage, QWindow, QPainter, QPen, QColor
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtGui import QImage, QWindow
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .base_viewport import BaseViewport
 from .camera import CameraController
@@ -85,156 +85,6 @@ class _QWindowEventBridge(QObject):
         except Exception:
             pass
         return False
-
-
-class _PickCaptureOverlay(QWidget):
-    """盖在原生 Open3D 窗口上，捕获点击以便 3D 标点，同时转发旋转/平移/缩放。"""
-
-    def __init__(self, viewport, container):
-        flags = int(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        super().__init__(None, Qt.WindowFlags(flags))
-        self._window_flags = Qt.WindowFlags(flags)
-        self._viewport = viewport
-        self._container = container
-        self._pick_labels = []
-        self._active = False
-        self._pick_active = False
-        self.setMouseTracking(True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        # Windows 会把创建时的 WA_TransparentForMouseEvents 映射成原生
-        # click-through 样式，窗口显示后再设为 False 并不总会恢复命中测试。
-        # 非标点状态直接隐藏窗口即可，无需启用鼠标穿透。
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-
-    def sync_geometry(self):
-        if self._container is None or not self._active:
-            return
-        owner = self._container.window()
-        app_active = (
-            QApplication.applicationState()
-            == Qt.ApplicationState.ApplicationActive
-        )
-        owner_ready = (
-            owner is not None
-            and owner.isVisible()
-            and not owner.isMinimized()
-            and self._container.isVisible()
-            and self._container.width() > 1
-            and self._container.height() > 1
-        )
-        if not app_active or not owner_ready:
-            self._release_input()
-            self.hide()
-            return
-        # 到 activate 时 container 已加入主窗口，此时才能取得正确 owner。
-        # 绑定 owner 后，覆盖层会随主窗口最小化和关闭。
-        # 子控件的 setGeometry 使用父窗口坐标；若误用屏幕坐标，覆盖层会
-        # 向右下偏移，挡住右侧立面列表，点击会全部落到三维捕获层上。
-        if self.parentWidget() is not owner:
-            self.setParent(owner, self._window_flags)
-        parent = self.parentWidget()
-        top_left = (
-            self._container.mapTo(parent, QPoint(0, 0))
-            if parent is not None
-            else self._container.mapToGlobal(QPoint(0, 0))
-        )
-        self.setGeometry(
-            top_left.x(), top_left.y(),
-            self._container.width(), self._container.height(),
-        )
-        was_hidden = not self.isVisible()
-        if was_hidden:
-            self.show()
-        self.raise_()
-
-    def activate(self, picking=False):
-        self._active = True
-        self._pick_active = bool(picking)
-        self.sync_geometry()
-        # 覆盖层仅覆盖三维显示框，无需 grabMouse/grabKeyboard。全局抓取会
-        # 让侧栏的“撤销标注”“退出标注”等按钮无法接收点击。
-        self._release_input()
-        if self._pick_active:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-            self.activateWindow()
-            self.setFocus()
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
-    def set_pick_active(self, enabled):
-        self.activate(picking=enabled)
-
-    def deactivate(self):
-        self._active = False
-        self._pick_active = False
-        self._release_input()
-        self.unsetCursor()
-        self.hide()
-
-    def _grab_input(self):
-        try:
-            self.grabMouse()
-        except Exception:
-            pass
-        try:
-            self.grabKeyboard()
-        except Exception:
-            pass
-
-    def _release_input(self):
-        try:
-            self.releaseMouse()
-        except Exception:
-            pass
-        try:
-            self.releaseKeyboard()
-        except Exception:
-            pass
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        if self._pick_active:
-            painter.setPen(QPen(QColor(255, 220, 80), 1))
-            painter.drawText(
-                12, 22,
-                '3D 标点：左键点击加点，拖动旋转，右键平移，滚轮缩放，按 Esc 退出',
-            )
-        painter.end()
-
-    def mousePressEvent(self, event):
-        if self._pick_active:
-            print(
-                f'[Pick] overlay.press x={event.position().x():.1f} '
-                f'y={event.position().y():.1f} button={event.button()}',
-                flush=True,
-            )
-        self._viewport._interactor.handle_mouse_press(event)
-        event.accept()
-
-    def mouseMoveEvent(self, event):
-        self._viewport._interactor.handle_mouse_move(event)
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        handled = self._viewport._interactor.handle_mouse_release(event)
-        if self._pick_active:
-            print(f'[Pick] overlay.release handled={bool(handled)}', flush=True)
-        self.update()
-        event.accept()
-
-    def wheelEvent(self, event):
-        self._viewport._interactor.handle_wheel(event)
-        event.accept()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            try:
-                self._viewport.exit_pick_mode()
-            except Exception:
-                pass
-        event.accept()
 
 
 class _RenderQueue(QObject):
@@ -450,15 +300,8 @@ class Open3DViewport(BaseViewport):
             self._container.installEventFilter(self._event_bridge)
             layout.addWidget(self._container)
 
-            self._roi_controller = ROISelectionController(self, container_widget=self._container)
-            self._pick_capture_overlay = _PickCaptureOverlay(self, self._container)
-            # Windows 外部 Open3D 窗口不会稳定转发右键事件；普通浏览模式也
-            # 保持透明捕获层可见，确保旋转、平移和滚轮缩放都由 interactor 处理。
-            QTimer.singleShot(
-                0,
-                lambda: self._pick_capture_overlay.activate(picking=False)
-                if self._pick_capture_overlay is not None
-                else None,
+            self._roi_controller = ROISelectionController(
+                self, container_widget=self._container
             )
 
             # 在 QWindow 上安装事件桥，确保右键平移与拖拽事件送达 interactor
@@ -555,9 +398,6 @@ class Open3DViewport(BaseViewport):
                 # 关闭点选/框选（由 Overlay 控制）
                 self._interactor.pick_enabled = False
                 self._interactor.selection_enabled = False
-                capture = getattr(self, '_pick_capture_overlay', None)
-                if capture is not None:
-                    capture.deactivate()
             elif mode == self.InteractionMode.PICK:
                 setattr(self._interactor, 'input_locked', False)
                 self._interactor.selection_enabled = False
@@ -566,9 +406,6 @@ class Open3DViewport(BaseViewport):
                 setattr(self._interactor, 'input_locked', False)
                 self._interactor.pick_enabled = False
                 self._interactor.selection_enabled = False
-                capture = getattr(self, '_pick_capture_overlay', None)
-                if capture is not None:
-                    capture.activate(picking=False)
         except Exception:
             pass
 
@@ -589,13 +426,6 @@ class Open3DViewport(BaseViewport):
             self._adapter.poll()
         except Exception:
             pass
-        try:
-            overlay = getattr(self, '_pick_capture_overlay', None)
-            if overlay is not None and getattr(overlay, '_active', False):
-                overlay.sync_geometry()
-        except Exception:
-            pass
-
     def close(self):
         self.destroy()
 
@@ -1100,13 +930,6 @@ class Open3DViewport(BaseViewport):
             self.set_mode(self.InteractionMode.NAVIGATE)
         except Exception:
             pass
-        self._set_pick_capture_active(False)
-
-    def _set_pick_capture_active(self, enabled: bool):
-        overlay = getattr(self, '_pick_capture_overlay', None)
-        if overlay is None:
-            return
-        overlay.set_pick_active(enabled)
 
     def update_pick_markers(self, src_points=None, tgt_points=None):
         self.clear_pick_markers()
@@ -1145,17 +968,9 @@ class Open3DViewport(BaseViewport):
             self._adapter.poll()
         except Exception:
             pass
-        overlay = getattr(self, '_pick_capture_overlay', None)
-        if overlay is not None and overlay._pick_labels:
-            overlay._pick_labels = []
-            overlay.update()
-
     def _refresh_pick_overlay_labels(self):
-        overlay = getattr(self, '_pick_capture_overlay', None)
-        if overlay is None:
-            return
-        overlay._pick_labels = []
-        overlay.update()
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
 
     def clear_pick_markers(self):
         for name in self._pick_markers + self._pick_lines:
@@ -1163,10 +978,8 @@ class Open3DViewport(BaseViewport):
         self._pick_markers = []
         self._pick_lines = []
         self._pick_marker_xyz = np.zeros((0, 3), dtype=np.float64)
-        overlay = getattr(self, '_pick_capture_overlay', None)
-        if overlay is not None:
-            overlay._pick_labels = []
-            overlay.update()
+        if self._pick_overlay is not None:
+            self._pick_overlay.update()
 
     def save_screenshot(self, path):
         image = self._adapter.capture_screen()
