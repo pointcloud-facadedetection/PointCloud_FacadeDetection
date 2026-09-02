@@ -1,11 +1,4 @@
 ﻿"""FacadeService 兼容门面。
-
-保留原 `FacadeService` 类名作为统一入口，内部委托给：
-- FacadeIndexService：索引映射 / 质量域构建
-- FacadeDetectionService：立面检测业务编排
-- FacadeQualityService：质量评估业务编排
-
-UI 渲染相关方法已迁移到 ViewportRenderService，本类不再直接操作 UI 控件。
 """
 from __future__ import annotations
 

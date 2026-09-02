@@ -5,9 +5,6 @@
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import math
 import time
 from typing import Optional
 
@@ -27,31 +24,6 @@ class FacadeQualityService:
 
     def set_index_service(self, index_service: FacadeIndexService):
         self._index_service = index_service
-
-    @staticmethod
-    def _quality_run_key(*, station_id, facade_key, dataset_revision,
-                         standard_id, interval_size_m, profile_snapshot):
-        """根据质量评估输入生成稳定的运行键。"""
-        def normalize(value):
-            if isinstance(value, dict):
-                return {str(key): normalize(value[key]) for key in sorted(value, key=str)
-                        if not str(key).startswith('__')}
-            if isinstance(value, (list, tuple)):
-                return [normalize(item) for item in value]
-            if isinstance(value, float):
-                return None if not math.isfinite(value) else round(value, 9)
-            if hasattr(value, 'item'):
-                return normalize(value.item())
-            return value
-
-        payload = normalize({
-            'station_id': station_id, 'facade_key': str(facade_key),
-            'dataset_revision': dataset_revision, 'standard_id': standard_id,
-            'interval_size_m': interval_size_m,
-            'profile_snapshot': profile_snapshot or {},
-        })
-        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
     def _get_source_points(self, cloud_name: str):
         """返回质量评估使用的点源与原始点数组。"""
@@ -235,7 +207,7 @@ class FacadeQualityService:
 
             result['interval_size_m'] = gsize
 
-            # FIX: Ensure overall contains all required fields with correct names
+            # Ensure overall contains all required fields with correct names
             result.setdefault('overall', {})
             result['overall'].update({
                 'plane_model': plane_model.tolist(),
@@ -251,15 +223,6 @@ class FacadeQualityService:
 
             vert_data = result.get('verticality', {})
             overall = result.get('overall', {})
-
-            # Derived report metrics use the same valid measurement rows as the
-            # algorithm output; this does not alter the algorithm itself.
-            flat_values = [float(row.get('flatness_gap_mm')) for row in result.get('windows', [])
-                           if row.get('coverage_valid') and np.isfinite(float(row.get('flatness_gap_mm', np.nan)))]
-            vertical_values = [float(row.get('verticality_deviation_mm')) for row in result.get('windows', [])
-                               if row.get('coverage_valid') and np.isfinite(float(row.get('verticality_deviation_mm', np.nan)))]
-            overall['flatness_mean_deviation_mm'] = float(np.mean(flat_values)) if flat_values else np.nan
-            overall['verticality_mean_deviation_mm'] = float(np.mean(vertical_values)) if vertical_values else np.nan
 
             overall['verticality_pass'] = vert_data.get('verticality_pass', False)
             overall['verticality_pass_rate'] = vert_data.get('verticality_pass_rate', 0.0)
@@ -291,19 +254,7 @@ class FacadeQualityService:
             if profile is not None:
                 result['profile_snapshot'] = profile.snapshot()
 
-            result['parameter_fingerprint'] = self._quality_run_key(
-                station_id=facade.get('station_id'),
-                facade_key=facade.get('facade_db_id', facade.get('id', facade_no)),
-                dataset_revision=dataset.revision,
-                standard_id=getattr(profile, 'standard_id', None),
-                interval_size_m=gsize,
-                profile_snapshot=result.get('profile_snapshot') or {})
-            result['station_id'] = facade.get('station_id')
-            result['cloud_name'] = cloud_name
-
-            # Keep only a lightweight export descriptor.  The worker result can
-            # contain millions of points; retaining another points/colors copy
-            # here keeps the entire quality domain alive after the dialog opens.
+            # 仅保留一个轻量级的导出描述符。
             result['__export_context'] = {
                 'results_dir': str(results_dir) if results_dir else None,
                 'facade_no': facade_no,

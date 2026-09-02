@@ -10,4 +10,3 @@ from .facade import Facade, QualityMetric  # noqa: E402,F401
 from .report import Report  # noqa: E402,F401
 from .pointcloud_station import PointCloudStation  # noqa: E402,F401
 from .pointcloud_view_state import PointCloudViewState  # noqa: E402,F401
-from .quality_inspection_run import QualityInspectionRun  # noqa: E402,F401

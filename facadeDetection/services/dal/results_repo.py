@@ -87,6 +87,9 @@ class ResultsRepo:
         with project_session(project_uuid) as s:
             # 只有明确标记为数据库 ID 的 ID 才能指向现有行。
             facade = None
+            expected_station = None
+            if isinstance(facade_data, dict):
+                expected_station = scalar_int(facade_data.get('station_id'), 'station_id')
             if isinstance(facade_data, dict) and facade_data.get('facade_db_id'):
                 facade = s.execute(select(Facade).where(
                     Facade.id == int(facade_data['facade_db_id']),
@@ -128,6 +131,7 @@ class ResultsRepo:
                         bbox_json=facade_data.get('bbox_2d'),
                         area=float(facade_data.get('area', 0.0) or 0.0),
                         orientation=facade_data.get('type_label') or facade_data.get('type'),
+                        station_id=expected_station,
                         dataset_id=_sqlite_scalar_text(facade_data.get('dataset_id')),
                         dataset_fingerprint=_sqlite_scalar_text(facade_data.get('dataset_fingerprint')),
                     )
@@ -137,10 +141,11 @@ class ResultsRepo:
                 raise ValueError(
                     f'立面不存在: facade_id={facade_id}, display_no={display_no}')
             if isinstance(facade_data, dict):
-                expected_station = facade_data.get('station_id')
-                expected_station = scalar_int(expected_station, 'station_id')
                 if expected_station is not None and int(facade.station_id or -1) != expected_station:
-                    raise ValueError('立面与当前站点不匹配，拒绝保存质量结果')
+                    raise ValueError(
+                        '立面与当前站点不匹配，拒绝保存质量结果 '
+                        f'(facade_db_id={facade.id}, db_station_id={facade.station_id}, '
+                        f'expected_station_id={expected_station})')
                 if expected_station is not None:
                     facade.station_id = expected_station
                 if facade_data.get('dataset_id') is not None:
@@ -191,10 +196,9 @@ class ResultsRepo:
 
     @staticmethod
     def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> list[Facade]:
-        """Persist a detection batch and its basic metrics in the active scene.
+        """将一个检测批次及其基本指标持久化到当前场景中。
 
-        Keeping this transaction in the repository prevents the application
-        service from depending on SQLAlchemy session details.
+        将此事务保存在存储库中，可避免应用程序服务依赖于 SQLAlchemy 会话的详细信息。
         """
         with project_session(project_uuid) as s:
             project = s.execute(

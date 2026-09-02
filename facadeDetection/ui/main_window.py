@@ -61,7 +61,6 @@ from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
 from services.dal.results_repo import ResultsRepo
-from services.dal.quality_run_repo import QualityRunRepo
 from utils.workers import QualityWorker, PointCloudLoadWorker, RegistrationWorker
 
 
@@ -1554,8 +1553,7 @@ class MainWindow(QMainWindow):
                 context = _export_context(display_quality)
                 exported = ResultExportService().export_heatmap(
                     context.get('results_dir'), facade_no,
-                    context.get('points'), context.get('colors'), display_quality,
-                    station_name=cloud, run_id=display_quality.get('run_id'))
+                    context.get('points'), context.get('colors'), display_quality)
                 if exported and exported.get('heatmap'):
                     # Persist only small, portable artifact metadata. Runtime
                     # point arrays stay in __export_context and are not stored.
@@ -1655,11 +1653,28 @@ class MainWindow(QMainWindow):
         facade_copy['id'] = facade_id
         facade_copy['display_no'] = facade_no
 
+        # QualityWorker runs asynchronously.  Keep ownership information with
+        # the request instead of trusting the mutable UI facade list when it
+        # finishes (the active station may have changed meanwhile).
+        active_station_id = getattr(self.station_service, '_active_station_id', None)
+        dataset = self.facade_service._index_service._get_dataset(cloud)
+        facade_copy['__quality_request_context'] = {
+            'project_uuid': project_uuid,
+            'project_generation': self._project_generation,
+            'station_id': facade_copy.get('station_id', active_station_id),
+            'dataset_id': getattr(dataset, 'dataset_id', None),
+            'dataset_revision': getattr(dataset, 'revision', None),
+            'cloud_name': cloud,
+        }
+
         # A completed historical result is already a valid report. Reopen it
         # directly; never spend CPU or memory recomputing it on every project
         # activation. Revision mismatches are deliberately handled by the
         # normal worker path, which will reject stale geometry safely.
         historical_quality = facade_copy.get('quality_report')
+        if facade_copy.get('quality_status') == 'complete' and isinstance(historical_quality, dict):
+            self._show_quality_dialog(cloud, facade_copy, historical_quality)
+            return
 
         print(f'[PCFD] ui.evaluate_start facade_id={facade_id} facade_no={facade_no} '
               f'cloud={cloud}', flush=True)
@@ -1670,14 +1685,6 @@ class MainWindow(QMainWindow):
             getattr(self, '_inspection_profile', None))
         grid_size = float(self.interval_combo.currentData())
         cache_key = self._quality_cache_key(cloud, facade_copy, profile, grid_size)
-        # A facade's current JSON is not sufficient to identify a historical
-        # result: standard and interval are part of the calculation identity.
-        if (facade_copy.get('quality_status') == 'complete' and
-                isinstance(historical_quality, dict) and
-                historical_quality.get('interval_size_m') == grid_size and
-                historical_quality.get('profile_snapshot') == (profile.snapshot() if profile else {})):
-            self._show_quality_dialog(cloud, facade_copy, historical_quality)
-            return
         cached_quality = self._quality_result_cache.get(cache_key)
         if cached_quality:
             self.statusBar().showMessage('已命中质量结果缓存', 3000)
@@ -1717,6 +1724,52 @@ class MainWindow(QMainWindow):
 
         if token != getattr(self, '_quality_request_token', -1):
             print(f'[PCFD] ui.quality_stale token={token} ignored', flush=True)
+            return
+
+        # 用户可以在工作者正在计算时切换工作站，因此在显示或持久化其结果之前，请验证请求上下文。
+        request_context = f.get('__quality_request_context') or {}
+        current_project = getattr(self.current_project, 'project_id', None)
+        current_station = getattr(self.station_service, '_active_station_id', None)
+        expected_station = request_context.get('station_id')
+        current_generation = getattr(self, '_project_generation', 0)
+        current_facades = (getattr(self.project_operation_service,
+                                   '_last_facade_results', None) or [])
+        request_db_id = f.get('facade_db_id')
+        canonical = next(
+            (item for item in current_facades
+             if request_db_id is not None and
+             str(item.get('facade_db_id')) == str(request_db_id)),
+            None)
+        if canonical is None:
+            canonical = next(
+                (item for item in current_facades
+                 if str(item.get('id')) == str(f.get('id'))),
+                None)
+        current_dataset = self.facade_service._index_service._get_dataset(cloud)
+        if (request_context.get('project_uuid') != current_project or
+                request_context.get('project_generation') != current_generation or
+                request_context.get('cloud_name') != cloud or
+                canonical is None or
+                (request_db_id is not None and
+                 str(canonical.get('facade_db_id')) != str(request_db_id)) or
+                (request_context.get('dataset_id') is not None and
+                 getattr(current_dataset, 'dataset_id', None) !=
+                 request_context.get('dataset_id')) or
+                (request_context.get('dataset_revision') is not None and
+                 getattr(current_dataset, 'revision', None) !=
+                 request_context.get('dataset_revision')) or
+                (expected_station is not None and current_station is not None and
+                 int(expected_station) != int(current_station))):
+            print(f'[PCFD] ui.quality_stale_identity facade_id={f.get("id")} '
+                  f'expected_station={expected_station} current_station={current_station} '
+                  f'expected_cloud={request_context.get("cloud_name")} current_cloud={cloud} '
+                  f'expected_db_id={request_db_id} canonical_db_id='
+                  f'{(canonical or {}).get("facade_db_id")} '
+                  f'expected_dataset={request_context.get("dataset_id")} '
+                  f'current_dataset={getattr(current_dataset, "dataset_id", None)}',
+                  flush=True)
+            self._active_quality_worker = None
+            self.statusBar().showMessage('质量结果已过期，当前站点已变化，未保存。', 5000)
             return
 
         self.statusBar().clearMessage()
@@ -1798,12 +1851,6 @@ class MainWindow(QMainWindow):
             # Quality reports are self-contained; no results-domain NPZ is
             # needed for replay. Keep export context separate from persistence.
             artifact_path = None
-            current_fingerprint = quality.get('parameter_fingerprint')
-            if not current_fingerprint:
-                raise RuntimeError('质量服务未返回检测批次指纹')
-            quality['run_id'] = None
-            quality['station_id'] = f.get('station_id')
-            quality['cloud_name'] = cloud
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
@@ -1812,34 +1859,6 @@ class MainWindow(QMainWindow):
                 quality_artifact_path=artifact_path,
                 color=self.render_service.facade_color_for(f, facade_no),
             )
-            station_id = f.get('station_id')
-            profile_snapshot = quality.get('profile_snapshot') or {}
-            run_id = QualityRunRepo.upsert(
-                project_uuid,
-                station_id=station_id,
-                facade_id=int(f.get('id', 0)) or None,
-                facade_key=f.get('facade_db_id', f.get('id', facade_no)),
-                facade_display_no=facade_no,
-                cloud_name=cloud,
-                dataset_id=f.get('dataset_id'),
-                dataset_fingerprint=f.get('dataset_fingerprint'),
-                dataset_revision=getattr(dataset, 'revision', None),
-                profile_snapshot=profile_snapshot,
-                standard_id=(profile_snapshot.get('standard_id')
-                             or profile_snapshot.get('standard')
-                             or quality.get('standard_id')),
-                standard_name=(profile_snapshot.get('standard_name')
-                               or quality.get('standard_name')),
-                standard_version=(profile_snapshot.get('version')
-                                  or quality.get('standard_version')),
-                interval_size_m=float(quality.get('interval_size_m',
-                                                   quality.get('parameters', {}).get('interval_size_m', 0.0))),
-                parameter_fingerprint=quality.get('parameter_fingerprint'),
-                quality=quality)
-            quality['parameter_fingerprint'] = current_fingerprint
-            quality['run_id'] = run_id
-            quality['station_id'] = station_id
-            quality['cloud_name'] = cloud
             f['quality_status'] = 'complete'
             f['quality_report'] = quality
             # The worker receives a copy; update the canonical facade list so
@@ -3098,8 +3117,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
 
     def _activate_project(self, project):
-        # Historical facade geometry is not a formal result.  Never carry it
-        # across projects or restore detection-only cache entries.
+        # 历史立面几何形状并非正式结果。切勿将其应用到其他项目中，也不要恢复仅用于检测的缓存条目。
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
@@ -3107,9 +3125,8 @@ class MainWindow(QMainWindow):
         project_uuid = getattr(project, 'project_id', None)
         if not project_uuid:
             raise ValueError('项目标识为空，无法恢复项目')
-        # All entry points (open directory, project picker, upload and FLS)
-        # use the same strict activation transaction.  Do this before changing
-        # current_project so a failed restore cannot leave a false active UI.
+        # 所有入口点（打开目录、项目选择器、上传和 FLS）均使用相同的严格激活事务。
+        # 请在修改current_project 之前执行此操作，以免恢复失败时导致用户界面处于错误的激活状态。
         self.project_overview_service.activate_project(project_uuid)
         try:
             self.pointcloud_service.set_project(project_uuid)
@@ -3136,10 +3153,8 @@ class MainWindow(QMainWindow):
                 active_station_id = getattr(self.station_service, '_active_station_id', None)
                 historical = self.project_overview_service.load_historical_facades(
                     project_uuid, active_station_id)
-                # Restore historical facades through the same state path as a
-                # fresh detection. This synchronizes the list, renderer cache,
-                # heatmap availability and report snapshot, including the
-                # empty-history case (which must clear the previous project).
+                # 通过与新检测相同的状态路径恢复历史立面。
+                # 这将同步列表、渲染器缓存、热力图可用性及报告快照
                 self.project_operation_service._last_facade_results = historical or []
                 self._show_facade_results(historical or [])
                 self._refresh_report_preview()
