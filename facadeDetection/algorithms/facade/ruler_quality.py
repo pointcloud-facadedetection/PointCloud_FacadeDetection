@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, asdict, field
 import time
 import os
+import sys
 import numpy as np
 
 from .ruler_flatness_3d import (
@@ -634,7 +635,13 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
 
     n_workers = min(len(u_centers), params.n_jobs, os.cpu_count() or 1)
 
-    if n_workers > 1 and params.parallel_mode == 'process':
+    use_process = (
+        params.parallel_mode == 'process'
+        and not (os.name == 'nt' and getattr(sys, 'frozen', False))
+        and n_workers > 1
+    )
+
+    if use_process:
         print(f'[PCFD] verticality.parallel_process workers={n_workers} '
               f'strips={len(u_centers)}', flush=True)
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
@@ -835,7 +842,13 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
 
     n_workers = min(len(params.flatness_angles_deg), params.n_jobs, os.cpu_count() or 1)
 
-    if params.parallel_mode == 'process' and n_workers > 1:
+    use_process = (
+        params.parallel_mode == 'process'
+        and not (os.name == 'nt' and getattr(sys, 'frozen', False))
+        and n_workers > 1
+    )
+
+    if use_process:
         print(f'[PCFD] quality.parallel_process workers={n_workers} '
               f'points={len(points)}', flush=True)
         with ProcessPoolExecutor(max_workers=n_workers) as executor:

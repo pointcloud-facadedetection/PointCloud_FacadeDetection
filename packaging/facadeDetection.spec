@@ -19,6 +19,12 @@ binaries = []
 hiddenimports = []
 
 # 基础项目资源
+pca_json = app_root / 'utils' / 'pca-code.json'
+if pca_json.exists():
+    datas.append((str(pca_json), 'facadeDetection/utils'))
+else:
+    raise FileNotFoundError(f'Missing resource file: {pca_json}')
+
 datas += collect_data_files('facadeDetection', includes=['utils/pca-code.json'])
 
 # 尽量完整收集关键第三方包，减少手工漏项

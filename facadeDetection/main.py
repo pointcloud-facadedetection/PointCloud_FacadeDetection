@@ -1,4 +1,5 @@
 import sys
+import multiprocessing
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import APPLICATION_TITLE, MainWindow
@@ -20,6 +21,7 @@ def main():
     QTimer.singleShot(0, window.showMaximized)
     app.setQuitOnLastWindowClosed(True)
     sys.exit(app.exec())
+    multiprocessing.freeze_support()
 
 
 if __name__ == '__main__':

@@ -34,7 +34,7 @@ class InspectionProfile:
     max_hole_ratio: float = 0.20
     verticality_bin_size_m: float = 0.05
     verticality_enabled: bool = True
-    parallel_mode: str = "process"
+    parallel_mode: str = "thread"
     n_jobs: int = 4
 
     def snapshot(self) -> dict:

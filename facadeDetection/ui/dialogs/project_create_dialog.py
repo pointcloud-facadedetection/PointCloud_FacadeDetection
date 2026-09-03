@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
 )
 
+from utils.resource_utils import resource_path
+
 
 class RegionSelector(QWidget):
     """
@@ -56,16 +58,13 @@ class RegionSelector(QWidget):
 
     def _load_data(self) -> list:
         """从 utils/pca-code.json 加载数据"""
-        # 当前文件位于 facadeDetection/ui/dialogs，向上两级到达包根目录。
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        package_dir = os.path.dirname(os.path.dirname(current_dir))
-        json_path = os.path.join(package_dir, "utils", "pca-code.json")
+        json_path = resource_path("utils", "pca-code.json")
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             # 如果文件不存在，返回空列表，并显示错误提示
-            QMessageBox.critical(self, "错误", "未找到省市区数据")
+            QMessageBox.critical(self, "错误", f"未找到省市区数据: {json_path}")
             return []
         except json.JSONDecodeError:
             QMessageBox.critical(self, "错误", "省市区数据文件格式错误")
