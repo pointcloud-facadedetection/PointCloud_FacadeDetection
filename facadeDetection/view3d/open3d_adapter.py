@@ -139,6 +139,7 @@ class Open3DAdapter:
             self.request_render('point_size')
 
     def poll(self):
+        # TODO(渲染性能): poll：将渲染节流与页面可见性、窗口激活状态联动，避免隐藏视口持续 poll_events 或延迟提交旧帧。
         if not self._assert_owner():
             return False
         now = time.monotonic()
@@ -173,6 +174,7 @@ class Open3DAdapter:
         return self.vis.capture_screen_float_buffer(do_render=False)
 
     def destroy(self):
+        # TODO(生命周期): destroy：验证 Open3D/GLFW 原生句柄、几何体引用和 owner thread 在重复销毁及异常关闭场景下的完整释放。
         """Destroy the native window once, while GLFW is still available.
         策略：
         1. 先标记销毁状态，阻止后续操作

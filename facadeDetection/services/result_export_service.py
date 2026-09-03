@@ -345,7 +345,7 @@ class ResultExportService:
         return heatmap_path
 
     @staticmethod
-    def _fit_report_image(image, max_width=800, max_height=520):
+    def _fit_report_image(image, max_width=700, max_height=600):
         """Create a bounded, letterboxed image for the fixed PDF image box."""
         source = np.asarray(image, dtype=np.uint8)
         if source.ndim != 3 or source.shape[0] == 0 or source.shape[1] == 0:
@@ -354,6 +354,8 @@ class ResultExportService:
         scale = min(float(max_width) / w, float(max_height) / h, 1.0)
         nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
         resized = cv2.resize(source, (nw, nh), interpolation=cv2.INTER_AREA)
+        # Keep the report image contract fixed at 1200x520.  The source is
+        # letterboxed inside this canvas, including for very tall images.
         canvas = np.full((max_height, max_width, 3), [245, 247, 250], dtype=np.uint8)
         x, y = (max_width - nw) // 2, (max_height - nh) // 2
         canvas[y:y + nh, x:x + nw] = resized

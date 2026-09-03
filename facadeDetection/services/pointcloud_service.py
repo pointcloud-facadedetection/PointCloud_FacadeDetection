@@ -21,12 +21,8 @@ class PointCloudService:
         self.source_assets: Dict[str, dict] = {}
         self.decisions: Dict[str, DecisionSet] = {}
         self._decision_versions: Dict[str, int] = {}
-        # Runtime ownership is deliberately explicit.  The public service API
-        # remains unchanged, while all in-memory datasets are scoped to this
-        # project generation and can be disposed atomically on a switch.
         self._project_uuid = None
         self._project_generation = 0
-    #Todo：project_generation
     @property
     def project_generation(self) -> int:
         return self._project_generation
@@ -34,9 +30,6 @@ class PointCloudService:
     def set_project(self, project_uuid):
         """Bind the registry to a project; switching always drops old data."""
         project_uuid = str(project_uuid) if project_uuid else None
-        # ``None`` is the unloaded state.  Restore may populate the registry
-        # before the UI binds the project id, so binding from None must not
-        # discard the freshly restored snapshot.
         if self._project_uuid is not None and project_uuid != self._project_uuid:
             self.clear_runtime()
             self._project_uuid = project_uuid
@@ -133,12 +126,8 @@ class PointCloudService:
                 asset['colors'] = None
 
     def bind_processing_cloud(self, cloud_name: str) -> Optional[str]:
-        """Repair a restored viewport cloud's metadata from the dataset registry.
-
-        Open3D scene restoration predates the in-memory dataset contract in
-        some projects, so the cloud can exist while ``dataset_id`` is absent.
-        Match only the filename suffix; never bind a station preview cloud.
-        """
+        """从数据集注册表中修复已恢复视口云的元数据。 """
+               
         vp = self.viewport
         if vp is None or not cloud_name or str(cloud_name).startswith('pcfd.station.'):
             return None
@@ -229,11 +218,7 @@ class PointCloudService:
         return None
 
     def resolve_processing_cloud(self, preferred: Optional[str] = None) -> Optional[str]:
-        """Return the proxy cloud bound to a registered dataset.
-
-        Station clouds are deliberately display-only and must never be selected
-        merely because they happen to be the last Open3D geometry.
-        """
+        """返回与已注册数据集绑定的代理点云。"""
         vp = self.viewport
         if vp is None or not hasattr(vp, "get_cloud_data"):
             return None

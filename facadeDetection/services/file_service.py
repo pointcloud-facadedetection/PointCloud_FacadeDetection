@@ -50,6 +50,7 @@ class FileService:
         dataset_metadata: Optional[dict] = None,
         distance_path: Optional[str] = None,
     ) -> Optional[FileAsset]:
+        # TODO(性能/内存): upload_files：read_point_cloud、距离解析、代理构建和 dataset 注册会同时持有大数组，需后台化并设计分阶段释放/内存预算。
         """
         上传一个文件（点云或图片）并进行渲染。
         """
@@ -169,7 +170,7 @@ class FileService:
                 print(f"[PCFD] cloud.bound cloud={name} dataset={dataset_id} "
                       f"proxy={len(pts_ds)}", flush=True)
 
-            # Update pcfd index assets
+            # 更新 pcfd 索引资产
             try:
                 if project_uuid:
                     rel = os.path.relpath(str(load_path),
@@ -197,8 +198,8 @@ class FileService:
 
         return asset
 
-    # New: unified FLS import workflow (folder -> convert -> persist -> render)
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
+        # TODO(性能/响应性): import_fls_directory：转换器调用及逐个 PLY 读取/处理。
         """
         通过基于子进程的转换器将 FARO FLS 目录转换为 PLY 格式进行导入，随后通过
         相同的 upload_files 管道保存并渲染生成的 PLY 文件，以确保一致性。
@@ -222,7 +223,7 @@ class FileService:
 
         project_name = src.name
 
-        # Run conversion
+        # 调用转换器(pybind)将 FLS 转为 PLY
         try:
             result = convert_fls_to_ply(
                 fls_folder=str(src), output_dir=str(out_dir),

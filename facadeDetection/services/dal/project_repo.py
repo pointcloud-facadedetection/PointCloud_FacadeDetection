@@ -23,6 +23,18 @@ from utils.file_lifecycle import ensure_project_folders, gc_project, validate_pa
 
 class ProjectRepo:
     @staticmethod
+    def get_index_project_id(project_uuid: str) -> int | None:
+        """Return the legacy numeric index id without exposing sessions to UI."""
+        if not project_uuid:
+            return None
+        init_index_db()
+        with index_session() as session:
+            row = session.execute(
+                select(IndexProject).where(IndexProject.project_uuid == project_uuid)
+            ).scalar_one_or_none()
+            return int(row.id) if row is not None else None
+
+    @staticmethod
     def create_project(name: str, org_unit: str | None = None, address: str | None = None,
                        remarks: str | None = None, building_floor: str | None = None) -> dict:
         project_uuid = str(_uuid.uuid4())

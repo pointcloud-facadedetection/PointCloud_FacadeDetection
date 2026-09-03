@@ -5,7 +5,6 @@ from PySide6.QtCore import (
     QPointF,
     QRectF,
     QSize,
-    QThreadPool,
     Slot,
     QTimer,
     Qt,
@@ -50,6 +49,8 @@ from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
 from services.viewport_render_service import ViewportRenderService
+from services.viewport_render_facade import ViewportRenderFacade
+from runtime.lifecycle import RuntimeLifecycle
 from services.pointcloud_service import PointCloudService
 from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
@@ -61,6 +62,7 @@ from view3d.open3d_viewport import Open3DViewport
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
 from services.dal.results_repo import ResultsRepo
+from services.dal.project_repo import ProjectRepo
 from utils.workers import QualityWorker, PointCloudLoadWorker, RegistrationWorker
 
 
@@ -430,6 +432,7 @@ class MainWindow(QMainWindow):
         self.viewport = Open3DViewport()
         # Unified render service for business modules
         self.render_service = ViewportRenderService(self.viewport, db=None)
+        self.render_facade = ViewportRenderFacade(self.render_service)
         self.project_overview_service = ProjectOverviewService(self.viewport, self.render_service, db=None)
         # 使用 ruiqi_dev 最新服务编排，UI 只负责展示与交互。
         self.pointcloud_service = PointCloudService(self.viewport, self.render_service)
@@ -473,15 +476,10 @@ class MainWindow(QMainWindow):
         # 质量结果窗口采用非阻塞打开方式；必须由主窗口持有引用，避免窗口被
         # Python 垃圾回收，同时避免再次进入 QDialog.exec() 的嵌套事件循环。
         self._quality_dialog = None
-        # Quality jobs may hold a large raw-point working set.  The global Qt
-        # pool can otherwise start several facade jobs simultaneously and
-        # exhaust Windows commit memory while CPUs remain underutilised.
-        self._quality_pool = QThreadPool(self)
-        self._quality_pool.setMaxThreadCount(1)
-        self._registration_pool = QThreadPool(self)
-        self._registration_pool.setMaxThreadCount(1)
-        self._load_pool = QThreadPool(self)
-        self._load_pool.setMaxThreadCount(1)
+        self._runtime = RuntimeLifecycle(self, max_thread_count=1)
+        self._quality_pool = self._runtime.pool('quality')
+        self._registration_pool = self._runtime.pool('registration')
+        self._load_pool = self._runtime.pool('load')
         self._active_load_worker = None
         self._load_cancel_button = None
         self._load_in_progress = False
@@ -496,7 +494,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._create_resize_handles()
         self._connect_buttons()
-        # Hook: display facade stats in the right dock when results ready
+        # Hook: 当结果准备就绪时，在右侧停靠栏中显示立面统计数据
         try:
             self.project_operation_service.on_facade_results = self._show_facade_results
         except Exception:
@@ -914,7 +912,7 @@ class MainWindow(QMainWindow):
 
         self.left_dock = self._create_sidebar('leftDock', 'left')
         self.right_dock = self._create_sidebar('rightDock', 'right')
-        # Prepare right panel layout for results
+        # 准备结果的右侧面板布局，避免重复创建。
         try:
             self._init_right_panel_widgets()
         except Exception:
@@ -967,7 +965,7 @@ class MainWindow(QMainWindow):
         viewport_layout.addWidget(config_bar)
         self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
         self._on_standard_changed(0)
-        viewport_layout.addWidget(self.viewport.get_widget(), 1)
+        viewport_layout.addWidget(self.render_facade.widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
         self.operation_splitter.addWidget(viewport_panel)
@@ -1282,7 +1280,7 @@ class MainWindow(QMainWindow):
             cloud = (self.pointcloud_service.resolve_processing_cloud()
                      if self.pointcloud_service is not None else None)
             if cloud and self.render_service is not None:
-                self.render_service.highlight_facades(cloud, results or [])
+                self.render_facade.highlight_facades(cloud, results or [])
         except Exception as exc:
             print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
         
@@ -1327,7 +1325,7 @@ class MainWindow(QMainWindow):
             info.setStyleSheet('font-size: 12px; color: #334155;')
             row_layout.addWidget(info, 1)
             
-            color = self.render_service.facade_color_for(f, display_no)
+            color = self.render_facade.facade_color(f, display_no)
             swatch = QFrame()
             swatch.setFixedSize(18, 18)
             swatch.setStyleSheet(
@@ -1375,7 +1373,7 @@ class MainWindow(QMainWindow):
         cloud = self._active_cloud_name()
         if not cloud or self.render_service is None:
             return []
-        return self.render_service.compatible_quality_reports(
+        return self.render_facade.compatible_quality_reports(
             cloud, results, index_service=self.facade_service._index_service)
 
     def _refresh_heatmap_button_state(self):
@@ -1397,17 +1395,15 @@ class MainWindow(QMainWindow):
         self._heatmap_mode = ('verticality' if self._heatmap_mode == 'flatness'
                               else 'flatness')
         cloud = self._active_cloud_name()
-        self.render_service.render_quality_reports(
+        self.render_facade.quality_reports(
             cloud, getattr(self.project_operation_service, '_last_facade_results', None) or [],
             index_service=self.facade_service._index_service,
             heatmap_mode=self._heatmap_mode)
         self._refresh_heatmap_button_state()
 
     def _set_facade_preview_status(self, facade, button, status):
-        # review_status is the only canonical runtime field.  Keep the
-        # QListWidget payload and operation-service object identical by ID.
+        # review_status 是唯一的规范运行时字段。
         facade['review_status'] = status
-        # Clicking the status control also selects its owning list row.
         for row in range(self.list_facades.count()):
             item = self.list_facades.item(row)
             payload = item.data(Qt.ItemDataRole.UserRole) or {}
@@ -1497,13 +1493,9 @@ class MainWindow(QMainWindow):
             context = display_quality.get('__export_context') or {}
             if context.get('points') is not None and context.get('results_dir'):
                 return context
-            # Historical reports intentionally do not persist large point arrays.
-            # Rebuild the export input from the active processing dataset.
+            # 历史报告会刻意不保留大型点数组。从当前处理中的数据集重建导出输入。
             try:
                 dataset = self.facade_service._index_service._get_dataset(cloud)
-                # Export the segmented facade domain as the front-facing base.
-                # Quality indices are measurement support only and must not
-                # define the image extent.
                 proxy_ids = np.asarray(
                     facade.get('proxy_indices') or facade.get('inlier_indices') or [],
                     dtype=np.int64)
@@ -1529,8 +1521,7 @@ class MainWindow(QMainWindow):
                         (len(points), 1))
                 else:
                     colors = np.asarray(colors, dtype=float).reshape(-1, 3)
-                    # Ensure the segmented facade colour is visible in the
-                    # exported base, independent of source RGB availability.
+                    # 确保分段立面的颜色在导出的基础图层中可见，且不受源RGB数据是否可用影响。
                     colors[:] = np.asarray(
                         self.render_service.facade_color_for(facade), dtype=float)
                 project_uuid = getattr(self.current_project, 'project_id', None)
@@ -1547,7 +1538,7 @@ class MainWindow(QMainWindow):
             try:
                 display_quality = dict(quality) if isinstance(quality, dict) else {}
                 display_quality['heatmap_mode'] = mode
-                self.render_service.apply_quality_colors(
+                self.render_facade.apply_quality_colors(
                     cloud, display_quality,
                     index_service=self.facade_service._index_service)
                 context = _export_context(display_quality)
@@ -1555,8 +1546,8 @@ class MainWindow(QMainWindow):
                     context.get('results_dir'), facade_no,
                     context.get('points'), context.get('colors'), display_quality)
                 if exported and exported.get('heatmap'):
-                    # Persist only small, portable artifact metadata. Runtime
-                    # point arrays stay in __export_context and are not stored.
+                    # 仅持久化小型、可移植的工件元数据。
+                    # 运行时点数组保存在 __export_context 中，不会被存储。
                     artifact = {key: exported.get(key) for key in
                                 ('mode', 'title', 'heatmap', 'overlay', 'report', 'legend')}
                     quality_report = facade.get('quality_report')
@@ -1575,24 +1566,18 @@ class MainWindow(QMainWindow):
             try:
                 results = getattr(self.project_operation_service,
                                   '_last_facade_results', None)
-                self.render_service.restore_highlight(cloud, results or [])
+                self.render_facade.restore_highlight(cloud, results or [])
             except Exception as e:
                 print(f'[PCFD] ui.restore_error facade_id={facade_id} error={e}', flush=True)
 
         label = f'立面 {facade_no}'
         project_name = getattr(self.current_project, 'name', '') if self.current_project else ''
 
-        # Ensure quality is a dict
         if not isinstance(quality, dict):
             print(f'[PCFD] ui.quality_not_dict facade_id={facade_id} type={type(quality)}', flush=True)
             quality = {}
 
         try:
-            # 不使用 exec()：质量计算完成后这里本来就在 GUI 线程中，exec() 会
-            # 再启动一个嵌套事件循环。主窗口又包含 Open3D 原生子窗口，在
-            # Windows 上拖动该模态窗口时可能形成 Qt/原生窗口消息循环互等，
-            # 最终表现为整个进程锁死。open() 保留模态输入限制，但不阻塞主
-            # GUI 事件循环，因此窗口拖动、重绘和 Open3D 消息均可正常处理。
             previous = self._quality_dialog
             if previous is not None and previous.isVisible():
                 previous.close()
@@ -1628,8 +1613,8 @@ class MainWindow(QMainWindow):
         cloud = self._active_cloud_name()
         if not cloud:
             return
-        # Selection remains an explicit, non-expensive interaction.
-        self.render_service.select_facade(cloud, int(f.get('id', 0)))
+        
+        self.render_facade.select_facade(cloud, int(f.get('id', 0)))
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
         return
 
@@ -1641,21 +1626,15 @@ class MainWindow(QMainWindow):
         if not project_uuid:
             QMessageBox.warning(self, '质量评估', '请先选择项目。')
             return
-        # Quality PNG export is written to the active project's results folder.
-        # The folder is created here, while actual export remains user-triggered
-        # from the result dialog.
+        # 高质量的 PNG 导出文件将保存到当前项目的结果文件夹中。
         results_dir = Storage.ensure_project_dirs(project_uuid)['results']
 
-        # FIX: Ensure facade dict has stable id and display_no
         facade_copy = dict(f)
         facade_id = int(facade_copy.get('id', 0))
         facade_no = int(facade_copy.get('display_no', facade_id))
         facade_copy['id'] = facade_id
         facade_copy['display_no'] = facade_no
 
-        # QualityWorker runs asynchronously.  Keep ownership information with
-        # the request instead of trusting the mutable UI facade list when it
-        # finishes (the active station may have changed meanwhile).
         active_station_id = getattr(self.station_service, '_active_station_id', None)
         dataset = self.facade_service._index_service._get_dataset(cloud)
         facade_copy['__quality_request_context'] = {
@@ -1667,10 +1646,7 @@ class MainWindow(QMainWindow):
             'cloud_name': cloud,
         }
 
-        # A completed historical result is already a valid report. Reopen it
-        # directly; never spend CPU or memory recomputing it on every project
-        # activation. Revision mismatches are deliberately handled by the
-        # normal worker path, which will reject stale geometry safely.
+        # 已完成的历史结果本身就是一份有效的报告。直接重新打开它
         historical_quality = facade_copy.get('quality_report')
         if facade_copy.get('quality_status') == 'complete' and isinstance(historical_quality, dict):
             self._show_quality_dialog(cloud, facade_copy, historical_quality)
@@ -1679,8 +1655,6 @@ class MainWindow(QMainWindow):
         print(f'[PCFD] ui.evaluate_start facade_id={facade_id} facade_no={facade_no} '
               f'cloud={cloud}', flush=True)
 
-        # Snapshot all UI-owned values before submitting. The worker must not
-        # access widgets or the Open3D viewport while running.
         profile = self._quality_profile_snapshot(
             getattr(self, '_inspection_profile', None))
         grid_size = float(self.interval_combo.currentData())
@@ -1698,7 +1672,6 @@ class MainWindow(QMainWindow):
         self._quality_request_cache_key = cache_key
         self.statusBar().showMessage(f'正在计算立面 #{facade_no} 质量指标...')
 
-        # FIX: Pass facade_copy with stable IDs to worker
         worker = QualityWorker(self.facade_service, cloud, facade_copy, kwargs)
         self._active_quality_worker = worker
         worker.signals.finished.connect(
@@ -1774,7 +1747,6 @@ class MainWindow(QMainWindow):
 
         self.statusBar().clearMessage()
 
-        # State 1: Worker returned None (exception or unexpected failure)
         if quality is None:
             print(f'[PCFD] ui.quality_none facade_id={facade_no}', flush=True)
             QMessageBox.warning(self, '质量评估', 
@@ -1782,7 +1754,6 @@ class MainWindow(QMainWindow):
             self._refresh_report_preview()
             return
 
-        # Ensure quality is a dict
         if not isinstance(quality, dict):
             print(f'[PCFD] ui.quality_invalid_type facade_id={facade_no} '
                   f'type={type(quality)}', flush=True)
@@ -1791,7 +1762,6 @@ class MainWindow(QMainWindow):
             self._refresh_report_preview()
             return
 
-        # Cache the result regardless of ok status
         cache_key = getattr(self, '_quality_request_cache_key', None)
         if cache_key is not None:
             self._quality_result_cache[cache_key] = quality
@@ -1801,23 +1771,19 @@ class MainWindow(QMainWindow):
                                  if (r.get('facade') or {}).get('display_no') != facade_no]
         self._quality_reports.append({'facade': f, 'quality': quality})
 
-        # State 2: Algorithm returned ok=False (narrow facade, no windows, etc.)
         if not quality.get('ok', True):
             error_reason = quality.get('reason', 'unknown')
             error_message = quality.get('message', f'质量计算失败：{error_reason}')
             print(f'[PCFD] ui.quality_error facade_id={facade_no} '
                   f'reason={error_reason} message={error_message}', flush=True)
 
-            # Show info message but still open dialog for diagnostics
             QMessageBox.information(self, '质量评估', 
                 f'立面 #{facade_no} 质量评估结果：\n\n{error_message}')
 
-            # Open dialog even for error results so user can see diagnostics
             QTimer.singleShot(0, lambda: self._show_quality_dialog(cloud, f, quality))
             self._refresh_report_preview()
             return
 
-        # State 3: ok=True but no valid windows
         overall = quality.get('overall') or {}
         window_count = int(overall.get('candidate_window_count', 0) or 0)
         valid_count = int(overall.get('quality_valid_window_count', 0) or 0)
@@ -1833,23 +1799,15 @@ class MainWindow(QMainWindow):
             self._refresh_report_preview()
             return
 
-        # State 4: Success with valid windows
         print(f'[PCFD] ui.quality_success facade_id={facade_no} '
               f'windows={window_count} valid={valid_count} '
               f'intervals={len(quality.get("intervals", []))}', flush=True)
-        # Persist only after the algorithm has produced a valid report. The
-        # repository transaction is the commit point for the completed state.
+        # 仅在算法生成有效报告后才进行持久化。
         try:
             project_uuid = getattr(self.current_project, 'project_id', None)
             if not project_uuid:
                 raise RuntimeError('当前项目已失效，无法保存质量结果')
-            # results_dir belongs to the evaluation request, but the finished
-            # callback must not read a local variable from _evaluate_facade.
-            # Resolve it here so asynchronous completion has an independent,
-            # valid persistence context.
             dataset = self.facade_service._index_service._get_dataset(cloud)
-            # Quality reports are self-contained; no results-domain NPZ is
-            # needed for replay. Keep export context separate from persistence.
             artifact_path = None
             ResultsRepo.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
@@ -1861,8 +1819,6 @@ class MainWindow(QMainWindow):
             )
             f['quality_status'] = 'complete'
             f['quality_report'] = quality
-            # The worker receives a copy; update the canonical facade list so
-            # the heatmap toggle becomes available immediately after success.
             for current in (getattr(self.project_operation_service,
                                     '_last_facade_results', None) or []):
                 if int(current.get('id', -1)) == int(f.get('id', -2)):
@@ -1901,17 +1857,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'报告已导出：{path}', 6000)
         except Exception as exc:
             QMessageBox.warning(self, '导出报告', f'报告导出失败：{exc}')
-
-    def _project_db_id(self):
-        """Resolve the numeric project id required by the legacy report registry."""
-        from db.connection import index_session
-        from models import Project
-        from sqlalchemy import select
-        with index_session() as session:
-            row = session.execute(select(Project).where(Project.uuid == self.current_project.project_id)).scalar_one_or_none()
-            if row is None:
-                raise ValueError('当前项目不存在')
-            return row.id
 
     def _refresh_report_preview(self):
         if not hasattr(self, 'report_preview_browser'):
@@ -2369,6 +2314,7 @@ class MainWindow(QMainWindow):
         return dock
 
     def set_current_page(self, page_index):
+        # TODO(渲染性能): set_current_page：页签切换时统一暂停/恢复视口、隐藏旧页原生窗口并强制刷新，避免 Open3D 残留其他页 UI 数秒。
         if not 0 <= page_index < len(PAGE_DEFINITIONS):
             return
         page_title, page_key = PAGE_DEFINITIONS[page_index]
@@ -2649,8 +2595,7 @@ class MainWindow(QMainWindow):
 
         self._last_upload_directory = directory_path
         self._prepare_project_activation(None)
-        # open_project currently includes Open3D rendering and must remain on
-        # the GUI thread. Do not send this legacy combined pipeline to a worker.
+        # open_project 目前包含 Open3D 渲染功能，必须保持在GUI 线程上。
         project = self.project_overview_service.open_project(directory_path)
         self._refresh_project_list()
         self._activate_project(project)
@@ -3017,18 +2962,16 @@ class MainWindow(QMainWindow):
 
     def _start_load(self, operation, project_id, *, file_paths=None,
                     directory=None, project=None):
-        """Run the combined legacy pipeline on GUI thread.
+        # TODO(性能/响应性): _start_load：优化点云加载。
+        """在GUI线程上运行合并后的传统管道。
 
-        FileService currently registers Open3D geometry as part of loading.
-        Running it in QRunnable raises Open3D's GUI-thread guard. Keep the
-        worker API for the future split pipeline, but never dispatch this
-        combined operation to a worker.
+        FileService 目前会在加载过程中注册 Open3D 几何体。
+        在 QRunnable 中运行它会触发 Open3D 的 GUI 线程保护机制。保留
+        面向未来拆分管道的 worker API。
         """
         if getattr(self, '_closing', False):
             return
-        # This pipeline intentionally commits Open3D only on the GUI thread.
-        # Reject re-entry rather than allowing two imports to multiply the
-        # resident source/proxy arrays and exhaust Windows commit memory.
+        
         if getattr(self, '_load_in_progress', False):
             QMessageBox.information(self, '点云加载', '已有加载任务正在执行，请稍候。')
             return
@@ -3043,8 +2986,6 @@ class MainWindow(QMainWindow):
                 if uploaded:
                     # 只同步站点投影；已有运行时 dataset 保持不变。
                     self.station_service.refresh()
-                    # Upload is an explicit user mutation: show one newly
-                    # imported station, without restoring the whole project.
                     stations = self.station_service.list_stations()
                     new_station = next(
                         (row for row in reversed(stations) if row.id not in before_ids),
@@ -3059,8 +3000,7 @@ class MainWindow(QMainWindow):
                 before_ids = {row.id for row in self.station_service.list_stations()}
                 payload = self.project_overview_service.import_fls_directory(directory, project_id)
                 if payload.get('success'):
-                    # FLS import already persists and synchronizes its assets;
-                    # only display one new station.
+                    # FLS 导入功能已实现资产的持久化存储和同步
                     self.station_service.refresh()
                     new_station = next(
                         (row for row in reversed(self.station_service.list_stations())
@@ -3096,9 +3036,7 @@ class MainWindow(QMainWindow):
             uploaded = result.get('uploaded') or []
             if uploaded:
                 self._refresh_project_list()
-                # 上传完成后只同步站点投影，不重新激活项目。重新激活会
-                # 让已有站点再次走 PLY 恢复链路；新增站点由用户点击时
-                # 按 station_id 懒加载，已有 dataset 保持不变。
+                # 上传完成后只同步站点投影，不重新激活项目
                 self.station_service.refresh()
                 self._refresh_station_panel()
                 self.statusBar().showMessage(
@@ -3117,7 +3055,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'FLS 导入', payload.get('message', '导入失败'))
 
     def _activate_project(self, project):
-        # 历史立面几何形状并非正式结果。切勿将其应用到其他项目中，也不要恢复仅用于检测的缓存条目。
+        # TODO(生命周期): _activate_project：审查代码的生命周期和异常处理，确保在项目切换、导入和恢复时不会泄漏资源或导致 GUI 状态不一致。
         if hasattr(self, 'list_facades'):
             self.list_facades.clear()
             self.lbl_facade_summary.setText('未检测')
@@ -3144,7 +3082,7 @@ class MainWindow(QMainWindow):
         self._set_current_project(project)
         self._refresh_report_preview()
         try:
-            # propagate active project UUID to operation scheduler for DAL persistence
+            # 将活动项目的 UUID 传递给操作调度程序，以实现 DAL 持久化
             self.project_operation_service.set_active_project_uuid(project_uuid)
         except Exception:
             pass
@@ -3168,16 +3106,17 @@ class MainWindow(QMainWindow):
         self.set_current_page(operation_index)
 
     def _prepare_project_activation(self, project_id):
+        # TODO(生命周期): _prepare_project_activation：需要统一旧项目异步任务取消、等待和资源释放顺序，核查重复分支及切换竞态。
         """Dispose the old session before a restore/import loads new arrays."""
         current_id = getattr(self.current_project, 'project_id', None)
         if current_id == project_id and project_id is not None:
-            # Re-importing the current project still needs a clean registry.
             self._dispose_project_runtime()
         else:
             self._dispose_project_runtime()
         self._project_generation += 1
 
     def _dispose_project_runtime(self):
+        # TODO(内存/生命周期): _dispose_project_runtime：建立可验证的项目资源释放清单。
         """Single GUI-thread disposal gate for project switches and close."""
         self._load_in_progress = False
         try:
@@ -3213,6 +3152,7 @@ class MainWindow(QMainWindow):
             self.station_list.blockSignals(False)
 
     def closeEvent(self, event):
+        # TODO(生命周期/稳定性): closeEvent：核查关闭期间线程池短超时、原生窗口销毁和 Qt 退出顺序，避免后台任务继续访问已销毁视口导致未响应。
         """严格按顺序销毁，先停 timer，再断信号，再销毁 viewport，最后退出 app。"""
         if getattr(self, '_closing', False):
             event.accept()
@@ -3232,14 +3172,10 @@ class MainWindow(QMainWindow):
         if quality_dialog is not None:
             quality_dialog.close()
             self._quality_dialog = None
-        # Step 4: 清理线程池（不再接受新任务）
-        for pool_name in ('_quality_pool', '_load_pool', '_registration_pool'):
-            pool = getattr(self, pool_name, None)
-            if pool is not None:
-                try:
-                    pool.clear()
-                except Exception:
-                    pass
+        # Step 4: 由 runtime 统一清理线程池（不再接受新任务）
+        runtime = getattr(self, '_runtime', None)
+        if runtime is not None:
+            runtime.clear()
 
         # Step 5: 释放项目运行时资源
         self._dispose_project_runtime()
@@ -3251,14 +3187,9 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Step 7: 等待线程池完成（短超时）
-        for pool_name in ('_quality_pool', '_load_pool', '_registration_pool'):
-            pool = getattr(self, pool_name, None)
-            if pool is not None:
-                try:
-                    pool.waitForDone(100)
-                except Exception:
-                    pass
+        # Step 7: 等待 runtime 线程池完成（短超时）
+        if runtime is not None:
+            runtime.stop(100)
 
         # Step 8: 调用父类关闭事件
         try:

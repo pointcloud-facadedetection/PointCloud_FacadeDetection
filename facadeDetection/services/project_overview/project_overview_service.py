@@ -40,6 +40,7 @@ class ProjectOverviewService:
 
     def create_load_worker(self, operation: str, project_uuid: str,
                            *, file_paths=None, directory=None):
+        # TODO(性能/线程安全): create_load_worker：拆分后台文件解析与 GUI 线程 Open3D 提交。
         def run(worker):
             if operation == 'activate':
                 worker.signals.progress.emit(10, '正在读取项目资源')
@@ -99,6 +100,7 @@ class ProjectOverviewService:
         )
 
     def open_project(self, directory_path: str) -> ProjectCard:
+        # TODO(生命周期/性能): open_project：目录扫描、索引同步和项目激活应避免在 GUI 线程同步执行，并核查重复索引读取与激活失败回滚。
         path = Path(directory_path).expanduser().resolve()
         if self.viewport is not None and hasattr(self.viewport, 'clear'):
             self.viewport.clear()
@@ -286,6 +288,7 @@ class ProjectOverviewService:
         )
 
     def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:
+        # TODO(性能/内存): upload_files：批量导入需控制原始点、距离数据、代理点和索引映射的同时驻留峰值，并提供进度/取消边界，现有加载速度很慢。
         if not project_uuid:
             raise ValueError('请先新建或选择项目，再上传点云文件。')
         svc = self._ensure_file_service()
@@ -313,6 +316,7 @@ class ProjectOverviewService:
         return uploaded
 
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
+        # TODO(性能/响应性): import_fls_directory：FLS 转换、递归扫描和逐站读取目前同步执行，应移出主线程并限制批量中间对象累积。
         svc = self._ensure_file_service()
         # FLS 也采用增量导入语义，避免已有站点被清空后重新读取。
         res = svc.import_fls_directory(dir_path, project_uuid)

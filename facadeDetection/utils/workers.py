@@ -41,6 +41,7 @@ class PointCloudLoadWorker(QRunnable):
         return self._cancelled
 
     def run(self):
+        # TODO(线程生命周期): PointCloudLoadWorker.run
         try:
             self.signals.progress.emit(2, '正在准备点云加载任务')
             if self._cancelled:

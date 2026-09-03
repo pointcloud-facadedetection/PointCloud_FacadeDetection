@@ -214,6 +214,7 @@ class ViewportRenderService:
 
     # ---- Facade highlighting ----
     def highlight_facades(self, cloud_name: str, facades: list[dict], base_color=(0.75, 0.75, 0.75)):
+        # TODO(内存/渲染性能): highlight_facades：整云 np.tile 颜色矩阵及代理索引映射。
         """
         立面着色策略（统一颜色规则 + 选中高亮）：
         - 非立面点使用基础色 base_color。
@@ -258,8 +259,6 @@ class ViewportRenderService:
                     continue
                 col = np.asarray(col, dtype=np.float32)
 
-                # Detection service guarantees proxy_global after normalization.
-                # Never fall back to algorithm-local indices here.
                 proxy_ids = f.get('proxy_indices', [])
                 if not proxy_ids:
                     proxy_ids = f.get('inlier_indices', [])

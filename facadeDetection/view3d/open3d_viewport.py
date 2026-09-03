@@ -240,6 +240,7 @@ class Open3DViewport(BaseViewport):
         self._interactor.selection_enabled = bool(value)
 
     def _init_ui(self):
+        # TODO(渲染生命周期): _init_ui：统一管理 Open3D 原生窗口、createWindowContainer、Overlay 与事件桥接的可见性和销毁顺序，避免页签切换产生残留 UI。
         layout = self._layout
         try:
             self._adapter.create_window(self._window_title, width=1280, height=960, visible=True)
@@ -408,6 +409,7 @@ class Open3DViewport(BaseViewport):
             pass
 
     def process_events(self):
+        # TODO(渲染性能): process_events：按页面可见性暂停 GLFW 轮询和帧提交，并在重新显示时执行一次受控刷新，降低隐藏页 CPU/GPU 占用。
         if not self._init_success:
             return
         try:
