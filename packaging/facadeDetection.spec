@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import Tree, collect_all, collect_data_files, collect_submodules
+from PyInstaller.building.datastruct import Tree
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 
 project_root = Path(__file__).resolve().parents[1]
