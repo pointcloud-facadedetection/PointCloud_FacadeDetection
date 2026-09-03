@@ -4,8 +4,12 @@ import os
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
+# 兼容 __file__ 未定义的情况（CI 环境中可能出现）
+try:
+    project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    project_root = Path.cwd()
 
-project_root = Path(__file__).resolve().parents[1]
 app_root = project_root / 'facadeDetection'
 
 block_cipher = None
