@@ -10,7 +10,7 @@ on:
       release_asset_name:
         description: 'Release asset name for FlsConverter_package zip'
         required: true
-        default: 'fls-package-v0.1.0.zip'
+        default: 'FlsConverter_package.zip'
       app_name:
         description: 'Output application folder name'
         required: false
