@@ -39,7 +39,9 @@ converter_root = project_root / 'FlsConverter_package'
 if converter_root.is_dir():
     datas += Tree(str(converter_root), prefix='FlsConverter_package')
 
-pathex = [str(project_root)]
+# main.py 内部使用 from ui / from db / from services 等顶层导入；同时保留
+# 项目根目录，保证 facadeDetection 包本身及其资源可以被分析。
+pathex = [str(app_root), str(project_root)]
 
 a = Analysis(
     [str(app_root / 'main.py')],

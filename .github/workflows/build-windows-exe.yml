@@ -26,6 +26,9 @@ jobs:
       PYTHONUTF8: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PIP_NO_CACHE_DIR: '1'
+      # facadeDetection/main.py 使用 ui、db、services 等顶层包导入，
+      # 因此必须把 facadeDetection 目录加入 Python 模块搜索路径。
+      PYTHONPATH: ${{ github.workspace }}\facadeDetection;${{ github.workspace }}
       FLS_CONVERTER_DLL_DIR: ${{ github.workspace }}\FlsConverter_package\FlsConverter
       APP_NAME: ${{ inputs.app_name }}
 
