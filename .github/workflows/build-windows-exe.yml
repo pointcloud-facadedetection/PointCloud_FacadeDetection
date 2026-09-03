@@ -102,13 +102,14 @@ jobs:
         run: |
           python -m pip install -r facadeDetection/requirements.txt
 
-      # - name: Smoke test imports and converter path
-      #   shell: pwsh
-      #   run: |
-      #     $ErrorActionPreference = 'Stop'
-      #     $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\facadeDetection;$env:GITHUB_WORKSPACE"
-      #     $env:FLS_CONVERTER_DLL_DIR = "$env:GITHUB_WORKSPACE\FlsConverter_package\FlsConverter"
-      #     python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd() / 'facadeDetection')); sys.path.insert(0, str(Path.cwd())); import facadeDetection.main; from facadeDetection.utils.convert_fls2ply import _load_pybind_converter; converter = _load_pybind_converter(); print('facadeDetection import OK'); print('FlsConverter import OK:', converter)"
+      # ========== 修改点：仅测试转换器加载，避免导入整个 main ==========
+      - name: Smoke test imports and converter path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\facadeDetection;$env:GITHUB_WORKSPACE"
+          $env:FLS_CONVERTER_DLL_DIR = "$env:GITHUB_WORKSPACE\FlsConverter_package\FlsConverter"
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd() / 'facadeDetection')); sys.path.insert(0, str(Path.cwd())); from facadeDetection.utils.convert_fls2ply import _load_pybind_converter; converter = _load_pybind_converter(); print('FlsConverter import OK:', converter)"
 
       - name: Build executable with PyInstaller
         shell: pwsh
