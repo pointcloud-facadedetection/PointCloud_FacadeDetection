@@ -6,7 +6,7 @@ on:
       release_tag:
         description: 'GitHub Release tag that contains FlsConverter_package zip'
         required: true
-        default: 'latest'
+        default: 'fls-package-v0.1.0'
       release_asset_name:
         description: 'Release asset name for FlsConverter_package zip'
         required: true
@@ -22,7 +22,6 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-
     env:
       PYTHONUTF8: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
@@ -33,6 +32,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install GitHub‑CLI
+        shell: pwsh
+        run: |
+          winget install --id GitHub.cli -e
+          echo "C:\Program Files\GitHub CLI" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -56,11 +61,7 @@ jobs:
           $outDir = Join-Path $env:GITHUB_WORKSPACE 'external'
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
           $zipPath = Join-Path $outDir $env:RELEASE_ASSET_NAME
-          if ($env:RELEASE_TAG -eq 'latest') {
-            gh release download --repo $env:GITHUB_REPOSITORY --pattern $env:RELEASE_ASSET_NAME --dir $outDir
-          } else {
-            gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:RELEASE_ASSET_NAME --dir $outDir
-          }
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:RELEASE_ASSET_NAME --dir $outDir
           if (-not (Test-Path $zipPath)) {
             throw "Release asset not found: $zipPath"
           }
@@ -69,7 +70,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'external\${{ inputs.release_asset_name }}'
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "external\${{ inputs.release_asset_name }}"
           $extractRoot = Join-Path $env:GITHUB_WORKSPACE 'FlsConverter_package'
           if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
           Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
@@ -120,7 +121,7 @@ jobs:
           $distRoot = Join-Path $env:GITHUB_WORKSPACE 'dist'
           $packageName = "${env:APP_NAME}-windows-py312"
           $zipPath = Join-Path $distRoot "$packageName.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          if (Test-Path $zipPath) { Remove-Item -Recurse -Force $zipPath }
           Compress-Archive -Path (Join-Path $distRoot $env:APP_NAME) -DestinationPath $zipPath -Force
           Get-ChildItem $distRoot
 
