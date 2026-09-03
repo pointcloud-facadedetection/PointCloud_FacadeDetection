@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
-
-from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 
@@ -38,7 +37,10 @@ runtime_hooks = [str(project_root / 'packaging' / 'runtime_hook_fls_converter.py
 # dist/facadeDetection/FlsConverter_package/FlsConverter，供 DLL 搜索路径使用。
 converter_root = project_root / 'FlsConverter_package'
 if converter_root.is_dir():
-    datas += Tree(str(converter_root), prefix='FlsConverter_package')
+    for source in converter_root.rglob('*'):
+        if source.is_file():
+            target_dir = Path('FlsConverter_package') / source.relative_to(converter_root).parent
+            datas.append((str(source), str(target_dir)))
 
 # main.py 内部使用 from ui / from db / from services 等顶层导入；同时保留
 # 项目根目录，保证 facadeDetection 包本身及其资源可以被分析。
