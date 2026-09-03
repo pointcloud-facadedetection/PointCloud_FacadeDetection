@@ -81,18 +81,22 @@ jobs:
           if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
           Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
           $expected = Join-Path $extractRoot 'FlsConverter'
-          if (Test-Path (Join-Path $expected 'FlsConverter.pyd')) {
-            Write-Host "FlsConverter directory ready: $expected"
-          } else {
-            $nested = Get-ChildItem $extractRoot -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'FlsConverter.pyd') } | Select-Object -First 1
-            if ($nested) {
-              if (Test-Path $expected) { Remove-Item -Recurse -Force $expected }
-              Move-Item $nested.FullName $expected
-            }
+          $foundPyd = Get-ChildItem -Path $extractRoot -Recurse -Filter 'FlsConverter.pyd' -File | Select-Object -First 1
+          if (-not $foundPyd) {
+            throw "FlsConverter.pyd not found after extraction. zipPath=$zipPath extractRoot=$extractRoot"
           }
+
+          $converterDir = $foundPyd.Directory.FullName
+          if ($converterDir -ne $expected) {
+            if (Test-Path $expected) { Remove-Item -Recurse -Force $expected }
+            New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+            Copy-Item -Path $converterDir -Destination $expected -Recurse -Force
+          }
+
           if (-not (Test-Path (Join-Path $expected 'FlsConverter.pyd'))) {
-            throw 'FlsConverter.pyd not found after extraction.'
+            throw "FlsConverter.pyd still not found in normalized folder: $expected"
           }
+          Write-Host "FlsConverter directory ready: $expected"
 
       - name: Install project dependencies
         run: |
