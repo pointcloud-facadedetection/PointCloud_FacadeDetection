@@ -113,7 +113,6 @@ jobs:
           import os
           from pathlib import Path
           os.environ['FLS_CONVERTER_DLL_DIR'] = str(Path.cwd() / 'FlsConverter_package' / 'FlsConverter')
-          import facadeDetection.main as app_main
           from facadeDetection.utils.convert_fls2ply import _load_pybind_converter
           converter = _load_pybind_converter()
           print('FlsConverter import OK:', converter)
