@@ -137,6 +137,7 @@ class PointCloudStationService:
         dist_path = Path(station.source_path).with_suffix('.dist')
         metadata = {'source_id': source_id, 'station_id': station.id,
                     'project_uuid': self.project_uuid,
+                    'source_ply_path': str(Path(station.source_path).resolve()),
                     'asset_fingerprint': list(fingerprint_key),
                     'source_raw_count': int(len(points))}
         metadata.update(self._global_coordinate_metadata(station.source_path))

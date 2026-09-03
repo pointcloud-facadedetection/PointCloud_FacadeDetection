@@ -2024,8 +2024,7 @@ class MainWindow(QMainWindow):
         )
 
     def _projection_cloud_source(self, data):
-        """优先返回原始 PLY 的实点云及 intensity，保持测试查看器效果。"""
-        points = data.get('pos')
+        """只读取原始 PLY；降噪后的视口点云不得参与取景和映射。"""
         dataset_id = data.get('dataset_id')
         if (
             not dataset_id
@@ -2047,25 +2046,33 @@ class MainWindow(QMainWindow):
             if dataset is not None
             else None
         )
-        if source_path:
-            try:
-                return self.photo_match_service.load_projection_cloud(
-                    source_path,
-                    voxel_size=0.1,
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                print(
-                    f'[PCFD] projection.intensity_fallback '
-                    f'path={source_path} error={exc}',
-                    flush=True,
-                )
-        else:
-            print(
-                f'[PCFD] projection.no_source_ply dataset={dataset_id}',
-                flush=True,
+        if not source_path and dataset is not None:
+            source_id = (dataset.metadata or {}).get('source_id')
+            source_asset = (
+                self.pointcloud_service.get_source_asset(source_id)
+                if source_id
+                and hasattr(self.pointcloud_service, 'get_source_asset')
+                else None
             )
-        # 视口显示色不是 LiDAR intensity；缺文件时用 depth，与测试查看器一致。
-        return points, None
+            source_path = (
+                (source_asset.get('metadata') or {}).get('ply_path')
+                if source_asset is not None
+                else None
+            )
+        if not source_path:
+            raise ValueError(
+                '当前点云缺少原始 PLY 路径，无法进行角度调整或点云映射；'
+                '请重新加载原始 PLY 文件。'
+            )
+        try:
+            return self.photo_match_service.load_projection_cloud(
+                source_path,
+                voxel_size=0.1,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f'原始 PLY 读取失败，无法进行角度调整或点云映射：{exc}'
+            ) from exc
 
     def _on_projection_slider_changed(self, _value):
         sender = self.sender()
@@ -2096,8 +2103,8 @@ class MainWindow(QMainWindow):
         if points is None or len(points) == 0:
             QMessageBox.information(self, '针孔投影', '请先加载点云。')
             return
-        points, _values = self._projection_cloud_source(data)
         try:
+            points, _values = self._projection_cloud_source(data)
             params = self.photo_match_service.initialize_projection(
                 points,
                 image_size=self._projection_image_size(),
@@ -2168,10 +2175,10 @@ class MainWindow(QMainWindow):
         if len(finite_points) == 0:
             QMessageBox.warning(self, title, '当前点云不包含有效坐标。')
             return False
-        source_points, _values = self._projection_cloud_source(data)
-        source_points = np.asarray(source_points, dtype=np.float64)
-        finite_points = source_points[np.isfinite(source_points).all(axis=1)]
         try:
+            source_points, _values = self._projection_cloud_source(data)
+            source_points = np.asarray(source_points, dtype=np.float64)
+            finite_points = source_points[np.isfinite(source_points).all(axis=1)]
             projection_params = self.photo_match_service.initialize_projection(
                 finite_points,
                 image_size=self._projection_image_size(),
