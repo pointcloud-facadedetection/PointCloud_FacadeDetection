@@ -26,9 +26,6 @@ jobs:
       PYTHONUTF8: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PIP_NO_CACHE_DIR: '1'
-      # facadeDetection/main.py 使用 ui、db、services 等顶层包导入，
-      # 因此必须把 facadeDetection 目录加入 Python 模块搜索路径。
-      PYTHONPATH: ${{ github.workspace }}\facadeDetection;${{ github.workspace }}
       FLS_CONVERTER_DLL_DIR: ${{ github.workspace }}\FlsConverter_package\FlsConverter
       APP_NAME: ${{ inputs.app_name }}
 
@@ -109,14 +106,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          @'
-          import os
-          from pathlib import Path
-          os.environ['FLS_CONVERTER_DLL_DIR'] = str(Path.cwd() / 'FlsConverter_package' / 'FlsConverter')
-          from facadeDetection.utils.convert_fls2ply import _load_pybind_converter
-          converter = _load_pybind_converter()
-          print('FlsConverter import OK:', converter)
-          '@ | python -
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\facadeDetection;$env:GITHUB_WORKSPACE"
+          $env:FLS_CONVERTER_DLL_DIR = "$env:GITHUB_WORKSPACE\FlsConverter_package\FlsConverter"
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd() / 'facadeDetection')); sys.path.insert(0, str(Path.cwd())); import facadeDetection.main; from facadeDetection.utils.convert_fls2ply import _load_pybind_converter; converter = _load_pybind_converter(); print('facadeDetection import OK'); print('FlsConverter import OK:', converter)"
 
       - name: Build executable with PyInstaller
         shell: pwsh
