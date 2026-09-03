@@ -2,7 +2,7 @@
 
 Repositories provide high-level CRUD focused on business use cases and
 are safe to call from PySide slots. All functions use short-lived sessions
-through db.crud.get_session().
+through db.connection.project_session().
 """
 
 from .project_repo import ProjectRepo  # noqa: F401
