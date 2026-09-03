@@ -1,14 +1,21 @@
+from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt
+import numpy as np
+
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QColorDialog,
     QDockWidget,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -28,9 +35,10 @@ from .widgets.technical_canvas import TechnicalCanvas
 from .pages.overview_page import OverviewPageMixin
 from .pages.operation_page import OperationPageMixin
 from .pages.report_page import ReportPageMixin
-from .controllers.facade_quality import FacadeQualityMixin
-from .controllers.registration import RegistrationMixin
-from .controllers.project_lifecycle import ProjectLifecycleMixin
+from .controllers.facade_quality import FacadeQualityController
+from .controllers.registration import RegistrationController
+from .controllers.project_lifecycle import ProjectLifecycleController
+from .dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
@@ -41,6 +49,7 @@ from services.pointcloud_service import PointCloudService
 from services.pointcloud_station_service import PointCloudStationService
 from services.facade.facade_service import FacadeService
 from services.report_export import ReportExportService
+from services.result_export_service import ResultExportService
 from config.storage import Storage
 from view3d.open3d_viewport import Open3DViewport
 
@@ -140,7 +149,6 @@ PAGE_HEADER_GROUPS = {
 
 
 class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
-              FacadeQualityMixin, RegistrationMixin, ProjectLifecycleMixin,
               QMainWindow):
     def __init__(self):
         super().__init__()
@@ -194,9 +202,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self._current_report_pdf_name = None
         self._report_navigation_index = 0
         self._report_webview_error = None
-        self._quality_reports = []
-        self._heatmap_mode = 'flatness'
-        self._quality_result_cache = {}
+        # 质量域状态（_quality_reports/_quality_result_cache/_active_quality_worker
+        # 等）由 FacadeQualityController 持有，经下方同名 property 委托访问。
         self._report_snapshot = {'project': {}, 'facades': []}
         # 质量结果窗口采用非阻塞打开方式；必须由主窗口持有引用，避免窗口被
         # Python 垃圾回收，同时避免再次进入 QDialog.exec() 的嵌套事件循环。
@@ -205,17 +212,61 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self._quality_pool = self._runtime.pool('quality')
         self._registration_pool = self._runtime.pool('registration')
         self._load_pool = self._runtime.pool('load')
-        self._active_load_worker = None
         self._load_cancel_button = None
-        self._load_in_progress = False
-        self._active_quality_worker = None
-        self._registration_worker = None
+        # 加载/项目代际状态（_active_load_worker、_load_in_progress、
+        # _project_generation）由 ProjectLifecycleController 持有，
+        # _project_generation 经下方同名 property 委托访问。
         self._pending_station_selection = {}
         self._station_selection_timer = QTimer(self)
         self._station_selection_timer.setSingleShot(True)
         self._station_selection_timer.setInterval(160)
         self._station_selection_timer.timeout.connect(self._flush_station_selection)
-        self._project_generation = 0
+        # 配准编排移入独立 controller；按钮使能、弹窗、视口选点等 UI 反馈
+        # 全部经信号接回本窗口，worker 状态由 controller 自行持有。
+        self.registration_controller = RegistrationController(
+            self.station_service,
+            self.render_service,
+            self._registration_pool,
+            self._registration_context,
+            parent=self,
+        )
+        self._connect_registration_controller()
+        # 质量编排移入独立 controller；对话框、立面列表、热力图按钮等 UI 反馈
+        # 全部经信号接回本窗口。参数快照与采样间距依赖 UI 控件读数，
+        # 以可调用对象注入，由 controller 在计算发起时实时取数。
+        self.facade_quality_controller = FacadeQualityController(
+            facade_service=self.facade_service,
+            render_facade=self.render_facade,
+            render_service=self.render_service,
+            pointcloud_service=self.pointcloud_service,
+            project_operation_service=self.project_operation_service,
+            station_service=self.station_service,
+            pool=self._quality_pool,
+            context_provider=self._quality_context,
+            profile_provider=self._quality_profile_provider,
+            grid_size_provider=self._quality_grid_size,
+            parent=self,
+        )
+        self._connect_facade_quality_controller()
+        # 项目加载/激活/销毁编排移入独立 controller；项目列表、页签、标题、
+        # 状态栏等 UI 反馈全部经信号接回本窗口。销毁链路需要直接复位质量域
+        # 状态，故显式注入 facade_quality_controller。
+        self.lifecycle_controller = ProjectLifecycleController(
+            project_overview_service=self.project_overview_service,
+            pointcloud_service=self.pointcloud_service,
+            station_service=self.station_service,
+            project_operation_service=self.project_operation_service,
+            render_service=self.render_service,
+            facade_quality_controller=self.facade_quality_controller,
+            context_provider=self._lifecycle_context,
+            parent=self,
+        )
+        self._connect_lifecycle_controller()
+        # service 层的信息弹窗与取色交互上移到本窗口（时机与文案不变）。
+        self.project_operation_service.info_requested.connect(
+            self._show_operation_info)
+        self.project_operation_service.color_pick_requested.connect(
+            self._pick_scene_color)
         self._setup_ui()
         self._create_resize_handles()
         self._connect_buttons()
@@ -707,7 +758,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         }
         pointcloud_actions = {
             'btn_denoise': self.project_operation_service.denoise,
-            'btn_registration': self._run_station_registration,
+            'btn_registration': self.registration_controller.run_station_registration,
             'btn_select_detection_area': (
                 self.project_operation_service.select_detection_area
             ),
@@ -744,6 +795,545 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             lambda: self._toggle_sidebar('right')
         )
 
+    def _registration_context(self):
+        # 供 RegistrationController 实时判断配准结果是否已过期。
+        return (
+            self._project_generation,
+            getattr(self.current_project, 'project_id', None),
+            getattr(self, '_closing', False),
+        )
+
+    def _connect_registration_controller(self):
+        controller = self.registration_controller
+        controller.busy_changed.connect(self._set_registration_buttons_enabled)
+        controller.status_message.connect(self._show_registration_status)
+        controller.warning_requested.connect(self._show_registration_warning)
+        controller.info_requested.connect(self._show_registration_info)
+        controller.station_panel_refresh_requested.connect(
+            self._refresh_station_panel)
+        controller.manual_pick_requested.connect(
+            self._enter_registration_pick_mode)
+        controller.manual_icp_prompt_requested.connect(
+            self._prompt_manual_registration_icp)
+
+    def _set_registration_buttons_enabled(self, enabled):
+        button = self.header_buttons.get('btn_registration')
+        if button is not None:
+            button.setEnabled(enabled)
+
+    def _show_registration_status(self, message, timeout):
+        self.statusBar().showMessage(message, timeout)
+
+    def _show_registration_warning(self, message):
+        QMessageBox.warning(self, '点云配准', message)
+
+    def _show_registration_info(self, message):
+        QMessageBox.information(self, '点云配准', message)
+
+    def _enter_registration_pick_mode(self, source_cloud, target_cloud):
+        self.render_service.enter_registration_pick_mode(
+            source_cloud, target_cloud, self._on_registration_pick,
+            pick_radius=10)
+
+    def _on_registration_pick(self, _picked, source_next):
+        self.registration_controller.handle_pick_updated(source_next)
+
+    def _prompt_manual_registration_icp(self, pairs):
+        answer = QMessageBox.question(
+            self, '点云配准',
+            f'已选择 {pairs} 对对应点，是否执行人工初值 ICP？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.registration_controller.start_manual_registration()
+
+    # 质量域状态由 FacadeQualityController 持有。以下 property 保持项目生命周期
+    # 代码（project_lifecycle）对同名属性的读写语义不变。
+    @property
+    def _quality_reports(self):
+        return self.facade_quality_controller.quality_reports
+
+    @property
+    def _quality_result_cache(self):
+        return self.facade_quality_controller.quality_result_cache
+
+    @property
+    def _active_quality_worker(self):
+        return self.facade_quality_controller.active_quality_worker
+
+    @_active_quality_worker.setter
+    def _active_quality_worker(self, value):
+        self.facade_quality_controller.active_quality_worker = value
+
+    def _quality_context(self):
+        # 供 FacadeQualityController 实时判断质量结果是否已过期。
+        return (
+            getattr(self.current_project, 'project_id', None),
+            self._project_generation,
+        )
+
+    def _quality_profile_provider(self):
+        return self._quality_profile_snapshot(
+            getattr(self, '_inspection_profile', None))
+
+    def _quality_grid_size(self):
+        return float(self.interval_combo.currentData())
+
+    def _connect_facade_quality_controller(self):
+        controller = self.facade_quality_controller
+        controller.status_message.connect(self._show_quality_status)
+        controller.status_cleared.connect(self._clear_quality_status)
+        controller.warning_requested.connect(self._show_quality_warning)
+        controller.info_requested.connect(self._show_quality_info)
+        controller.report_preview_refresh_requested.connect(
+            self._refresh_report_preview)
+        controller.heatmap_button_refresh_requested.connect(
+            self._refresh_heatmap_button_state)
+        controller.show_dialog_requested.connect(self._show_quality_dialog)
+
+    def _show_quality_status(self, message, timeout):
+        self.statusBar().showMessage(message, timeout)
+
+    def _clear_quality_status(self):
+        self.statusBar().clearMessage()
+
+    def _show_quality_warning(self, message):
+        QMessageBox.warning(self, '质量评估', message)
+
+    def _show_quality_info(self, message):
+        QMessageBox.information(self, '质量评估', message)
+
+    @staticmethod
+    def _quality_double(value, minimum, maximum, step):
+        box = QDoubleSpinBox()
+        box.setRange(minimum, maximum)
+        box.setSingleStep(step)
+        box.setDecimals(3)
+        box.setValue(value)
+        return box
+
+    def _reset_quality_parameters(self):
+        profile = getattr(self, '_inspection_profile', None)
+        if profile is None:
+            return
+        self.quality_length_spin.setValue(profile.measure_height_m)
+        self.quality_step_spin.setValue(profile.scan_step_m)
+        self.quality_width_spin.setValue(profile.ruler_width_m)
+        self.quality_select_band_spin.setValue(profile.select_band_m)
+        self.quality_hole_band_spin.setValue(profile.hole_band_m)
+        self.quality_bin_size_spin.setValue(profile.bin_size_m)
+        self.quality_top_q_spin.setValue(profile.top_q)
+        self.quality_sor_check.setChecked(profile.sor_enabled)
+        self.quality_sor_sigma_spin.setValue(profile.sor_sigma)
+        self.quality_sor_k_spin.setValue(profile.sor_k)
+        method_index = self.quality_sor_method_combo.findData(profile.sor_method)
+        if method_index >= 0:
+            self.quality_sor_method_combo.setCurrentIndex(method_index)
+        self.quality_sor_w_weight_spin.setValue(profile.sor_w_weight)
+        self.quality_max_hole_ratio_spin.setValue(profile.max_hole_ratio)
+        self.quality_min_points_spin.setValue(profile.min_points)
+
+    def _quality_profile_snapshot(self, profile):
+        if profile is None or not hasattr(self, 'quality_length_spin'):
+            return profile
+        return replace(
+            profile,
+            measure_height_m=self.quality_length_spin.value(),
+            scan_step_m=self.quality_step_spin.value(),
+            ruler_width_m=self.quality_width_spin.value(),
+            select_band_m=self.quality_select_band_spin.value(),
+            hole_band_m=self.quality_hole_band_spin.value(),
+            bin_size_m=self.quality_bin_size_spin.value(),
+            top_q=self.quality_top_q_spin.value(),
+            sor_enabled=self.quality_sor_check.isChecked(),
+            sor_sigma=self.quality_sor_sigma_spin.value(),
+            sor_k=self.quality_sor_k_spin.value(),
+            sor_method=str(self.quality_sor_method_combo.currentData() or 'local'),
+            sor_w_weight=self.quality_sor_w_weight_spin.value(),
+            max_hole_ratio=self.quality_max_hole_ratio_spin.value(),
+            min_points=self.quality_min_points_spin.value())
+
+    def _show_facade_results(self, results: list[dict]):
+        results = self.facade_quality_controller.process_facade_results(results)
+        count = len(results)
+        self.lbl_facade_summary.setText(f'检测立面数量：{count}')
+        if not results:
+            self.list_facades.clear()
+            self._refresh_heatmap_button_state()
+            self.facade_quality_controller.set_latest_results([])
+            self._refresh_report_preview()
+            return
+        self.list_facades.clear()
+        for index, f in enumerate(results, 1):
+            display_no = int(f.get('display_no') or index)
+            f['display_no'] = display_no
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, f)
+            item.setSizeHint(QSize(0, 40))
+            self.list_facades.addItem(item)
+
+            row = QWidget()
+            row.setStyleSheet("""
+                QWidget { background: transparent; }
+                QLabel { font-size: 12px; color: #334155; }
+            """)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 6, 8, 6)
+            row_layout.setSpacing(8)
+
+            info = QLabel(f"立面{display_no}　点数 {int(f.get('point_count') or 0):,}")
+            info.setToolTip(f"业务索引 facade_id={int(f.get('id', 0))}")
+            info.setStyleSheet('font-size: 12px; color: #334155;')
+            row_layout.addWidget(info, 1)
+
+            color = self.render_facade.facade_color(f, display_no)
+            swatch = QFrame()
+            swatch.setFixedSize(18, 18)
+            swatch.setStyleSheet(
+                'background-color: rgb(%d,%d,%d); border: 1px solid #94a3b8; border-radius: 3px;' %
+                tuple(int(max(0, min(1, x)) * 255) for x in color)
+            )
+            swatch.setToolTip('该立面在视口中的显示颜色')
+            row_layout.addWidget(swatch)
+
+            status = self._facade_review_status(f)
+            action_button = QPushButton(
+                '完整' if status == 'complete' else '确认完整')
+            action_button.setFixedWidth(72)
+            action_button.setMinimumHeight(26)
+            action_button.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    border: 1px solid #cbd5e1;
+                    background: #ffffff;
+                    color: #475569;
+                }
+                QPushButton:hover {
+                    background: #f1f5f9;
+                    border-color: #94a3b8;
+                }
+            """)
+            action_button.setToolTip('点击切换完整/不完整；仅完整立面允许质量计算')
+            action_button.clicked.connect(
+                lambda _=False, obj=f, button=action_button:
+                self._toggle_facade_review_status(obj, button))
+            row_layout.addWidget(action_button)
+
+            row.setMaximumHeight(48)
+            self.list_facades.setItemWidget(item, row)
+
+        self.facade_quality_controller.set_latest_results(results)
+        self._refresh_heatmap_button_state()
+        self._refresh_report_preview()
+
+    def _refresh_heatmap_button_state(self):
+        button = getattr(self, 'btn_heatmap_toggle', None)
+        if button is None:
+            return
+        controller = self.facade_quality_controller
+        enabled = bool(controller.compatible_quality_results())
+        button.setEnabled(enabled)
+        mode = controller.heatmap_mode
+        current = '平整度' if mode == 'flatness' else '垂直度'
+        next_mode = '垂直度' if mode == 'flatness' else '平整度'
+        button.setText(f'热力切换显示（当前：{current}）')
+        button.setToolTip(f'点击切换至{next_mode}热力映射')
+
+    def _toggle_heatmap_display(self):
+        self.facade_quality_controller.toggle_heatmap_display()
+
+    def _set_facade_preview_status(self, facade, button, status):
+        # review_status 是唯一的规范运行时字段。
+        facade['review_status'] = status
+        for row in range(self.list_facades.count()):
+            item = self.list_facades.item(row)
+            payload = item.data(Qt.ItemDataRole.UserRole) or {}
+            if int(payload.get('id', -1)) == int(facade.get('id', -2)):
+                self.list_facades.setCurrentItem(item)
+                item.setData(Qt.ItemDataRole.UserRole, facade)
+                break
+        for current in (self.project_operation_service.last_facade_results or []):
+            if int(current.get('id', -1)) == int(facade.get('id', -2)):
+                current['review_status'] = status
+                facade = current
+                break
+        item = self.list_facades.currentItem()
+        if item is not None and int((item.data(Qt.ItemDataRole.UserRole) or {}).get('id', -1)) == int(facade.get('id', -2)):
+            item.setData(Qt.ItemDataRole.UserRole, facade)
+        button.setText('完整' if status == 'complete' else '不完整')
+        if hasattr(self.project_operation_service, 'persist_facade_review_status'):
+            self.project_operation_service.persist_facade_review_status(facade)
+
+    def _toggle_facade_review_status(self, facade, button):
+        """Toggle pending/incomplete -> complete, complete -> incomplete."""
+        current = self._facade_review_status(facade)
+        target = 'incomplete' if current == 'complete' else 'complete'
+        self._set_facade_preview_status(facade, button, target)
+
+    @staticmethod
+    def _facade_review_status(facade):
+        """Canonical status reader; tolerate legacy/null review_status."""
+        value = (facade or {}).get('review_status')
+        if value not in {'complete', 'incomplete'}:
+            value = (facade or {}).get('preview_status')
+        return value if value in {'complete', 'incomplete'} else 'pending'
+
+    def _evaluate_selected_facade(self):
+        item = self.list_facades.currentItem()
+        if item is None:
+            QMessageBox.information(self, '质量评估', '请先在右侧结果列表中选择一个立面。')
+            return
+        facade = item.data(Qt.ItemDataRole.UserRole)
+        if facade:
+            if self._facade_review_status(facade) != 'complete':
+                QMessageBox.information(self, '质量评估', '请先人工确认该立面为完整立面。')
+                return
+            current = next((f for f in (self.project_operation_service.last_facade_results or [])
+                            if int(f.get('id', -1)) == int(facade.get('id', -2))), facade)
+            self.facade_quality_controller.evaluate_facade(current)
+
+    def _on_facade_item_clicked(self, item):
+        f = item.data(Qt.ItemDataRole.UserRole)
+        if not f:
+            return
+        cloud = self.facade_quality_controller.active_cloud_name()
+        if not cloud:
+            return
+
+        self.render_facade.select_facade(cloud, int(f.get('id', 0)))
+        self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
+        return
+
+    def _show_quality_dialog(self, cloud, facade, quality):
+        facade_id = int(facade.get('id', 0))
+        facade_no = int(facade.get('display_no', facade_id))
+
+        print(f'[PCFD] ui.show_dialog facade_id={facade_id} facade_no={facade_no}', flush=True)
+
+        def _export_context(display_quality):
+            context = display_quality.get('__export_context') or {}
+            if context.get('points') is not None and context.get('results_dir'):
+                return context
+            # 历史报告会刻意不保留大型点数组。从当前处理中的数据集重建导出输入。
+            try:
+                dataset = self.facade_service.get_dataset(cloud)
+                proxy_ids = np.asarray(
+                    facade.get('proxy_indices') or facade.get('inlier_indices') or [],
+                    dtype=np.int64)
+                if len(proxy_ids) and dataset.index.has_source_mapping():
+                    raw_indices = dataset.index.proxy_to_source_ids(
+                        proxy_ids, deduplicate=True)
+                else:
+                    raw_indices = proxy_ids
+                raw_indices = raw_indices[(raw_indices >= 0) &
+                                          (raw_indices < len(dataset.processed_raw_points))]
+                if len(raw_indices) == 0:
+                    print(f'[PCFD] export_context_failed facade_id={facade_id} '
+                          'reason=no_facade_source_indices', flush=True)
+                    return context
+                points = np.asarray(dataset.processed_raw_points)[raw_indices]
+                source_colors = dataset.index.get_source_colors()
+                colors = (np.asarray(source_colors)[raw_indices]
+                          if source_colors is not None and
+                          len(source_colors) > int(raw_indices.max()) else None)
+                if colors is None:
+                    colors = np.tile(np.asarray(
+                        self.render_service.facade_color_for(facade), dtype=float),
+                        (len(points), 1))
+                else:
+                    colors = np.asarray(colors, dtype=float).reshape(-1, 3)
+                    # 确保分段立面的颜色在导出的基础图层中可见，且不受源RGB数据是否可用影响。
+                    colors[:] = np.asarray(
+                        self.render_service.facade_color_for(facade), dtype=float)
+                project_uuid = getattr(self.current_project, 'project_id', None)
+                results_dir = (Storage.ensure_project_dirs(project_uuid)['results']
+                               if project_uuid else None)
+                return {'results_dir': results_dir, 'points': points,
+                        'colors': colors}
+            except Exception as exc:
+                print(f'[PCFD] export_context_failed facade_id={facade_id} '
+                      f'error={exc!r}', flush=True)
+                return context
+
+        def _show_effect(mode='flatness'):
+            try:
+                display_quality = dict(quality) if isinstance(quality, dict) else {}
+                display_quality['heatmap_mode'] = mode
+                self.render_facade.apply_quality_colors(
+                    cloud, display_quality,
+                    index_service=self.facade_service.index_service)
+                context = _export_context(display_quality)
+                exported = ResultExportService().export_heatmap(
+                    context.get('results_dir'), facade_no,
+                    context.get('points'), context.get('colors'), display_quality)
+                if exported and exported.get('heatmap'):
+                    # 仅持久化小型、可移植的工件元数据。
+                    # 运行时点数组保存在 __export_context 中，不会被存储。
+                    artifact = {key: exported.get(key) for key in
+                                ('mode', 'title', 'heatmap', 'overlay', 'report', 'legend')}
+                    quality_report = facade.get('quality_report')
+                    if isinstance(quality_report, dict):
+                        artifacts = quality_report.setdefault('heatmap_artifacts', {})
+                        artifacts[exported.get('mode', mode)] = artifact
+                        self._refresh_report_preview()
+                    self.statusBar().showMessage(
+                        f'热力图已保存：{exported["heatmap"]}', 6000)
+                else:
+                    self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
+            except Exception as e:
+                print(f'[PCFD] ui.show_effect_error facade_id={facade_id} error={e}', flush=True)
+
+        def _restore():
+            try:
+                results = self.project_operation_service.last_facade_results
+                self.render_facade.restore_highlight(cloud, results or [])
+            except Exception as e:
+                print(f'[PCFD] ui.restore_error facade_id={facade_id} error={e}', flush=True)
+
+        label = f'立面 {facade_no}'
+        project_name = getattr(self.current_project, 'name', '') if self.current_project else ''
+
+        if not isinstance(quality, dict):
+            print(f'[PCFD] ui.quality_not_dict facade_id={facade_id} type={type(quality)}', flush=True)
+            quality = {}
+
+        try:
+            previous = self._quality_dialog
+            if previous is not None and previous.isVisible():
+                previous.close()
+
+            dlg = FacadeQualityDialog(self, label, quality,
+                                      project_name=project_name,
+                                      on_show_colors=_show_effect,
+                                      on_restore_colors=_restore)
+            self._quality_dialog = dlg
+
+            def _dialog_finished(result_code, dialog=dlg):
+                if self._quality_dialog is dialog:
+                    self._quality_dialog = None
+                print(
+                    f'[PCFD] ui.dialog_closed facade_id={facade_id} '
+                    f'result={result_code}',
+                    flush=True,
+                )
+
+            dlg.finished.connect(_dialog_finished)
+            dlg.open()
+        except Exception as e:
+            print(f'[PCFD] ui.dialog_exception facade_id={facade_id} error={e}', flush=True)
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, '质量评估',
+                f'显示质量结果时出错：\n{e}')
+
+    # 项目代际计数由 ProjectLifecycleController 持有。注册/质量 controller 的
+    # context_provider 经此 property 读取，语义与原实例属性一致。
+    @property
+    def _project_generation(self):
+        return self.lifecycle_controller.project_generation
+
+    @_project_generation.setter
+    def _project_generation(self, value):
+        self.lifecycle_controller.project_generation = value
+
+    def _lifecycle_context(self):
+        # 供 ProjectLifecycleController 实时读取关闭标志与当前项目标识。
+        return (
+            getattr(self, '_closing', False),
+            getattr(self.current_project, 'project_id', None),
+        )
+
+    def _connect_lifecycle_controller(self):
+        controller = self.lifecycle_controller
+        controller.info_requested.connect(self._show_lifecycle_info)
+        controller.warning_requested.connect(self._show_lifecycle_warning)
+        controller.status_message.connect(self._show_lifecycle_status)
+        controller.status_cleared.connect(self._clear_lifecycle_status)
+        controller.station_panel_refresh_requested.connect(
+            self._refresh_station_panel)
+        controller.project_list_refresh_requested.connect(
+            self._refresh_project_list)
+        controller.facade_list_reset_requested.connect(self._reset_facade_list)
+        controller.station_list_reset_requested.connect(self._reset_station_list)
+        controller.current_project_change_requested.connect(
+            self._set_current_project)
+        controller.report_preview_refresh_requested.connect(
+            self._refresh_report_preview)
+        controller.facade_results_refresh_requested.connect(
+            self._show_facade_results)
+        controller.page_change_requested.connect(self.set_current_page)
+
+    def _show_lifecycle_info(self, title, message):
+        QMessageBox.information(self, title, message)
+
+    def _show_lifecycle_warning(self, title, message):
+        QMessageBox.warning(self, title, message)
+
+    def _show_lifecycle_status(self, message, timeout):
+        self.statusBar().showMessage(message, timeout)
+
+    def _clear_lifecycle_status(self):
+        self.statusBar().clearMessage()
+
+    def _reset_facade_list(self):
+        if hasattr(self, 'list_facades'):
+            self.list_facades.clear()
+            self.lbl_facade_summary.setText('未检测')
+            self._refresh_heatmap_button_state()
+
+    def _reset_station_list(self):
+        if hasattr(self, 'station_list'):
+            self.station_list.blockSignals(True)
+            self.station_list.clear()
+            self.station_list.blockSignals(False)
+
+    def _start_load(self, operation, project_id, *, file_paths=None,
+                    directory=None, project=None):
+        self.lifecycle_controller.start_load(
+            operation, project_id,
+            file_paths=file_paths, directory=directory, project=project)
+
+    def _prepare_project_activation(self, project_id):
+        self.lifecycle_controller.prepare_project_activation(project_id)
+
+    def _activate_project(self, project):
+        self.lifecycle_controller.activate_project(project)
+
+    def _show_operation_info(self, title, message):
+        QMessageBox.information(self, title, message)
+
+    def _pick_scene_color(self):
+        # 从 service 上移的取色弹窗；取消或选色无效时不做任何事。
+        dlg = QColorDialog()
+        dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
+        if not dlg.exec():
+            return
+        qcol = dlg.selectedColor()
+        if not qcol.isValid():
+            return
+        color = (qcol.redF(), qcol.greenF(), qcol.blueF())
+        self.project_operation_service.apply_global_color(color)
+
+    def _set_current_project(self, project):
+        self.current_project = project
+        has_project = project is not None
+
+        for page_key, button in self.page_buttons.items():
+            button.setEnabled(page_key == 'project_overview' or has_project)
+
+        if has_project:
+            self.current_project_label.setText(f'当前项目：{project.name}')
+            self.current_project_label.setToolTip(
+                f'{project.name}\n{project.directory_path}')
+        else:
+            self.current_project_label.setText('当前项目：未选择')
+            self.current_project_label.setToolTip('')
+            self.set_current_page(0)
+        self._update_overview_workspace()
+        self._refresh_report_preview()
+        self._update_window_title()
+
     def closeEvent(self, event):
         # TODO(生命周期/稳定性): closeEvent：核查关闭期间线程池短超时、原生窗口销毁和 Qt 退出顺序，避免后台任务继续访问已销毁视口导致未响应。
         """严格按顺序销毁，先停 timer，再断信号，再销毁 viewport，最后退出 app。"""
@@ -771,7 +1361,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             runtime.clear()
 
         # Step 5: 释放项目运行时资源
-        self._dispose_project_runtime()
+        self.lifecycle_controller.dispose_project_runtime()
 
         # Step 6: 销毁 viewport（关键：在 Qt 窗口销毁前完成）
         try:

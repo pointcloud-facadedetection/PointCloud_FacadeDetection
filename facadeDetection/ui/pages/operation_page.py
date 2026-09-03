@@ -489,7 +489,7 @@ class OperationPageMixin:
                 project_id = getattr(self.current_project, 'project_id', None)
                 historical = (self.project_overview_service.load_historical_facades(
                     project_id, station.id) if project_id else [])
-                self.project_operation_service._last_facade_results = historical or []
+                self.project_operation_service.last_facade_results = historical or []
                 self._show_facade_results(historical or [])
             except Exception as exc:
                 print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)

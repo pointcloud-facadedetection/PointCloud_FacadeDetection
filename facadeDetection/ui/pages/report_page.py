@@ -19,7 +19,6 @@ from ui.main_window_config import PAGE_DEFINITIONS
 from ui.widgets.window_chrome import ElidedLabel
 from ui.widgets.technical_canvas import TechnicalCanvas
 from services.report_export import ReportDataService, PdfReportRenderer
-from services.dal.report_repo import ReportRepo
 
 
 REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
@@ -39,7 +38,7 @@ class ReportPageMixin:
             return
         try:
             PdfReportRenderer.write_pdf(self._report_html, path)
-            ReportRepo.register_pdf(
+            self.report_export_service.register_pdf(
                 getattr(self.current_project, 'project_id', None),
                 path,
                 '建筑外立面质量检测报告',
@@ -53,7 +52,7 @@ class ReportPageMixin:
     def _refresh_report_preview(self):
         if not hasattr(self, 'report_preview_browser'):
             return
-        facades = getattr(self.project_operation_service, '_last_facade_results', None) or []
+        facades = self.project_operation_service.last_facade_results or []
         self._report_snapshot = ReportDataService.build(
             self.current_project, facades,
             getattr(self.current_project, 'directory_path', None))
