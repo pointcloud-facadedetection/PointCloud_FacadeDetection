@@ -1,4 +1,4 @@
-﻿"""FacadeService 兼容门面。
+"""FacadeService 兼容门面。
 """
 from __future__ import annotations
 
@@ -29,6 +29,14 @@ class FacadeService:
         self._index_service.set_pointcloud_service(pointcloud_service)
         self._detection_service._pointcloud_service = pointcloud_service
         self._quality_service._pointcloud_service = pointcloud_service
+
+    @property
+    def index_service(self) -> FacadeIndexService:
+        return self._index_service
+
+    def get_dataset(self, cloud_name: str):
+        """返回指定点云的处理数据集。"""
+        return self._index_service._get_dataset(cloud_name)
 
     # ==================== 检测接口 ====================
 
@@ -67,6 +75,18 @@ class FacadeService:
             ruler_step=ruler_step,
             profile=profile,
             results_dir=results_dir)
+
+    def commit_quality_success(self, project_uuid: str, facade_id: int, quality: dict,
+                               *, display_no=None, facade_data=None, color=None,
+                               dataset_revision=None, quality_artifact_path=None) -> None:
+        """持久化一次成功的质量评估结果。"""
+        self._quality_service.commit_quality_success(
+            project_uuid, facade_id, quality,
+            display_no=display_no,
+            facade_data=facade_data,
+            color=color,
+            dataset_revision=dataset_revision,
+            quality_artifact_path=quality_artifact_path)
 
     # ==================== 索引映射接口 ====================
 

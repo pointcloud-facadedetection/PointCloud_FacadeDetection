@@ -25,6 +25,20 @@ class FacadeQualityService:
     def set_index_service(self, index_service: FacadeIndexService):
         self._index_service = index_service
 
+    def commit_quality_success(self, project_uuid: str, facade_id: int, quality: dict,
+                               *, display_no=None, facade_data=None, color=None,
+                               dataset_revision=None, quality_artifact_path=None) -> None:
+        """持久化一次成功的质量评估结果（委托 DAL）。"""
+        from services.dal.results_repo import ResultsRepo
+        ResultsRepo.commit_quality_success(
+            project_uuid, facade_id, quality,
+            display_no=display_no,
+            facade_data=facade_data,
+            color=color,
+            dataset_revision=dataset_revision,
+            quality_artifact_path=quality_artifact_path,
+        )
+
     def _get_source_points(self, cloud_name: str):
         """返回质量评估使用的点源与原始点数组。"""
         pcs = self._pointcloud_service

@@ -197,6 +197,22 @@ class ViewportRenderService:
         method = getattr(self.viewport, 'registration_pick_points', None)
         return method() if callable(method) else ([], [])
 
+    def get_cloud_data(self, cloud_name):
+        """读取视口中某朵点云的元数据字典，供配准快照等只读场景使用。"""
+        method = getattr(self.viewport, 'get_cloud_data', None)
+        return method(cloud_name) if callable(method) else None
+
+    def get_cloud_names(self):
+        """返回视口当前全部点云名称，供活动点云解析等只读场景使用。"""
+        method = getattr(self.viewport, 'get_cloud_names', None)
+        return method() if callable(method) else []
+
+    def clear_viewport(self):
+        """清空视口场景（项目销毁时调用），委托给 viewport.clear。"""
+        method = getattr(self.viewport, 'clear', None)
+        if callable(method):
+            method()
+
     def is_pick_mode(self) -> bool:
         return self._pick_mode
 

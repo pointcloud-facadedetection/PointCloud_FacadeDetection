@@ -2,7 +2,6 @@ from __future__ import annotations
 import time
 from typing import Optional
 import numpy as np
-from PySide6.QtWidgets import QColorDialog, QMessageBox
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
 from config.storage import Storage
 import json
@@ -15,6 +14,8 @@ class _GuiDispatcher(QObject):
     denoise_failed = Signal(str)
     detection_finished = Signal(object)
     detection_failed = Signal(str)
+    info_requested = Signal(str, str)    # (标题, 正文)，信息弹窗上移到 UI 层
+    color_pick_requested = Signal()      # 取色弹窗上移到 UI 层
 
 
 class ProjectOperationService:
@@ -42,6 +43,17 @@ class ProjectOperationService:
         self._gui_dispatcher.detection_failed.connect(
             self._on_detection_failed, Qt.ConnectionType.QueuedConnection)
         self._task_scheduler = RuntimeTaskScheduler(parent)
+        # 供 UI 层连接的信息弹窗/取色请求信号（service 不再直接弹窗）。
+        self.info_requested = self._gui_dispatcher.info_requested
+        self.color_pick_requested = self._gui_dispatcher.color_pick_requested
+
+    @property
+    def last_facade_results(self) -> Optional[list[dict]]:
+        return self._last_facade_results
+
+    @last_facade_results.setter
+    def last_facade_results(self, results: Optional[list[dict]]):
+        self._last_facade_results = results
 
     def set_station_service(self, service):
         self._station_service = service
@@ -127,16 +139,12 @@ class ProjectOperationService:
 
     def change_color(self):
         self._notify('change_color')
-        # 弹出颜色选择器，选择后全局应用并持久化到项目缓存
+        # 取色弹窗已上移到 UI 层；用户确认选色后回调 apply_global_color。
+        self.color_pick_requested.emit()
+
+    def apply_global_color(self, color):
+        # 全局应用选定的颜色并持久化到项目缓存
         try:
-            dlg = QColorDialog()
-            dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
-            if not dlg.exec():
-                return
-            qcol = dlg.selectedColor()
-            if not qcol.isValid():
-                return
-            color = (qcol.redF(), qcol.greenF(), qcol.blueF())
             # 首选通过渲染服务应用（若可用）
             try:
                 render = self._get_render_service()
@@ -352,7 +360,7 @@ class ProjectOperationService:
         cloud = self._active_cloud_name()
         if not cloud:
             try:
-                QMessageBox.information(None, '框选检测区域', '请先加载点云数据。')
+                self.info_requested.emit('框选检测区域', '请先加载点云数据。')
             except Exception:
                 print('请先加载点云数据。', flush=True)
             return
@@ -413,8 +421,7 @@ class ProjectOperationService:
 
             if not cloud or n_indices == 0:
                 try:
-                    QMessageBox.information(
-                        None,
+                    self.info_requested.emit(
                         '框选检测区域',
                         '未选中有效区域。提示：请确保在视口中拖拽框选建筑立面区域!',
                     )
@@ -609,7 +616,7 @@ class ProjectOperationService:
                 return
             if not self._last_facade_results:
                 try:
-                    QMessageBox.information(None, '质量检测', '还未进行质量检测。')
+                    self.info_requested.emit('质量检测', '还未进行质量检测。')
                 except Exception:
                     print('还未进行质量检测。', flush=True)
                 return
@@ -623,7 +630,7 @@ class ProjectOperationService:
                         heatmap_mode='flatness')
                 if not ok:
                     try:
-                        QMessageBox.information(None, '质量检测', '还未进行质量检测。')
+                        self.info_requested.emit('质量检测', '还未进行质量检测。')
                     except Exception:
                         print('还未进行质量检测。', flush=True)
         except Exception as e:

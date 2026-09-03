@@ -20,3 +20,8 @@ class ReportExportService:
         if not path.is_file() or path.suffix.lower() != '.pdf':
             raise ValueError('请选择有效的 PDF 文件。')
         return PdfDocument(name=path.name, uri=path.as_uri())
+
+    def register_pdf(self, project_id, pdf_path, title=None):
+        """将已导出的 PDF 登记到当前项目的 project.db（委托 DAL）。"""
+        from services.dal.report_repo import ReportRepo
+        return ReportRepo.register_pdf(project_id, pdf_path, title)
