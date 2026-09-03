@@ -116,7 +116,7 @@ class ResultsRepo:
                     geometry = {key: facade_data.get(key) for key in (
                         'plane_model', 'normal', 'center', 'inlier_indices',
                         'proxy_indices', 'measurement_indices', 'voxel_ids',
-                        'cloud_name', '__index_space')
+                        'cloud_name', '__index_space', 'review_status')
                         if facade_data.get(key) is not None}
                     point_count = int(facade_data.get('point_count') or
                                       len(facade_data.get('proxy_indices') or
@@ -141,6 +141,17 @@ class ResultsRepo:
                 raise ValueError(
                     f'立面不存在: facade_id={facade_id}, display_no={display_no}')
             if isinstance(facade_data, dict):
+                geometry = dict(facade.plane_json or {})
+                for key in (
+                    'plane_model', 'normal', 'center', 'inlier_indices',
+                    'proxy_indices', 'measurement_indices', 'voxel_ids',
+                    'cloud_name', '__index_space', 'review_status',
+                    'point_count', 'raw_point_count'):
+                    if facade_data.get(key) is not None:
+                        geometry[key] = serializable(facade_data.get(key))
+                if geometry.get('review_status') not in {'pending', 'incomplete', 'complete'}:
+                    geometry['review_status'] = 'complete'
+                facade.plane_json = geometry
                 if expected_station is not None and int(facade.station_id or -1) != expected_station:
                     raise ValueError(
                         '立面与当前站点不匹配，拒绝保存质量结果 '
@@ -185,7 +196,11 @@ class ResultsRepo:
             raise ValueError(f'unsupported facade review status: {status}')
         with project_session(project_uuid) as s:
             facade = s.execute(
-                select(Facade).where(Facade.id == int(facade_id), Facade.is_deleted == 0)
+                select(Facade).where(
+                    Facade.id == int(facade_id),
+                    Facade.project_id == select(Project.id).where(
+                        Project.uuid == project_uuid).scalar_subquery(),
+                    Facade.is_deleted == 0)
             ).scalar_one_or_none()
             if facade is None:
                 raise ValueError(f'立面不存在: {facade_id}')

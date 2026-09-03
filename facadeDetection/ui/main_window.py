@@ -1293,6 +1293,10 @@ class MainWindow(QMainWindow):
                 unique[fid].update({k: v for k, v in facade.items()
                                     if k not in ('preview_status', 'preview_status_source')})
         results = list(unique.values())
+        for facade in results:
+            if facade.get('review_status') not in {'complete', 'incomplete'}:
+                if facade.get('quality_status') == 'complete':
+                    facade['review_status'] = 'complete'
         count = len(results)
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
         if not results:
@@ -1404,21 +1408,30 @@ class MainWindow(QMainWindow):
     def _set_facade_preview_status(self, facade, button, status):
         # review_status 是唯一的规范运行时字段。
         facade['review_status'] = status
+        facade_db_id = facade.get('facade_db_id') or facade.get('database_id') or facade.get('id')
         for row in range(self.list_facades.count()):
             item = self.list_facades.item(row)
             payload = item.data(Qt.ItemDataRole.UserRole) or {}
-            if int(payload.get('id', -1)) == int(facade.get('id', -2)):
+            payload_id = (payload.get('facade_db_id') or payload.get('database_id') or
+                          payload.get('id', -1))
+            if int(payload_id) == int(facade_db_id):
                 self.list_facades.setCurrentItem(item)
                 item.setData(Qt.ItemDataRole.UserRole, facade)
                 break
         for current in (getattr(self.project_operation_service, '_last_facade_results', None) or []):
-            if int(current.get('id', -1)) == int(facade.get('id', -2)):
+            current_id = (current.get('facade_db_id') or current.get('database_id') or
+                          current.get('id', -1))
+            if int(current_id) == int(facade_db_id):
                 current['review_status'] = status
                 facade = current
                 break
         item = self.list_facades.currentItem()
-        if item is not None and int((item.data(Qt.ItemDataRole.UserRole) or {}).get('id', -1)) == int(facade.get('id', -2)):
-            item.setData(Qt.ItemDataRole.UserRole, facade)
+        if item is not None:
+            item_payload = item.data(Qt.ItemDataRole.UserRole) or {}
+            item_id = (item_payload.get('facade_db_id') or item_payload.get('database_id') or
+                       item_payload.get('id', -1))
+            if int(item_id) == int(facade_db_id):
+                item.setData(Qt.ItemDataRole.UserRole, facade)
         button.setText('完整' if status == 'complete' else '不完整')
         if hasattr(self.project_operation_service, 'persist_facade_review_status'):
             self.project_operation_service.persist_facade_review_status(facade)
@@ -1435,6 +1448,8 @@ class MainWindow(QMainWindow):
         value = (facade or {}).get('review_status')
         if value not in {'complete', 'incomplete'}:
             value = (facade or {}).get('preview_status')
+        if value not in {'complete', 'incomplete'} and (facade or {}).get('quality_status') == 'complete':
+            value = 'complete'
         return value if value in {'complete', 'incomplete'} else 'pending'
 
     def _evaluate_selected_facade(self):
@@ -1448,7 +1463,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, '质量评估', '请先人工确认该立面为完整立面。')
                 return
             current = next((f for f in (getattr(self.project_operation_service, '_last_facade_results', None) or [])
-                            if int(f.get('id', -1)) == int(facade.get('id', -2))), facade)
+                            if int((f.get('facade_db_id') or f.get('database_id') or f.get('id', -1))) ==
+                               int((facade.get('facade_db_id') or facade.get('database_id') or facade.get('id', -2)))), facade)
             self._evaluate_facade(current)
 
     def _active_cloud_name(self) -> str | None:
@@ -1630,9 +1646,10 @@ class MainWindow(QMainWindow):
         results_dir = Storage.ensure_project_dirs(project_uuid)['results']
 
         facade_copy = dict(f)
-        facade_id = int(facade_copy.get('id', 0))
+        facade_id = int(facade_copy.get('facade_db_id') or facade_copy.get('database_id') or facade_copy.get('id', 0))
         facade_no = int(facade_copy.get('display_no', facade_id))
         facade_copy['id'] = facade_id
+        facade_copy['facade_db_id'] = facade_id
         facade_copy['display_no'] = facade_no
 
         active_station_id = getattr(self.station_service, '_active_station_id', None)
@@ -1691,6 +1708,8 @@ class MainWindow(QMainWindow):
     def _on_quality_finished(self, token, cloud, f, quality):
         """Handle quality computation completion with full state machine."""
         facade_no = int(f.get('display_no', f.get('id', 0)))
+        persistent_facade_id = int(
+            f.get('facade_db_id') or f.get('database_id') or f.get('id', 0))
 
         print(f'[PCFD] ui.quality_finished token={token} '
               f'facade_no={facade_no}', flush=True)
@@ -1810,7 +1829,7 @@ class MainWindow(QMainWindow):
             dataset = self.facade_service._index_service._get_dataset(cloud)
             artifact_path = None
             ResultsRepo.commit_quality_success(
-                project_uuid, int(f.get('id', 0)), quality,
+                project_uuid, persistent_facade_id, quality,
                 display_no=facade_no,
                 facade_data=f,
                 dataset_revision=getattr(dataset, 'revision', None),
@@ -1819,11 +1838,14 @@ class MainWindow(QMainWindow):
             )
             f['quality_status'] = 'complete'
             f['quality_report'] = quality
+            f['review_status'] = 'complete'
             for current in (getattr(self.project_operation_service,
                                     '_last_facade_results', None) or []):
-                if int(current.get('id', -1)) == int(f.get('id', -2)):
+                current_id = int(current.get('facade_db_id') or current.get('database_id') or current.get('id', -1))
+                if current_id == persistent_facade_id:
                     current.update({'quality_status': 'complete',
                                     'quality_report': quality,
+                                    'review_status': 'complete',
                                     'dataset_revision': getattr(dataset, 'revision', None)})
                     break
             self._refresh_heatmap_button_state()

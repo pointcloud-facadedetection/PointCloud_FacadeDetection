@@ -436,8 +436,8 @@ class PdfReportRenderer:
             background: #f5f7fa;
             text-align: center;
             padding: 2px;
-            width: 80%;
-            height: 50mm;
+            width: 90%;
+            height: 60mm;
             overflow: hidden;
             page-break-inside: avoid;
         }}
@@ -445,7 +445,7 @@ class PdfReportRenderer:
             display: block;
             width: 100%;
             max-width: 100%;
-            height: 48mm;
+            height: 55mm;
         }}
         .image-legend {{
             margin-top: 2px;

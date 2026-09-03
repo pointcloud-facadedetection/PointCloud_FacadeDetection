@@ -3,7 +3,7 @@ import numpy as np
 import open3d as o3d
 from algorithms.registration import (
     point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
-    audit_exported_global_transform, estimate_xy_initial_transform,
+    audit_exported_global_transform, estimate_xy_initial_transform, global_refinement
 )
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
@@ -380,7 +380,8 @@ class PointCloudStationService:
     def register_selected(self, update_viewport=True, manual_points=None,
                           proxy_clouds=None):
         rows = [x for x in self.list_stations() if x.is_selected]
-        if len(rows) < 2: raise ValueError('点云配准至少需要选择两个 PLY 站点')
+        if len(rows) < 2:
+            raise ValueError('点云配准至少需要选择两个 PLY 站点')
         if manual_points is not None and len(rows) != 2:
             raise ValueError('人工对应点配准当前只支持两个站点')
         if manual_points is not None:
@@ -396,14 +397,10 @@ class PointCloudStationService:
                                   for x in proxy_clouds)
                 if len(snapshots) != 2:
                     raise ValueError('人工点云快照数量必须为 2')
-                # 用户界面从这些快照中提取物理坐标。
                 for points, snapshot in zip((src_pairs, tgt_pairs),
                                              (snapshots[1], snapshots[0])):
                     if len(snapshot) == 0:
                         raise ValueError('人工点云快照为空')
-                    # Do not allocate an NxM distance matrix for large proxy
-                    # clouds; every selected point must be an exact snapshot
-                    # member (the picker already returns snapshot coordinates).
                     tree = o3d.geometry.KDTreeFlann(
                         o3d.geometry.PointCloud(o3d.utility.Vector3dVector(snapshot)))
                     distances = []
@@ -413,68 +410,113 @@ class PointCloudStationService:
                     if np.any(np.asarray(distances) > 1e-3):
                         raise ValueError('人工对应点不属于当前站点快照，请重新选点')
         log_event(self.project_uuid, 'station.registration.started', count=len(rows))
-        staged = []
-        transformed_clouds = []
+
+        # 构建配准域点云（带预计算法向量）
         registration_clouds = []
         for row in rows:
             dataset = self._load_proxy_domain(row)
-            # 5 cm is the fine registration domain.  The algorithm builds its
-            # own 20/10/5 cm pyramid, so this snapshot is not needlessly
-            # downsampled twice at the coarse levels.
             voxel_size = 0.05
             key = (dataset.dataset_id, int(len(dataset.proxy_points)), voxel_size)
             reg = self._registration_cloud_cache.get(key)
             if reg is None:
                 reg = build_registration_cloud(
-                    dataset.proxy_points, dataset.proxy_colors, voxel_size=voxel_size)
+                    dataset.proxy_points, dataset.proxy_colors,
+                    voxel_size=voxel_size, estimate_normals=True)
                 self._registration_cloud_cache[key] = reg
             if len(reg.points) < 3:
                 raise ValueError(f'{row.display_name} 配准下采样点不足')
             registration_clouds.append(reg)
 
+        # Z轴软约束参数（GPS已全局对齐高程，允许10-20cm残余修正）
+        z_lock = True
+        max_z_shift = 0.15   # Z平移最大允许15cm修正（GPS典型精度）
+        z_damping = 0.3      # 每轮ICP后Z平移向0回归30%
+
         reference = registration_clouds[0]
         reference_cloud = reference.as_open3d()
-        transformed_clouds.append(reference_cloud)
-        for row, moving_reg in zip(rows[1:], registration_clouds[1:]):
-            # 输入点云已经过 GPS/全球坐标校正。ICP 只估计残余精化，不重新应用 JSON 变换。
+        transformed_clouds = [reference_cloud]
+        staged = []
+
+        # 两两配准（带Z轴软约束与改进的初始估计）
+        pairwise_summaries = []
+        for idx, (row, moving_reg) in enumerate(zip(rows[1:], registration_clouds[1:]), start=1):
+
             if manual_points is not None:
                 src_pairs, tgt_pairs = manual_points
                 if proxy_clouds is None:
                     raise ValueError('人工点配准缺少代理点云快照')
                 result = manual_seeded_icp(
                     moving_reg.points, reference.points, src_pairs, tgt_pairs,
-                    voxel_size=voxel_size, max_correspondence_distance=0.25,
-                    pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40)
+                    voxel_size=0.05, max_correspondence_distance=0.25,
+                    pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40,
+                    z_lock=z_lock, max_z_shift=max_z_shift, z_damping=z_damping)
             else:
-                # GPS has already established the global frame.  This only
-                # estimates the residual XY pose and is not a second GPS
-                # transform application.
+                # 改进：传入预计算法向量与Z轴软约束参数
                 initial = estimate_xy_initial_transform(
-                    moving_reg.points, reference.points)
+                    moving_reg.points, reference.points,
+                    source_normals=moving_reg.normals,
+                    target_normals=reference.normals,
+                    z_lock=z_lock, max_z_shift=max_z_shift, z_damping=z_damping)
+
                 result = point_to_plane_icp(
-                    moving_reg.points, reference.points, voxel_size=voxel_size,
+                    moving_reg.points, reference.points,
                     init=initial,
+                    voxel_size=0.05,
                     max_correspondence_distance=0.25,
-                    pyramid_scales=(4.0, 2.0, 1.0), max_iteration=40)
-            if not result.accepted:
-                raise ValueError(f'{row.display_name} 配准失败：{result.message}，RMSE={result.inlier_rmse:.4f}')
+                    pyramid_scales=(4.0, 2.0, 1.0),
+                    max_iteration=40,
+                    source_normals=moving_reg.normals,
+                    target_normals=reference.normals,
+                    z_lock=z_lock, max_z_shift=max_z_shift, z_damping=z_damping)
+
             cloud = moving_reg.as_open3d()
             cloud.transform(result.transformation)
             transformed_clouds.append(cloud)
             staged.append((row, result))
 
+            pairwise_summaries.append({
+                'moving_station': row.display_name,
+                'reference_station': rows[0].display_name,
+                'fitness': round(result.fitness, 6),
+                'rmse': round(result.inlier_rmse, 6),
+                'normal_consistency': round(result.normal_consistency, 6),
+                'correspondence_count': result.correspondence_count,
+                'z_shift': round(float(result.transformation[2, 3]), 6),
+                'timing': result.timing_s,
+                'warnings': result.warnings,
+            })
+
+        # 全局精修（3站及以上时自动触发，同样保持Z轴软约束）
+        if len(rows) > 2 and manual_points is None:
+            refined_transforms, global_log = global_refinement(
+                registration_clouds,
+                [np.eye(4)] + [r.transformation for _, r in staged],
+                voxel_size=0.05,
+                max_correspondence_distance=0.15,
+                max_iteration=15,
+                z_lock=z_lock,
+                max_z_shift=max_z_shift,
+                z_damping=z_damping)
+
+            # 用精修后的变换重新变换点云
+            transformed_clouds = []
+            for i, reg in enumerate(registration_clouds):
+                cloud = reg.as_open3d()
+                cloud.transform(refined_transforms[i])
+                transformed_clouds.append(cloud)
+
+            # 更新staged结果
+            for i, (row, result) in enumerate(staged):
+                result.transformation = refined_transforms[i + 1]
+
+        # 合并并保存
         merged = o3d.geometry.PointCloud()
         for cloud in transformed_clouds:
             merged += cloud
-        # The transform is estimated on the cached registration domain, but
-        # do not quantize the published result a second time.  This preserves
-        # the physical facade edge used for the final overlay while keeping
-        # the expensive ICP work bounded by the proxy domain.
         merged = merged.voxel_down_sample(0.05)
         result_dir = Storage.ensure_project_dirs(self.project_uuid)['results']
         operation_id = uuid.uuid4().hex
         out = result_dir / f'registration_{operation_id}.ply'
-        # 保留 .ply 后缀，以便 Open3D 为临时文件选择 PLY 写入器。
         tmp = result_dir / f'.registration_{operation_id}.tmp.ply'
         if not o3d.io.write_point_cloud(str(tmp), merged):
             raise IOError(f'配准结果写入失败：{tmp}')
@@ -493,6 +535,7 @@ class PointCloudStationService:
                             result.inlier_rmse) for row, result in staged},
             },
         }
+
         if update_viewport:
             self.commit_registration(payload)
         return payload

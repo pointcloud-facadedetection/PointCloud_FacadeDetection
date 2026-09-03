@@ -197,6 +197,9 @@ class ProjectOverviewService:
                 point_count = int(row.point_count or geometry.get('point_count') or
                                   len(geometry.get('proxy_indices') or geometry.get('inlier_indices') or []))
                 raw_point_count = int(row.raw_point_count or geometry.get('raw_point_count') or point_count)
+                review_status = geometry.get('review_status') or geometry.get('preview_status')
+                if review_status not in {'complete', 'incomplete', 'pending'}:
+                    review_status = 'complete' if row.quality_status == 'complete' else 'pending'
                 item = {'id': row.id, 'facade_db_id': row.id, 'display_no': display_no,
                                'point_count': point_count, 'raw_point_count': raw_point_count,
                                'type': row.label, 'type_label': row.label,
@@ -205,8 +208,9 @@ class ProjectOverviewService:
                                **{key: geometry[key] for key in (
                                    'plane_model', 'normal', 'center', 'inlier_indices',
                                     'proxy_indices', 'measurement_indices', 'voxel_ids',
-                                    'cloud_name', '__index_space', 'review_status')
+                                     'cloud_name', '__index_space')
                                    if key in geometry},
+                                'review_status': review_status,
                                 'quality_metrics': [{'name': m.metric_name, 'value': m.value,
                                                     'unit': m.unit, 'pass': m.pass_flag}
                                                     for m in metrics],

@@ -220,51 +220,65 @@ class ResultExportService:
         limit_mm = float(quality.get('parameters', {}).get(
             limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
         
-        # 修复: 统一单位 - 与视口保持一致
+        # 统一单位 - 与视口保持一致
         values_mm = values  # 保持 mm 单位用于颜色计算
         limit_m = limit_mm / 1000.0  # 阈值转为 m
         
-        # 统一缩放因子 - 使用全局最大缺陷值
+        # 计算超标量
         excess_mm = np.maximum(np.abs(values_mm) - limit_mm, 0.0)
         
-        # 使用全局最大超标量作为缩放基准（与视口一致）
-        # 如果所有值都低于limit，使用limit的10%作为最小缩放
-        global_max_excess = float(np.nanmax(excess_mm)) if np.any(np.isfinite(excess_mm)) else limit_mm * 0.1
-        scale_mm = max(global_max_excess, limit_mm * 0.05)  # 至少保留5%的limit作为缩放
+        # ============================================================
+        # 优化1: 颜色区分度 - 使用自适应分位数归一化，避免异常值压缩动态范围
+        finite_excess = excess_mm[np.isfinite(excess_mm)]
+        if len(finite_excess) > 0 and np.any(finite_excess > 0):
+            # 98%分位数作为归一化上限，避免单个极端值拉低整体对比度
+            p98_excess = float(np.percentile(finite_excess, 98))
+            scale_mm = max(p98_excess, limit_mm * 0.15)  # 至少保留15%的limit作为动态范围
+        else:
+            scale_mm = limit_mm * 0.15
         
         t = np.clip(excess_mm / scale_mm, 0.0, 1.0)
 
-        # 统一配色 - 青→黄→橙→红 (与3D视口一致)
+
+        # 增强颜色区分度 - 5节点色标（青→绿→黄→橙→红）
         defect_colors = np.zeros((len(values_mm), 3), dtype=float)
         
-        # 青色 (0.0, 0.75, 1.0) at t=0 -> 黄色 (1, 1, 0) at t=0.33
-        # -> 橙色 (1, 0.5, 0) at t=0.66 -> 红色 (1, 0, 0) at t=1.0
+        # 节点定义: t=0.0青(0,0.7,1.0) -> t=0.25绿(0.2,0.9,0.2) -> t=0.5黄(1,1,0) -> t=0.75橙(1,0.5,0) -> t=1.0红(1,0,0)
+        # 分段线性插值
         
-        mask1 = t <= 0.33
-        tt1 = t[mask1] / 0.33
-        defect_colors[mask1, 0] = 0.0 + 1.0 * tt1          # R: 0 -> 1
-        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1         # G: 0.75 -> 1
-        defect_colors[mask1, 2] = 1.0 - 1.0 * tt1            # B: 1 -> 0
+        # 区间1: 0.0 ~ 0.25 (青 -> 绿)
+        mask1 = t <= 0.25
+        tt1 = t[mask1] / 0.25
+        defect_colors[mask1, 0] = 0.0 + 0.2 * tt1       # R: 0 -> 0.2
+        defect_colors[mask1, 1] = 0.7 + 0.2 * tt1       # G: 0.7 -> 0.9
+        defect_colors[mask1, 2] = 1.0 - 0.8 * tt1       # B: 1.0 -> 0.2
         
-        mask2 = (t > 0.33) & (t <= 0.66)
-        tt2 = (t[mask2] - 0.33) / 0.33
-        defect_colors[mask2, 0] = 1.0
-        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2            # G: 1 -> 0.5
-        defect_colors[mask2, 2] = 0.0
+        # 区间2: 0.25 ~ 0.5 (绿 -> 黄)
+        mask2 = (t > 0.25) & (t <= 0.5)
+        tt2 = (t[mask2] - 0.25) / 0.25
+        defect_colors[mask2, 0] = 0.2 + 0.8 * tt2       # R: 0.2 -> 1.0
+        defect_colors[mask2, 1] = 0.9 + 0.1 * tt2       # G: 0.9 -> 1.0
+        defect_colors[mask2, 2] = 0.2 - 0.2 * tt2       # B: 0.2 -> 0.0
         
-        mask3 = t > 0.66
-        tt3 = (t[mask3] - 0.66) / 0.34
-        defect_colors[mask3, 0] = 1.0
-        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3            # G: 0.5 -> 0
-        defect_colors[mask3, 2] = 0.0
+        # 区间3: 0.5 ~ 0.75 (黄 -> 橙)
+        mask3 = (t > 0.5) & (t <= 0.75)
+        tt3 = (t[mask3] - 0.5) / 0.25
+        defect_colors[mask3, 0] = 1.0                   # R: 1.0
+        defect_colors[mask3, 1] = 1.0 - 0.5 * tt3       # G: 1.0 -> 0.5
+        defect_colors[mask3, 2] = 0.0                   # B: 0.0
+        
+        # 区间4: 0.75 ~ 1.0 (橙 -> 红)
+        mask4 = t > 0.75
+        tt4 = (t[mask4] - 0.75) / 0.25
+        defect_colors[mask4, 0] = 1.0                   # R: 1.0
+        defect_colors[mask4, 1] = 0.5 - 0.5 * tt4       # G: 0.5 -> 0.0
+        defect_colors[mask4, 2] = 0.0                   # B: 0.0
 
         base_points, _ = self._filter_base_points(pts_local, colors, plane_model, quality)
         
         if len(base_points) == 0:
             raise ValueError('过滤后立面点云为空，无法导出叠加图')
 
-        # Export background is intentionally light so the point-cloud silhouette
-        # remains visible after PDF downscaling.
         base_colors = np.full((len(base_points), 3), [0.65, 0.70, 0.78], dtype=float)
 
         # 转换为米单位传入 rasterize_facade
@@ -319,7 +333,7 @@ class ResultExportService:
 
         # Keep the neutral point-cloud layer subdued while preserving detail.
         defect_boost = 1.35
-        base_darkened = np.clip(base_rgb.astype(np.float32) * 1.02, 0, 255)
+        base_darkened = np.clip(base_rgb.astype(np.float32) * 1.10, 0, 255)
         
         boosted_overlay = overlay[:, :, :3].astype(np.float32) * defect_boost
         boosted_overlay = np.clip(boosted_overlay, 0, 255)
@@ -337,16 +351,21 @@ class ResultExportService:
         if not cv2.imwrite(str(overlay_path), composite):
             raise RuntimeError('合成图 PNG 写入失败')
 
+
+        # 优化2: 缩小报告图尺寸，适配A4半栏并排显示
         report_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_report.png'
-        report_image = self._fit_report_image(composite)
+        # 单图目标宽度360px，双图并排适配A4可用宽度（约182mm ≈ 690px @ 96dpi）
+        report_image = self._fit_report_image(composite, max_width=360, max_height=640)
         if not cv2.imwrite(str(report_path), report_image):
             raise RuntimeError('PDF 报告热力图写入失败')
 
         return heatmap_path
 
     @staticmethod
-    def _fit_report_image(image, max_width=700, max_height=600):
-        """Create a bounded, letterboxed image for the fixed PDF image box."""
+    def _fit_report_image(image, max_width=360, max_height=640):
+        """Create a bounded, letterboxed image for the fixed PDF image box.
+
+        """
         source = np.asarray(image, dtype=np.uint8)
         if source.ndim != 3 or source.shape[0] == 0 or source.shape[1] == 0:
             raise ValueError('报告图像为空')
@@ -354,8 +373,6 @@ class ResultExportService:
         scale = min(float(max_width) / w, float(max_height) / h, 1.0)
         nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
         resized = cv2.resize(source, (nw, nh), interpolation=cv2.INTER_AREA)
-        # Keep the report image contract fixed at 1200x520.  The source is
-        # letterboxed inside this canvas, including for very tall images.
         canvas = np.full((max_height, max_width, 3), [245, 247, 250], dtype=np.uint8)
         x, y = (max_width - nw) // 2, (max_height - nh) // 2
         canvas[y:y + nh, x:x + nw] = resized
@@ -375,19 +392,25 @@ class ResultExportService:
         for i in range(n_segments):
             t = i / max(n_segments - 1, 1)
 
-            # 图例配色与热力图一致 - 青→黄→橙→红
-            if t <= 0.33:
-                tt = t / 0.33
-                r = int(np.clip((0.0 + 1.0 * tt) * 255, 0, 255))
-                g = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
-                b = int(np.clip((1.0 - 1.0 * tt) * 255, 0, 255))
-            elif t <= 0.66:
-                tt = (t - 0.33) / 0.33
+
+            # 图例配色与热力图一致 - 5节点色标（青→绿→黄→橙→红）
+            if t <= 0.25:
+                tt = t / 0.25
+                r = int(np.clip((0.0 + 0.2 * tt) * 255, 0, 255))
+                g = int(np.clip((0.7 + 0.2 * tt) * 255, 0, 255))
+                b = int(np.clip((1.0 - 0.8 * tt) * 255, 0, 255))
+            elif t <= 0.5:
+                tt = (t - 0.25) / 0.25
+                r = int(np.clip((0.2 + 0.8 * tt) * 255, 0, 255))
+                g = int(np.clip((0.9 + 0.1 * tt) * 255, 0, 255))
+                b = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
+            elif t <= 0.75:
+                tt = (t - 0.5) / 0.25
                 r = 255
                 g = int(np.clip((1.0 - 0.5 * tt) * 255, 0, 255))
                 b = 0
             else:
-                tt = (t - 0.66) / 0.34
+                tt = (t - 0.75) / 0.25
                 r = 255
                 g = int(np.clip((0.5 - 0.5 * tt) * 255, 0, 255))
                 b = 0
