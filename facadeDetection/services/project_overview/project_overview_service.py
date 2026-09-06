@@ -44,7 +44,8 @@ class ProjectOverviewService:
 
         结果中的 prepared 对象携带全部待提交数组，Open3D 提交段由 GUI
         完成回调执行（见 ProjectLifecycleController.on_load_finished）。
-        activate 保留同步事务，不经 worker。
+        activate 的 worker 由 ProjectLifecycleController 自行构建
+        （计算段依赖 pointcloud/station 服务，不在本服务内）。
         """
         if operation == 'upload':
             def run(worker):

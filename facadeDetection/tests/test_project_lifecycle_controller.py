@@ -1,10 +1,11 @@
 """B3：ProjectLifecycleController offscreen 编排测试（mock service）。"""
+import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import SignalInstance
+from PySide6.QtCore import QThreadPool, SignalInstance
 
-from fakes import Row, SignalRecorder
+from fakes import Row, SignalRecorder, pump_until
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from ui.main_window_config import PAGE_DEFINITIONS
 from utils.workers import PointCloudLoadWorker
@@ -75,6 +76,9 @@ class FakeStationService:
         self.log = log
         self.rows = [Row(1)]
         self._active_station_id = None
+        self.prepare_threads = []
+        self.commit_threads = []
+        self.commit_count = 0
 
     def set_project(self, uuid):
         self.log.append(('station.set_project', uuid))
@@ -88,8 +92,20 @@ class FakeStationService:
     def show_single(self, row):
         self.log.append(('station.show_single', row.id))
 
-    def restore_view(self):
+    def prepare_restore_view(self):
+        """与真实 StationService 相同的契约：计算段只准备数据，不渲染。"""
+        import threading
+        self.log.append(('station.prepare_restore',))
+        self.prepare_threads.append(threading.get_ident())
+        if not self.rows:
+            return (None, None)
+        return (self.rows[0], object())
+
+    def commit_restore_view(self, prepared):
+        import threading
         self.log.append(('station.restore_view',))
+        self.commit_threads.append(threading.get_ident())
+        self.commit_count += 1
 
 
 class FakeOperationService:
@@ -194,6 +210,7 @@ def test_activate_full_sequence(env):
         ('overview.activate', 'uuid-1'),
         ('pc.set_project', 'uuid-1'),
         ('station.set_project', 'uuid-1'),
+        ('station.prepare_restore',),
         ('station.restore_view',),
         ('op.set_uuid', 'uuid-1'),
         ('overview.historical', 'uuid-1', None),
@@ -216,6 +233,7 @@ def test_activate_empty_stations_branch(env):
     controller.start_load('activate', 'uuid-1', project=project)
     assert ('render.clear_scene',) in log
     assert ('station.restore_view',) not in log
+    assert ('station.prepare_restore',) in log
     assert ('set_project', project) in rec.events
     assert ('status', '项目已打开，但未发现可用 PLY 站点。', 5000) in rec.events
     assert not any(e[0] == 'page' for e in rec.events)
@@ -320,3 +338,124 @@ def test_on_load_finished_stale_generation_ignored(env):
                                 before_ids=set())
     assert rec.events == []
     assert log == []
+
+
+# ---------------------------------------------------------------------------
+# activate 后台化：worker 计算段离 GUI 线程，提交段恰好一次回 GUI
+# ---------------------------------------------------------------------------
+def _load_signal_recorder(controller):
+    rec = SignalRecorder()
+    controller.load_started.connect(lambda: rec.events.append(('load_started',)))
+    controller.load_finished.connect(lambda: rec.events.append(('load_finished',)))
+    return rec
+
+
+class TestActivateBackgroundSplit:
+    def test_prepare_off_gui_commit_on_gui(self, qapp):
+        gui_ident = threading.get_ident()
+        log = []
+        quality = SimpleNamespace(active_quality_worker=None,
+                                  quality_result_cache={}, quality_reports=[])
+        pool = QThreadPool()
+        pool.setMaxThreadCount(1)
+        controller = ProjectLifecycleController(
+            project_overview_service=FakeOverviewService(log),
+            pointcloud_service=FakePointCloudService(log),
+            station_service=FakeStationService(log),
+            project_operation_service=FakeOperationService(log),
+            render_service=FakeRenderService(log),
+            facade_quality_controller=quality,
+            context_provider=lambda: (False, None),
+            load_pool=pool,
+        )
+        rec = _load_signal_recorder(controller)
+        project = SimpleNamespace(project_id='uuid-1', name='演示',
+                                  directory_path='.')
+
+        controller.start_load('activate', 'uuid-1', project=project)
+        assert controller._load_in_progress is True  # 调用立即返回，未同步阻塞
+        assert pump_until(qapp, lambda: not controller._load_in_progress)
+
+        # 机制：计算段（DB 激活/set_project/站点域准备）真实离开 GUI 线程
+        station = controller.station_service
+        assert len(station.prepare_threads) == 1
+        assert station.prepare_threads[0] != gui_ident
+        # 机制：GUI 提交段恰好执行一次，且发生在 GUI 线程
+        assert station.commit_count == 1
+        assert station.commit_threads == [gui_ident]
+        # 机制：加载窗口信号各恰好一次（首开弹窗契约）
+        assert rec.kinds().count('load_started') == 1
+        assert rec.kinds().count('load_finished') == 1
+        # 数据：完整激活事务真实走完（准备 → 提交 → 项目级状态）
+        assert ('station.prepare_restore',) in log
+        assert log.index(('station.prepare_restore',)) < \
+            log.index(('station.restore_view',))
+        assert ('overview.historical', 'uuid-1', None) in log
+        assert controller._active_load_worker is None
+
+    def test_second_activation_reuses_same_worker_contract(self, qapp):
+        # 二开（同一控制器再次 activate）同样走 worker 且弹窗信号成对
+        log = []
+        quality = SimpleNamespace(active_quality_worker=None,
+                                  quality_result_cache={}, quality_reports=[])
+        controller = ProjectLifecycleController(
+            project_overview_service=FakeOverviewService(log),
+            pointcloud_service=FakePointCloudService(log),
+            station_service=FakeStationService(log),
+            project_operation_service=FakeOperationService(log),
+            render_service=FakeRenderService(log),
+            facade_quality_controller=quality,
+            context_provider=lambda: (False, None),
+            load_pool=None,
+        )
+        rec = _load_signal_recorder(controller)
+        project = SimpleNamespace(project_id='uuid-1')
+        controller.start_load('activate', 'uuid-1', project=project)
+        controller.start_load('activate', 'uuid-1', project=project)
+        assert rec.kinds() == ['load_started', 'load_finished',
+                               'load_started', 'load_finished']
+        assert controller.station_service.commit_count == 2
+
+    def test_db_activate_failure_leaves_ui_untouched(self, qapp):
+        log = []
+        quality = SimpleNamespace(active_quality_worker=None,
+                                  quality_result_cache={}, quality_reports=[])
+        overview = FakeOverviewService(log)
+        def failing_activate(uuid):
+            raise RuntimeError('模拟 DB 激活失败')
+        overview.activate_project = failing_activate
+        controller = ProjectLifecycleController(
+            project_overview_service=overview,
+            pointcloud_service=FakePointCloudService(log),
+            station_service=FakeStationService(log),
+            project_operation_service=FakeOperationService(log),
+            render_service=FakeRenderService(log),
+            facade_quality_controller=quality,
+            context_provider=lambda: (False, None),
+            load_pool=None,  # 内联：信号直连，语义与同步路径等价
+        )
+        rec = SignalRecorder()
+        controller.warning_requested.connect(
+            lambda t, m: rec.events.append(('warn', t, m)))
+        controller.current_project_change_requested.connect(
+            lambda p: rec.events.append(('set_project', p)))
+        load_rec = _load_signal_recorder(controller)
+        project = SimpleNamespace(project_id='uuid-1')
+
+        controller.start_load('activate', 'uuid-1', project=project)
+
+        # 机制：DB 激活失败时计算段在 overview.activate 处中断——
+        # set_project/站点准备/提交段都没有发生
+        assert ('pc.set_project', 'uuid-1') not in log
+        assert ('station.set_project', 'uuid-1') not in log
+        assert ('station.prepare_restore',) not in log
+        # 渲染/注册表未被改动：没有 clear_scene，没有 current_project_change
+        assert ('render.clear_scene',) not in log
+        assert not any(e[0] == 'set_project' for e in rec.events)
+        # 统一错误路径：警告 + 状态复位 + 加载窗口成对关闭
+        warns = [e for e in rec.events if e[0] == 'warn']
+        assert warns and '模拟 DB 激活失败' in warns[0][2]
+        assert '站点恢复失败' not in warns[0][2]
+        assert load_rec.kinds() == ['load_started', 'load_finished']
+        assert controller._load_in_progress is False
+        assert controller._active_load_worker is None

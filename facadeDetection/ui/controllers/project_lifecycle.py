@@ -1,6 +1,7 @@
 from PySide6.QtCore import QObject, Signal
 
 from ui.main_window_config import PAGE_DEFINITIONS
+from utils.workers import PointCloudLoadWorker
 
 
 class ProjectLifecycleController(QObject):
@@ -18,7 +19,7 @@ class ProjectLifecycleController(QObject):
     report_preview_refresh_requested = Signal()
     facade_results_refresh_requested = Signal(object)  # 立面结果列表
     page_change_requested = Signal(int)
-    load_started = Signal()               # upload/fls 后台计算段开始（显示加载窗口）
+    load_started = Signal()               # 后台计算段开始（显示加载窗口）
     load_progress = Signal(int, str)      # (百分比, 进度文本)
     load_finished = Signal()              # 加载会话结束：完成/失败/被取消（关闭加载窗口）
 
@@ -36,8 +37,8 @@ class ProjectLifecycleController(QObject):
         self.facade_quality_controller = facade_quality_controller
         # context_provider() -> (closing, current_project_id)，实时读取。
         self._context_provider = context_provider
-        # upload/fls 的计算段经该池（maxThreadCount=1）后台执行；为 None 时
-        # worker 内联同步运行（测试/无池环境），信号直连保证回调仍在调用线程。
+        # upload/fls/activate 的计算段经该池（maxThreadCount=1）后台执行；
+        # 为 None 时 worker 内联同步运行（测试/无池环境），信号直连保证回调仍在调用线程。
         self.load_pool = load_pool
         self.project_generation = 0
         self._load_in_progress = False
@@ -45,13 +46,14 @@ class ProjectLifecycleController(QObject):
 
     def start_load(self, operation, project_id, *, file_paths=None,
                    directory=None, project=None):
-        """upload/fls：计算段（解析/注册/转换）后台执行，Open3D 提交段回 GUI。
+        """upload/fls/activate：计算段后台执行，Open3D 提交段回 GUI。
 
         worker 只做准备段；完成信号经队列投递回 GUI 线程后，由
-        on_load_finished 执行提交段（show_point_cloud）与站点展示
-        （show_single），project_generation 丢弃迟到结果。
-        activate 保留 GUI 线程同步事务：激活有"先成功再改 UI"的回滚语义，
-        且 restore_view 的渲染与站点代理加载交织，拆分风险大于收益。
+        on_load_finished 执行提交段（upload/fls：show_point_cloud 与
+        show_single；activate：commit_restore_view 与项目级 UI 状态切换），
+        project_generation 丢弃迟到结果。
+        activate 的事务语义：DB 激活失败不得改动 UI/渲染状态；
+        set_project/站点恢复失败由 GUI 失败回调清空场景并走统一错误路径。
         """
         closing, _ = self._context_provider()
         if closing:
@@ -62,19 +64,35 @@ class ProjectLifecycleController(QObject):
             return
         self._load_in_progress = True
         self.status_message.emit('正在加载点云，请稍候...', 0)
+        generation = self.project_generation
         if operation == 'activate':
-            try:
-                self.activate_project(project)
-                self.project_list_refresh_requested.emit()
-            except Exception as exc:
-                self.on_load_failed(self.project_generation, str(exc))
-            finally:
+            self.facade_list_reset_requested.emit()
+            project_uuid = getattr(project, 'project_id', None)
+            if not project_uuid:
                 self._load_in_progress = False
                 self.status_cleared.emit()
+                self.on_load_failed(generation, '项目标识为空，无法恢复项目')
+                return
+            worker = self._create_activate_worker(project, project_uuid)
+            self._active_load_worker = worker
+            worker.signals.progress.connect(
+                lambda pct, text: (
+                    self.status_message.emit(text, 0),
+                    self.load_progress.emit(pct, text),
+                ))
+            worker.signals.finished.connect(
+                lambda result: self.on_load_finished(
+                    generation, operation, project_uuid, result))
+            worker.signals.failed.connect(
+                lambda error: self._on_activate_failed(generation, error))
+            self.load_started.emit()
+            if self.load_pool is None:
+                worker.run()
+            else:
+                self.load_pool.start(worker)
             return
 
         before_ids = {row.id for row in self.station_service.list_stations()}
-        generation = self.project_generation
         try:
             worker = self.project_overview_service.create_load_worker(
                 operation, project_id,
@@ -99,6 +117,83 @@ class ProjectLifecycleController(QObject):
             worker.run()
         else:
             self.load_pool.start(worker)
+
+    def _create_activate_worker(self, project, project_uuid):
+        """activate 计算段 worker：DB 激活 + set_project + 站点视图数据准备。
+
+        DB 激活失败原样抛出（GUI 侧不得改动 UI/渲染状态）；set_project 与
+        站点准备失败包装为“站点恢复失败”，GUI 失败回调据此清空场景。
+        """
+        def run(worker):
+            worker.check_cancelled()
+            worker.signals.progress.emit(10, '正在激活项目数据')
+            self.project_overview_service.activate_project(project_uuid)
+            try:
+                worker.signals.progress.emit(30, '正在准备站点数据')
+                self.pointcloud_service.set_project(project_uuid)
+                self.station_service.set_project(project_uuid)
+                worker.signals.progress.emit(60, '正在恢复站点视图')
+                prepared_view = self.station_service.prepare_restore_view()
+            except Exception as exc:
+                raise RuntimeError(f'站点恢复失败：{exc}') from exc
+            return {'operation': 'activate', 'project_uuid': project_uuid,
+                    'project': project, 'prepared_view': prepared_view}
+        return PointCloudLoadWorker(run)
+
+    def _on_activate_failed(self, generation, error):
+        """activate 失败回调（GUI 线程）：站点恢复阶段的失败清空场景
+        （与旧同步事务一致）；DB 激活失败不得触碰 UI/渲染状态。"""
+        if '站点恢复失败' in str(error):
+            self.render_service.clear_scene_display()
+        self.on_load_failed(generation, error)
+
+    def _commit_activate(self, result):
+        """activate 提交段（GUI 线程）：渲染提交与项目级 UI 状态切换。
+
+        站点提交失败先清空场景再抛出，由 on_load_finished 统一走
+        on_load_failed；历史立面恢复失败仅降级为状态栏提示，不影响激活。
+        """
+        project = result.get('project')
+        project_uuid = result.get('project_uuid')
+        self.station_panel_refresh_requested.emit(None)
+        prepared = result.get('prepared_view')
+        if prepared is not None and prepared[0] is None:
+            # 空项目：与旧同步路径一致，跳过后续项目级状态切换
+            self.render_service.clear_scene_display()
+            self.current_project_change_requested.emit(project)
+            self.status_message.emit('项目已打开，但未发现可用 PLY 站点。', 5000)
+            return
+        if prepared is not None:
+            try:
+                self.station_service.commit_restore_view(prepared)
+            except Exception as exc:
+                self.render_service.clear_scene_display()
+                raise RuntimeError(f'站点恢复失败：{exc}') from exc
+        self.current_project_change_requested.emit(project)
+        self.report_preview_refresh_requested.emit()
+        try:
+            # 将活动项目的 UUID 传递给操作调度程序，以实现 DAL 持久化
+            self.project_operation_service.set_active_project_uuid(project_uuid)
+        except Exception:
+            pass
+        try:
+            if project_uuid:
+                active_station_id = getattr(self.station_service, '_active_station_id', None)
+                historical = self.project_overview_service.load_historical_facades(
+                    project_uuid, active_station_id)
+                # 通过与新检测相同的状态路径恢复历史立面。
+                # 这将同步列表、渲染器缓存、热力图可用性及报告快照
+                self.project_operation_service.last_facade_results = historical or []
+                self.facade_results_refresh_requested.emit(historical or [])
+                self.report_preview_refresh_requested.emit()
+        except Exception as exc:
+            self.status_message.emit(f'项目历史数据恢复部分失败：{exc}', 5000)
+        operation_index = next(
+            index
+            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
+            if key == 'project_operation'
+        )
+        self.page_change_requested.emit(operation_index)
 
     def on_load_failed(self, generation, error):
         if generation != self.project_generation:
@@ -145,6 +240,8 @@ class ProjectLifecycleController(QObject):
                         self.station_panel_refresh_requested.emit(new_station.id)
                 else:
                     self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))
+            elif operation == 'activate':
+                self._commit_activate(result)
             self.project_list_refresh_requested.emit()
         except Exception as exc:
             self.on_load_failed(generation, str(exc))
@@ -158,52 +255,14 @@ class ProjectLifecycleController(QObject):
         )
 
     def activate_project(self, project):
-        # TODO(生命周期): _activate_project：审查代码的生命周期和异常处理，确保在项目切换、导入和恢复时不会泄漏资源或导致 GUI 状态不一致。
-        self.facade_list_reset_requested.emit()
-        project_uuid = getattr(project, 'project_id', None)
-        if not project_uuid:
-            raise ValueError('项目标识为空，无法恢复项目')
-        # 所有入口点（打开目录、项目选择器、上传和 FLS）均使用相同的严格激活事务。
-        # 请在修改current_project 之前执行此操作，以免恢复失败时导致用户界面处于错误的激活状态。
-        self.project_overview_service.activate_project(project_uuid)
-        try:
-            self.pointcloud_service.set_project(project_uuid)
-            self.station_service.set_project(project_uuid)
-            self.station_panel_refresh_requested.emit(None)
-            if not self.station_service.list_stations():
-                self.render_service.clear_scene_display()
-                self.current_project_change_requested.emit(project)
-                self.status_message.emit('项目已打开，但未发现可用 PLY 站点。', 5000)
-                return
-            self.station_service.restore_view()
-        except Exception as exc:
-            self.render_service.clear_scene_display()
-            raise RuntimeError(f'站点恢复失败：{exc}') from exc
-        self.current_project_change_requested.emit(project)
-        self.report_preview_refresh_requested.emit()
-        try:
-            # 将活动项目的 UUID 传递给操作调度程序，以实现 DAL 持久化
-            self.project_operation_service.set_active_project_uuid(project_uuid)
-        except Exception:
-            pass
-        try:
-            if project_uuid:
-                active_station_id = getattr(self.station_service, '_active_station_id', None)
-                historical = self.project_overview_service.load_historical_facades(
-                    project_uuid, active_station_id)
-                # 通过与新检测相同的状态路径恢复历史立面。
-                # 这将同步列表、渲染器缓存、热力图可用性及报告快照
-                self.project_operation_service.last_facade_results = historical or []
-                self.facade_results_refresh_requested.emit(historical or [])
-                self.report_preview_refresh_requested.emit()
-        except Exception as exc:
-            self.status_message.emit(f'项目历史数据恢复部分失败：{exc}', 5000)
-        operation_index = next(
-            index
-            for index, (_title, key) in enumerate(PAGE_DEFINITIONS)
-            if key == 'project_operation'
-        )
-        self.page_change_requested.emit(operation_index)
+        """打开项目的统一入口：与 start_load('activate') 同一 worker 事务。
+
+        所有入口（打开目录、项目选择器、项目卡片）共享同一条后台激活
+        管道：计算段（DB 激活/站点域准备）离开 GUI 线程，渲染提交与
+        项目级 UI 状态切换在 GUI 完成回调执行，并显示加载窗口。
+        """
+        self.start_load('activate', getattr(project, 'project_id', None),
+                        project=project)
 
     def prepare_project_activation(self, project_id):
         # TODO(生命周期): _prepare_project_activation：需要统一旧项目异步任务取消、等待和资源释放顺序，核查重复分支及切换竞态。

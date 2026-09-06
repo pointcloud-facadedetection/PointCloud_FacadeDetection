@@ -354,24 +354,32 @@ class PointCloudStationService:
             return None
         return translated
 
-    def _show_dataset(self, station):
-        dataset = self._load_proxy_domain(station)
+    def prepare_show_single(self, station):
+        """计算段：站点域准备（PLY 读取/代理重建/缓存采集），不触碰渲染。
+
+        返回注册的 dataset；站点资产无效时返回 None。可在后台线程执行。
+        """
+        if station.last_error:
+            return None
+        return self._load_proxy_domain(station)
+
+    def commit_show_single(self, station, dataset):
+        """提交段：渲染提交 + 活动站点与视图持久化，必须在 GUI 线程执行。"""
+        if station.last_error or dataset is None:
+            self.render.clear_scene_display()
+            log_event(self.project_uuid, 'asset.invalid', station_id=station.id, reason=station.last_error)
+            return
         self.render.clear_scene_display()
         self.render.show_station_proxy(
             station.id, station.display_name, dataset.proxy_points,
             dataset.proxy_colors, dataset_id=dataset.dataset_id)
-        return dataset
-
-    def show_single(self, station):
-        if station.last_error:
-            self.render.clear_scene_display()
-            log_event(self.project_uuid, 'asset.invalid', station_id=station.id, reason=station.last_error)
-            return
-        self._show_dataset(station)
         self._active_station_id = station.id
         selected = [x.id for x in self.list_stations() if x.is_selected]
         PointCloudStationRepo.save_view(self.project_uuid, 'single', station.id, selected)
         log_event(self.project_uuid, 'station.switch', station_id=station.id)
+
+    def show_single(self, station):
+        self.commit_show_single(station, self.prepare_show_single(station))
 
     def merge_selected(self):
         rows = [x for x in self.list_stations() if x.is_selected and not x.last_error]
@@ -420,35 +428,47 @@ class PointCloudStationService:
                 dataset.proxy_colors, dataset_id=dataset.dataset_id))
         return rows, names
 
-    def restore_view(self):
-        """恢复持久化的站点视图，若无则回退到第一个站点。"""
+    def prepare_restore_view(self):
+        """计算段：恢复视图的数据准备（选中状态持久化 + 首站代理域加载）。
+
+        返回 (station, dataset) 供 commit_restore_view 在 GUI 线程提交；
+        无站点时为 (None, None)；已恢复过（或恢复进行中）返回 None。
+        全程不触碰渲染，可在后台线程执行。
+        """
         if self._restoring or self._loaded_project == self.project_uuid:
-            return
+            return None
         self._restoring = True
         try:
-            self._restore_view_once()
-            self._loaded_project = self.project_uuid
+            rows = self.list_stations()
+            if not rows:
+                return (None, None)
+            state = PointCloudStationRepo.get_view(self.project_uuid)
+            by_id = {row.id: row for row in rows}
+            selected_ids = [sid for sid in (state.selected_station_ids if state else []) if sid in by_id]
+            if not selected_ids:
+                selected_ids = [row.id for row in rows if row.is_selected]
+            if not selected_ids:
+                selected_ids = [rows[0].id]
+            for row in rows:
+                PointCloudStationRepo.set_selected(self.project_uuid, row.id, row.id in selected_ids)
+            # Opening a project must have a deterministic, low-cost initial view.
+            # Persisted merge/active state remains available through explicit user
+            # actions, but never hides the first station on project activation.
+            first = rows[0]
+            return first, self.prepare_show_single(first)
         finally:
             self._restoring = False
 
-    def _restore_view_once(self):
-        rows = self.list_stations()
-        if not rows:
-            self.render.clear_scene_display()
+    def commit_restore_view(self, prepared):
+        """提交段：渲染提交与恢复标记，必须在 GUI 线程执行。"""
+        if prepared is None:
             return
-        state = PointCloudStationRepo.get_view(self.project_uuid)
-        by_id = {row.id: row for row in rows}
-        selected_ids = [sid for sid in (state.selected_station_ids if state else []) if sid in by_id]
-        if not selected_ids:
-            selected_ids = [row.id for row in rows if row.is_selected]
-        if not selected_ids:
-            selected_ids = [rows[0].id]
-        for row in rows:
-            PointCloudStationRepo.set_selected(self.project_uuid, row.id, row.id in selected_ids)
-        # Opening a project must have a deterministic, low-cost initial view.
-        # Persisted merge/active state remains available through explicit user
-        # actions, but never hides the first station on project activation.
-        self.show_single(rows[0])
+        station, dataset = prepared
+        if station is None:
+            self.render.clear_scene_display()
+        else:
+            self.commit_show_single(station, dataset)
+        self._loaded_project = self.project_uuid
 
     def register_selected(self, update_viewport=True, manual_points=None,
                           proxy_clouds=None):
