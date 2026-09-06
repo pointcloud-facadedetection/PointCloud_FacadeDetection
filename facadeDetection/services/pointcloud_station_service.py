@@ -125,6 +125,14 @@ class PointCloudStationService:
                 self.pointcloud.datasets.pop(legacy_id, None)
                 existing.dataset_id = dataset_id
                 self.pointcloud.datasets[dataset_id] = existing
+                # 上传链已按当前资产完成读取/代理构建，继承指纹后走复用分支，
+                # 避免同一文件被完整处理第二遍
+                existing.metadata = dict(existing.metadata or {},
+                                         station_id=station.id,
+                                         asset_fingerprint=list(fingerprint_key))
+                existing.metadata.update(
+                    self._global_coordinate_metadata(station.source_path))
+                self._station_fingerprints[station.id] = fingerprint_key
         if existing is not None and self._station_fingerprints.get(station.id) == fingerprint_key:
             state = PointCloudStationRepo.get_denoise_state(
                 self.project_uuid, station.id)

@@ -734,7 +734,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         return dock
 
     def set_current_page(self, page_index):
-        # TODO(渲染性能): set_current_page：页签切换时统一暂停/恢复视口、隐藏旧页原生窗口并强制刷新，避免 Open3D 残留其他页 UI 数秒。
         if not 0 <= page_index < len(PAGE_DEFINITIONS):
             return
         page_title, page_key = PAGE_DEFINITIONS[page_index]
@@ -746,6 +745,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
+        # 仅项目操作页持有三维视口，其余页面暂停其 GLFW 轮询与帧提交
+        viewport = getattr(self, 'viewport', None)
+        if viewport is not None and hasattr(viewport, 'set_render_enabled'):
+            viewport.set_render_enabled(page_key == 'project_operation')
         self._update_window_title(page_key)
 
     def _connect_buttons(self):

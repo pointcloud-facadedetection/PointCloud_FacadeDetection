@@ -106,9 +106,15 @@ class PointCloudService:
         """Release one station's raw/proxy/index domain after it is removed."""
         token = f":{station_id}"
         dataset_ids = [key for key in self.datasets if str(key).endswith(token)]
+        source_ids = set()
         for dataset_id in dataset_ids:
             dataset = self.datasets.pop(dataset_id, None)
             if dataset is not None:
+                # 上传链注册的 source 键（uuid:source:stem）与站点域键
+                # （uuid:station_id:source）不同名，以 metadata 为准才能释放干净
+                src = (dataset.metadata or {}).get('source_id')
+                if src:
+                    source_ids.add(src)
                 dataset.raw.points = np.empty((0, 3), dtype=np.float32)
                 dataset.raw.colors = None
                 dataset.index.source_points = None
@@ -118,8 +124,9 @@ class PointCloudService:
                 dataset.index._raw_to_voxel = None
             self.decisions.pop(dataset_id, None)
             self._decision_versions.pop(dataset_id, None)
-        for source_id in [key for key in self.source_assets
-                          if str(key).endswith(f":{station_id}:source")]:
+        source_ids.update(key for key in self.source_assets
+                          if str(key).endswith(f":{station_id}:source"))
+        for source_id in source_ids:
             asset = self.source_assets.pop(source_id, None)
             if asset is not None:
                 asset['points'] = np.empty((0, 3), dtype=np.float32)

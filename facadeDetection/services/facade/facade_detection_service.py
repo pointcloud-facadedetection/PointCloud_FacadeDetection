@@ -82,7 +82,7 @@ class FacadeDetectionService:
         if hasattr(dataset, 'proxy_normals') and dataset.proxy_normals is not None:
             geo.normals = o3d.utility.Vector3dVector(dataset.proxy_normals.astype(float))
         else:
-            # 兜底：估计法向（仅对小数据）
+            # 兜底：估计法向（仅对小数据），并缓存到 dataset 供后续检测复用
             if len(proxy_pts) < 500000:
                 geo.estimate_normals(
                     search_param=o3d.geometry.KDTreeSearchParamHybrid(
@@ -90,6 +90,7 @@ class FacadeDetectionService:
                         max_nn=30
                     )
                 )
+                dataset.proxy_normals = np.asarray(geo.normals, dtype=np.float32)
 
         vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
         min_area = float(getattr(Config, 'MIN_FACADE_AREA', 10.0))

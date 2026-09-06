@@ -16,7 +16,6 @@ class Open3DAdapter:
         self._owner_thread_id = None
         self._destroyed = False
         # GLFW must continue to receive events, but rendering is demand-driven.
-        self._scene_dirty = False
         self._render_pending = False
         self._interaction_active = False
         self._render_enabled = True
@@ -53,7 +52,6 @@ class Open3DAdapter:
 
     def request_render(self, reason='unknown'):
         if not self._destroyed and self.vis is not None:
-            self._scene_dirty = True
             self._render_pending = True
 
     def begin_interaction(self):
@@ -139,8 +137,11 @@ class Open3DAdapter:
             self.request_render('point_size')
 
     def poll(self):
-        # TODO(渲染性能): poll：将渲染节流与页面可见性、窗口激活状态联动，避免隐藏视口持续 poll_events 或延迟提交旧帧。
         if not self._assert_owner():
+            return False
+        if not self._render_enabled:
+            # 视口所在页面不可见：GLFW 事件轮询与帧提交一起暂停，
+            # 由 set_render_enabled(True) 时的 request_render 恢复
             return False
         now = time.monotonic()
         if now - self._last_event_poll_time < self._event_poll_interval:
@@ -155,7 +156,6 @@ class Open3DAdapter:
             return False
         self.vis.update_renderer()
         self._last_render_time = now
-        self._scene_dirty = False
         self._render_pending = False
         return True
 
@@ -169,7 +169,6 @@ class Open3DAdapter:
             return None
         self.vis.update_renderer()
         self._last_render_time = time.monotonic()
-        self._scene_dirty = False
         self._render_pending = False
         return self.vis.capture_screen_float_buffer(do_render=False)
 
@@ -193,7 +192,6 @@ class Open3DAdapter:
         self._destroyed = True
         self._render_enabled = False
         self._render_pending = False
-        self._scene_dirty = False
     
         # Step 2: 保存并清空引用（先于 Open3D 调用）
         vis = self.vis

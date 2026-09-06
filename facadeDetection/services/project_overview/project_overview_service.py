@@ -109,8 +109,6 @@ class ProjectOverviewService:
             from config.storage import Storage
             from db.connection import upsert_index_project
             idx = Storage.load_pcfd_index(path)
-            if idx is None:
-                idx = Storage.load_pcfd_index(path)
             if idx is not None:
                 proj = (idx.get('project') or {})
                 puid = str(proj.get('uuid') or '')

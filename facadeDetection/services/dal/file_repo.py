@@ -46,10 +46,16 @@ class FileRepo:
         path = Path(asset.path)
         if not path.is_file():
             return False, "missing"
-        if asset.size_bytes is not None and path.stat().st_size != asset.size_bytes:
+        stat = path.stat()
+        if asset.size_bytes is not None and stat.st_size != asset.size_bytes:
             return False, "size_mismatch"
+        # size 与 mtime 均未变时跳过全量哈希；mtime 变化才重新校验内容
+        meta = asset.meta_json or {}
+        if asset.sha256 and meta.get('mtime_ns') == stat.st_mtime_ns:
+            return True, "ok"
         if asset.sha256 and _sha256(path) != asset.sha256:
             return False, "sha256_mismatch"
+        asset.meta_json = dict(meta, mtime_ns=stat.st_mtime_ns)
         return True, "ok"
 
     @staticmethod
@@ -114,12 +120,14 @@ class FileRepo:
                 or_(FileAsset.path == path_to_store,
                     and_(FileAsset.sha256 == sha, FileAsset.size_bytes == size)),
             ).order_by(FileAsset.id.asc())).scalars().first()
+            mtime_ns = Path(path_to_store).stat().st_mtime_ns
             if existing is not None:
                 existing.path = path_to_store
                 existing.size_bytes = size
                 existing.sha256 = sha
                 existing.original_name = src.name
                 existing.ext = src.suffix.lower()
+                existing.meta_json = dict(existing.meta_json or {}, mtime_ns=mtime_ns)
                 return existing
 
             asset = FileAsset(
@@ -132,6 +140,7 @@ class FileRepo:
                 ext=src.suffix.lower(),
                 size_bytes=size,
                 sha256=sha,
+                meta_json={'mtime_ns': mtime_ns},
             )
             s.add(asset)
             s.flush()

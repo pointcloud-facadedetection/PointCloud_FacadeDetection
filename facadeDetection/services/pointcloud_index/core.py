@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +51,7 @@ class PointCloudDataset:
     raw: RawPointStore
     index: "VoxelCascadeIndex"
     metadata: dict | None = None
+    proxy_normals: np.ndarray | None = None
 
     @property
     def revision(self) -> str:

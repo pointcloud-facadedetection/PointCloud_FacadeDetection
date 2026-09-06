@@ -26,5 +26,12 @@ uploads/
 *.pdf
 *.npz
 
+# 项目资料（示例点云、FARO 转换器二进制、演示视频、数据库备份）
+项目资料/
+*.mp4
+
+# 应用运行时数据
+data/
+
 .DS_Store
 Thumbs.db

@@ -408,8 +408,11 @@ class Open3DViewport(BaseViewport):
         except Exception:
             pass
 
+    def set_render_enabled(self, enabled):
+        """按页面可见性暂停/恢复 GLFW 轮询与帧提交；恢复时由适配器补一次刷新。"""
+        self._adapter.set_render_enabled(enabled)
+
     def process_events(self):
-        # TODO(渲染性能): process_events：按页面可见性暂停 GLFW 轮询和帧提交，并在重新显示时执行一次受控刷新，降低隐藏页 CPU/GPU 占用。
         if not self._init_success:
             return
         try:
