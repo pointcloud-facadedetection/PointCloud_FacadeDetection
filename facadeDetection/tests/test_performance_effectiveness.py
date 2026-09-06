@@ -83,8 +83,10 @@ class TestStationDatasetReuse:
         base_pts, base_cols = svc._load(str(ply))
         t_real_read = time.perf_counter() - t0
         assert len(base_pts) == n_points and base_cols is not None
-        # _load 返回 float64，字节数翻倍；总量一致证明机器真的读了全部点
-        assert base_pts.nbytes + base_cols.nbytes == raw_nbytes * 2
+        # _load 命中 PLY memmap 快读，返回 float32；总量一致证明真的读了全部点
+        assert base_pts.dtype == np.float32 and base_cols.dtype == np.float32
+        assert base_pts.nbytes + base_cols.nbytes == raw_nbytes
+        assert np.allclose(base_pts, pts, rtol=1e-6, atol=1e-7)
         assert t_real_read > 0
 
         monkeypatch.setattr(PointCloudStationRepo, 'get_asset_fingerprint',

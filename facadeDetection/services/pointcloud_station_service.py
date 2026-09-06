@@ -10,6 +10,7 @@ from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
 from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
 from utils.dist_reader import read_dist
+from utils.ply_fast_reader import read_ply_fast
 from config.storage import Storage
 import uuid
 
@@ -86,6 +87,11 @@ class PointCloudStationService:
 
     def _load(self, path):
         """Read an already-globalized PLY; never apply transformToGlobal here."""
+        # 二进制 PLY 走 memmap 免解析快读；不满足快读条件时回退 Open3D，
+        # 两条路径对同一资产逐点一致（uchar rgb /255 归一化语义相同）。
+        fast = read_ply_fast(path)
+        if fast is not None:
+            return fast
         cloud = o3d.io.read_point_cloud(str(path))
         points = np.asarray(cloud.points, dtype=np.float64)
         colors = np.asarray(cloud.colors, dtype=np.float64) if cloud.has_colors() else None
@@ -149,6 +155,7 @@ class PointCloudStationService:
             self.project_uuid, station.id, fingerprint_key)
         if cached_raw is not None:
             # 与 self._load 等价：同一资产的 PLY 解包结果逐点一致。
+            # 命中时是 .npy 的只读 memmap，RSS 只计实际触碰的页。
             points, colors = cached_raw
             print(f'[PCFD] raw_cache.restored station={station.id} '
                   f'raw={len(points)}', flush=True)

@@ -20,6 +20,7 @@ from config.storage import Storage
 
 from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
+from utils.ply_fast_reader import read_ply_fast
 from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
 
@@ -421,6 +422,10 @@ class FileService:
         return None
 
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        # 二进制 PLY 走 memmap 免解析快读；不满足条件时回退 Open3D，行为不变
+        fast = read_ply_fast(path)
+        if fast is not None:
+            return fast
         pcd = o3d.io.read_point_cloud(path)
         try:
             pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)
