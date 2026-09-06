@@ -735,10 +735,10 @@ def ensure_normals(pcd, voxel_size=0.05, inplace=False):
     pcd_work.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50)
     )
-    try:
-        pcd_work.orient_normals_consistent_tangent_plane(30)
-    except Exception:
-        pcd_work.orient_normals_towards_camera_location([0, 0, 0])
+    # 不做 orient_normals_consistent_tangent_plane：检测链路对法向符号
+    # 完全不敏感（hough_facade._canonical_normals 统一半球，facade_detection
+    # 内所有法向点积均取 np.abs），一致定向只翻转符号，不改变任何判定，
+    # 跳过它对检测输出逐点一致，省去大图 MST 传播的可观耗时。
     return pcd_work
 
 

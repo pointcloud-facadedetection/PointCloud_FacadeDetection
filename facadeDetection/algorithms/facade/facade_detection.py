@@ -13,7 +13,7 @@ UV 连通域（自适应孔洞闭合）→ 3D 空间约束合并 → 完形回�
 """
 from __future__ import annotations
 
-import copy
+import time
 import numpy as np
 import open3d as o3d
 
@@ -25,6 +25,7 @@ from algorithms.geometry import (
 )
 from config.settings import Config
 from algorithms.facade.hough_facade import normal_hough_peaks, rho_hough_peaks
+from utils.logging_utils import trace
 
 
 # ==================== 内部工具函数 ====================
@@ -414,11 +415,17 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     
     保持与原有 facade_detection.py 完全相同的函数签名和返回结构。
     """
-    work = ensure_normals(copy.deepcopy(pcd), voxel_size)
+    started = time.perf_counter()
+    # 服务层每次检测都新建 geo 且之后不再复用，允许 ensure_normals 就地写入，
+    # 省掉外层 deepcopy 与 ensure_normals 内部第二份 deepcopy（198 万点级
+    # 点云的两份完整复制）。法向估计结果与优化前逐点一致。
+    work = ensure_normals(pcd, voxel_size, inplace=True)
     points, normals = np.asarray(work.points, float), np.asarray(work.normals, float)
     n = len(points)
     if not n:
         return {'facades': [], 'remaining': work, 'total_points': 0}
+    trace("facade.algo.normals", points=n,
+          seconds=f"{time.perf_counter()-started:.2f}")
     
     meta = metadata or {}
     cfg = meta.get('adaptive_detection', {})
@@ -527,6 +534,9 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
             # 更新 remaining
             for f in facades:
                 remaining[np.asarray(f['inlier_indices'], int)] = False
+        trace("facade.algo.coarse", coarse_points=coarse_n,
+              facades=len(facades),
+              seconds=f"{time.perf_counter()-started:.2f}")
     
     # ===== 细层：在 remaining 点上执行原有逻辑 + 空间化 Hough =====
     hough_seeds = []
@@ -546,6 +556,9 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
         min_count, min_facade_area, irls_iters, signed_dist_tolerance)
     
     facades.extend(fine_facades)
+    trace("facade.algo.seeds", hough_seeds=len(hough_seeds),
+          facades=len(facades),
+          seconds=f"{time.perf_counter()-started:.2f}")
     
     # 后处理
     if enable_merge:
@@ -554,8 +567,12 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                          angle_deg=float(getattr(Config, 'MERGE_ANGLE_DEG', 5.0)),
                          d_thresh=float(getattr(Config, 'MERGE_D_THRESH_M', 0.10)),
                          max_plane_dist=base)
+    trace("facade.algo.merge", facades=len(facades),
+          seconds=f"{time.perf_counter()-started:.2f}")
     
     facades = _postprocess(facades, points, normals, tol, cos_tol, spacing, voxel_size)
+    trace("facade.algo.postprocess", facades=len(facades),
+          seconds=f"{time.perf_counter()-started:.2f}")
     
     # 构建剩余点云
     used = np.zeros(n, bool)
@@ -567,6 +584,8 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     facades.sort(key=lambda f: -f['point_count'])
     for i, f in enumerate(facades):
         f['id'] = i
+    trace("facade.algo.done", facades=len(facades), total_points=n,
+          seconds=f"{time.perf_counter()-started:.2f}")
     
     return {'facades': facades, 'remaining': out, 'total_points': n}
 
