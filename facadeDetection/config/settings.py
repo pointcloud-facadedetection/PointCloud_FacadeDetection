@@ -6,6 +6,9 @@ class Config:
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
     DEFAULT_VOXEL_SIZE = 0.05
 
+    # stratified_proxy_build 距离壳层并行的线程数上限（多线程共享同一份点云数组）
+    PROXY_BUILD_MAX_WORKERS: int = min(4, os.cpu_count() or 1)
+
     DETECT_DIST_TOL_MM = 20.0
     # Minimum effective facade area in square meters
     MIN_FACADE_AREA = 10.0

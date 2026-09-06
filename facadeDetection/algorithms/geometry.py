@@ -1,4 +1,6 @@
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d
@@ -6,6 +8,16 @@ import copy
 from collections import deque
 
 log = logging.getLogger("facadeDetection.pointcloud")
+
+
+def _proxy_build_max_workers():
+    """stratified_proxy_build 壳层并行的线程数（同机多核、线程内共享数组）。"""
+    default = min(4, os.cpu_count() or 1)
+    try:
+        from config.settings import Config
+        return max(1, int(getattr(Config, 'PROXY_BUILD_MAX_WORKERS', default)))
+    except Exception:
+        return default
 
 # ==================== 距离自适应几何工具 ====================
 
@@ -310,6 +322,15 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     # to a later decision, not to the persistent mapping.
     lo = float(kwargs.pop("min_range", 0.0)); crop = float(kwargs.pop("crop_range", np.max(rng)))
     elev = np.zeros(len(pts), np.float32) if elevations is None else np.asarray(elevations, dtype=np.float32)
+    elev_low = kwargs.get("elevation_low_scale", 1.0)
+    elev_high = kwargs.get("elevation_high_scale", .75)
+    elev_thr = kwargs.get("elevation_threshold_deg", 50.0)
+    min_voxel = kwargs.get("min_voxel", .02)
+    max_voxel = kwargs.get("max_voxel", .20)
+
+    # 主线程先按与原串行循环完全一致的语义划分壳层（空壳同样推进 lo，
+    # break 判定只在非空壳层之后），线程内只做重计算。
+    shell_jobs = []
     for hi, base in list(shells) + [(float("inf"), None)]:
         mask = (rng >= lo) & (rng < min(float(hi), crop + 1e-9)) & (rng <= crop)
         ids = np.flatnonzero(mask)
@@ -320,11 +341,15 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
             # Keep the final open-ended distance shell instead of silently
             # dropping all points beyond the last configured boundary.
             base = shells[-1][1]
+        shell_jobs.append((ids, base))
+        lo = float(hi)
+        if lo >= crop: break
+
+    def _build_shell(ids, base):
+        # 只读共享的 pts/rng/col/elev，结果全部局部化，线程间无共享写。
         scale = elevation_scale_factor(float(np.median(np.abs(elev[ids]))),
-                                       kwargs.get("elevation_low_scale", 1.0),
-                                       kwargs.get("elevation_high_scale", .75),
-                                       kwargs.get("elevation_threshold_deg", 50.0))
-        vs = float(np.clip(base * scale, kwargs.get("min_voxel", .02), kwargs.get("max_voxel", .20)))
+                                       elev_low, elev_high, elev_thr)
+        vs = float(np.clip(base * scale, min_voxel, max_voxel))
         shell = pts[ids]
         origin = np.floor(np.min(shell, axis=0) / vs) * vs
         keys = np.floor((shell - origin) / vs).astype(np.int64)
@@ -349,21 +374,31 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
                              len(dist2))
         rep_rows = np.minimum.reduceat(first_idx, starts)
         reps = sorted_global[rep_rows]
-        proxy_parts.append(pts[reps])
-        range_parts.append(rng[reps])
-        # 代表点是组内距质心最近的源行，不一定是 CSR 组首；
-        # 显式返回才能从缓存逐点复现 proxy。
-        rep_parts.append(reps)
         # CSR 的每个 offset 对应一个 Proxy 点，而不是一个距离壳层。
         # 体素内成员按代理顺序保存，保证 proxy[i] 映射到
         # indices[offsets[i]:offsets[i + 1]]。
-        source_parts.extend(
-            sorted_global[start:end] for start, end in zip(starts, ends)
-        )
+        groups = [sorted_global[start:end] for start, end in zip(starts, ends)]
+        return (pts[reps], (col[reps] if col is not None else None),
+                rng[reps], reps, groups)
+
+    # 距离壳层互不相交、计算相互独立；numpy 的 lexsort/reduceat/逐点算术
+    # 在大数组上释放 GIL，线程可真并行。pool.map 保序，拼接顺序与串行一致。
+    workers = min(_proxy_build_max_workers(), len(shell_jobs))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            shell_results = list(pool.map(lambda job: _build_shell(*job), shell_jobs))
+    else:
+        shell_results = [_build_shell(*job) for job in shell_jobs]
+
+    for proxy_p, color_p, range_p, reps, groups in shell_results:
+        proxy_parts.append(proxy_p)
+        range_parts.append(range_p)
+        # 代表点是组内距质心最近的源行，不一定是 CSR 组首；
+        # 显式返回才能从缓存逐点复现 proxy。
+        rep_parts.append(reps)
+        source_parts.extend(groups)
         if col is not None:
-            color_parts.append(col[reps])
-        lo = float(hi)
-        if lo >= crop: break
+            color_parts.append(color_p)
     # 每个距离壳层的点数通常不同，不能用 np.asarray 将其直接拼成
     # 规则数组；vstack 才是这里所需的“按行合并”。
     proxy = np.vstack(proxy_parts).astype(np.float32, copy=False)
