@@ -259,6 +259,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             render_service=self.render_service,
             facade_quality_controller=self.facade_quality_controller,
             context_provider=self._lifecycle_context,
+            load_pool=self._load_pool,
             parent=self,
         )
         self._connect_lifecycle_controller()

@@ -290,12 +290,6 @@ class ProjectOverviewService:
             building_floor=info.get("building_floor"), remarks=info.get("remarks"),
         )
 
-    def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:
-        """同步入口：计算段 + 提交段一次完成（调用方必须在 GUI 线程）。"""
-        prepared, uploaded = self.prepare_upload_files(file_paths, project_uuid)
-        self.commit_prepared_uploads(prepared)
-        return uploaded
-
     def prepare_upload_files(self, file_paths: list[str], project_uuid: Optional[str],
                              *, worker=None):
         """批量上传计算段：逐文件解析/注册，全程不触碰 Open3D 视口。

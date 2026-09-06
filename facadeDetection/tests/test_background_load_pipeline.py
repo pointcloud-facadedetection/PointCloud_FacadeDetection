@@ -430,3 +430,155 @@ class TestOverviewPrepareCommitSplit:
         assert pointcloud.get_dataset('u1:c.ply') is None
         assert render.calls == []
         assert calls['import_file'] == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. start_load 后台化：真实 QThreadPool 上计算段离开 GUI 线程，
+#    提交段与站点展示仍在 GUI 线程；代际令牌丢弃迟到结果
+# ---------------------------------------------------------------------------
+from PySide6.QtCore import QThreadPool
+
+from fakes import Row, pump_until
+from ui.controllers.project_lifecycle import ProjectLifecycleController
+from utils.workers import PointCloudLoadWorker
+
+
+class _AsyncFakeOverview:
+    """worker 计算段做真实 numpy 工作并记录线程；提交段记录 GUI 线程。"""
+
+    def __init__(self, on_compute=None):
+        self.commit_calls = []      # [(thread_ident, prepared_list)]
+        self.compute_threads = []
+        self.compute_seconds = 0.0
+        self.worker_count = 0
+        self.prepared_array = None
+        self._on_compute = on_compute
+
+    def create_load_worker(self, operation, project_uuid, *,
+                           file_paths=None, directory=None):
+        self.worker_count += 1
+        def run(worker):
+            worker.check_cancelled()
+            t0 = time.perf_counter()
+            raw = np.random.default_rng(1).random((200_000, 3), dtype=np.float32)
+            proxy = raw[::2].copy()   # 真实数组工作：100k 行代理
+            self.prepared_array = proxy
+            self.compute_threads.append(threading.get_ident())
+            self.compute_seconds += time.perf_counter() - t0
+            if self._on_compute is not None:
+                self._on_compute()
+            return {'operation': operation,
+                    'uploaded': list(file_paths or []),
+                    'prepared': [proxy]}
+        return PointCloudLoadWorker(run)
+
+    def commit_prepared_uploads(self, prepared):
+        self.commit_calls.append((threading.get_ident(), list(prepared or [])))
+
+
+class _AsyncFakeStations:
+    def __init__(self):
+        self.rows = [Row(1), Row(2)]
+        self.shown = []             # [(station_id, thread_ident)]
+
+    def list_stations(self):
+        return self.rows
+
+    def refresh(self):
+        pass
+
+    def show_single(self, row):
+        self.shown.append((row.id, threading.get_ident()))
+
+
+def _make_async_controller(overview, stations, pool):
+    quality = SimpleNamespace(active_quality_worker=None,
+                              quality_result_cache={}, quality_reports={})
+    return ProjectLifecycleController(
+        project_overview_service=overview,
+        pointcloud_service=SimpleNamespace(close_project=lambda: None),
+        station_service=stations,
+        project_operation_service=SimpleNamespace(
+            invalidate_async_jobs=lambda: None,
+            clear_processing_state=lambda: None),
+        render_service=SimpleNamespace(clear_runtime=lambda: None,
+                                       clear_viewport=lambda: None),
+        facade_quality_controller=quality,
+        context_provider=lambda: (False, 'u1'),
+        load_pool=pool,
+    )
+
+
+class TestStartLoadBackground:
+    def test_compute_off_gui_commit_on_gui(self, qapp):
+        gui_ident = threading.get_ident()
+        stations = _AsyncFakeStations()
+        # 计算段完成时新站点已可见（模拟 sync_assets 后的站点投影）
+        overview = _AsyncFakeOverview(
+            on_compute=lambda: stations.rows.append(Row(3)))
+        pool = QThreadPool()
+        pool.setMaxThreadCount(1)
+        controller = _make_async_controller(overview, stations, pool)
+        infos = []
+        panels = []
+        controller.info_requested.connect(lambda t, m: infos.append((t, m)))
+        controller.station_panel_refresh_requested.connect(panels.append)
+
+        t0 = time.perf_counter()
+        controller.start_load('upload', 'u1', file_paths=['a.ply'])
+        # 防重入：后台任务执行期间第二次 start_load 必须被拒且不起新 worker
+        controller.start_load('upload', 'u1', file_paths=['b.ply'])
+        wall = time.perf_counter() - t0
+        assert controller._load_in_progress is True   # 调用立即返回，未同步阻塞
+        assert pump_until(qapp, lambda: not controller._load_in_progress)
+
+        # 机制：计算段真实离开 GUI 线程；提交段与站点展示回到 GUI 线程；
+        # 重入被拒绝（只有 1 个 worker）
+        assert overview.worker_count == 1
+        assert infos and '已有加载任务' in infos[0][1]
+        assert len(overview.compute_threads) == 1
+        assert overview.compute_threads[0] != gui_ident
+        assert len(overview.commit_calls) == 1
+        assert overview.commit_calls[0][0] == gui_ident
+        assert stations.shown == [(3, gui_ident)]
+        assert panels == [3]
+        assert controller._active_load_worker is None
+
+        # 数据：提交段收到的就是计算段产出的同一代理数组（真实流过线程边界）
+        committed = overview.commit_calls[0][1]
+        assert len(committed) == 1
+        assert committed[0] is overview.prepared_array
+        assert committed[0].shape == (100_000, 3)
+        assert committed[0].nbytes == 100_000 * 3 * 4
+
+        # 时间：计算段有真实耗时；start_load 调用本身不阻塞等待它
+        print(f'\n[perf] worker_compute={overview.compute_seconds*1e3:.2f}ms '
+              f'start_load_call={wall*1e3:.2f}ms')
+        assert overview.compute_seconds > 0
+
+    def test_stale_generation_result_dropped(self, qapp):
+        gui_ident = threading.get_ident()
+        stations = _AsyncFakeStations()
+        overview = _AsyncFakeOverview(
+            on_compute=lambda: stations.rows.append(Row(3)))
+        pool = QThreadPool()
+        pool.setMaxThreadCount(1)
+        controller = _make_async_controller(overview, stations, pool)
+        panels = []
+        controller.station_panel_refresh_requested.connect(panels.append)
+
+        controller.start_load('upload', 'u1', file_paths=['a.ply'])
+        # 模拟项目切换：销毁门取消 worker 并 bump 代际
+        controller.dispose_project_runtime()
+        controller.project_generation += 1
+        assert pool.waitForDone(5000)
+        pump_until(qapp, lambda: True, timeout=0.2)  # 投递排队的迟到信号
+
+        # 机制：迟到结果不污染新项目——无提交、无展示、无面板刷新
+        assert overview.commit_calls == []
+        assert stations.shown == []
+        assert panels == []
+        assert controller._load_in_progress is False
+        assert controller._active_load_worker is None
+        # 计算段要么未完成，要么其结果被代际门控丢弃；绝不抵达 GUI 提交段
+        assert overview.compute_seconds >= 0

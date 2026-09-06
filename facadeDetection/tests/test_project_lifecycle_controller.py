@@ -7,6 +7,7 @@ from PySide6.QtCore import SignalInstance
 from fakes import Row, SignalRecorder
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from ui.main_window_config import PAGE_DEFINITIONS
+from utils.workers import PointCloudLoadWorker
 
 OPERATION_INDEX = next(i for i, (_t, k) in enumerate(PAGE_DEFINITIONS)
                        if k == 'project_operation')
@@ -31,6 +32,24 @@ class FakeOverviewService:
     def import_fls_directory(self, directory, pid):
         self.log.append(('overview.fls', pid))
         return self.fls_payload
+
+    def commit_prepared_uploads(self, prepared):
+        self.log.append(('overview.commit', len(prepared or [])))
+
+    def create_load_worker(self, operation, project_uuid, *,
+                           file_paths=None, directory=None):
+        """与真实 ProjectOverviewService 相同的 worker 契约：计算段在
+        worker.run() 内执行，结果携带 prepared/uploaded 供 GUI 回调提交。"""
+        def run(worker):
+            if operation == 'upload':
+                return {'operation': operation,
+                        'uploaded': self.upload_files(file_paths, project_uuid),
+                        'prepared': []}
+            if operation == 'fls':
+                return {'operation': operation,
+                        'result': self.import_fls_directory(directory, project_uuid)}
+            raise ValueError(f'未知加载操作: {operation}')
+        return PointCloudLoadWorker(run)
 
     def load_historical_facades(self, uuid, station_id):
         self.log.append(('overview.historical', uuid, station_id))
@@ -281,16 +300,23 @@ def test_stale_generation_load_failed_ignored(env):
 def test_on_load_finished_upload_branch(env):
     controller, _, rec, log, _, _ = env
     controller.on_load_finished(controller.project_generation, 'upload',
-                                'uuid-1', None, {'uploaded': ['a', 'b']})
-    assert ('status', '已增量添加 2 个文件，已有站点资源未重新加载。', 5000) \
-        in rec.events
+                                'uuid-1',
+                                {'uploaded': ['a', 'b'], 'prepared': ['p1', 'p2']},
+                                before_ids=set())
+    # 提交段真实执行（2 个 prepared），随后刷新站点并展示新站点
+    assert ('overview.commit', 2) in log
     assert ('station.refresh',) in log
-    assert ('station_panel', None) in rec.events
+    assert ('station.show_single', 1) in log
+    assert ('station_panel', 1) in rec.events
+    assert ('proj_list',) in rec.events
+    assert ('cleared',) in rec.events
+    assert controller._load_in_progress is False
 
 
 def test_on_load_finished_stale_generation_ignored(env):
     controller, _, rec, log, _, _ = env
-    controller.on_load_finished(999, 'upload', 'uuid-1', None,
-                                {'uploaded': ['a']})
+    controller.on_load_finished(999, 'upload', 'uuid-1',
+                                {'uploaded': ['a'], 'prepared': ['p1']},
+                                before_ids=set())
     assert rec.events == []
     assert log == []

@@ -21,7 +21,8 @@ class ProjectLifecycleController(QObject):
 
     def __init__(self, project_overview_service, pointcloud_service,
                  station_service, project_operation_service, render_service,
-                 facade_quality_controller, context_provider, parent=None):
+                 facade_quality_controller, context_provider, parent=None,
+                 load_pool=None):
         super().__init__(parent)
         self.project_overview_service = project_overview_service
         self.pointcloud_service = pointcloud_service
@@ -32,18 +33,22 @@ class ProjectLifecycleController(QObject):
         self.facade_quality_controller = facade_quality_controller
         # context_provider() -> (closing, current_project_id)，实时读取。
         self._context_provider = context_provider
+        # upload/fls 的计算段经该池（maxThreadCount=1）后台执行；为 None 时
+        # worker 内联同步运行（测试/无池环境），信号直连保证回调仍在调用线程。
+        self.load_pool = load_pool
         self.project_generation = 0
         self._load_in_progress = False
         self._active_load_worker = None
 
     def start_load(self, operation, project_id, *, file_paths=None,
                    directory=None, project=None):
-        # TODO(性能/响应性): _start_load：优化点云加载。
-        """在GUI线程上运行合并后的传统管道。
+        """upload/fls：计算段（解析/注册/转换）后台执行，Open3D 提交段回 GUI。
 
-        FileService 目前会在加载过程中注册 Open3D 几何体。
-        在 QRunnable 中运行它会触发 Open3D 的 GUI 线程保护机制。保留
-        面向未来拆分管道的 worker API。
+        worker 只做准备段；完成信号经队列投递回 GUI 线程后，由
+        on_load_finished 执行提交段（show_point_cloud）与站点展示
+        （show_single），project_generation 丢弃迟到结果。
+        activate 保留 GUI 线程同步事务：激活有"先成功再改 UI"的回滚语义，
+        且 restore_view 的渲染与站点代理加载交织，拆分风险大于收益。
         """
         closing, _ = self._context_provider()
         if closing:
@@ -53,35 +58,79 @@ class ProjectLifecycleController(QObject):
             self.info_requested.emit('点云加载', '已有加载任务正在执行，请稍候。')
             return
         self._load_in_progress = True
-        try:
-            self.status_message.emit('正在加载点云，请稍候...', 0)
-            if operation == 'activate':
+        self.status_message.emit('正在加载点云，请稍候...', 0)
+        if operation == 'activate':
+            try:
                 self.activate_project(project)
-            elif operation == 'upload':
-                before_ids = {row.id for row in self.station_service.list_stations()}
-                uploaded = self.project_overview_service.upload_files(file_paths, project_id)
+                self.project_list_refresh_requested.emit()
+            except Exception as exc:
+                self.on_load_failed(self.project_generation, str(exc))
+            finally:
+                self._load_in_progress = False
+                self.status_cleared.emit()
+            return
+
+        before_ids = {row.id for row in self.station_service.list_stations()}
+        generation = self.project_generation
+        try:
+            worker = self.project_overview_service.create_load_worker(
+                operation, project_id,
+                file_paths=file_paths, directory=directory)
+        except Exception as exc:
+            self._load_in_progress = False
+            self.on_load_failed(generation, str(exc))
+            return
+        self._active_load_worker = worker
+        worker.signals.progress.connect(
+            lambda _pct, text: self.status_message.emit(text, 0))
+        worker.signals.finished.connect(
+            lambda result: self.on_load_finished(
+                generation, operation, project_id, result, before_ids))
+        worker.signals.failed.connect(
+            lambda error: self.on_load_failed(generation, error))
+        if self.load_pool is None:
+            worker.run()
+        else:
+            self.load_pool.start(worker)
+
+    def on_load_failed(self, generation, error):
+        if generation != self.project_generation:
+            return
+        self._active_load_worker = None
+        self._load_in_progress = False
+        self.status_message.emit('点云加载失败', 5000)
+        self.warning_requested.emit('点云加载', error)
+
+    def on_load_finished(self, generation, operation, project_id, result,
+                         before_ids=None):
+        """GUI 线程完成回调：提交段 + 站点展示。代际不符的迟到结果直接丢弃。"""
+        if generation != self.project_generation:
+            return
+        self._active_load_worker = None
+        self._load_in_progress = False
+        self.status_cleared.emit()
+        try:
+            result = result or {}
+            if operation == 'upload':
+                uploaded = result.get('uploaded') or []
                 if uploaded:
+                    # Open3D 提交段必须回 GUI 线程（open3d_adapter 的 owner 校验）
+                    self.project_overview_service.commit_prepared_uploads(
+                        result.get('prepared') or [])
                     # 只同步站点投影；已有运行时 dataset 保持不变。
                     self.station_service.refresh()
-                    stations = self.station_service.list_stations()
-                    new_station = next(
-                        (row for row in reversed(stations) if row.id not in before_ids),
-                        None,
-                    )
+                    new_station = self._find_new_station(before_ids)
                     if new_station is not None:
                         self.station_service.show_single(new_station)
                         self.station_panel_refresh_requested.emit(new_station.id)
                 else:
                     self.warning_requested.emit('直接上传文件', '未成功绑定任何点云文件。')
             elif operation == 'fls':
-                before_ids = {row.id for row in self.station_service.list_stations()}
-                payload = self.project_overview_service.import_fls_directory(directory, project_id)
+                payload = result.get('result') or {}
                 if payload.get('success'):
                     # FLS 导入功能已实现资产的持久化存储和同步
                     self.station_service.refresh()
-                    new_station = next(
-                        (row for row in reversed(self.station_service.list_stations())
-                         if row.id not in before_ids), None)
+                    new_station = self._find_new_station(before_ids)
                     if new_station is not None:
                         self.station_service.show_single(new_station)
                         self.station_panel_refresh_requested.emit(new_station.id)
@@ -89,47 +138,15 @@ class ProjectLifecycleController(QObject):
                     self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))
             self.project_list_refresh_requested.emit()
         except Exception as exc:
-            self.on_load_failed(self.project_generation, str(exc))
-        finally:
-            self._load_in_progress = False
-            self.status_cleared.emit()
+            self.on_load_failed(generation, str(exc))
 
-    def on_load_failed(self, generation, error):
-        if generation != self.project_generation:
-            return
-        self._active_load_worker = None
-        self.status_message.emit('点云加载失败', 5000)
-        self.warning_requested.emit('点云加载', error)
-
-    def on_load_finished(self, generation, operation, project_id, project, result):
-        if generation != self.project_generation:
-            return
-        self._active_load_worker = None
-        self.status_cleared.emit()
-        if operation == 'activate' and project is not None:
-            self.project_list_refresh_requested.emit()
-            self.activate_project(project)
-        elif operation == 'upload':
-            uploaded = result.get('uploaded') or []
-            if uploaded:
-                self.project_list_refresh_requested.emit()
-                # 上传完成后只同步站点投影，不重新激活项目
-                self.station_service.refresh()
-                self.station_panel_refresh_requested.emit(None)
-                self.status_message.emit(
-                    f'已增量添加 {len(uploaded)} 个文件，已有站点资源未重新加载。', 5000)
-            else:
-                self.warning_requested.emit('直接上传文件', '未成功绑定任何点云文件。')
-        elif operation == 'fls':
-            payload = result.get('result') or {}
-            if payload.get('success'):
-                self.project_list_refresh_requested.emit()
-                self.station_service.refresh()
-                self.station_panel_refresh_requested.emit(None)
-                self.status_message.emit(
-                    f'已增量导入 {payload.get("uploaded", 0)} 个站点，已有资源未重新加载。', 5000)
-            else:
-                self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))
+    def _find_new_station(self, before_ids):
+        stations = self.station_service.list_stations()
+        return next(
+            (row for row in reversed(stations)
+             if before_ids is None or row.id not in before_ids),
+            None,
+        )
 
     def activate_project(self, project):
         # TODO(生命周期): _activate_project：审查代码的生命周期和异常处理，确保在项目切换、导入和恢复时不会泄漏资源或导致 GUI 状态不一致。
@@ -193,6 +210,11 @@ class ProjectLifecycleController(QObject):
         # TODO(内存/生命周期): _dispose_project_runtime：建立可验证的项目资源释放清单。
         """Single GUI-thread disposal gate for project switches and close."""
         self._load_in_progress = False
+        # 取消仍在后台执行的准备段；其迟到结果由 project_generation 门控丢弃。
+        worker = self._active_load_worker
+        if worker is not None:
+            worker.cancel()
+            self._active_load_worker = None
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:
