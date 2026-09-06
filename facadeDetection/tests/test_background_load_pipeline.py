@@ -252,3 +252,181 @@ class TestFlsImportBackgroundable:
         assert all(p[1] == len(station_sizes) for p in progress)
         print(f'\n[perf] fls_import_2_stations_off_gui={holder["elapsed"]*1e3:.2f}ms')
         assert holder['elapsed'] > 0
+
+
+# ---------------------------------------------------------------------------
+# 3. ProjectOverviewService：批量准备/提交分离，create_load_worker 产出
+#    携带 prepared 的结果并逐文件回报进度、响应取消
+# ---------------------------------------------------------------------------
+from services.dal.file_repo import FileRepo
+from services.dal.pointcloud_station_repo import PointCloudStationRepo
+from services.project_overview.project_overview_service import ProjectOverviewService
+
+
+class _FakeWorker:
+    """prepare_upload_files 需要的最小 worker 协议（同步记录进度）。"""
+
+    def __init__(self):
+        self.progress = []
+        self.signals = SimpleNamespace(
+            progress=SimpleNamespace(
+                emit=lambda pct, text: self.progress.append(
+                    (pct, text, threading.get_ident()))))
+        self.cancelled = False
+
+    def check_cancelled(self):
+        if self.cancelled:
+            raise RuntimeError('点云加载任务已取消')
+
+
+def _stub_persistence(monkeypatch, tmp_path):
+    """把 DB/索引持久化打桩到计数器，管道其余部分全部真实执行。"""
+    calls = {'import_file': 0, 'sync_assets': 0, 'pcfd_append': 0}
+    monkeypatch.setattr(
+        FileRepo, 'import_file',
+        staticmethod(lambda **kwargs: calls.__setitem__(
+            'import_file', calls['import_file'] + 1) or None))
+    monkeypatch.setattr(
+        PointCloudStationRepo, 'sync_assets',
+        staticmethod(lambda uuid: calls.__setitem__(
+            'sync_assets', calls['sync_assets'] + 1) or {}))
+    monkeypatch.setattr(Storage, 'resolve_project_root',
+                        classmethod(lambda cls, uuid: tmp_path))
+    monkeypatch.setattr(
+        Storage, 'append_pcfd_asset_for_uuid',
+        classmethod(lambda cls, uuid, kind, rel: calls.__setitem__(
+            'pcfd_append', calls['pcfd_append'] + 1)))
+    return calls
+
+
+def _make_overview():
+    pointcloud = PointCloudService()
+    viewport = FakeViewport()
+    render = FakeRenderService(pointcloud, viewport)
+    overview = ProjectOverviewService(viewport=viewport, render_service=render)
+    return overview, pointcloud, viewport, render
+
+
+class TestOverviewPrepareCommitSplit:
+    def test_batch_prepare_off_gui_commit_on_gui(self, tmp_path, monkeypatch):
+        gui_ident = threading.get_ident()
+        calls = _stub_persistence(monkeypatch, tmp_path)
+        overview, pointcloud, viewport, render = _make_overview()
+
+        rng = np.random.default_rng(21)
+        paths = []
+        for index, size in enumerate((120_000, 90_000), start=1):
+            pts = (rng.normal(size=(size, 3)) * 25).astype(np.float32)
+            cols = rng.random((size, 3), dtype=np.float32)
+            ply = _write_ply(tmp_path / f'up{index}.ply', pts, cols)
+            ranges = np.linalg.norm(pts, axis=1).astype('<f4')
+            (tmp_path / f'up{index}.dist').write_bytes(ranges.tobytes())
+            paths.append(str(ply))
+        # .dist 与 PLY 一起传入：必须被归并为一个上传任务而非独立资产
+        upload_list = [paths[0], str(tmp_path / 'up1.dist'),
+                       paths[1], str(tmp_path / 'up2.dist')]
+
+        svc = overview._ensure_file_service()
+        prepare_threads = []
+        real_prepare = svc.prepare_upload
+        def recording_prepare(*args, **kwargs):
+            prepare_threads.append(threading.get_ident())
+            return real_prepare(*args, **kwargs)
+        monkeypatch.setattr(svc, 'prepare_upload', recording_prepare)
+
+        holder = {}
+        worker = _FakeWorker()
+        def work():
+            t0 = time.perf_counter()
+            holder['out'] = overview.prepare_upload_files(
+                upload_list, 'u1', worker=worker)
+            holder['elapsed'] = time.perf_counter() - t0
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+
+        prepared, uploaded = holder['out']
+        # 机制：两个文件的准备都发生在后台线程，计算段零渲染提交；
+        # 逐文件进度真实回报且发生在后台线程
+        assert prepare_threads == [thread.ident] * 2 or all(
+            ident != gui_ident for ident in prepare_threads)
+        assert render.calls == []
+        assert len(worker.progress) >= 2
+        assert all(p[2] != gui_ident for p in worker.progress)
+        assert [p[0] for p in worker.progress] == sorted(p[0] for p in worker.progress)
+
+        # 数据：.dist 被归并（2 个任务而非 4 个），dataset/source 真实驻留
+        assert len(prepared) == 2 and len(uploaded) == 2
+        assert calls['import_file'] == 2       # 每个点云资产恰好持久化一次
+        assert calls['sync_assets'] == 1       # 批尾一次同步
+        total_proxy = 0
+        for index, item in enumerate(prepared, start=1):
+            dataset = pointcloud.get_dataset(f'u1:up{index}.ply')
+            assert dataset is not None
+            assert item.points is dataset.proxy_points
+            assert len(item.points) > 0
+            total_proxy += len(item.points)
+        assert total_proxy > 0
+        print(f'\n[perf] batch_prepare_2x100k_off_gui={holder["elapsed"]*1e3:.2f}ms')
+        assert holder['elapsed'] > 0
+
+        # 提交段：GUI 线程逐文件提交，增量语义（不清空已有云）
+        viewport.clouds['existing'] = {'pos': np.zeros((1, 3), np.float32)}
+        overview.commit_prepared_uploads(prepared)
+        assert len(render.calls) == 2
+        assert all(call[2] == gui_ident for call in render.calls)
+        assert 'existing' in viewport.clouds   # 增量上传没有清空场景
+        for index in (1, 2):
+            data = viewport.clouds[f'up{index}.ply']
+            assert data['dataset_id'] == f'u1:up{index}.ply'
+            assert data['domain'] == 'proxy'
+
+    def test_create_load_worker_result_and_progress(self, tmp_path, monkeypatch):
+        calls = _stub_persistence(monkeypatch, tmp_path)
+        overview, pointcloud, viewport, render = _make_overview()
+
+        rng = np.random.default_rng(31)
+        pts = (rng.normal(size=(60_000, 3)) * 10).astype(np.float32)
+        cols = rng.random((60_000, 3), dtype=np.float32)
+        ply = _write_ply(tmp_path / 'w.ply', pts, cols)
+
+        worker = overview.create_load_worker('upload', 'u1', file_paths=[str(ply)])
+        events = {'progress': [], 'finished': [], 'failed': []}
+        worker.signals.progress.connect(
+            lambda pct, text: events['progress'].append(pct))
+        worker.signals.finished.connect(lambda r: events['finished'].append(r))
+        worker.signals.failed.connect(lambda e: events['failed'].append(e))
+        worker.run()  # 内联执行：信号直连，同步投递
+
+        assert events['failed'] == []
+        assert len(events['finished']) == 1
+        payload = events['finished'][0]
+        # 结果携带 prepared 对象与上传清单，供 GUI 完成回调提交
+        assert payload['operation'] == 'upload'
+        assert payload['uploaded'] == [str(Path(str(ply)).resolve())] or \
+            payload['uploaded'] == [str(ply)]
+        assert len(payload['prepared']) == 1
+        dataset = pointcloud.get_dataset('u1:w.ply')
+        assert payload['prepared'][0].points is dataset.proxy_points
+        assert events['progress'][0] == 2       # worker 起始进度
+        assert events['progress'][-1] == 100    # worker 完成进度
+        assert render.calls == []               # worker 只做计算段
+
+    def test_cancelled_worker_skips_compute(self, tmp_path, monkeypatch):
+        calls = _stub_persistence(monkeypatch, tmp_path)
+        overview, pointcloud, _, render = _make_overview()
+        rng = np.random.default_rng(41)
+        ply = _write_ply(tmp_path / 'c.ply',
+                         rng.normal(size=(10_000, 3)).astype(np.float32),
+                         rng.random((10_000, 3), dtype=np.float32))
+        worker = overview.create_load_worker('upload', 'u1', file_paths=[str(ply)])
+        events = {'finished': [], 'failed': []}
+        worker.signals.finished.connect(lambda r: events['finished'].append(r))
+        worker.signals.failed.connect(lambda e: events['failed'].append(e))
+        worker.cancel()
+        worker.run()
+        # 机制：取消的任务不做任何读取/注册/提交
+        assert events['finished'] == []
+        assert pointcloud.get_dataset('u1:c.ply') is None
+        assert render.calls == []
+        assert calls['import_file'] == 0

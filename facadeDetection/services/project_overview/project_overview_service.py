@@ -40,28 +40,33 @@ class ProjectOverviewService:
 
     def create_load_worker(self, operation: str, project_uuid: str,
                            *, file_paths=None, directory=None):
-        # TODO(性能/线程安全): create_load_worker：拆分后台文件解析与 GUI 线程 Open3D 提交。
-        def run(worker):
-            if operation == 'activate':
-                worker.signals.progress.emit(10, '正在读取项目资源')
+        """构建后台加载 worker：计算段（解析/注册/转换）在池线程执行。
+
+        结果中的 prepared 对象携带全部待提交数组，Open3D 提交段由 GUI
+        完成回调执行（见 ProjectLifecycleController.on_load_finished）。
+        activate 保留同步事务，不经 worker。
+        """
+        if operation == 'upload':
+            def run(worker):
                 worker.check_cancelled()
-                self.activate_project(project_uuid)
-                return {'operation': operation, 'project_uuid': project_uuid}
-            if operation == 'upload':
-                paths = list(file_paths or [])
-                worker.signals.progress.emit(10, f'准备加载 {len(paths)} 个文件')
-                worker.check_cancelled()
-                result = self.upload_files(paths, project_uuid)
+                prepared, uploaded = self.prepare_upload_files(
+                    list(file_paths or []), project_uuid, worker=worker)
                 return {'operation': operation, 'project_uuid': project_uuid,
-                        'uploaded': result}
-            if operation == 'fls':
-                worker.signals.progress.emit(10, '正在转换 FLS 目录')
+                        'prepared': prepared, 'uploaded': uploaded}
+            return PointCloudLoadWorker(run)
+        if operation == 'fls':
+            def run(worker):
                 worker.check_cancelled()
-                result = self.import_fls_directory(directory, project_uuid)
+                result = self.import_fls_directory(
+                    directory, project_uuid,
+                    progress_cb=lambda done, total, name:
+                        worker.signals.progress.emit(
+                            int(10 + 80 * done / max(total, 1)),
+                            f'正在导入站点 {name} ({done}/{total})'))
                 return {'operation': operation, 'project_uuid': project_uuid,
                         'result': result}
-            raise ValueError(f'未知加载操作: {operation}')
-        return PointCloudLoadWorker(run)
+            return PointCloudLoadWorker(run)
+        raise ValueError(f'未知加载操作: {operation}')
 
     # -------------- 项目管理 --------------
     def list_projects(self) -> list[ProjectCard]:
@@ -286,12 +291,22 @@ class ProjectOverviewService:
         )
 
     def upload_files(self, file_paths: list[str], project_uuid: Optional[str]) -> list[str]:
-        # TODO(性能/内存): upload_files：批量导入需控制原始点、距离数据、代理点和索引映射的同时驻留峰值，并提供进度/取消边界，现有加载速度很慢。
+        """同步入口：计算段 + 提交段一次完成（调用方必须在 GUI 线程）。"""
+        prepared, uploaded = self.prepare_upload_files(file_paths, project_uuid)
+        self.commit_prepared_uploads(prepared)
+        return uploaded
+
+    def prepare_upload_files(self, file_paths: list[str], project_uuid: Optional[str],
+                             *, worker=None):
+        """批量上传计算段：逐文件解析/注册，全程不触碰 Open3D 视口。
+
+        返回 (prepared, uploaded)；prepared 由 commit_prepared_uploads 在
+        GUI 线程提交。增量语义：不清空当前场景，已有运行时 dataset 保持不变。
+        worker 提供时逐文件回报进度并响应取消。
+        """
         if not project_uuid:
             raise ValueError('请先新建或选择项目，再上传点云文件。')
         svc = self._ensure_file_service()
-        # 增量上传不能清空当前场景；项目切换由 MainWindow 的统一销毁门
-        # 处理，当前方法只负责导入本批资源。
         normalized = [str(Path(p).expanduser().resolve()) for p in file_paths if p]
         # 将同名 PLY/.dist 组合成一个上传任务；.dist 不是独立点云资产。
         dist_by_stem = {
@@ -299,25 +314,38 @@ class ProjectOverviewService:
             if Path(p).suffix.lower() == '.dist'
         }
         pointclouds = [p for p in normalized if Path(p).suffix.lower() != '.dist']
+        total = len(pointclouds)
+        prepared = []
         uploaded: list[str] = []
-        for p in pointclouds:
+        for index, p in enumerate(pointclouds):
+            if worker is not None:
+                worker.check_cancelled()
+                worker.signals.progress.emit(
+                    int(10 + 80 * index / max(total, 1)), f'正在解析 {Path(p).name}')
             try:
-                dist_path = dist_by_stem.get(Path(p).stem.lower())
-                svc.upload_files(project_uuid=project_uuid, file_path=p,
-                                 distance_path=dist_path,
-                                 copy_into_project=False)
+                item = svc.prepare_upload(
+                    project_uuid=project_uuid, file_path=p,
+                    distance_path=dist_by_stem.get(Path(p).stem.lower()),
+                    copy_into_project=False)
+                prepared.append(item)
                 uploaded.append(p)
             except Exception as e:
                 print(f"上传失败: {p} -> {e}", flush=True)
-        # FileService 在渲染前会将 FileAsset 持久化。 
+        # FileService 在渲染前会将 FileAsset 持久化。
         PointCloudStationRepo.sync_assets(project_uuid)
-        return uploaded
+        return prepared, uploaded
 
-    def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
-        # TODO(性能/响应性): import_fls_directory：FLS 转换、递归扫描和逐站读取目前同步执行，应移出主线程并限制批量中间对象累积。
+    def commit_prepared_uploads(self, prepared) -> None:
+        """批量上传提交段：Open3D 几何提交与视口状态写入，必须在 GUI 线程。"""
+        svc = self._ensure_file_service()
+        for item in prepared or []:
+            svc.commit_prepared(item)
+
+    def import_fls_directory(self, dir_path: str, project_uuid: Optional[str],
+                             *, progress_cb=None) -> dict:
         svc = self._ensure_file_service()
         # FLS 也采用增量导入语义，避免已有站点被清空后重新读取。
-        res = svc.import_fls_directory(dir_path, project_uuid)
+        res = svc.import_fls_directory(dir_path, project_uuid, progress_cb=progress_cb)
         # FLS 导入会为每个生成的 PLY 文件创建一个 FileAsset。
         if project_uuid and res.get('success'):
             PointCloudStationRepo.sync_assets(project_uuid)
