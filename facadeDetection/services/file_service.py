@@ -4,6 +4,7 @@ import hashlib
 import json
 import mimetypes
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 import open3d as o3d
@@ -21,6 +22,18 @@ from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
 from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
+
+
+@dataclass
+class PreparedUpload:
+    """upload 计算段的产物：全部数组与注册已完成，只剩 GUI 提交。"""
+    kind: FileKind
+    asset: Optional[FileAsset]
+    name: str
+    dataset_id: Optional[str] = None
+    points: Optional[np.ndarray] = None
+    colors: Optional[np.ndarray] = None
+    image: Optional[np.ndarray] = None
 
 
 class FileService:
@@ -50,9 +63,30 @@ class FileService:
         dataset_metadata: Optional[dict] = None,
         distance_path: Optional[str] = None,
     ) -> Optional[FileAsset]:
-        # TODO(性能/内存): upload_files：read_point_cloud、距离解析、代理构建和 dataset 注册会同时持有大数组，需后台化并设计分阶段释放/内存预算。
-        """
-        上传一个文件（点云或图片）并进行渲染。
+        """同步入口：计算段 + 提交段一次完成（调用方必须在 GUI 线程）。"""
+        prepared = self.prepare_upload(
+            project_uuid, file_path,
+            voxel_size=voxel_size,
+            copy_into_project=copy_into_project,
+            dataset_metadata=dataset_metadata,
+            distance_path=distance_path,
+        )
+        return self.commit_prepared(prepared)
+
+    def prepare_upload(
+        self,
+        project_uuid: Optional[str],
+        file_path: str,
+        *,
+        voxel_size: float = 0.05,
+        copy_into_project: bool = False,
+        dataset_metadata: Optional[dict] = None,
+        distance_path: Optional[str] = None,
+    ) -> PreparedUpload:
+        """计算段：读取、距离解析、代理构建与 dataset 注册。
+
+        全程不触碰 Open3D 视口与渲染状态，可在后台线程执行；
+        大数组随 PreparedUpload 交给 commit_prepared 在 GUI 线程提交。
         """
         src = Path(file_path).resolve()
         if not src.exists():
@@ -72,6 +106,7 @@ class FileService:
             )
 
         load_path = Path(asset.path) if asset else src
+        name = asset.original_name if asset else src.name
         if kind == FileKind.raw_pointcloud:
             started = time.perf_counter()
             print(f"[PCFD] load.begin path={load_path}", flush=True)
@@ -83,6 +118,7 @@ class FileService:
             dist_file = Path(distance_path).resolve() if distance_path else load_path.with_suffix('.dist')
             dist_exists = dist_file.exists()
             print(f"[PCFD] load.dist status={('found' if dist_exists else 'not_found')} path={dist_file}", flush=True)
+            dataset_id = None
             if dist_exists and self.pointcloud_service is not None:
                 dist = read_dist(dist_file, pts, dataset_metadata or {})
                 print(
@@ -155,22 +191,7 @@ class FileService:
             else:
                 pts_ds, cols_ds = voxel_downsample(pts, cols, voxel_size=voxel_size)
 
-            name = asset.original_name if asset else src.name
-            self.render_service.show_point_cloud(name=name, points=pts_ds, colors=cols_ds)
-            print(f"[PCFD] load.render_done displayed={len(pts_ds)} "
-                  f"seconds={time.perf_counter()-started:.2f}", flush=True)
-
-            data = self.viewport.get_cloud_data(name) if hasattr(self.viewport, "get_cloud_data") else None
-            if data is not None and self.pointcloud_service is not None:
-                data["dataset_id"] = dataset_id
-                data["domain"] = "proxy"
-                data["index_space"] = "proxy_global"
-                data["is_processing_cloud"] = True
-                data["proxy_ids"] = np.arange(len(pts_ds), dtype=np.int32)
-                print(f"[PCFD] cloud.bound cloud={name} dataset={dataset_id} "
-                      f"proxy={len(pts_ds)}", flush=True)
-
-            # 更新 pcfd 索引资产
+            # 更新 pcfd 索引资产（纯文件 IO，可后台执行）
             try:
                 if project_uuid:
                     rel = os.path.relpath(str(load_path),
@@ -183,26 +204,51 @@ class FileService:
                                                            str(load_path))
             except Exception:
                 pass
-        elif kind == FileKind.raw_image:
+            return PreparedUpload(kind=kind, asset=asset, name=name,
+                                  dataset_id=dataset_id, points=pts_ds, colors=cols_ds)
+        if kind == FileKind.raw_image:
             img = self._load_image(str(load_path))
-            name = asset.original_name if asset else src.name
-            self.render_service.show_image(name=name, image=img)
             try:
                 if project_uuid:
                     Storage.append_pcfd_asset_for_uuid(project_uuid, 'raw_images', str(load_path))
             except Exception:
                 pass
-        else:
-            # Should not happen because we only support those two kinds
-            raise RuntimeError(f"无法处理的文件类型: {kind}")
+            return PreparedUpload(kind=kind, asset=asset, name=name, image=img)
+        # Should not happen because we only support those two kinds
+        raise RuntimeError(f"无法处理的文件类型: {kind}")
 
-        return asset
+    def commit_prepared(self, prepared: PreparedUpload) -> Optional[FileAsset]:
+        """提交段：Open3D 几何提交与视口状态写入，必须在 GUI 线程执行。"""
+        if prepared.kind == FileKind.raw_pointcloud:
+            started = time.perf_counter()
+            self.render_service.show_point_cloud(
+                name=prepared.name, points=prepared.points, colors=prepared.colors)
+            print(f"[PCFD] load.render_done displayed={len(prepared.points)} "
+                  f"seconds={time.perf_counter()-started:.2f}", flush=True)
 
-    def import_fls_directory(self, dir_path: str, project_uuid: Optional[str]) -> dict:
-        # TODO(性能/响应性): import_fls_directory：转换器调用及逐个 PLY 读取/处理。
+            data = self.viewport.get_cloud_data(prepared.name) \
+                if hasattr(self.viewport, "get_cloud_data") else None
+            if (data is not None and self.pointcloud_service is not None
+                    and prepared.dataset_id is not None):
+                data["dataset_id"] = prepared.dataset_id
+                data["domain"] = "proxy"
+                data["index_space"] = "proxy_global"
+                data["is_processing_cloud"] = True
+                data["proxy_ids"] = np.arange(len(prepared.points), dtype=np.int32)
+                print(f"[PCFD] cloud.bound cloud={prepared.name} dataset={prepared.dataset_id} "
+                      f"proxy={len(prepared.points)}", flush=True)
+        elif prepared.kind == FileKind.raw_image:
+            self.render_service.show_image(name=prepared.name, image=prepared.image)
+        return prepared.asset
+
+    def import_fls_directory(self, dir_path: str, project_uuid: Optional[str],
+                             progress_cb=None) -> dict:
         """
         通过基于子进程的转换器将 FARO FLS 目录转换为 PLY 格式进行导入，随后通过
-        相同的 upload_files 管道保存并渲染生成的 PLY 文件，以确保一致性。
+        与 upload 相同的读取/代理/注册管线保存生成的 PLY 文件，以确保一致性。
+
+        全程不触碰视口（渲染由后续站点展示阶段完成），可在后台线程执行；
+        progress_cb(done, total, station_name) 逐站回报进度。
         """
         trace('fls.import.begin', path=dir_path, project_uuid=project_uuid)
         log_event(project_uuid, 'fls.import.begin', path=dir_path)
@@ -342,6 +388,8 @@ class FileService:
                 except Exception:
                     pass
                 success_count += 1
+                if progress_cb is not None:
+                    progress_cb(success_count, len(ply_paths), Path(p).name)
 
             except Exception as e:
                 trace('fls.import.ply_failed', path=p, error=e)
