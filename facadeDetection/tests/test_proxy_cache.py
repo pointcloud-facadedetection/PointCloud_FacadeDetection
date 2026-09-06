@@ -559,3 +559,177 @@ class TestCsrNdarrayMetadata:
               f'ndarray_peak={peak_arr/1e6:.1f}MB')
         assert peak_list > 50 * 1024 * 1024  # 4M Python int 必然超过 50MB
         assert peak_arr < 0.1 * peak_list
+
+
+class TestProxyNormalsPersistence:
+    """proxy 法向随缓存持久化：大点云检测估计一次，重开/再检测直接复用。
+
+    三类事实：
+    1. 机制：_estimate_geo_normals 调用计数、缓存命中/拒绝写入门控；
+    2. 数据：npz 内 proxy_normals 与内存 float64 原值逐点一致，
+       恢复后 dataset.proxy_normals 逐点一致；
+    3. 时间：首次估计有可测耗时，复用路径可测地更快。
+    """
+
+    def _make_synthetic_cache(self, tmp_path, monkeypatch, n_proxy):
+        """打桩 Storage.project_root 并预写一份带合法 CSR 的 proxy 缓存。"""
+        project_root = tmp_path / 'proj'
+        monkeypatch.setattr(Storage, 'project_root',
+                            classmethod(lambda cls, u: project_root))
+        fp = ('fp', 100, 200)
+        offsets = np.arange(n_proxy + 1, dtype=np.int64)  # 每组 1 个源点
+        assert proxy_cache.save_proxy_cache(
+            'u', 7, fp, offsets=offsets,
+            indices=np.arange(n_proxy, dtype=np.int32),
+            ranges=np.zeros(n_proxy, dtype=np.float32),
+            scan_origins=np.zeros((1, 3), dtype=np.float32),
+            distance_source='dist',
+            representative_ids=np.arange(n_proxy, dtype=np.int64),
+            proxy_points=np.zeros((n_proxy, 3), dtype=np.float32))
+        return fp
+
+    def test_save_and_load_proxy_normals_roundtrip(self, tmp_path,
+                                                   monkeypatch):
+        n_proxy = 100
+        fp = self._make_synthetic_cache(tmp_path, monkeypatch, n_proxy)
+        # 未写法向的旧格式缓存：proxy_normals 为 None，缓存本体仍有效
+        cached = proxy_cache.load_proxy_cache('u', 7, fp, source_count=n_proxy)
+        assert cached is not None and cached['proxy_normals'] is None
+
+        rng = np.random.default_rng(1)
+        normals = rng.normal(size=(n_proxy, 3))
+        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+        assert proxy_cache.save_proxy_normals('u', 7, fp, normals)
+        cached = proxy_cache.load_proxy_cache('u', 7, fp, source_count=n_proxy)
+        # 数据：float64 原值逐点往返；CSR 字段不受重写影响
+        assert cached['proxy_normals'] is not None
+        assert cached['proxy_normals'].dtype == np.float64
+        assert np.array_equal(cached['proxy_normals'], normals)
+        assert len(cached['offsets']) == n_proxy + 1
+        assert np.array_equal(cached['indices'],
+                              np.arange(n_proxy, dtype=np.int32))
+        # 机制：指纹不符 / 长度不符 / 缓存缺失一律拒绝写入
+        assert not proxy_cache.save_proxy_normals(
+            'u', 7, ('other', 1, 2), normals)
+        assert not proxy_cache.save_proxy_normals('u', 7, fp, normals[:-1])
+        assert not proxy_cache.save_proxy_normals('u', 999, fp, normals)
+
+    def test_station_restore_attaches_cached_normals(self, harness):
+        svc1 = harness.new_service()
+        ds1 = svc1._load_proxy_domain(harness.station)
+        n_proxy = len(ds1.proxy_points)
+        fp = _real_fingerprint(harness.ply)
+        rng = np.random.default_rng(2)
+        normals = rng.normal(size=(n_proxy, 3))
+        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+        assert proxy_cache.save_proxy_normals('u', 7, fp, normals)
+
+        svc2 = harness.new_service()
+        ds2 = svc2._load_proxy_domain(harness.station)
+        # 机制：仍命中缓存（未再读盘、未重建）
+        assert ds2.metadata['proxy_cache'] == 'restored'
+        assert len(harness.build_calls) == 1
+        # 数据：恢复的法向挂到 dataset 且与写入逐点一致
+        assert ds2.proxy_normals is not None
+        assert ds2.proxy_normals.dtype == np.float64
+        assert np.array_equal(ds2.proxy_normals, normals)
+
+        # 去噪直恢复子集：长度与缓存代理数不符，不得挂缓存法向
+        harness.denoise_state['value'] = {
+            'enabled': True,
+            'proxy_count': 2,
+            'proxy_source_offsets': [0, 2, 5],
+            'proxy_source_indices': [10, 20, 30, 40, 50],
+        }
+        svc3 = harness.new_service()
+        ds3 = svc3._load_proxy_domain(harness.station)
+        assert ds3.metadata['denoise_restored'] is True
+        assert ds3.proxy_normals is None
+
+    def test_detect_estimates_once_and_reopen_reuses_cached_normals(
+            self, tmp_path, monkeypatch):
+        import services.facade.facade_detection_service as fds_mod
+        from services.pointcloud_index.core import (
+            PointCloudDataset, RawPointStore)
+
+        n_proxy = 520_000  # 触发 >=50 万的大点云估计+持久化分支
+        fp = self._make_synthetic_cache(tmp_path, monkeypatch, n_proxy)
+        rng = np.random.default_rng(4)
+        proxy = rng.uniform(0, 3, (n_proxy, 3)).astype(np.float32)
+
+        class _IndexStub:
+            proxy_points = proxy
+            proxy_colors = None
+
+        def make_dataset(pointcloud):
+            dataset = PointCloudDataset(
+                dataset_id='u:cloud',
+                raw=RawPointStore.from_arrays(proxy[:8]),
+                index=_IndexStub(),
+                metadata={'station_id': 7, 'asset_fingerprint': list(fp)})
+            pointcloud.datasets['u:cloud'] = dataset
+            return dataset
+
+        seen_normals = []
+        estimate_calls = []
+        real_estimate = fds_mod._estimate_geo_normals
+
+        def spy_estimate(geo, voxel_size):
+            estimate_calls.append(time.perf_counter())
+            return real_estimate(geo, voxel_size)
+
+        def stub_detect(geo, **kwargs):
+            seen_normals.append(
+                np.asarray(geo.normals).copy() if geo.has_normals() else None)
+            return {'facades': [], 'remaining': geo,
+                    'total_points': len(geo.points)}
+
+        monkeypatch.setattr(fds_mod, '_estimate_geo_normals', spy_estimate)
+        monkeypatch.setattr(fds_mod, 'detect_facades_adaptive', stub_detect)
+        monkeypatch.setattr(fds_mod.ResultsRepo, 'save_detected_facades',
+                            staticmethod(lambda *a, **k: None))
+
+        viewport = SimpleNamespace(
+            get_cloud_data=lambda name: {'dataset_id': 'u:cloud',
+                                         'station_id': 7})
+
+        # 第一次检测：大点云法向真实估计一次并持久化
+        pc1 = PointCloudService()
+        ds1 = make_dataset(pc1)
+        svc1 = fds_mod.FacadeDetectionService(viewport, pc1,
+                                              index_service=None)
+        t0 = time.perf_counter()
+        svc1.detect('cloud', project_uuid='u')
+        t_first = time.perf_counter() - t0
+        # 机制：估计真实发生一次
+        assert len(estimate_calls) == 1
+        # 数据：float64 单位法向原值写入 dataset 并传给算法
+        assert ds1.proxy_normals is not None
+        assert ds1.proxy_normals.dtype == np.float64
+        assert seen_normals[0] is not None
+        assert np.array_equal(seen_normals[0], ds1.proxy_normals)
+        norms = np.linalg.norm(ds1.proxy_normals, axis=1)
+        assert np.all(np.abs(norms - 1.0) <= 1e-12)
+
+        # 数据：proxy npz 真实追加 proxy_normals，与内存逐点一致
+        cached = proxy_cache.load_proxy_cache('u', 7, fp,
+                                              source_count=n_proxy)
+        assert cached is not None and cached['proxy_normals'] is not None
+        assert np.array_equal(cached['proxy_normals'], ds1.proxy_normals)
+
+        # 模拟重开：全新 service + 从缓存恢复法向的 dataset
+        pc2 = PointCloudService()
+        ds2 = make_dataset(pc2)
+        ds2.proxy_normals = cached['proxy_normals']
+        svc2 = fds_mod.FacadeDetectionService(viewport, pc2,
+                                              index_service=None)
+        t0 = time.perf_counter()
+        svc2.detect('cloud', project_uuid='u')
+        t_second = time.perf_counter() - t0
+        # 机制：estimate_normals 计 0 次，算法收到的就是缓存法向（逐点一致）
+        assert len(estimate_calls) == 1
+        assert np.array_equal(seen_normals[1], cached['proxy_normals'])
+        # 时间：复用路径可测地快于真实估计
+        print(f'\n[perf] proxy_normals first_detect={t_first:.2f}s '
+              f'reuse_detect={t_second:.2f}s proxy={n_proxy}')
+        assert t_second < t_first
