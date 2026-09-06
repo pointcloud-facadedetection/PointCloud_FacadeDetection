@@ -18,6 +18,12 @@ class _GuiDispatcher(QObject):
     color_pick_requested = Signal()      # 取色弹窗上移到 UI 层
 
 
+def _json_boundary_list(value):
+    """JSON 持久化边界的统一 list 转换：运行期 CSR/ranges 是 ndarray，
+    只在写入 denoise_state_json 前在这里付一次转换成本。"""
+    return None if value is None else np.asarray(value).tolist()
+
+
 class ProjectOperationService:
     """将项目操作页的按钮事件转交给视口或后续算法实现。"""
 
@@ -226,9 +232,11 @@ class ProjectOperationService:
                         'keep_proxy_indices': np.asarray(
                             stats.get('proxy_keep_indices', []), dtype=np.int64).tolist(),
                         'proxy_base_count': int(stats.get('proxy_base_count', 0)),
-                        'proxy_source_offsets': stats.get('proxy_source_offsets'),
-                        'proxy_source_indices': stats.get('proxy_source_indices'),
-                        'ranges': stats.get('ranges'),
+                        'proxy_source_offsets': _json_boundary_list(
+                            stats.get('proxy_source_offsets')),
+                        'proxy_source_indices': _json_boundary_list(
+                            stats.get('proxy_source_indices')),
+                        'ranges': _json_boundary_list(stats.get('ranges')),
                         'proxy_count': int(len(points)),
                         'enabled': True,
                     }

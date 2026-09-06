@@ -150,9 +150,11 @@ class FileService:
                 metadata.update({
                     'source_id': source_id,
                     'source_raw_count': int(len(pts)),
-                    'proxy_source_offsets': proxy_offsets.tolist(),
-                    'proxy_source_indices': proxy_indices.tolist(),
-                    'ranges': proc_ranges.tolist(),
+                    # CSR/ranges 以 ndarray 传递，避免大数组的 list 往返；
+                    # JSON 持久化边界（save_denoise_state）才统一转 list
+                    'proxy_source_offsets': proxy_offsets,
+                    'proxy_source_indices': proxy_indices,
+                    'ranges': proc_ranges,
                     'scan_origins': dist.scan_origins.tolist(),
                     'distance_source': dist.source,
                     'distance_warnings': dist.warnings,
@@ -348,9 +350,11 @@ class FileService:
                 metadata = {
                     'source_id': source_id,
                     'source_raw_count': int(len(source_pts)),
-                    'proxy_source_offsets': proxy_offsets.tolist(),
-                    'proxy_source_indices': proxy_indices.tolist(),
-                    'ranges': proc_ranges.tolist(),
+                    # CSR/ranges 以 ndarray 传递，避免大数组的 list 往返；
+                    # JSON 持久化边界（save_denoise_state）才统一转 list
+                    'proxy_source_offsets': proxy_offsets,
+                    'proxy_source_indices': proxy_indices,
+                    'ranges': proc_ranges,
                     'scan_origins': dist.scan_origins.tolist(),
                     'distance_source': dist.source,
                     'distance_warnings': dist.warnings,

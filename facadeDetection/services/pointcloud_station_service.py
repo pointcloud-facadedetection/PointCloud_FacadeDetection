@@ -196,10 +196,16 @@ class PointCloudStationService:
             representative_ids = state_indices[state_offsets[:-1]]
             proxy = points[representative_ids]
             proxy_colors = colors[representative_ids] if colors is not None else None
+            # 运行期 metadata 的 CSR/ranges 一律以 ndarray 传递：
+            # 千万级 indices 的 .tolist() 会产生 GB 级 Python int 临时对象，
+            # pymalloc 不会把这些内存还给 OS。list 转换只在 JSON 持久化边界发生。
+            state_ranges = (state or {}).get('ranges')
             metadata.update({
-                'proxy_source_offsets': state_offsets.tolist(),
-                'proxy_source_indices': state_indices.tolist(),
-                'ranges': (state or {}).get('ranges') or [0.0] * len(proxy),
+                'proxy_source_offsets': state_offsets,
+                'proxy_source_indices': state_indices.astype(np.int32, copy=False),
+                'ranges': (np.asarray(state_ranges, dtype=np.float32)
+                           if state_ranges else
+                           np.zeros(len(proxy), dtype=np.float32)),
                 'denoise_restored': True,
             })
             print(f'[PCFD] denoise.restore station={station.id} '
@@ -215,9 +221,9 @@ class PointCloudStationService:
                 proxy = points[representative_ids]
                 proxy_colors = colors[representative_ids] if colors is not None else None
             metadata.update({
-                'proxy_source_offsets': cached_proxy['offsets'].tolist(),
-                'proxy_source_indices': cached_proxy['indices'].tolist(),
-                'ranges': cached_proxy['ranges'].tolist(),
+                'proxy_source_offsets': cached_proxy['offsets'],
+                'proxy_source_indices': cached_proxy['indices'],
+                'ranges': cached_proxy['ranges'],
                 'scan_origins': cached_proxy['scan_origins'].tolist(),
                 'distance_source': cached_proxy['distance_source'],
                 'proxy_cache': 'restored',
@@ -233,9 +239,9 @@ class PointCloudStationService:
                 scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
                 elevations=elevations)
             metadata.update({
-                'proxy_source_offsets': offsets.tolist(),
-                'proxy_source_indices': indices.tolist(),
-                'ranges': ranges.tolist(),
+                'proxy_source_offsets': offsets,
+                'proxy_source_indices': indices,
+                'ranges': ranges,
                 'scan_origins': dist.scan_origins.tolist(),
                 'distance_source': dist.source,
                 'distance_warnings': dist.warnings,
@@ -278,9 +284,12 @@ class PointCloudStationService:
                              np.all((keep >= 0) & (keep < len(proxy))))
             if (base_count == len(proxy) and valid_keep):
                 metadata = dict(dataset.metadata or {})
-                for key in ('proxy_source_offsets', 'proxy_source_indices', 'ranges'):
+                # 去噪快照来自 JSON（list）；运行期统一转回 ndarray
+                for key, dtype in (('proxy_source_offsets', np.int64),
+                                   ('proxy_source_indices', np.int32),
+                                   ('ranges', np.float32)):
                     if state.get(key) is not None:
-                        metadata[key] = state[key]
+                        metadata[key] = np.asarray(state[key], dtype=dtype)
                 dataset = self.pointcloud.register_dataset(
                     dataset_id, proxy[keep],
                     proxy_colors[keep] if proxy_colors is not None else None,

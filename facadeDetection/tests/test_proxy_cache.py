@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -429,3 +431,131 @@ class TestProxyDirectArrays:
         assert len(harness.build_calls) == 1    # 回退采集不等于重建
         # 数据：回退结果与首轮逐点一致
         assert np.array_equal(ds2.proxy_points, first_proxy)
+
+
+class TestCsrNdarrayMetadata:
+    """运行期 metadata 的 CSR/ranges 一律 ndarray；list 只在 JSON 边界出现。"""
+
+    CSR_KEYS = ('proxy_source_offsets', 'proxy_source_indices', 'ranges')
+
+    def test_metadata_csr_keys_are_ndarray_all_branches(self, harness):
+        # dist 重建分支
+        svc1 = harness.new_service()
+        ds1 = svc1._load_proxy_domain(harness.station)
+        for key in self.CSR_KEYS:
+            assert isinstance(ds1.metadata[key], np.ndarray), key
+        # 数据：register_dataset 的索引与 metadata 数组逐点一致
+        assert np.array_equal(ds1.index.source_raw_offsets,
+                              ds1.metadata['proxy_source_offsets'])
+        assert np.array_equal(ds1.index.source_raw_indices,
+                              ds1.metadata['proxy_source_indices'])
+        assert int(ds1.index.source_raw_offsets[-1]) == \
+            len(ds1.metadata['proxy_source_indices'])
+
+        # proxy 缓存恢复分支
+        svc2 = harness.new_service()
+        ds2 = svc2._load_proxy_domain(harness.station)
+        assert ds2.metadata['proxy_cache'] == 'restored'
+        for key in self.CSR_KEYS:
+            assert isinstance(ds2.metadata[key], np.ndarray), key
+        assert np.array_equal(ds2.metadata['proxy_source_offsets'],
+                              ds1.metadata['proxy_source_offsets'])
+
+        # 去噪直恢复分支（state 来自 JSON，运行期必须转回 ndarray）
+        harness.denoise_state['value'] = {
+            'enabled': True,
+            'proxy_count': 2,
+            'proxy_source_offsets': [0, 2, 5],
+            'proxy_source_indices': [10, 20, 30, 40, 50],
+            'ranges': [1.5, 2.5],
+        }
+        svc3 = harness.new_service()
+        ds3 = svc3._load_proxy_domain(harness.station)
+        assert ds3.metadata['denoise_restored'] is True
+        for key in self.CSR_KEYS:
+            assert isinstance(ds3.metadata[key], np.ndarray), key
+        assert np.array_equal(ds3.metadata['proxy_source_offsets'], [0, 2, 5])
+        assert ds3.metadata['proxy_source_indices'].dtype == np.int32
+
+    def test_register_dataset_accepts_both_ndarray_and_list(self):
+        # register_dataset 兼容性：ndarray 直传与旧 list 调用方都能注册
+        offsets = np.array([0, 2, 5], dtype=np.int64)
+        indices = np.array([10, 20, 30, 40, 50], dtype=np.int32)
+        source = np.zeros((64, 3), dtype=np.float32)
+        proxy = np.zeros((2, 3), dtype=np.float32)
+        pointcloud = PointCloudService()
+        pointcloud.register_source_asset('src', source, None, {})
+        ds_arr = pointcloud.register_dataset(
+            'd1', proxy, None,
+            metadata={'source_id': 'src',
+                      'proxy_source_offsets': offsets,
+                      'proxy_source_indices': indices})
+        ds_list = pointcloud.register_dataset(
+            'd2', proxy, None,
+            metadata={'source_id': 'src',
+                      'proxy_source_offsets': offsets.tolist(),
+                      'proxy_source_indices': indices.tolist()})
+        for ds in (ds_arr, ds_list):
+            assert np.array_equal(ds.index.source_raw_offsets, offsets)
+            assert np.array_equal(ds.index.source_raw_indices, indices)
+            assert ds.index.source_raw_offsets.dtype == np.int64
+            assert ds.index.source_raw_indices.dtype == np.int32
+
+    def test_json_boundary_produces_serializable_lists(self):
+        # save_denoise_state 写入 denoise_state_json 前的统一转换边界
+        from services.project_operation.project_operation_service import (
+            _json_boundary_list)
+        offsets = np.array([0, 3, 7], dtype=np.int64)
+        indices = np.array([1, 2, 3, 4, 5, 6, 7], dtype=np.int32)
+        ranges = np.array([0.5, 1.5], dtype=np.float32)
+        state = {
+            'proxy_source_offsets': _json_boundary_list(offsets),
+            'proxy_source_indices': _json_boundary_list(indices),
+            'ranges': _json_boundary_list(ranges),
+        }
+        for value in state.values():
+            assert isinstance(value, list)
+        # 数据：JSON 可序列化且往返后数值一致
+        restored = json.loads(json.dumps(state))
+        assert restored['proxy_source_offsets'] == [0, 3, 7]
+        assert restored['proxy_source_indices'] == [1, 2, 3, 4, 5, 6, 7]
+        assert _json_boundary_list(None) is None
+
+    def test_ndarray_metadata_avoids_python_int_roundtrip(self):
+        # 内存证明：大 CSR 的 .tolist() 产生海量 Python int 临时对象
+        # （pymalloc 不还给 OS），ndarray 直传的追踪峰值必须远低于它。
+        n_proxy, group = 200_000, 20   # indices 4M
+        offsets = np.arange(0, n_proxy * group + 1, group, dtype=np.int64)
+        indices = np.arange(n_proxy * group, dtype=np.int32)
+        ranges = np.zeros(n_proxy, dtype=np.float32)
+        source = np.zeros((n_proxy * group, 3), dtype=np.float32)
+        proxy = np.zeros((n_proxy, 3), dtype=np.float32)
+
+        tracemalloc.start()
+        meta_list = {'proxy_source_offsets': offsets.tolist(),
+                     'proxy_source_indices': indices.tolist(),
+                     'ranges': ranges.tolist()}
+        peak_list = tracemalloc.get_traced_memory()[1]
+        assert len(meta_list['proxy_source_indices']) == n_proxy * group
+        del meta_list
+        tracemalloc.reset_peak()
+
+        pointcloud = PointCloudService()
+        pointcloud.register_source_asset('src', source, None, {})
+        dataset = pointcloud.register_dataset(
+            'd', proxy, None,
+            metadata={'source_id': 'src',
+                      'proxy_source_offsets': offsets,
+                      'proxy_source_indices': indices,
+                      'ranges': ranges})
+        peak_arr = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        # 数据：ndarray 路径注册的索引与输入逐点一致
+        assert np.array_equal(dataset.index.source_raw_offsets, offsets)
+        assert np.array_equal(dataset.index.source_raw_indices, indices)
+        # 内存：list 往返的 Python 分配峰值真实存在且远超 ndarray 路径
+        print(f'\n[mem] tolist_peak={peak_list/1e6:.1f}MB '
+              f'ndarray_peak={peak_arr/1e6:.1f}MB')
+        assert peak_list > 50 * 1024 * 1024  # 4M Python int 必然超过 50MB
+        assert peak_arr < 0.1 * peak_list

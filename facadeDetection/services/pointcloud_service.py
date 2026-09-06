@@ -403,12 +403,13 @@ class PointCloudService:
                 new_offsets, new_indices = self._rebuild_csr_for_keep(
                     old_offsets, old_indices, keep_proxy)
 
-                # 重建 metadata
+                # 重建 metadata（CSR/ranges 保持 ndarray，list 转换只发生在
+                # save_denoise_state 的 JSON 持久化边界）
                 new_meta = dict(meta)
                 new_meta.update({
-                    'ranges': new_ranges.tolist(),
-                    'proxy_source_offsets': new_offsets.tolist(),
-                    'proxy_source_indices': new_indices.tolist(),
+                    'ranges': new_ranges,
+                    'proxy_source_offsets': new_offsets,
+                    'proxy_source_indices': new_indices,
                     'denoise_history': new_meta.get('denoise_history', []) + [{
                         'before': n_before,
                         'after': n_after,
