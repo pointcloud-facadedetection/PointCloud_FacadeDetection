@@ -5,8 +5,10 @@
 建立只读映射，既不整读也不解析，RSS 只计实际触碰的页，OS 可回收。
 
 代理缓存：非去噪站点的代理重建（read_dist + estimate_elevation_angles +
-stratified_proxy_build）对同一资产结果完全确定；把 CSR 映射与代表行持久化后，
-重开项目可以直接从源点云采集代理点，跳过每站约 12.6s 的体素分组计算。
+stratified_proxy_build）对同一资产结果完全确定；把 CSR 映射、代表行与代理
+数组本体（proxy_points/proxy_colors）持久化后，重开项目直接使用缓存的代理
+数组，既不重建也不从 raw memmap 采集（代表点散布全文件，fancy 采集会把
+整个映射换入内存）。无 proxy 数组字段的旧缓存回退按代表行采集。
 
 缓存以资产指纹为唯一有效性凭证：指纹不一致、文件缺失或损坏一律未命中，
 绝不使用过期缓存。读写失败只允许警告，不得影响主流程。
@@ -91,23 +93,30 @@ def save_raw_cache(project_uuid, station_id, fingerprint_key, *, points,
     """写入原始点缓存三件套（.npy 不压缩）；失败仅警告并返回 False。
 
     指纹 json 最后落盘，读端先验 json 再映射数组：写入中途崩溃只会导致
-    未命中重建，绝不会读到半个缓存。
+    未命中重建，绝不会读到半个缓存。sidecar 同时记录 colors_in_range：
+    三件套是本进程写入的已校验数据，读端凭标记跳过 register_source_asset
+    的值域扫描（对 memmap 的 min/max 整扫会把全部颜色页换入内存）。
     """
     try:
         fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
         points_path, colors_path, meta_path = raw_cache_paths(
             project_uuid, station_id)
+        colors_array = (np.empty((0, 3), dtype=np.float32) if colors is None
+                        else np.asarray(colors, dtype=np.float32).reshape(-1, 3))
+        colors_in_range = bool(
+            colors_array.size == 0 or
+            (float(colors_array.min()) >= 0.0 and
+             float(colors_array.max()) <= 1.0))
         _save_npy(points_path,
                   np.asarray(points, dtype=np.float32).reshape(-1, 3))
         # 无颜色站点用空数组作标记，读回时还原为 None
-        _save_npy(colors_path,
-                  np.empty((0, 3), dtype=np.float32) if colors is None
-                  else np.asarray(colors, dtype=np.float32).reshape(-1, 3))
+        _save_npy(colors_path, colors_array)
         _save_json(meta_path, {
             'format': RAW_CACHE_FORMAT,
             'fingerprint_path': fp_path,
             'fingerprint_sha': fp_sha,
             'fingerprint_size': fp_size,
+            'colors_in_range': colors_in_range,
         })
         _remove_legacy_raw_cache(project_uuid, station_id)
         return True
@@ -147,6 +156,11 @@ def load_raw_cache(project_uuid, station_id, fingerprint_key):
             colors = None
         elif colors.shape != points.shape:
             return None
+        elif meta.get('colors_in_range'):
+            # 附带在 memmap 对象上的进程内标记（ndarray 语义不变）：
+            # register_source_asset 据此跳过值域扫描，保持映射不换页。
+            # 旧缓存无此字段，保持现有扫描行为。
+            colors._pcfd_colors_in_range = True
         return points, colors
     except Exception:
         return None
@@ -154,10 +168,23 @@ def load_raw_cache(project_uuid, station_id, fingerprint_key):
 
 def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
                      indices, ranges, scan_origins, distance_source,
-                     representative_ids) -> bool:
-    """写入代理缓存（np.savez 不压缩）；失败仅警告并返回 False。"""
+                     representative_ids, proxy_points=None,
+                     proxy_colors=None) -> bool:
+    """写入代理缓存（np.savez 不压缩）；失败仅警告并返回 False。
+
+    proxy_points/proxy_colors 是重建产出的代理数组本体；持久化后重开项目
+    直接使用它们，不从 raw memmap 按代表行采集（采集会把整个映射换页）。
+    """
     try:
         fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
+        arrays = {}
+        if proxy_points is not None:
+            arrays['proxy_points'] = np.asarray(
+                proxy_points, dtype=np.float32).reshape(-1, 3)
+            # 无颜色代理用空数组作标记，读回时还原为 None
+            arrays['proxy_colors'] = (
+                np.empty((0, 3), dtype=np.float32) if proxy_colors is None
+                else np.asarray(proxy_colors, dtype=np.float32).reshape(-1, 3))
         _save_npz(
             proxy_cache_path(project_uuid, station_id),
             offsets=np.asarray(offsets, dtype=np.int64),
@@ -170,7 +197,8 @@ def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
             distance_source=np.array(str(distance_source)),
             fingerprint_path=np.array(fp_path),
             fingerprint_sha=np.array(fp_sha),
-            fingerprint_size=np.array(fp_size, dtype=np.int64))
+            fingerprint_size=np.array(fp_size, dtype=np.int64),
+            **arrays)
         return True
     except Exception as exc:
         print(f'[PCFD] proxy_cache.save_failed station={station_id} '
@@ -180,7 +208,11 @@ def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
 
 def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                      source_count=None):
-    """读取代理缓存；指纹不符/缺失/损坏一律返回 None。"""
+    """读取代理缓存；指纹不符/缺失/损坏一律返回 None。
+
+    返回的 proxy_points/proxy_colors 是缓存的代理数组本体；旧缓存没有
+    这两个字段（或形状与 CSR 不一致）时为 None，调用方回退按代表行采集。
+    """
     try:
         path = proxy_cache_path(project_uuid, station_id)
         if not path.exists():
@@ -195,6 +227,21 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
             ranges = np.asarray(data['ranges'], dtype=np.float32)
             scan_origins = np.asarray(data['scan_origins'], dtype=np.float32)
             distance_source = str(data['distance_source'])
+            proxy_points = None
+            proxy_colors = None
+            if 'proxy_points' in data.files:
+                candidate = np.asarray(data['proxy_points'], dtype=np.float32)
+                colors = np.asarray(data['proxy_colors'], dtype=np.float32)
+                if candidate.ndim == 2 and candidate.shape[1] == 3 and \
+                        len(candidate) == len(offsets) - 1:
+                    proxy_points = candidate
+                    if colors.size == 0:
+                        proxy_colors = None
+                    elif colors.shape == candidate.shape:
+                        proxy_colors = colors
+                    else:
+                        # 颜色形状损坏：整份代理回退采集，不混用半份缓存
+                        proxy_points = None
         # CSR 结构完整性：损坏文件绝不进入主流程
         if (len(offsets) < 2 or offsets[0] != 0 or
                 np.any(np.diff(offsets) <= 0) or
@@ -213,7 +260,8 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
         return {'offsets': offsets, 'indices': indices,
                 'representative_ids': representative_ids,
                 'ranges': ranges, 'scan_origins': scan_origins,
-                'distance_source': distance_source}
+                'distance_source': distance_source,
+                'proxy_points': proxy_points, 'proxy_colors': proxy_colors}
     except Exception:
         return None
 

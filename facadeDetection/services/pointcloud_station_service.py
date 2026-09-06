@@ -205,10 +205,15 @@ class PointCloudStationService:
             print(f'[PCFD] denoise.restore station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)}', flush=True)
         elif cached_proxy is not None:
-            # 与 dist 重建分支等价：代理点按持久化的代表行从源点云采集。
-            representative_ids = cached_proxy['representative_ids']
-            proxy = points[representative_ids]
-            proxy_colors = colors[representative_ids] if colors is not None else None
+            # 与 dist 重建分支等价：优先使用缓存的代理数组本体，完全不触碰
+            # raw memmap（代表点散布全文件，fancy 采集会把整个映射换页）；
+            # 无 proxy 数组字段的旧缓存回退按持久化代表行采集。
+            proxy = cached_proxy.get('proxy_points')
+            proxy_colors = cached_proxy.get('proxy_colors')
+            if proxy is None:
+                representative_ids = cached_proxy['representative_ids']
+                proxy = points[representative_ids]
+                proxy_colors = colors[representative_ids] if colors is not None else None
             metadata.update({
                 'proxy_source_offsets': cached_proxy['offsets'].tolist(),
                 'proxy_source_indices': cached_proxy['indices'].tolist(),
@@ -235,12 +240,14 @@ class PointCloudStationService:
                 'distance_source': dist.source,
                 'distance_warnings': dist.warnings,
             })
-            # 重建结果对同一资产是确定的，落盘后重开项目可直接命中缓存
+            # 重建结果对同一资产是确定的，落盘后重开项目可直接命中缓存；
+            # 代理数组本体一并持久化，重开轮不再从 raw memmap 采集
             proxy_cache.save_proxy_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 offsets=offsets, indices=indices, ranges=ranges,
                 scan_origins=dist.scan_origins, distance_source=dist.source,
-                representative_ids=representatives)
+                representative_ids=representatives,
+                proxy_points=proxy, proxy_colors=proxy_colors)
         else:
             proxy, proxy_colors = points, colors
         self.pointcloud.register_source_asset(source_id, points, colors,

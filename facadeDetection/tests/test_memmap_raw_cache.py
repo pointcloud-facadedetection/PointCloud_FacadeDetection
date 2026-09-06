@@ -390,6 +390,138 @@ class TestMemmapRawCache:
         assert all(p.exists() for p in harness.raw_paths())
 
 
+class TestColorsInRangeMarker:
+    """raw sidecar 的 colors_in_range 标记：命中时跳过值域扫描。"""
+
+    def test_marked_colors_skip_range_scan(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Storage, 'project_root',
+                            classmethod(lambda cls, u: tmp_path / 'proj'))
+        n = 8_000_000  # colors ≈ 96MB：一次 min/max 整扫必然抬高 RSS
+        rng = np.random.default_rng(4)
+        pts = rng.uniform(-10, 10, (n, 3)).astype(np.float32)
+        cols = rng.random((n, 3), dtype=np.float32)
+        fp = ('fp', 'sha', 100)
+        assert proxy_cache.save_raw_cache('u', 9, fp, points=pts, colors=cols)
+        colors_nbytes = cols.nbytes
+        del pts, cols
+        gc.collect()
+
+        points, colors = proxy_cache.load_raw_cache('u', 9, fp)
+        # 机制：sidecar 标记真实附带在 colors memmap 上
+        assert getattr(colors, '_pcfd_colors_in_range', False) is True
+
+        process = psutil.Process()
+        rss_before = process.memory_info().rss
+        pointcloud = PointCloudService()
+        pointcloud.register_source_asset('src', points, colors, {})
+        delta_marked = process.memory_info().rss - rss_before
+        # 内存：带标记的 colors 未被扫描（整扫会换入 ~96MB）
+        assert delta_marked < 0.3 * colors_nbytes
+        # 数据：colors 仍是只读映射，未被物化
+        assert _is_readonly_mapping(
+            pointcloud.get_source_asset('src')['colors'])
+
+        # 对照：无标记的旧缓存（sidecar 去掉 colors_in_range）保持现有扫描
+        _, _, meta_path = proxy_cache.raw_cache_paths('u', 9)
+        import json as _json
+        meta = _json.loads(meta_path.read_text(encoding='utf-8'))
+        meta.pop('colors_in_range', None)
+        meta_path.write_text(_json.dumps(meta), encoding='utf-8')
+        points2, colors2 = proxy_cache.load_raw_cache('u', 9, fp)
+        assert getattr(colors2, '_pcfd_colors_in_range', False) is False
+        rss_before2 = process.memory_info().rss
+        pointcloud.register_source_asset('legacy', points2, colors2, {})
+        delta_legacy = process.memory_info().rss - rss_before2
+        # 机制：旧缓存 memmap 被真实整扫（证明上面的低增量不是假象）
+        assert delta_legacy > 0.5 * colors_nbytes
+        print(f'\n[rss] marked_register={delta_marked/1e6:.1f}MB '
+              f'legacy_register={delta_legacy/1e6:.1f}MB '
+              f'colors={colors_nbytes/1e6:.1f}MB')
+
+    def test_out_of_range_raw_cache_not_marked(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Storage, 'project_root',
+                            classmethod(lambda cls, u: tmp_path / 'proj'))
+        pts = np.zeros((4, 3), dtype=np.float32)
+        cols = np.array([[0.5, 1.2, -0.3]] * 4, dtype=np.float32)
+        fp = ('fp', 'sha', 100)
+        assert proxy_cache.save_raw_cache('u', 9, fp, points=pts, colors=cols)
+        points, colors = proxy_cache.load_raw_cache('u', 9, fp)
+        # 数据：越界颜色不得带标记（读端仍会扫描并裁剪）
+        assert getattr(colors, '_pcfd_colors_in_range', False) is False
+        pointcloud = PointCloudService()
+        pointcloud.register_source_asset('src', points, colors, {})
+        stored = pointcloud.get_source_asset('src')['colors']
+        assert np.allclose(np.asarray(stored), [[0.5, 1.0, 0.0]] * 4)
+
+
+class TestProxyDirectArraysRSS:
+
+    def test_reopen_with_cached_proxy_arrays_keeps_raw_pages_out(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Storage, 'project_root',
+                            classmethod(lambda cls, u: tmp_path / 'proj'))
+        n = 8_000_000  # raw ≈ 192MB：缺页采集会把 RSS 推高到可测量级
+        rng = np.random.default_rng(9)
+        pts = rng.uniform(-50, 50, (n, 3)).astype(np.float32)
+        cols = rng.random((n, 3), dtype=np.float32)
+        fp = ('fp', 'sha', 100)
+        assert proxy_cache.save_raw_cache('u', 9, fp, points=pts, colors=cols)
+        group = 80
+        n_proxy = 100_000
+        offsets = np.arange(0, n_proxy * group + 1, group, dtype=np.int64)
+        indices = (np.arange(n_proxy * group, dtype=np.int64) % n
+                   ).astype(np.int32)
+        representatives = indices[offsets[:-1]].astype(np.int64)
+        proxy = pts[representatives].copy()
+        proxy_cols = cols[representatives].copy()
+        assert proxy_cache.save_proxy_cache(
+            'u', 9, fp, offsets=offsets, indices=indices,
+            ranges=np.full(n_proxy, 10.0, dtype=np.float32),
+            scan_origins=np.zeros((1, 3), dtype=np.float32),
+            distance_source='dist', representative_ids=representatives,
+            proxy_points=proxy, proxy_colors=proxy_cols)
+        raw_nbytes = pts.nbytes + cols.nbytes
+        del pts, cols, proxy, proxy_cols
+        gc.collect()
+
+        process = psutil.Process()
+        rss_before = process.memory_info().rss
+        getitem_calls = []
+        real_getitem = np.memmap.__getitem__
+        def counting_getitem(self, key):
+            getitem_calls.append(key)
+            return real_getitem(self, key)
+        monkeypatch.setattr(np.memmap, '__getitem__', counting_getitem)
+
+        # 模拟重开轮：memmap raw + 缓存 proxy 数组 + 注册，全程不得触碰 raw 页
+        points, colors = proxy_cache.load_raw_cache('u', 9, fp)
+        cached = proxy_cache.load_proxy_cache('u', 9, fp, source_count=n)
+        assert cached is not None and cached['proxy_points'] is not None
+        pointcloud = PointCloudService()
+        pointcloud.register_source_asset('u:9:source', points, colors, {})
+        dataset = pointcloud.register_dataset(
+            'u:9', cached['proxy_points'], cached['proxy_colors'],
+            metadata={'source_id': 'u:9:source',
+                      'proxy_source_offsets': cached['offsets'],
+                      'proxy_source_indices': cached['indices'],
+                      'ranges': cached['ranges']})
+        rss_after = process.memory_info().rss
+
+        # 机制：恢复 + 注册全程对 raw memmap 零取元素（无 gather、无扫描）
+        assert getitem_calls == []
+        # 内存：RSS 增量远低于 raw 体积（阈值 30%）；旧的代表行采集路径
+        # 会把 ~192MB 映射全部换页
+        delta = rss_after - rss_before
+        print(f'\n[rss] reopen_with_proxy_arrays delta={delta/1e6:.1f}MB '
+              f'raw={raw_nbytes/1e6:.1f}MB '
+              f'proxy={cached["proxy_points"].nbytes/1e6:.1f}MB')
+        assert delta < 0.3 * raw_nbytes
+        # 数据：数据集真实可用，CSR 完整指向 raw 行
+        assert len(dataset.proxy_points) == n_proxy
+        assert dataset.proxy_points.nbytes > 0
+        assert int(dataset.index.source_raw_offsets[-1]) == len(indices)
+
+
 class TestMemmapRSS:
 
     def test_untouched_mapping_does_not_raise_rss(self, tmp_path):

@@ -79,6 +79,11 @@ class PointCloudService:
         return dataset
 
     def register_source_asset(self, source_id: str, points, colors=None, metadata=None):
+        # raw 缓存三件套是本进程写入的已校验数据：load_raw_cache 会在
+        # colors memmap 上附带 _pcfd_colors_in_range 标记，据此跳过值域
+        # 扫描（对 memmap 的 min/max 整扫会把全部颜色页换入内存）。
+        # 外部数组无标记，保持现有扫描行为。
+        colors_in_range = bool(getattr(colors, '_pcfd_colors_in_range', False))
         points = np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3))
         if colors is not None:
             colors = np.asarray(colors, dtype=np.float32)
@@ -86,11 +91,12 @@ class PointCloudService:
                 colors = None
             else:
                 colors = colors.reshape(-1, 3)
-                # clip 对值域内数据是恒等：已在 [0,1] 时跳过整数组拷贝，
-                # 让 raw 缓存的只读 memmap 颜色保持映射，不被物化。
-                if colors.size == 0 or not (float(colors.min()) >= 0.0 and
-                                            float(colors.max()) <= 1.0):
-                    colors = np.clip(colors, 0.0, 1.0)
+                if not colors_in_range:
+                    # clip 对值域内数据是恒等：已在 [0,1] 时跳过整数组拷贝，
+                    # 让 raw 缓存的只读 memmap 颜色保持映射，不被物化。
+                    if colors.size == 0 or not (float(colors.min()) >= 0.0 and
+                                                float(colors.max()) <= 1.0):
+                        colors = np.clip(colors, 0.0, 1.0)
                 colors = np.ascontiguousarray(colors)
         self.source_assets[source_id] = {
             "points": points,

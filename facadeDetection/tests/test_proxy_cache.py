@@ -349,3 +349,83 @@ class TestProxyCache:
         assert not harness.raw_meta_path.exists()
         assert not proxy_dir.exists()                 # 空目录一并清理
         assert not raw_dir.exists()
+
+
+class TestProxyDirectArrays:
+    """proxy 缓存直存代理数组：重开轮完全不触碰 raw memmap。"""
+
+    def test_reopen_uses_cached_proxy_arrays_without_raw_gather(
+            self, harness, monkeypatch):
+        svc1 = harness.new_service()
+        ds1 = svc1._load_proxy_domain(harness.station)
+        assert len(harness.build_calls) == 1
+        first_proxy = np.array(ds1.proxy_points)
+        first_colors = np.array(ds1.proxy_colors)
+
+        # 数据：proxy npz 真实包含代理数组字段，且与首轮结果逐点一致
+        with np.load(harness.cache_path) as data:
+            assert 'proxy_points' in data.files
+            assert 'proxy_colors' in data.files
+            cached_points = np.asarray(data['proxy_points'])
+            cached_colors = np.asarray(data['proxy_colors'])
+        assert cached_points.shape == first_proxy.shape
+        assert np.array_equal(cached_points, first_proxy)
+        assert np.array_equal(cached_colors, first_colors)
+
+        # 机制：重开轮对 raw memmap 的任何取元素（gather/切片）计数必须为 0
+        getitem_calls = []
+        real_getitem = np.memmap.__getitem__
+        def counting_getitem(self, key):
+            getitem_calls.append(key)
+            return real_getitem(self, key)
+        monkeypatch.setattr(np.memmap, '__getitem__', counting_getitem)
+
+        svc2 = harness.new_service()
+        t0 = time.perf_counter()
+        ds2 = svc2._load_proxy_domain(harness.station)
+        t_second = time.perf_counter() - t0
+        assert ds2.metadata['proxy_cache'] == 'restored'
+        assert getitem_calls == []              # 零 gather：raw 页未被换入
+        assert len(harness.ply_load_calls) == 1
+        assert len(harness.build_calls) == 1
+        # 数据：恢复的代理与首轮逐点一致；raw 仍是只读映射
+        assert np.array_equal(ds2.proxy_points, first_proxy)
+        assert np.array_equal(ds2.proxy_colors, first_colors)
+        asset = svc2.pointcloud.get_source_asset('u:7:source')
+        assert not asset['points'].flags.owndata
+        print(f'\n[perf] reopen_with_proxy_arrays={t_second*1e3:.2f}ms '
+              f'proxy={len(first_proxy)}')
+        assert t_second > 0
+
+    def test_legacy_cache_without_proxy_arrays_falls_back_to_gather(
+            self, harness, monkeypatch):
+        svc1 = harness.new_service()
+        ds1 = svc1._load_proxy_domain(harness.station)
+        first_proxy = np.array(ds1.proxy_points)
+
+        # 剥掉 proxy 数组字段，模拟旧格式缓存（其余字段原样保留）
+        with np.load(harness.cache_path) as data:
+            kept = {key: data[key] for key in data.files
+                    if key not in ('proxy_points', 'proxy_colors')}
+        np.savez(harness.cache_path, **kept)
+        loaded = proxy_cache.load_proxy_cache(
+            'u', 7, _real_fingerprint(harness.ply),
+            source_count=harness.n_points)
+        assert loaded is not None
+        assert loaded['proxy_points'] is None   # 旧缓存无 proxy 数组字段
+
+        getitem_calls = []
+        real_getitem = np.memmap.__getitem__
+        def counting_getitem(self, key):
+            getitem_calls.append(key)
+            return real_getitem(self, key)
+        monkeypatch.setattr(np.memmap, '__getitem__', counting_getitem)
+
+        svc2 = harness.new_service()
+        ds2 = svc2._load_proxy_domain(harness.station)
+        # 机制：旧缓存回退按代表行采集，gather 真实发生
+        assert ds2.metadata['proxy_cache'] == 'restored'
+        assert len(getitem_calls) > 0
+        assert len(harness.build_calls) == 1    # 回退采集不等于重建
+        # 数据：回退结果与首轮逐点一致
+        assert np.array_equal(ds2.proxy_points, first_proxy)
