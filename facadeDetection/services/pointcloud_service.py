@@ -85,7 +85,13 @@ class PointCloudService:
             if colors.size % 3 != 0 or len(colors.reshape(-1, 3)) != len(points):
                 colors = None
             else:
-                colors = np.ascontiguousarray(np.clip(colors.reshape(-1, 3), 0.0, 1.0))
+                colors = colors.reshape(-1, 3)
+                # clip 对值域内数据是恒等：已在 [0,1] 时跳过整数组拷贝，
+                # 让 raw 缓存的只读 memmap 颜色保持映射，不被物化。
+                if colors.size == 0 or not (float(colors.min()) >= 0.0 and
+                                            float(colors.max()) <= 1.0):
+                    colors = np.clip(colors, 0.0, 1.0)
+                colors = np.ascontiguousarray(colors)
         self.source_assets[source_id] = {
             "points": points,
             "colors": colors,

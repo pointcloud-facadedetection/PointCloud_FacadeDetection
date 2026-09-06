@@ -28,7 +28,13 @@ class RawPointStore:
             if raw_colors.size % 3 == 0:
                 raw_colors = raw_colors.reshape(-1, 3)
                 if len(raw_colors) == len(p):
-                    c = np.ascontiguousarray(np.clip(raw_colors, 0.0, 1.0))
+                    # clip 对值域内数据是恒等：已在 [0,1] 时保留原数组，
+                    # 避免把 memmap 恢复的大颜色数组整份物化。
+                    if raw_colors.size == 0 or not (
+                            float(raw_colors.min()) >= 0.0 and
+                            float(raw_colors.max()) <= 1.0):
+                        raw_colors = np.clip(raw_colors, 0.0, 1.0)
+                    c = np.ascontiguousarray(raw_colors)
         return cls(p, c)
 
 
