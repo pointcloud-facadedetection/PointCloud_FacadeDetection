@@ -1,7 +1,8 @@
 """站点加载链路的两层磁盘缓存。
 
-原始点缓存：Open3D 解包 PLY 的结果（float32 数组）落盘后，重开项目用
-np.load 直接读回，跳过每站约 3.5s 的 PLY 解包。
+原始点缓存：Open3D 解包 PLY 的结果（float32 数组）以裸 .npy 三件套落盘
+（points.npy / colors.npy / 指纹 json），重开项目用 np.load(mmap_mode='r')
+建立只读映射，既不整读也不解析，RSS 只计实际触碰的页，OS 可回收。
 
 代理缓存：非去噪站点的代理重建（read_dist + estimate_elevation_angles +
 stratified_proxy_build）对同一资产结果完全确定；把 CSR 映射与代表行持久化后，
@@ -10,14 +11,27 @@ stratified_proxy_build）对同一资产结果完全确定；把 CSR 映射与�
 缓存以资产指纹为唯一有效性凭证：指纹不一致、文件缺失或损坏一律未命中，
 绝不使用过期缓存。读写失败只允许警告，不得影响主流程。
 """
+import json
 from pathlib import Path
 
 import numpy as np
 
 from config.storage import Storage
 
+# raw 缓存格式版本：布局或语义变更时递增，旧版本一律未命中回退重建
+RAW_CACHE_FORMAT = 2
 
-def raw_cache_path(project_uuid, station_id) -> Path:
+
+def raw_cache_paths(project_uuid, station_id):
+    """原始点缓存三件套路径：points.npy / colors.npy / 指纹 json。"""
+    base = (Storage.project_root(project_uuid) / Storage.CACHE_DIRNAME
+            / 'raw' / str(station_id))
+    return (base.with_suffix('.points.npy'),
+            base.with_suffix('.colors.npy'),
+            base.with_suffix('.json'))
+
+
+def _legacy_raw_cache_path(project_uuid, station_id) -> Path:
     return (Storage.project_root(project_uuid) / Storage.CACHE_DIRNAME
             / 'raw' / f'{station_id}.npz')
 
@@ -41,6 +55,22 @@ def _save_npz(path, **arrays) -> None:
     Path(f'{tmp}.npz').replace(path)
 
 
+def _save_npy(path, array) -> None:
+    """裸 .npy 落盘（tmp + 原子替换）；裸格式才能被 np.load(mmap_mode) 映射。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.tmp')
+    with open(tmp, 'wb') as stream:
+        np.save(stream, array)
+    tmp.replace(path)
+
+
+def _save_json(path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.tmp')
+    tmp.write_text(json.dumps(payload), encoding='utf-8')
+    tmp.replace(path)
+
+
 def _fingerprint_matches(data, fingerprint_key) -> bool:
     fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
     return (str(data['fingerprint_path']) == fp_path and
@@ -48,20 +78,38 @@ def _fingerprint_matches(data, fingerprint_key) -> bool:
             int(data['fingerprint_size']) == fp_size)
 
 
+def _remove_legacy_raw_cache(project_uuid, station_id) -> None:
+    """旧格式 raw npz 的一次性迁移清理；best-effort。"""
+    try:
+        _legacy_raw_cache_path(project_uuid, station_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def save_raw_cache(project_uuid, station_id, fingerprint_key, *, points,
                    colors) -> bool:
-    """写入原始点缓存（np.savez 不压缩）；失败仅警告并返回 False。"""
+    """写入原始点缓存三件套（.npy 不压缩）；失败仅警告并返回 False。
+
+    指纹 json 最后落盘，读端先验 json 再映射数组：写入中途崩溃只会导致
+    未命中重建，绝不会读到半个缓存。
+    """
     try:
         fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
-        _save_npz(
-            raw_cache_path(project_uuid, station_id),
-            points=np.asarray(points, dtype=np.float32).reshape(-1, 3),
-            # 无颜色站点用空数组作标记，读回时还原为 None
-            colors=(np.empty((0, 3), dtype=np.float32) if colors is None
-                    else np.asarray(colors, dtype=np.float32).reshape(-1, 3)),
-            fingerprint_path=np.array(fp_path),
-            fingerprint_sha=np.array(fp_sha),
-            fingerprint_size=np.array(fp_size, dtype=np.int64))
+        points_path, colors_path, meta_path = raw_cache_paths(
+            project_uuid, station_id)
+        _save_npy(points_path,
+                  np.asarray(points, dtype=np.float32).reshape(-1, 3))
+        # 无颜色站点用空数组作标记，读回时还原为 None
+        _save_npy(colors_path,
+                  np.empty((0, 3), dtype=np.float32) if colors is None
+                  else np.asarray(colors, dtype=np.float32).reshape(-1, 3))
+        _save_json(meta_path, {
+            'format': RAW_CACHE_FORMAT,
+            'fingerprint_path': fp_path,
+            'fingerprint_sha': fp_sha,
+            'fingerprint_size': fp_size,
+        })
+        _remove_legacy_raw_cache(project_uuid, station_id)
         return True
     except Exception as exc:
         print(f'[PCFD] raw_cache.save_failed station={station_id} '
@@ -70,16 +118,29 @@ def save_raw_cache(project_uuid, station_id, fingerprint_key, *, points,
 
 
 def load_raw_cache(project_uuid, station_id, fingerprint_key):
-    """读取原始点缓存；指纹不符/缺失/损坏一律返回 None。"""
+    """读取原始点缓存；指纹不符/缺失/损坏一律返回 None。
+
+    命中时返回 np.load(mmap_mode='r') 的只读映射，不整读数据；
+    形状校验只看 header，不触碰负载页。
+    """
     try:
-        path = raw_cache_path(project_uuid, station_id)
-        if not path.exists():
+        points_path, colors_path, meta_path = raw_cache_paths(
+            project_uuid, station_id)
+        _remove_legacy_raw_cache(project_uuid, station_id)
+        if not meta_path.exists():
             return None
-        with np.load(path, allow_pickle=False) as data:
-            if not _fingerprint_matches(data, fingerprint_key):
-                return None
-            points = np.asarray(data['points'], dtype=np.float32)
-            colors = np.asarray(data['colors'], dtype=np.float32)
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        if int(meta.get('format', -1)) != RAW_CACHE_FORMAT:
+            return None
+        fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
+        if (str(meta.get('fingerprint_path')) != fp_path or
+                str(meta.get('fingerprint_sha')) != fp_sha or
+                int(meta.get('fingerprint_size', -2)) != fp_size):
+            return None
+        if not points_path.exists() or not colors_path.exists():
+            return None
+        points = np.load(points_path, mmap_mode='r')
+        colors = np.load(colors_path, mmap_mode='r')
         if points.ndim != 2 or points.shape[1] != 3 or not len(points):
             return None
         if colors.size == 0:
@@ -159,7 +220,10 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
 
 def delete_station_cache(project_uuid, station_id) -> None:
     """站点删除时清理两层缓存；连同空目录一起移除，全部 best-effort。"""
-    for path in (raw_cache_path(project_uuid, station_id),
+    points_path, colors_path, meta_path = raw_cache_paths(
+        project_uuid, station_id)
+    for path in (points_path, colors_path, meta_path,
+                 _legacy_raw_cache_path(project_uuid, station_id),
                  proxy_cache_path(project_uuid, station_id)):
         try:
             path.unlink(missing_ok=True)

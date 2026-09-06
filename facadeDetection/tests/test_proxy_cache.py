@@ -3,8 +3,9 @@
 每个用例同时断言三类事实，防止"全部跳过、计时归零"的假优化：
 1. 机制：self._load（Open3D 读盘）/ stratified_proxy_build / np.load 的
    调用计数符合命中或未命中预期；
-2. 数据：两个 npz 真实写盘（存在且 >0 字节）、缓存读出的 raw/proxy 与
-   首轮结果 np.array_equal 完全一致、CSR offsets 一致、nbytes>0；
+2. 数据：raw 三件套（points.npy/colors.npy/指纹 json）与 proxy npz 真实写盘
+   （存在且 >0 字节）、缓存读出的 raw/proxy 与首轮结果 np.array_equal
+   完全一致、CSR offsets 一致、nbytes>0；
 3. 时间：首轮与缓存轮都有真实毫秒级耗时，缓存路径可测地更短。
 
 .dist 使用真实二进制 float32 文件（utils/dist_reader.py 的 mmap 二进制分支：
@@ -79,8 +80,12 @@ class _Harness:
         self.project_root = tmp_path / 'proj'
         self.cache_path = (self.project_root / Storage.CACHE_DIRNAME
                            / 'proxy' / '7.npz')
-        self.raw_path = (self.project_root / Storage.CACHE_DIRNAME
-                         / 'raw' / '7.npz')
+        self.raw_points_path = (self.project_root / Storage.CACHE_DIRNAME
+                                / 'raw' / '7.points.npy')
+        self.raw_colors_path = (self.project_root / Storage.CACHE_DIRNAME
+                                / 'raw' / '7.colors.npy')
+        self.raw_meta_path = (self.project_root / Storage.CACHE_DIRNAME
+                              / 'raw' / '7.json')
         self.station = SimpleNamespace(
             id=7, source_path=str(self.ply), display_name='s7')
 
@@ -130,17 +135,19 @@ def harness(tmp_path, monkeypatch):
 class TestProxyCache:
 
     def test_first_build_writes_cache_reopen_hits_cache(self, harness):
-        # ---- 第一次加载：Open3D 真实读盘、代理真实重建，两个 npz 真实写盘 ----
+        # ---- 第一次加载：真实读盘、代理真实重建，raw 三件套与 proxy npz 真实写盘 ----
         svc1 = harness.new_service()
         t0 = time.perf_counter()
         ds1 = svc1._load_proxy_domain(harness.station)
         t_first = time.perf_counter() - t0
-        assert len(harness.ply_load_calls) == 1       # 机制：PLY 解包真实发生
+        assert len(harness.ply_load_calls) == 1       # 机制：PLY 读取真实发生
         assert len(harness.build_calls) == 1          # 机制：重建真实发生
         assert harness.cache_path.exists()
         assert harness.cache_path.stat().st_size > 0  # 数据：proxy npz 真实写盘
-        assert harness.raw_path.exists()
-        assert harness.raw_path.stat().st_size > 0    # 数据：raw npz 真实写盘
+        for raw_file in (harness.raw_points_path, harness.raw_colors_path,
+                         harness.raw_meta_path):
+            assert raw_file.exists()
+            assert raw_file.stat().st_size > 0        # 数据：raw 三件套真实写盘
         assert 'proxy_cache' not in ds1.metadata      # 首次走 dist 重建分支
         assert ds1.metadata['distance_source'] == 'dist'
         assert len(ds1.proxy_points) > 0
@@ -161,9 +168,9 @@ class TestProxyCache:
         t0 = time.perf_counter()
         ds2 = svc2._load_proxy_domain(harness.station)
         t_second = time.perf_counter() - t0
-        assert len(harness.ply_load_calls) == 1       # 机制：Open3D 未再读盘
+        assert len(harness.ply_load_calls) == 1       # 机制：未再读盘
         assert len(harness.build_calls) == 1          # 机制：没有再重建
-        assert len(harness.np_load_calls) > loads_before  # 机制：npz 真实读盘
+        assert len(harness.np_load_calls) > loads_before  # 机制：缓存真实读盘
         assert ds2.metadata['proxy_cache'] == 'restored'
         # 数据：缓存恢复的 raw/proxy/颜色/CSR 与第一次结果完全一致
         second_raw = svc2.pointcloud.get_source_asset('u:7:source')['points']
@@ -194,7 +201,7 @@ class TestProxyCache:
         assert len(harness.ply_load_calls) == 1
         assert len(harness.build_calls) == 1
         old_bytes = harness.cache_path.read_bytes()
-        old_raw_bytes = harness.raw_path.read_bytes()
+        old_raw_bytes = harness.raw_points_path.read_bytes()
         old_offsets = np.asarray(ds1.metadata['proxy_source_offsets'])
         old_fingerprint = _real_fingerprint(harness.ply)
 
@@ -212,12 +219,12 @@ class TestProxyCache:
 
         svc2 = harness.new_service()
         ds2 = svc2._load_proxy_domain(harness.station)
-        assert len(harness.ply_load_calls) == 2     # 机制：重新 Open3D 读盘
+        assert len(harness.ply_load_calls) == 2     # 机制：重新读盘
         assert len(harness.build_calls) == 2        # 机制：指纹不符 → 重建
         assert 'proxy_cache' not in ds2.metadata
-        # 数据：两个 npz 被真实覆盖，且新内容与新结果一致
+        # 数据：proxy npz 与 raw 三件套被真实覆盖，且新内容与新结果一致
         assert harness.cache_path.read_bytes() != old_bytes
-        assert harness.raw_path.read_bytes() != old_raw_bytes
+        assert harness.raw_points_path.read_bytes() != old_raw_bytes
         raw_cached = proxy_cache.load_raw_cache(
             'u', 7, _real_fingerprint(harness.ply))
         assert raw_cached is not None
@@ -265,14 +272,14 @@ class TestProxyCache:
             dtype=np.float32)
         first_proxy = np.array(ds1.proxy_points)
 
-        # 写入垃圾字节破坏 raw npz；proxy npz 保持完好
-        harness.raw_path.write_bytes(b'\x00\xffgarbage' * 64)
+        # 写入垃圾字节破坏 raw points.npy；proxy npz 保持完好
+        harness.raw_points_path.write_bytes(b'\x00\xffgarbage' * 64)
         assert proxy_cache.load_raw_cache(
             'u', 7, _real_fingerprint(harness.ply)) is None
 
         svc2 = harness.new_service()
         ds2 = svc2._load_proxy_domain(harness.station)  # 不得崩溃
-        # 机制：回退 Open3D 真实读盘；proxy 缓存仍命中，不重建
+        # 机制：回退真实读盘；proxy 缓存仍命中，不重建
         assert len(harness.ply_load_calls) == 2
         assert len(harness.build_calls) == 1
         assert ds2.metadata['proxy_cache'] == 'restored'
@@ -320,9 +327,9 @@ class TestProxyCache:
         svc = harness.new_service()
         svc._load_proxy_domain(harness.station)
         assert harness.cache_path.exists()
-        assert harness.raw_path.exists()
+        assert harness.raw_points_path.exists()
         proxy_dir = harness.cache_path.parent
-        raw_dir = harness.raw_path.parent
+        raw_dir = harness.raw_points_path.parent
 
         rows = [SimpleNamespace(id=7, is_selected=True, registered_path=None)]
         list_results = [rows, []]  # 删除前选中列表、删除后剩余列表
@@ -337,6 +344,8 @@ class TestProxyCache:
 
         svc.delete_selected()
         assert not harness.cache_path.exists()        # 数据：proxy npz 真实删除
-        assert not harness.raw_path.exists()          # 数据：raw npz 真实删除
+        assert not harness.raw_points_path.exists()   # 数据：raw 三件套真实删除
+        assert not harness.raw_colors_path.exists()
+        assert not harness.raw_meta_path.exists()
         assert not proxy_dir.exists()                 # 空目录一并清理
         assert not raw_dir.exists()
