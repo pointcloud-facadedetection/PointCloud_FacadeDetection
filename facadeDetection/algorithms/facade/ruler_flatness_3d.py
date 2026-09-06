@@ -282,19 +282,36 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     selected = np.flatnonzero(surf & np.isin(bins, solid))
     
     # Correct top_q implementation
-    tops = []
-    for b in solid:
-        ix = selected[bins[selected] == b]
-        if len(ix):
-            if top_q >= 1.0:
-                tops.append(ix[np.argmax(w[ix])])
-            else:
+    if top_q >= 1.0:
+        # argsort+reduceat 分组向量化，与逐 bin 循环 + np.argmax 逐点一致：
+        # stable 排序保持组内原先后顺序，组序按 bin 升序（与 solid 迭代一致），
+        # first-max 语义与 np.argmax 的"组内第一个最大值"相同
+        if len(selected):
+            sel_bins = bins[selected]
+            order = np.argsort(sel_bins, kind='stable')
+            sorted_bins = sel_bins[order]
+            starts = np.flatnonzero(
+                np.r_[True, sorted_bins[1:] != sorted_bins[:-1]])
+            counts = np.diff(np.r_[starts, len(order)])
+            group_ids = np.repeat(np.arange(len(starts)), counts)
+            w_sorted = w[selected][order]
+            seg_max = np.maximum.reduceat(w_sorted, starts)
+            first = np.where(w_sorted == seg_max[group_ids],
+                             np.arange(len(w_sorted)), len(w_sorted))
+            top_rows = np.minimum.reduceat(first, starts)
+            tops = selected[order[top_rows]].astype(np.int64)
+        else:
+            tops = np.empty(0, dtype=np.int64)
+    else:
+        tops = []
+        for b in solid:
+            ix = selected[bins[selected] == b]
+            if len(ix):
                 segment_w = w[ix]
                 target_w = np.quantile(segment_w, top_q)
                 closest_idx = ix[np.argmin(np.abs(segment_w - target_w))]
                 tops.append(closest_idx)
-    
-    tops = np.asarray(tops, dtype=np.int64)
+        tops = np.asarray(tops, dtype=np.int64)
     if len(tops) < 2:
         raise ValueError("实区分段不足以放置靠尺")
     

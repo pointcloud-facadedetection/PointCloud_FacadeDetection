@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, asdict, field
+import atexit
+import shutil
+import tempfile
+import threading
 import time
 import os
 import numpy as np
@@ -12,6 +17,76 @@ from .ruler_flatness_3d import (
 )
 
 _EMPTY_SOURCE_IDS = np.empty(0, dtype=np.int64)
+
+
+# =============================================================================
+# 常驻进程池与共享数组落盘
+#
+# Windows spawn 下每个子进程都要重新启动解释器 + import，一次性池的固定
+# 开销在每次质量计算重复支付；模块级懒加载常驻池只在首次支付，atexit
+# 注册关闭（解释器退出在 PySide6 主窗口清理之后，shutdown(wait=False)
+# 不触碰 Qt 对象，退出顺序安全）。
+#
+# 进程模式任务不再 pickle 携带完整 points/surf 大数组：父进程把共享数组
+# 落一份临时 .npy，任务只传 (路径, 索引/标量, 参数)，子进程
+# np.load(mmap_mode='r') 自取，页由 OS 在子进程间共享。数值路径不变。
+# =============================================================================
+_POOL_LOCK = threading.Lock()
+_SHARED_POOL = None
+_SHARED_POOL_WORKERS = 0
+
+
+def _get_shared_process_pool(workers):
+    """取常驻 ProcessPoolExecutor；worker 数变化时重建。"""
+    global _SHARED_POOL, _SHARED_POOL_WORKERS
+    with _POOL_LOCK:
+        if _SHARED_POOL is None or _SHARED_POOL_WORKERS != int(workers):
+            if _SHARED_POOL is not None:
+                _SHARED_POOL.shutdown(wait=False)
+            _SHARED_POOL = ProcessPoolExecutor(max_workers=int(workers))
+            _SHARED_POOL_WORKERS = int(workers)
+        return _SHARED_POOL
+
+
+def _reset_shared_process_pool():
+    global _SHARED_POOL, _SHARED_POOL_WORKERS
+    with _POOL_LOCK:
+        pool, _SHARED_POOL, _SHARED_POOL_WORKERS = _SHARED_POOL, None, 0
+    if pool is not None:
+        try:
+            pool.shutdown(wait=False)
+        except Exception:
+            pass
+
+
+atexit.register(_reset_shared_process_pool)
+
+
+def _pool_map(workers, func, args_list):
+    """常驻池 map；子进程异常死亡（BrokenProcessPool）时重建池重试一次。"""
+    pool = _get_shared_process_pool(workers)
+    try:
+        return list(pool.map(func, args_list))
+    except BrokenProcessPool:
+        _reset_shared_process_pool()
+        pool = _get_shared_process_pool(workers)
+        return list(pool.map(func, args_list))
+
+
+class _SharedArrayFiles:
+    """进程模式共享数组载体：大数组落临时 .npy，子进程 mmap 自取。"""
+
+    def __init__(self):
+        self._dir = tempfile.mkdtemp(prefix='pcfd_quality_')
+
+    def dump(self, name, array):
+        path = os.path.join(self._dir, f'{name}.npy')
+        with open(path, 'wb') as stream:
+            np.save(stream, array)
+        return path
+
+    def cleanup(self):
+        shutil.rmtree(self._dir, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -619,33 +694,63 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     # ===================================================================
     # Step 5: 并行逐横向 strip 处理
     # ===================================================================
-    args_list = []
-    for uj, u_c in enumerate(u_centers):
-        args_list.append((
-            uj, float(u_c),
-            surf_u, surf_v, surf_ids,
-            v_centers, v_lo_bounds, v_hi_bounds,
-            horizontal_axis, vertical_axis, origin,
-            u_axis, v_axis, base_u_min, base_v_min, v_step,
-            half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
-            params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
-            params.select_band_m, params.hole_band_m,
-        ))
-
     n_workers = min(len(u_centers), params.n_jobs, os.cpu_count() or 1)
 
     if n_workers > 1 and params.parallel_mode == 'process':
         print(f'[PCFD] verticality.parallel_process workers={n_workers} '
               f'strips={len(u_centers)}', flush=True)
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            strip_results = list(executor.map(_verticality_strip_worker, args_list))
+        shared = _SharedArrayFiles()
+        try:
+            surf_paths = (shared.dump('surf_u', surf_u),
+                          shared.dump('surf_v', surf_v),
+                          shared.dump('surf_ids', surf_ids))
+            args_list = []
+            for uj, u_c in enumerate(u_centers):
+                args_list.append((
+                    uj, float(u_c), surf_paths,
+                    v_centers, v_lo_bounds, v_hi_bounds,
+                    horizontal_axis, vertical_axis, origin,
+                    u_axis, v_axis, base_u_min, base_v_min, v_step,
+                    half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
+                    params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+                    params.select_band_m, params.hole_band_m,
+                ))
+            strip_results = _pool_map(
+                min(int(params.n_jobs), os.cpu_count() or 1),
+                _verticality_strip_worker_mmap, args_list)
+        finally:
+            shared.cleanup()
     elif n_workers > 1:
+        args_list = []
+        for uj, u_c in enumerate(u_centers):
+            args_list.append((
+                uj, float(u_c),
+                surf_u, surf_v, surf_ids,
+                v_centers, v_lo_bounds, v_hi_bounds,
+                horizontal_axis, vertical_axis, origin,
+                u_axis, v_axis, base_u_min, base_v_min, v_step,
+                half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
+                params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+                params.select_band_m, params.hole_band_m,
+            ))
         print(f'[PCFD] verticality.parallel_thread workers={n_workers} '
               f'strips={len(u_centers)}', flush=True)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_verticality_strip_worker, args) for args in args_list]
             strip_results = [f.result() for f in futures]
     else:
+        args_list = []
+        for uj, u_c in enumerate(u_centers):
+            args_list.append((
+                uj, float(u_c),
+                surf_u, surf_v, surf_ids,
+                v_centers, v_lo_bounds, v_hi_bounds,
+                horizontal_axis, vertical_axis, origin,
+                u_axis, v_axis, base_u_min, base_v_min, v_step,
+                half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
+                params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+                params.select_band_m, params.hole_band_m,
+            ))
         print(f'[PCFD] verticality.sequential strips={len(u_centers)}', flush=True)
         strip_results = [_verticality_strip_worker(args) for args in args_list]
 
@@ -708,6 +813,28 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
         'verticality_pass_rate': float(np.mean(pass_rows)) if pass_rows else 0.0,
         'rows': rows,
     }
+
+def _direction_worker_mmap(args):
+    """进程模式入口：与 _direction_worker 数值路径完全一致，
+    仅改为按路径 mmap 自取共享数组（避免逐任务 pickle 复制）。"""
+    (points_path, raw_ids_path, plane_model, origin, u_axis, v_axis,
+     angle, params_dict) = args
+    points = np.load(points_path, mmap_mode='r')
+    raw_ids = np.load(raw_ids_path, mmap_mode='r')
+    return _direction_worker((points, raw_ids, plane_model, origin,
+                              u_axis, v_axis, angle, params_dict))
+
+
+def _verticality_strip_worker_mmap(args):
+    """进程模式入口：与 _verticality_strip_worker 数值路径完全一致，
+    仅改为按路径 mmap 自取 surf 三件套。"""
+    (uj, u_c, surf_paths, *rest) = args
+    surf_u = np.load(surf_paths[0], mmap_mode='r')
+    surf_v = np.load(surf_paths[1], mmap_mode='r')
+    surf_ids = np.load(surf_paths[2], mmap_mode='r')
+    return _verticality_strip_worker(
+        (uj, u_c, surf_u, surf_v, surf_ids, *rest))
+
 
 def _direction_worker(args):
     (points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict) = args
@@ -826,21 +953,34 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
           f'points={len(points)}', flush=True)
 
     # Parallel computation for each direction
-    args_list = []
-    for angle in params.flatness_angles_deg:
-        args_list.append((
-            points, raw_ids, plane_model, origin, u_axis, v_axis,
-            angle, params.snapshot()
-        ))
-
     n_workers = min(len(params.flatness_angles_deg), params.n_jobs, os.cpu_count() or 1)
 
     if params.parallel_mode == 'process' and n_workers > 1:
         print(f'[PCFD] quality.parallel_process workers={n_workers} '
               f'points={len(points)}', flush=True)
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            results = list(executor.map(_direction_worker, args_list))
+        shared = _SharedArrayFiles()
+        try:
+            points_path = shared.dump('points', points)
+            raw_ids_path = shared.dump('raw_ids', raw_ids)
+            args_list = []
+            for angle in params.flatness_angles_deg:
+                args_list.append((
+                    points_path, raw_ids_path, plane_model, origin,
+                    u_axis, v_axis, angle, params.snapshot()
+                ))
+            # 常驻池 worker 数按 n_jobs 取齐，与垂直度共用同一池，
+            # spawn 固定开销整个会话只付一次
+            results = _pool_map(min(int(params.n_jobs), os.cpu_count() or 1),
+                                _direction_worker_mmap, args_list)
+        finally:
+            shared.cleanup()
     else:
+        args_list = []
+        for angle in params.flatness_angles_deg:
+            args_list.append((
+                points, raw_ids, plane_model, origin, u_axis, v_axis,
+                angle, params.snapshot()
+            ))
         print(f'[PCFD] quality.parallel_thread workers={n_workers} '
               f'points={len(points)}', flush=True)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -898,7 +1038,9 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         for i in range(n_intervals):
             interval_rows = [r for r, iid in zip(rows, interval_ids) if iid == i]
             v_lo, v_hi = float(edges[i]), float(edges[i + 1])
-            point_v = (points - origin) @ v_axis
+            # 复用顶部已算好的 v_all（同一表达式 (points-origin)@v_axis），
+            # 不再每个 interval 对全量点重算
+            point_v = v_all
             point_mask = (point_v >= v_lo) & (
                 (point_v < v_hi) if i < n_intervals - 1 else (point_v <= v_hi)
             )
