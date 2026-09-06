@@ -265,13 +265,15 @@ class PointCloudService:
         counts = old_offsets[keep_proxy + 1] - old_offsets[keep_proxy]
         new_offsets = np.zeros(n_new + 1, dtype=np.int64)
         new_offsets[1:] = np.cumsum(counts, dtype=np.int64)
-        parts = []
-        for kp in keep_proxy:
-            s = int(old_offsets[kp])
-            e = int(old_offsets[kp + 1])
-            parts.append(old_indices[s:e])
-        new_indices = (np.concatenate(parts).astype(np.int32, copy=False)
-                       if parts else np.empty(0, dtype=np.int32))
+        total = int(new_offsets[-1])
+        if total == 0:
+            return new_offsets, np.empty(0, dtype=np.int32)
+        # np.repeat+arange 展开替代逐组切片拼接（同 core.proxy_to_source_ids
+        # 的 CSR 展开写法）：组序与组内顺序与原逐行循环完全一致
+        offsets_in_group = np.arange(total, dtype=np.int64) - np.repeat(
+            new_offsets[:-1], counts)
+        gather = np.repeat(old_offsets[keep_proxy], counts) + offsets_in_group
+        new_indices = old_indices[gather].astype(np.int32, copy=False)
         return new_offsets, new_indices
 
     def denoise(self, method: str = "adaptive", voxel_size: float = 0.05,
