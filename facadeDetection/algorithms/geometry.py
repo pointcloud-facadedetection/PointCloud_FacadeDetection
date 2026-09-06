@@ -341,14 +341,13 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
             for axis in range(3)
         ])
         dist2 = np.sum((sorted_pts - centers[group_ids]) ** 2, axis=1)
-        # 按体素组稳定选择一个代表点。这里避免依赖浮点相等与
-        # np.unique 返回位置组合，确保代表点数量始终等于体素组数。
-        rep_rows = np.fromiter(
-            (start + int(np.argmin(dist2[start:end]))
-             for start, end in zip(starts, ends)),
-            dtype=np.int64,
-            count=len(starts),
-        )
+        # 按体素组稳定选择"组内第一个最小值"代表点（与 np.argmin 语义一致），
+        # 用 reduceat 向量化替代逐组 Python 循环。
+        seg_min = np.minimum.reduceat(dist2, starts)
+        first_idx = np.where(dist2 == seg_min[group_ids],
+                             np.arange(len(dist2), dtype=np.int64),
+                             len(dist2))
+        rep_rows = np.minimum.reduceat(first_idx, starts)
         reps = sorted_global[rep_rows]
         proxy_parts.append(pts[reps])
         range_parts.append(rng[reps])
