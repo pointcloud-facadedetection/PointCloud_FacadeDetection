@@ -24,10 +24,16 @@ def estimate_elevation_angles(points, scan_origin=None):
     origins = np.zeros((1, 3), dtype=float) if scan_origin is None else np.asarray(scan_origin, dtype=float).reshape(-1, 3)
     if not len(pts):
         return np.empty(0, dtype=np.float32)
-    ranges = np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1)
-    delta = pts[:, None, :] - origins[None, :, :]
-    nearest = np.argmin(np.linalg.norm(delta, axis=2), axis=1)
-    dz = pts[:, 2] - origins[nearest, 2]
+    if len(origins) == 1:
+        # 单测站快路径：最近测站恒为第 0 个，跳过 N×M×3 临时数组与 argmin。
+        # 数学与原实现逐项相同（pts - o 的广播结果一致）。
+        ranges = np.linalg.norm(pts - origins[0], axis=1)
+        dz = pts[:, 2] - origins[0, 2]
+    else:
+        ranges = np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1)
+        delta = pts[:, None, :] - origins[None, :, :]
+        nearest = np.argmin(np.linalg.norm(delta, axis=2), axis=1)
+        dz = pts[:, 2] - origins[nearest, 2]
     horizontal = np.sqrt(np.maximum(ranges ** 2 - dz ** 2, 0.0))
     elevation = np.degrees(np.arctan2(dz, horizontal + 1e-9))
     return elevation.astype(np.float32)
