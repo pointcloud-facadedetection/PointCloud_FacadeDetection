@@ -5,6 +5,7 @@ from algorithms.registration import (
     point_to_plane_icp, manual_seeded_icp, build_registration_cloud,
     audit_exported_global_transform, estimate_xy_initial_transform,
 )
+from services import proxy_cache
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
 from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
@@ -54,6 +55,8 @@ class PointCloudStationService:
             for row in rows:
                 self.pointcloud.release_station_domain(row.id)
         PointCloudStationRepo.delete(self.project_uuid, [x.id for x in rows])
+        for row in rows:
+            proxy_cache.delete_proxy_cache(self.project_uuid, row.id)
         for path in result_paths:
             result = Path(path)
             # 配准结果在一次操作中由所有参与站点共享；
@@ -164,6 +167,12 @@ class PointCloudStationService:
                    (state_offsets[1:] >= state_offsets[:-1])) and
             np.all((state_indices >= 0) & (state_indices < len(points))) and
             np.all(np.diff(state_offsets) > 0))
+        # 缓存只代表 dist 重建分支的结果；dist 已消失时不得用缓存改变语义。
+        cached_proxy = None
+        if not restored_direct and dist_path.exists():
+            cached_proxy = proxy_cache.load_proxy_cache(
+                self.project_uuid, station.id, fingerprint_key,
+                source_count=len(points))
         if restored_direct:
             representative_ids = state_indices[state_offsets[:-1]]
             proxy = points[representative_ids]
@@ -175,6 +184,21 @@ class PointCloudStationService:
                 'denoise_restored': True,
             })
             print(f'[PCFD] denoise.restore station={station.id} '
+                  f'proxy={len(proxy)} raw={len(points)}', flush=True)
+        elif cached_proxy is not None:
+            # 与 dist 重建分支等价：代理点按 CSR 代表行从源点云采集。
+            representative_ids = cached_proxy['indices'][cached_proxy['offsets'][:-1]]
+            proxy = points[representative_ids]
+            proxy_colors = colors[representative_ids] if colors is not None else None
+            metadata.update({
+                'proxy_source_offsets': cached_proxy['offsets'].tolist(),
+                'proxy_source_indices': cached_proxy['indices'].tolist(),
+                'ranges': cached_proxy['ranges'].tolist(),
+                'scan_origins': cached_proxy['scan_origins'].tolist(),
+                'distance_source': cached_proxy['distance_source'],
+                'proxy_cache': 'restored',
+            })
+            print(f'[PCFD] proxy_cache.restored station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)}', flush=True)
         elif dist_path.exists():
             dist = read_dist(dist_path, points, metadata)
@@ -192,6 +216,11 @@ class PointCloudStationService:
                 'distance_source': dist.source,
                 'distance_warnings': dist.warnings,
             })
+            # 重建结果对同一资产是确定的，落盘后重开项目可直接命中缓存
+            proxy_cache.save_proxy_cache(
+                self.project_uuid, station.id, fingerprint_key,
+                offsets=offsets, indices=indices, ranges=ranges,
+                scan_origins=dist.scan_origins, distance_source=dist.source)
         else:
             proxy, proxy_colors = points, colors
         self.pointcloud.register_source_asset(source_id, points, colors,
