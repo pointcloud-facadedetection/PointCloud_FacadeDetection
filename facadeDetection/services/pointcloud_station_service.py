@@ -56,7 +56,7 @@ class PointCloudStationService:
                 self.pointcloud.release_station_domain(row.id)
         PointCloudStationRepo.delete(self.project_uuid, [x.id for x in rows])
         for row in rows:
-            proxy_cache.delete_proxy_cache(self.project_uuid, row.id)
+            proxy_cache.delete_station_cache(self.project_uuid, row.id)
         for path in result_paths:
             result = Path(path)
             # 配准结果在一次操作中由所有参与站点共享；
@@ -145,7 +145,19 @@ class PointCloudStationService:
                 return existing
             self.pointcloud.datasets.pop(dataset_id, None)
             self.pointcloud.release_station_domain(station.id)
-        points, colors = self._load(station.source_path)
+        cached_raw = proxy_cache.load_raw_cache(
+            self.project_uuid, station.id, fingerprint_key)
+        if cached_raw is not None:
+            # 与 self._load 等价：同一资产的 PLY 解包结果逐点一致。
+            points, colors = cached_raw
+            print(f'[PCFD] raw_cache.restored station={station.id} '
+                  f'raw={len(points)}', flush=True)
+        else:
+            points, colors = self._load(station.source_path)
+            # 解包结果对同一资产是确定的，落盘后重开项目跳过 Open3D 读盘
+            proxy_cache.save_raw_cache(
+                self.project_uuid, station.id, fingerprint_key,
+                points=points, colors=colors)
         source_id = f'{dataset_id}:source'
         state = PointCloudStationRepo.get_denoise_state(self.project_uuid, station.id)
         dist_path = Path(station.source_path).with_suffix('.dist')
