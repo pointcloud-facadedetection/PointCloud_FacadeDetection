@@ -39,6 +39,7 @@ from .controllers.facade_quality import FacadeQualityController
 from .controllers.registration import RegistrationController
 from .controllers.project_lifecycle import ProjectLifecycleController
 from .dialogs.facade_quality_dialog import FacadeQualityDialog
+from .dialogs.loading_dialog import LoadingDialog
 from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
@@ -1254,6 +1255,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         controller.warning_requested.connect(self._show_lifecycle_warning)
         controller.status_message.connect(self._show_lifecycle_status)
         controller.status_cleared.connect(self._clear_lifecycle_status)
+        controller.load_started.connect(self._show_loading_dialog)
+        controller.load_progress.connect(self._update_loading_dialog)
+        controller.load_finished.connect(self._hide_loading_dialog)
         controller.station_panel_refresh_requested.connect(
             self._refresh_station_panel)
         controller.project_list_refresh_requested.connect(
@@ -1279,6 +1283,22 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
 
     def _clear_lifecycle_status(self):
         self.statusBar().clearMessage()
+
+    def _show_loading_dialog(self):
+        if getattr(self, '_loading_dialog', None) is None:
+            self._loading_dialog = LoadingDialog(self)
+        self._loading_dialog.update_progress(0, '正在加载点云，请稍候...')
+        self._loading_dialog.show()
+
+    def _update_loading_dialog(self, percent, text):
+        dialog = getattr(self, '_loading_dialog', None)
+        if dialog is not None and dialog.isVisible():
+            dialog.update_progress(percent, text)
+
+    def _hide_loading_dialog(self):
+        dialog = getattr(self, '_loading_dialog', None)
+        if dialog is not None:
+            dialog.hide()
 
     def _reset_facade_list(self):
         if hasattr(self, 'list_facades'):

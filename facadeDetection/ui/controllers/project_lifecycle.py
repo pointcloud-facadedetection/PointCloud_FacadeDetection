@@ -18,6 +18,9 @@ class ProjectLifecycleController(QObject):
     report_preview_refresh_requested = Signal()
     facade_results_refresh_requested = Signal(object)  # 立面结果列表
     page_change_requested = Signal(int)
+    load_started = Signal()               # upload/fls 后台计算段开始（显示加载窗口）
+    load_progress = Signal(int, str)      # (百分比, 进度文本)
+    load_finished = Signal()              # 加载会话结束：完成/失败/被取消（关闭加载窗口）
 
     def __init__(self, project_overview_service, pointcloud_service,
                  station_service, project_operation_service, render_service,
@@ -82,12 +85,16 @@ class ProjectLifecycleController(QObject):
             return
         self._active_load_worker = worker
         worker.signals.progress.connect(
-            lambda _pct, text: self.status_message.emit(text, 0))
+            lambda pct, text: (
+                self.status_message.emit(text, 0),
+                self.load_progress.emit(pct, text),
+            ))
         worker.signals.finished.connect(
             lambda result: self.on_load_finished(
                 generation, operation, project_id, result, before_ids))
         worker.signals.failed.connect(
             lambda error: self.on_load_failed(generation, error))
+        self.load_started.emit()
         if self.load_pool is None:
             worker.run()
         else:
@@ -98,6 +105,7 @@ class ProjectLifecycleController(QObject):
             return
         self._active_load_worker = None
         self._load_in_progress = False
+        self.load_finished.emit()
         self.status_message.emit('点云加载失败', 5000)
         self.warning_requested.emit('点云加载', error)
 
@@ -108,6 +116,7 @@ class ProjectLifecycleController(QObject):
             return
         self._active_load_worker = None
         self._load_in_progress = False
+        self.load_finished.emit()
         self.status_cleared.emit()
         try:
             result = result or {}
@@ -215,6 +224,8 @@ class ProjectLifecycleController(QObject):
         if worker is not None:
             worker.cancel()
             self._active_load_worker = None
+            # 被取消的 worker 不会再走完成/失败回调，加载窗口须在此关闭
+            self.load_finished.emit()
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:
