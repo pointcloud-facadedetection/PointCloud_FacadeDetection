@@ -727,7 +727,12 @@ def ensure_normals(pcd, voxel_size=0.05, inplace=False):
             norms = np.linalg.norm(existing, axis=1)
             if np.all(norms > 1e-8):
                 pcd_work = pcd if inplace else copy.deepcopy(pcd)
-                pcd_work.normals = o3d.utility.Vector3dVector(existing / norms[:, None])
+                if np.all(np.abs(norms - 1.0) <= 1e-12):
+                    # 已单位化（如检测链路缓存的 float64 估计原值）：直接复用，
+                    # 避免一次除法带来的末位偏差，保证与估计输出逐位一致
+                    pcd_work.normals = o3d.utility.Vector3dVector(existing)
+                else:
+                    pcd_work.normals = o3d.utility.Vector3dVector(existing / norms[:, None])
                 return pcd_work
     # 避免无条件 deepcopy
     pcd_work = pcd if inplace else copy.deepcopy(pcd)

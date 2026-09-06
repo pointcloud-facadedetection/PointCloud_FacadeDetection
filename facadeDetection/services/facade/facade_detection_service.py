@@ -14,11 +14,21 @@ import open3d as o3d
 
 from algorithms.facade.facade_detection import detect_facades_adaptive
 from config.settings import Config
+from services import proxy_cache
 from services.dal.results_repo import ResultsRepo
 from services.facade.facade_index_service import FacadeIndexService
 from utils.logging_utils import trace
 
 log = logging.getLogger("facadeDetection.facade")
+
+
+def _estimate_geo_normals(geo, voxel_size):
+    """大点云代理法向估计：参数与 ensure_normals 估计分支完全一致
+    （radius=max(voxel_size*4, 0.2), max_nn=50），保证首次走估计路径的
+    检测结果与优化前逐点一致；估计原值（float64）由调用方缓存复用。"""
+    geo.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=max(float(voxel_size) * 4.0, 0.2), max_nn=50))
 
 
 class FacadeDetectionService:
@@ -75,24 +85,34 @@ class FacadeDetectionService:
             trace("facade.detect.error", cloud=cloud_name, reason="empty_proxy")
             return []
 
+        vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
+
         geo = o3d.geometry.PointCloud()
         geo.points = o3d.utility.Vector3dVector(proxy_pts.astype(float))
         
-        # 若代理点有法向则复用，否则估计
-        if hasattr(dataset, 'proxy_normals') and dataset.proxy_normals is not None:
-            geo.normals = o3d.utility.Vector3dVector(dataset.proxy_normals.astype(float))
-        else:
+        # 若代理点有法向则复用（长度必须与当前代理一致，去噪子集会失效）
+        cached_normals = getattr(dataset, 'proxy_normals', None)
+        estimated_large = False
+        if cached_normals is not None and len(cached_normals) == len(proxy_pts):
+            geo.normals = o3d.utility.Vector3dVector(
+                np.asarray(cached_normals, dtype=float))
+        elif len(proxy_pts) < 500000:
             # 兜底：估计法向（仅对小数据），并缓存到 dataset 供后续检测复用
-            if len(proxy_pts) < 500000:
-                geo.estimate_normals(
-                    search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                        radius=max(float(Config.DEFAULT_VOXEL_SIZE) * 4, 0.2), 
-                        max_nn=30
-                    )
+            geo.estimate_normals(
+                search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                    radius=max(float(Config.DEFAULT_VOXEL_SIZE) * 4, 0.2), 
+                    max_nn=30
                 )
-                dataset.proxy_normals = np.asarray(geo.normals, dtype=np.float32)
+            )
+            dataset.proxy_normals = np.asarray(geo.normals, dtype=np.float32)
+        else:
+            # 大点云：估计一次（参数与优化前检测内部估计完全一致，float64
+            # 原值保留保证逐点一致），写进 dataset 并持久化到 proxy 缓存，
+            # 下次检测/重开直接复用
+            _estimate_geo_normals(geo, vsize)
+            dataset.proxy_normals = np.asarray(geo.normals, dtype=np.float64)
+            estimated_large = True
 
-        vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
         min_area = float(getattr(Config, 'MIN_FACADE_AREA', 10.0))
 
         detect_kwargs = dataset.metadata or {}
@@ -123,6 +143,14 @@ class FacadeDetectionService:
         station_id = (data or {}).get('station_id') or (dataset.metadata or {}).get('station_id')
         if project_uuid and station_id is None:
             raise ValueError('当前处理点云未绑定站点，拒绝保存立面结果')
+        if estimated_large and project_uuid and station_id is not None:
+            # 代理法向对同一资产指纹是确定的，落盘后重开项目直接复用；
+            # 指纹缺失或长度校验失败时 save_proxy_normals 仅告警跳过
+            fingerprint = (dataset.metadata or {}).get('asset_fingerprint')
+            if fingerprint:
+                proxy_cache.save_proxy_normals(
+                    project_uuid, station_id, tuple(fingerprint),
+                    dataset.proxy_normals)
         for facade in facades:
             facade['dataset_id'] = dataset.dataset_id
             facade['dataset_revision'] = revision
@@ -216,9 +244,18 @@ class FacadeDetectionService:
         geo.points = o3d.utility.Vector3dVector(roi_pos.astype(float))
         
         # 复用法向
-        if hasattr(dataset, 'proxy_normals') and dataset.proxy_normals is not None:
-            roi_normals = dataset.proxy_normals[global_indices]
-            geo.normals = o3d.utility.Vector3dVector(roi_normals.astype(float))
+        cached_normals = getattr(dataset, 'proxy_normals', None)
+        if cached_normals is not None and len(cached_normals) == n_proxy:
+            if len(global_indices) == n_proxy:
+                # 全覆盖时缓存子集就是全集估计原值，逐点一致
+                geo.normals = o3d.utility.Vector3dVector(
+                    np.asarray(cached_normals[global_indices], dtype=float))
+            elif np.asarray(cached_normals).dtype != np.float64:
+                # 既有小云（float32 缓存）行为：子集直接索引复用
+                geo.normals = o3d.utility.Vector3dVector(
+                    np.asarray(cached_normals[global_indices], dtype=float))
+            # 大云（float64 缓存）严格子集：保持旧行为，不设置法向，
+            # 由检测内部对子集重新估计，保证与优化前逐点一致
 
         vsize = float(getattr(Config, 'DEFAULT_VOXEL_SIZE', 0.05))
 

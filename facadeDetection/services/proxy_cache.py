@@ -169,11 +169,13 @@ def load_raw_cache(project_uuid, station_id, fingerprint_key):
 def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
                      indices, ranges, scan_origins, distance_source,
                      representative_ids, proxy_points=None,
-                     proxy_colors=None) -> bool:
+                     proxy_colors=None, proxy_normals=None) -> bool:
     """写入代理缓存（np.savez 不压缩）；失败仅警告并返回 False。
 
     proxy_points/proxy_colors 是重建产出的代理数组本体；持久化后重开项目
     直接使用它们，不从 raw memmap 按代表行采集（采集会把整个映射换页）。
+    proxy_normals 是检测首次估计的代理法向（float64 原值），随同一指纹
+    持久化后下次检测/重开直接复用。
     """
     try:
         fp_path, fp_sha, fp_size = _fingerprint_fields(fingerprint_key)
@@ -185,6 +187,9 @@ def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
             arrays['proxy_colors'] = (
                 np.empty((0, 3), dtype=np.float32) if proxy_colors is None
                 else np.asarray(proxy_colors, dtype=np.float32).reshape(-1, 3))
+        if proxy_normals is not None:
+            arrays['proxy_normals'] = np.asarray(
+                proxy_normals, dtype=np.float64).reshape(-1, 3)
         _save_npz(
             proxy_cache_path(project_uuid, station_id),
             offsets=np.asarray(offsets, dtype=np.int64),
@@ -212,6 +217,8 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
 
     返回的 proxy_points/proxy_colors 是缓存的代理数组本体；旧缓存没有
     这两个字段（或形状与 CSR 不一致）时为 None，调用方回退按代表行采集。
+    proxy_normals 同理：无字段或长度与代理数不一致时为 None，调用方按
+    现行逻辑估计法向。
     """
     try:
         path = proxy_cache_path(project_uuid, station_id)
@@ -242,6 +249,13 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                     else:
                         # 颜色形状损坏：整份代理回退采集，不混用半份缓存
                         proxy_points = None
+            proxy_normals = None
+            if 'proxy_normals' in data.files:
+                cand_normals = np.asarray(data['proxy_normals'],
+                                          dtype=np.float64)
+                if cand_normals.ndim == 2 and cand_normals.shape[1] == 3 and \
+                        len(cand_normals) == len(offsets) - 1:
+                    proxy_normals = cand_normals
         # CSR 结构完整性：损坏文件绝不进入主流程
         if (len(offsets) < 2 or offsets[0] != 0 or
                 np.any(np.diff(offsets) <= 0) or
@@ -261,9 +275,39 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                 'representative_ids': representative_ids,
                 'ranges': ranges, 'scan_origins': scan_origins,
                 'distance_source': distance_source,
-                'proxy_points': proxy_points, 'proxy_colors': proxy_colors}
+                'proxy_points': proxy_points, 'proxy_colors': proxy_colors,
+                'proxy_normals': proxy_normals}
     except Exception:
         return None
+
+
+def save_proxy_normals(project_uuid, station_id, fingerprint_key,
+                       normals) -> bool:
+    """向既有 proxy 缓存追加代理法向（检测首次估计后持久化）。
+
+    代理法向对同一资产指纹是确定的；仅当缓存存在、指纹一致且法向条数与
+    CSR 代理数一致时才原子重写 npz（去噪子集的法向长度不符，绝不写入）。
+    任何失败仅警告并返回 False，不影响主流程。
+    """
+    try:
+        path = proxy_cache_path(project_uuid, station_id)
+        if not path.exists():
+            return False
+        normals = np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+        with np.load(path, allow_pickle=False) as data:
+            if not _fingerprint_matches(data, fingerprint_key):
+                return False
+            # 长度对不上 CSR 代理数的法向不是这份缓存的法向，拒绝混入
+            if len(normals) != len(data['offsets']) - 1:
+                return False
+            arrays = {name: data[name] for name in data.files}
+        arrays['proxy_normals'] = normals
+        _save_npz(path, **arrays)
+        return True
+    except Exception as exc:
+        print(f'[PCFD] proxy_cache.normals_save_failed station={station_id} '
+              f'reason={exc}', flush=True)
+        return False
 
 
 def delete_station_cache(project_uuid, station_id) -> None:

@@ -312,6 +312,14 @@ class PointCloudStationService:
                 raise RuntimeError(
                     f'站点 {station.display_name} 的去噪状态与当前代理点云不一致，'
                     '为避免展示原始噪点云，请重新执行去噪。')
+        # 检测估计的代理法向对同一资产是确定的；随缓存恢复挂到 dataset，
+        # 下次检测/重开直接复用，不再重复估计。去噪子集长度与缓存代理数
+        # 不一致时跳过，由检测按现行逻辑估计。
+        if cached_proxy is not None:
+            cached_normals = cached_proxy.get('proxy_normals')
+            if (cached_normals is not None and
+                    len(cached_normals) == len(dataset.proxy_points)):
+                dataset.proxy_normals = cached_normals
         return dataset
 
     @staticmethod
