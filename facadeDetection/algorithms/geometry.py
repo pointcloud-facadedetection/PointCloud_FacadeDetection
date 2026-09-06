@@ -290,7 +290,7 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     if not len(pts):
         return (np.empty((0, 3), np.float32), None,
                 np.zeros(1, np.int64), np.empty(0, np.int32),
-                np.empty(0, np.float32))
+                np.empty(0, np.float32), np.empty(0, np.int32))
 
     # Reproduce the adaptive voxel grouping, then preserve the complete group.
     shells = kwargs.pop("shells", ((10., .10), (20., .08), (35., .06),
@@ -299,7 +299,7 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     col = None if colors is None else np.asarray(colors, dtype=np.float32).reshape(-1, 3)
     if col is not None and len(col) != len(pts):
         raise ValueError("colors length mismatch")
-    proxy_parts, color_parts, range_parts, source_parts = [], [], [], []
+    proxy_parts, color_parts, range_parts, source_parts, rep_parts = [], [], [], [], []
     # Proxy construction must cover every Source row.  A display crop belongs
     # to a later decision, not to the persistent mapping.
     lo = float(kwargs.pop("min_range", 0.0)); crop = float(kwargs.pop("crop_range", np.max(rng)))
@@ -346,6 +346,9 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
         reps = sorted_global[rep_rows]
         proxy_parts.append(pts[reps])
         range_parts.append(rng[reps])
+        # 代表点是组内距质心最近的源行，不一定是 CSR 组首；
+        # 显式返回才能从缓存逐点复现 proxy。
+        rep_parts.append(reps)
         # CSR 的每个 offset 对应一个 Proxy 点，而不是一个距离壳层。
         # 体素内成员按代理顺序保存，保证 proxy[i] 映射到
         # indices[offsets[i]:offsets[i + 1]]。
@@ -365,7 +368,9 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     proxy_colors = (np.vstack(color_parts).astype(np.float32, copy=False)
                     if col is not None else None)
     proxy_ranges = np.concatenate(range_parts).astype(np.float32, copy=False)
-    return proxy, proxy_colors, offsets, indices, proxy_ranges
+    representatives = (np.concatenate(rep_parts).astype(np.int32, copy=False)
+                       if rep_parts else np.empty(0, np.int32))
+    return proxy, proxy_colors, offsets, indices, proxy_ranges, representatives
 
 
 def fit_plane_svd(points):

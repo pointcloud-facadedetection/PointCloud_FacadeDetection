@@ -20,7 +20,8 @@ def proxy_cache_path(project_uuid, station_id) -> Path:
 
 
 def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
-                     indices, ranges, scan_origins, distance_source) -> bool:
+                     indices, ranges, scan_origins, distance_source,
+                     representative_ids) -> bool:
     """写入代理缓存（np.savez 不压缩）；失败仅警告并返回 False。"""
     try:
         path = proxy_cache_path(project_uuid, station_id)
@@ -30,6 +31,10 @@ def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
         np.savez(tmp,  # 实际写入 <stem>.tmp.npz，完成后原子替换正式文件
                  offsets=np.asarray(offsets, dtype=np.int64),
                  indices=np.asarray(indices, dtype=np.int32),
+                 # CSR 组内按 lexsort 排列，代表点不一定是组首；
+                 # 显式持久化代表行才能逐点复现重建结果
+                 representative_ids=np.asarray(representative_ids,
+                                               dtype=np.int64),
                  ranges=np.asarray(ranges, dtype=np.float32),
                  scan_origins=np.asarray(scan_origins, dtype=np.float32),
                  distance_source=np.array(str(distance_source)),
@@ -63,6 +68,8 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                 return None
             offsets = np.asarray(data['offsets'], dtype=np.int64)
             indices = np.asarray(data['indices'], dtype=np.int32)
+            representative_ids = np.asarray(data['representative_ids'],
+                                            dtype=np.int64)
             ranges = np.asarray(data['ranges'], dtype=np.float32)
             scan_origins = np.asarray(data['scan_origins'], dtype=np.float32)
             distance_source = str(data['distance_source'])
@@ -70,13 +77,20 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
         if (len(offsets) < 2 or offsets[0] != 0 or
                 np.any(np.diff(offsets) <= 0) or
                 len(indices) != int(offsets[-1]) or
+                len(representative_ids) != len(offsets) - 1 or
                 len(ranges) != len(offsets) - 1):
             return None
-        if (source_count is not None and len(indices) and
-                (indices.min() < 0 or indices.max() >= source_count)):
-            return None
-        return {'offsets': offsets, 'indices': indices, 'ranges': ranges,
-                'scan_origins': scan_origins,
+        if source_count is not None:
+            if len(indices) and (indices.min() < 0 or
+                                 indices.max() >= source_count):
+                return None
+            if len(representative_ids) and \
+                    (representative_ids.min() < 0 or
+                     representative_ids.max() >= source_count):
+                return None
+        return {'offsets': offsets, 'indices': indices,
+                'representative_ids': representative_ids,
+                'ranges': ranges, 'scan_origins': scan_origins,
                 'distance_source': distance_source}
     except Exception:
         return None

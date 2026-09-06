@@ -186,8 +186,8 @@ class PointCloudStationService:
             print(f'[PCFD] denoise.restore station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)}', flush=True)
         elif cached_proxy is not None:
-            # 与 dist 重建分支等价：代理点按 CSR 代表行从源点云采集。
-            representative_ids = cached_proxy['indices'][cached_proxy['offsets'][:-1]]
+            # 与 dist 重建分支等价：代理点按持久化的代表行从源点云采集。
+            representative_ids = cached_proxy['representative_ids']
             proxy = points[representative_ids]
             proxy_colors = colors[representative_ids] if colors is not None else None
             metadata.update({
@@ -204,7 +204,7 @@ class PointCloudStationService:
             dist = read_dist(dist_path, points, metadata)
             elevations = (estimate_elevation_angles(points, dist.scan_origins)
                           if len(dist.scan_origins) else None)
-            proxy, proxy_colors, offsets, indices, ranges = stratified_proxy_build(
+            proxy, proxy_colors, offsets, indices, ranges, representatives = stratified_proxy_build(
                 points, colors, dist.ranges_m,
                 scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
                 elevations=elevations)
@@ -220,7 +220,8 @@ class PointCloudStationService:
             proxy_cache.save_proxy_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 offsets=offsets, indices=indices, ranges=ranges,
-                scan_origins=dist.scan_origins, distance_source=dist.source)
+                scan_origins=dist.scan_origins, distance_source=dist.source,
+                representative_ids=representatives)
         else:
             proxy, proxy_colors = points, colors
         self.pointcloud.register_source_asset(source_id, points, colors,

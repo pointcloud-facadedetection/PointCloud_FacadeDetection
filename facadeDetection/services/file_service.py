@@ -133,7 +133,7 @@ class FileService:
                     from algorithms.geometry import estimate_elevation_angles
                     elevations = estimate_elevation_angles(pts, dist.scan_origins)
 
-                proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges = stratified_proxy_build(
+                proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges, _reps = stratified_proxy_build(
                     pts, cols,
                     dist.ranges_m,
                     scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
@@ -333,7 +333,7 @@ class FileService:
                     elevations = estimate_elevation_angles(source_pts, dist.scan_origins)
 
                 # 使用修复后的 stratified_downsample
-                proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges = stratified_proxy_build(
+                proc_pts, proc_cols, proxy_offsets, proxy_indices, proc_ranges, _reps = stratified_proxy_build(
                     source_pts, source_cols,
                     dist.ranges_m,
                     scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
