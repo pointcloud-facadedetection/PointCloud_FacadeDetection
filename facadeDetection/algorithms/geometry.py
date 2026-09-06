@@ -740,10 +740,14 @@ def ensure_normals(pcd, voxel_size=0.05, inplace=False):
     pcd_work.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=50)
     )
-    # 不做 orient_normals_consistent_tangent_plane：检测链路对法向符号
-    # 完全不敏感（hough_facade._canonical_normals 统一半球，facade_detection
-    # 内所有法向点积均取 np.abs），一致定向只翻转符号，不改变任何判定，
-    # 跳过它对检测输出逐点一致，省去大图 MST 传播的可观耗时。
+    # orient_normals_consistent_tangent_plane 不能跳过：粗层
+    # voxel_down_sample 对法向做带符号平均，平均方向依赖一致定向
+    # （实测 1.5cm 密度 100 万点云 489/10051 个体素平均法向方向显著改变），
+    # 会改变粗层 Hough 投票与最终 facades，违反逐点一致边界。
+    try:
+        pcd_work.orient_normals_consistent_tangent_plane(30)
+    except Exception:
+        pcd_work.orient_normals_towards_camera_location([0, 0, 0])
     return pcd_work
 
 
