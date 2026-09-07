@@ -217,7 +217,10 @@ class ProjectOverviewService:
                                'quality_status': row.quality_status,
                                'quality_report': row.quality_report_json,
                                'color': row.color_json,
-                                'dataset_revision': row.dataset_revision}
+                                'dataset_revision': row.dataset_revision,
+                                'dataset_id': row.dataset_id,          # 新增
+                                'dataset_fingerprint': row.dataset_fingerprint,  # 新增
+                                'station_id': row.station_id}          # 新增
                 artifact = (row.quality_report_json or {}).get('quality_artifact_path')
                 if artifact:
                     path = Path(artifact)

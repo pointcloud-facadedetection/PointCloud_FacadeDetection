@@ -139,6 +139,16 @@ class ViewportRenderService:
 
     def facade_color_for(self, facade: dict, order: int = 0):
         """Return the discrete color shared by viewport and result panel."""
+        # Historical projects persist the exact facade color.  Prefer it over
+        # the current palette so reopening a project does not remap colors.
+        saved = facade.get('color')
+        if saved is not None:
+            try:
+                value = tuple(float(channel) for channel in saved)
+                if len(value) == 3:
+                    return value
+            except (TypeError, ValueError):
+                pass
         palette = getattr(Config, 'FACADE_INSTANCE_COLORS', []) or []
         if palette:
             try:

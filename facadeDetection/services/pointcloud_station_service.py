@@ -173,10 +173,16 @@ class PointCloudStationService:
                     'asset_fingerprint': list(fingerprint_key),
                     'source_raw_count': int(len(points))}
         metadata.update(self._global_coordinate_metadata(station.source_path))
-        state_offsets = np.asarray((state or {}).get('proxy_source_offsets', []),
-                                   dtype=np.int64)
-        state_indices = np.asarray((state or {}).get('proxy_source_indices', []),
-                                   dtype=np.int64)
+        # 兼容旧项目：source_offsets / source_indices 别名
+        state_payload = state or {}
+        state_offsets = np.asarray(
+            state_payload.get('proxy_source_offsets',
+                              state_payload.get('source_offsets', [])),
+            dtype=np.int64)
+        state_indices = np.asarray(
+            state_payload.get('proxy_source_indices',
+                              state_payload.get('source_indices', [])),
+            dtype=np.int64)
         restored_direct = bool(
             (state or {}).get('enabled') and len(state_offsets) >= 2 and
             len(state_offsets) == int((state or {}).get('proxy_count', 0)) + 1 and
@@ -263,7 +269,10 @@ class PointCloudStationService:
         self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
         if state and state.get('enabled') and not restored_direct:
-            keep = np.asarray(state.get('keep_proxy_indices', []), dtype=np.int64)
+            # 兼容旧项目：proxy_keep_indices 别名
+            keep = np.asarray(
+                state.get('keep_proxy_indices', state.get('proxy_keep_indices', [])),
+                dtype=np.int64)
             base_count = int(state.get('proxy_base_count', len(proxy)))
             saved_count = int(state.get('proxy_count', len(keep)))
             valid_keep = (len(keep) == saved_count and
@@ -285,11 +294,15 @@ class PointCloudStationService:
             if (base_count == len(proxy) and valid_keep):
                 metadata = dict(dataset.metadata or {})
                 # 去噪快照来自 JSON（list）；运行期统一转回 ndarray
-                for key, dtype in (('proxy_source_offsets', np.int64),
-                                   ('proxy_source_indices', np.int32),
-                                   ('ranges', np.float32)):
-                    if state.get(key) is not None:
-                        metadata[key] = np.asarray(state[key], dtype=dtype)
+                # 兼容旧项目：source_offsets / source_indices 别名
+                for key, dtype, aliases in (('proxy_source_offsets', np.int64, ('source_offsets',)),
+                                   ('proxy_source_indices', np.int32, ('source_indices',)),
+                                   ('ranges', np.float32, ())):
+                    value = state.get(key)
+                    if value is None:
+                        value = next((state.get(alias) for alias in aliases if state.get(alias) is not None), None)
+                    if value is not None:
+                        metadata[key] = np.asarray(value, dtype=dtype)
                 dataset = self.pointcloud.register_dataset(
                     dataset_id, proxy[keep],
                     proxy_colors[keep] if proxy_colors is not None else None,
