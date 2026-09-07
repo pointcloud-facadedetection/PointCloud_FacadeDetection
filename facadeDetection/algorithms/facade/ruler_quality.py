@@ -735,7 +735,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
             ))
         print(f'[PCFD] verticality.parallel_thread workers={n_workers} '
               f'strips={len(u_centers)}', flush=True)
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_verticality_strip_worker, args) for args in args_list]
             strip_results = [f.result() for f in futures]
     else:
@@ -983,7 +983,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
             ))
         print(f'[PCFD] quality.parallel_thread workers={n_workers} '
               f'points={len(points)}', flush=True)
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_direction_worker, args) for args in args_list]
             results = [f.result() for f in futures]
 
