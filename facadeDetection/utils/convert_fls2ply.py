@@ -200,7 +200,7 @@ def convert_fls_to_ply(
     output_dir: str,
     project_name: Optional[str] = None,
     on_stdout: Optional[Callable[[str], None]] = None,
-    merge_scans: bool = True,
+    merge_scans: bool = False,
     use_gps: bool = True,
     dll_dir: Optional[str] = None,
 ) -> ConversionResult:

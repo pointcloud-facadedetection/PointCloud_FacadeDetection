@@ -38,8 +38,23 @@ class FileRepo:
                     FileAsset.kind == FileKind.raw_pointcloud.value,
                     FileAsset.ext.ilike('.ply'),
                     FileAsset.path.ilike('%.ply'),
+                    FileAsset.ext.ilike('.e57'),
+                    FileAsset.path.ilike('%.e57'),
                 ))
             return s.execute(q.order_by(FileAsset.id.asc())).scalars().all()
+
+    @staticmethod
+    def list_assets_by_kind(project_uuid: str, kind: FileKind) -> list[FileAsset]:
+        """列出项目中指定原始资源；路径仍以绝对路径返回，便于编辑回显。"""
+        with project_session(project_uuid) as s:
+            proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()
+            if not proj:
+                return []
+            return list(s.execute(select(FileAsset).where(
+                FileAsset.project_id == proj.id,
+                FileAsset.kind == kind.value,
+                FileAsset.is_deleted == False,
+            ).order_by(FileAsset.id.asc())).scalars().all())
 
     @staticmethod
     def validate_asset(asset: FileAsset) -> tuple[bool, str]:

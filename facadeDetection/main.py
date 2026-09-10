@@ -1,6 +1,8 @@
 import sys
 import multiprocessing
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
+from pathlib import Path
 
 from ui.main_window import APPLICATION_TITLE, MainWindow
 from ui.theme import apply_application_theme
@@ -8,6 +10,9 @@ from db.connection import init_index_db
 
 def main():
     app = QApplication(sys.argv)
+    logo_path = Path(__file__).resolve().parent / 'utils' / 'logo.png'
+    if logo_path.is_file():
+        app.setWindowIcon(QIcon(str(logo_path)))
     app.setApplicationName(APPLICATION_TITLE)
     app.setOrganizationName('PointCloud FacadeDetection')
     apply_application_theme(app)

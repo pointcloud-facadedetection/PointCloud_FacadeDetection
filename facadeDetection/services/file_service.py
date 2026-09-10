@@ -21,6 +21,7 @@ from config.storage import Storage
 from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
+from utils.e57_reader import read_e57
 from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
 
@@ -44,7 +45,7 @@ class FileService:
     提供 project_uuid通过 FileRepo 保存，并触发渲染
     """
 
-    SUPPORTED_POINT_CLOUD_EXT = {'.ply', '.pcd', '.xyz', '.xyzn', '.xyzrgb', '.pts'}
+    SUPPORTED_POINT_CLOUD_EXT = {'.ply', '.pcd', '.xyz', '.xyzn', '.xyzrgb', '.pts', '.e57'}
     SUPPORTED_IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.bmp'}
 
     def __init__(self, viewport, db, render_service):
@@ -427,6 +428,8 @@ class FileService:
 
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         # 二进制 PLY 走 memmap 免解析快读；不满足条件时回退 Open3D，行为不变
+        if Path(path).suffix.lower() == '.e57':
+            return read_e57(path)
         fast = read_ply_fast(path)
         if fast is not None:
             return fast

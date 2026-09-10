@@ -187,9 +187,27 @@ class OverviewPageMixin:
             address=payload.get('address'),
             remarks=payload.get('remarks'),
             building_floor=payload.get('building_floor'),
+            construction_unit=payload.get('construction_unit'),
+            construction_unit_executor=payload.get('construction_unit_executor'),
+            inspection_unit=payload.get('inspection_unit'),
+            supervision_unit=payload.get('supervision_unit'),
+            client_unit=payload.get('client_unit'),
+            report_no=payload.get('report_no'),
+            inspection_date=payload.get('inspection_date'),
+            report_date=payload.get('report_date'),
+            inspection_params_json=payload.get('inspection_params_json'),
+            fls_directories=payload.get('fls_directories'),
+            pointcloud_files=payload.get('pointcloud_files'),
+            photo_files=payload.get('photo_files'),
         )
         self._refresh_project_list()
         self._activate_project(project)
+        # 资源已在项目保存时完成绑定。点云不再重复走 upload：激活流程会
+        # 从刚写入的 FileAsset 恢复首站，避免首次创建被误判为恢复已有站点。
+        # FLS 仍需转换并增量导入，沿用现有后台处理管线。
+        if payload.get('fls_directories'):
+            for directory in payload['fls_directories']:
+                self._start_load('fls', project.project_id, directory=directory)
 
     def _prompt_project_name(self, title, initial_text=''):
         """使用可容纳真实工程长名称的项目名称输入框。"""
@@ -402,6 +420,13 @@ class OverviewPageMixin:
             and self.current_project.project_id == project_id
         ):
             self._set_current_project(updated_project)
+            # Refresh the live station projection immediately after editing;
+            # downstream detection/report services read this project session.
+            try:
+                self.station_service.refresh()
+                self._refresh_station_panel()
+            except Exception as error:
+                QMessageBox.warning(self, '编辑项目', f'资源已保存，但站点视图刷新失败：{error}')
         self._refresh_project_list()
 
     def _delete_project(self, project_id):

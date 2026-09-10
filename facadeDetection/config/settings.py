@@ -11,9 +11,9 @@ class Config:
 
     DETECT_DIST_TOL_MM = 20.0
     # Minimum effective facade area in square meters
-    MIN_FACADE_AREA = 10.0
+    MIN_FACADE_AREA = 50.0
     # 进入业务流的最大立面数量：按最终点数降序选取。
-    MAX_FACADE_COUNT = 15
+    MAX_FACADE_COUNT = 40
 
     # 垂直立面法向 Z 分量阈值（|nz| < 此值视为垂直候选）
     VERTICAL_NZ_THR: float = 0.30
@@ -35,10 +35,26 @@ class Config:
     FACADE_COARSE_VOXEL_MULT: float = 4.0
     
     # 建筑外窗洞口最小跨越宽度（米），用于自适应孔洞闭合
-    FACADE_MIN_OPENING_M: float = 0.5
+    FACADE_MIN_OPENING_M: float = 0.50
     
     # UV 网格闭合半径上限（防止网格过密时爆炸）
     FACADE_UV_CLOSE_MAX_CELLS: int = 12
+    # UV+Depth 三维分层连通：同一 UV 格中深度不同的面不得被孔洞闭合桥接。
+    FACADE_DEPTH_LAYER_BIN_M: float = 0.05
+    FACADE_DEPTH_LAYER_GAP_M: float = 0.12
+
+    # 主立面边界弱面召回（仅在局部边界带运行，避免全场景二次扫描）。
+    FACADE_ENABLE_WEAK_BOUNDARY_RECALL: bool = True
+    FACADE_WEAK_BOUNDARY_BAND_M: float = 0.50
+    FACADE_WEAK_MIN_AREA_M2: float = 20.00
+    FACADE_WEAK_MIN_POINTS: int = 200
+    FACADE_WEAK_MIN_ANGLE_DEG: float = 30.0
+    FACADE_WEAK_MIN_DENSITY: float = 20.0          # 最小点密度（点数/平方米）
+    FACADE_WEAK_MIN_COMPACT_RATIO: float = 0.50    # 最大连通域占比
+    FACADE_WEAK_MAX_COMPONENTS: int = 4            # 最大连通域数量
+    FACADE_WEAK_MAX_PER_FACADE: int = 4            # 每个主立面最多召回数
+    FACADE_WEAK_EXTEND_TOL_MULT: float = 0.8       # 扩展时距离容差乘数
+    FACADE_WEAK_EXTEND_ANGLE_DEG: float = 5.0      # 扩展点法向与弱平面法向最大夹角
     
     # 粗层 signed 距离容差倍数（相对 base）
     FACADE_COARSE_SIGNED_MULT: float = 2.0
@@ -48,20 +64,29 @@ class Config:
     
     # Hough 参数调优
     HOUGH_MAX_VOTE_POINTS: int = 100000     
-    HOUGH_MAX_DIRECTION_PEAKS: int = 6       
+    HOUGH_MAX_DIRECTION_PEAKS: int = 8       
     HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4  
-    HOUGH_MAX_CANDIDATES: int = 16          
+    HOUGH_MAX_CANDIDATES: int = 24          
     HOUGH_RHO_MIN_PROMINENCE: float = 0.08   
-
+    # Hough 密度自适应参数
+    HOUGH_DENSITY_ADAPTIVE: bool = True
+    HOUGH_LOW_DENSITY_THRESH: float = 5.0        # 点/立方米
+    HOUGH_LOW_DENSITY_BIN_MULT: float = 2.0      # bin_size = base * mult
+    HOUGH_LOW_DENSITY_MIN_SUPPORT_RATIO: float = 0.2  # 相对 min_count
+    HOUGH_LOW_DENSITY_MIN_PEAK_DIST_M: float = 0.10
+    HOUGH_LOW_DENSITY_PROMINENCE_RATIO: float = 0.10
+    
     # 平面拟合参数
     RANSAC_ITERATIONS: int = 50            # RANSAC 迭代次数
     RANSAC_THRESHOLD_RATIO: float = 1.5     # 阈值 = voxel_size * ratio
 
     # 立面合并参数
     MERGE_ANGLE_DEG: float = 5.0            # 合并法向夹角阈值
-    MERGE_D_THRESH_M: float = 0.10          # 合并平面距离阈值
+    MERGE_D_THRESH_M: float = 0.08          # 合并平面距离阈值
     MERGE_UV_DIST_M: float = 3.0            # 合并 UV BBox 距离阈值
     FACADE_MERGE_UV_DIST_M: float = 5.0
+    FACADE_MERGE_NORMAL_RESIDUAL_DEG: float = 2.0
+    FACADE_MERGE_PROTECT_WEAK_PLANES: bool = True
 
     # 生长参数
     GROW_NORMAL_TOL_DEG: float = 8.0        # 生长法向一致性容忍
@@ -78,7 +103,6 @@ class Config:
 
 
     # --- Viewport interaction & camera settings ---
-    # Use orthographic projection by forcing a very small FoV in Open3D (<=5 deg)
     ORTHO_FOV_DEG = 5.0
     # 默认沿 +Y 轴观察，Z 轴向上（正面向上）；仅保留兼容配置项。
     ORTHO_DEFAULT_VIEW = 'neg_y'
@@ -101,22 +125,29 @@ class Config:
 
     # 立面实例颜色：按检测结果 id 循环使用，保证相邻立面易于区分。
     FACADE_INSTANCE_COLORS = [
-        # 深紫色系 (Hue ~0.75) - 高饱和 vs 低饱和
-        [0.50, 0.05, 0.85], [0.25, 0.08, 0.45],
-        # 深绿色系 (Hue ~0.28) - 高饱和 vs 低饱和  
-        [0.05, 0.55, 0.10], [0.15, 0.35, 0.18],
-        # 蓝紫色系 (Hue ~0.65) - 高饱和 vs 低饱和
-        [0.10, 0.05, 0.80], [0.20, 0.18, 0.50],
-        # 品红色系 (Hue ~0.90) - 高饱和 vs 低饱和
-        [0.80, 0.05, 0.55], [0.50, 0.15, 0.35],
-        # 蓝绿色系 (Hue ~0.45, 偏青但降低饱和避开热力图)
-        [0.05, 0.40, 0.45], [0.15, 0.25, 0.30],
-        # 棕/土色系 (Hue ~0.08, 偏橙但降低饱和)
-        [0.55, 0.35, 0.15], [0.40, 0.28, 0.18],
-        # 补充紫色系
-        [0.65, 0.10, 0.75], [0.35, 0.12, 0.55],
-        # 补充绿色系
-        [0.08, 0.70, 0.12], [0.30, 0.45, 0.20],
+    # ===== 高饱和组 =====
+    [0.50, 0.05, 0.85],   # 1  紫
+    [0.05, 0.55, 0.10],   # 2  绿
+    [0.10, 0.05, 0.80],   # 3  蓝紫
+    [0.80, 0.05, 0.55],   # 4  品红
+    [0.05, 0.40, 0.45],   # 5  蓝绿
+    [0.55, 0.35, 0.15],   # 6  土棕
+    [0.65, 0.10, 0.75],   # 7  紫2
+    [0.08, 0.70, 0.12],   # 8  绿2
+    [0.10, 0.20, 0.75],   # 9  蓝
+    [0.85, 0.15, 0.80],   # 10 粉紫
+
+    # ===== 低饱和组 =====
+    [0.15, 0.35, 0.18],   # 11 低绿1
+    [0.50, 0.15, 0.35],   # 12 低品红
+    [0.40, 0.28, 0.18],   # 13 低土棕
+    [0.25, 0.08, 0.45],   # 14 低紫1
+    [0.15, 0.25, 0.30],   # 15 低蓝绿
+    [0.35, 0.12, 0.55],   # 16 低紫2
+    [0.20, 0.18, 0.50],   # 17 低蓝紫
+    [0.55, 0.20, 0.45],   # 18 低粉紫
+    [0.20, 0.30, 0.55],   # 19 低蓝
+    [0.30, 0.45, 0.20],   # 20 低绿2
     ]
 
     FACADE_TYPE_COLORS = {

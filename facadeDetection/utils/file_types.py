@@ -5,7 +5,7 @@ from pathlib import Path
 
 def guess_file_kind(path: str) -> str:
     suffix = Path(path).suffix.lower()
-    if suffix in {".ply", ".pcd", ".xyz", ".xyzn", ".xyzrgb", ".pts"}:
+    if suffix in {".ply", ".pcd", ".xyz", ".xyzn", ".xyzrgb", ".pts", ".e57"}:
         return "raw_pointcloud"
     if suffix in {".png", ".jpg", ".jpeg", ".bmp"}:
         return "raw_image"
