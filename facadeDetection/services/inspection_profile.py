@@ -47,7 +47,7 @@ class InspectionProfileService:
         InspectionProfile(
             standard_id="structure_main",
             standard_name="主体",
-            version="GB 50204",
+            version="GB 50210",
             wall_type="structure",
             flatness_limit_mm=8.0,
             verticality_limit_mm=10.0,

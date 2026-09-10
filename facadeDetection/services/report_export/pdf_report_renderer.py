@@ -13,565 +13,306 @@ def _text(value, fallback="--"):
     return escape(str(value)) if value not in (None, "") else fallback
 
 
+def _num(value, unit="", decimals=2):
+    try:
+        text = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
+        return f"{text} {unit}".strip()
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _pct(value):
+    try:
+        number = float(value)
+        if abs(number) <= 1:
+            number *= 100
+        return f"{number:.1f}%"
+    except (TypeError, ValueError):
+        return "--"
+
+
 class PdfReportRenderer:
+    # ------------------------------------------------------------------
+    # Main entry
+    # ------------------------------------------------------------------
     @staticmethod
     def html(snapshot: dict) -> str:
         project = snapshot.get("project") or {}
+        summary = snapshot.get("summary") or {}
+        facades = snapshot.get("facades", [])
 
-        # ============================================
-        # 项目信息 - 3列2行内嵌table
-        # ============================================
-        info_items = [
+        cover = PdfReportRenderer._cover(project, summary)
+        body = PdfReportRenderer._body(facades, snapshot.get("buildings"))
+
+        style = (
+            "@page { size:A4; margin:12mm 14mm 14mm; }"
+            "body { font-family:'Microsoft YaHei','SimSun',sans-serif; color:#1f2937; font-size:9pt; line-height:1.4; margin:0; }"
+            "h1 { color:#163a63; font-size:18pt; margin:0 0 3mm; border-bottom:2.5px solid #2f75b5; padding-bottom:3mm; font-weight:700; text-align:center; }"
+            "h2 { color:#163a63; background:#eaf2fb; padding:5px 10px; margin:0 0 6px; border-left:4px solid #2f75b5; font-size:12pt; }"
+            "h3 { color:#365b7d; font-size:10pt; margin:8px 0 4px; font-weight:600; border-bottom:1px solid #e2e8f0; padding-bottom:2px; }"
+            ".cover-company { text-align:center; font-size:20pt; font-weight:700; color:#1e293b; margin-bottom:6px; }"
+            ".cover-title { text-align:center; font-size:18pt; font-weight:700; color:#163a63; margin-bottom:16px; border-bottom:2px solid #2f75b5; padding-bottom:8px; }"
+            ".cover-section-title { font-size:13pt; font-weight:700; color:#2f75b5; margin:12px 0 8px; text-align:center; }"
+            "table.summary-cards { width: 60%; margin: 0 auto 16px; border-collapse: separate; border-spacing: 10px; }"
+            "td.summary-card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 14px 8px; text-align: center; vertical-align: middle; width: 50%; }"
+            "td.sc-blue { border-top: 3px solid #3b82f6; }"
+            "td.sc-green { border-top: 3px solid #22c55e; }"
+            "td.sc-orange { border-top: 3px solid #f59e0b; }"
+            "td.sc-cyan { border-top: 3px solid #06b6d4; }"
+            ".sc-number { font-size: 18pt; font-weight: 700; color: #163a63; line-height: 1.2; }"
+            ".sc-label { font-size: 8pt; color: #64748b; margin-top: 4px; }"
+            "table.cover-info { width: 100%; border-collapse: collapse; font-size: 10pt; margin-top: 8px; }"
+            "table.cover-info td { padding: 5px 8px; vertical-align: top; }"
+            ".ci-label { width: 25%; color: #64748b; text-align: right; font-size: 9.5pt; }"
+            ".ci-value { width: 75%; color: #1e293b; font-weight: 500; text-align: left; }"
+            "table.wall-data { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin: 8px 0; }"
+            "table.wall-data td { border: 1px solid #cbd5e1; padding: 5px 6px; text-align: center; vertical-align: middle; }"
+            "table.wall-data td:first-child { background: #f1f5f9; font-weight: 600; color: #475569; }"
+            "table.wall-data td:last-child { background: #f8fafc; font-weight: 600; color: #163a63; }"
+            ".wd-header { background: #e2e8f0 !important; font-weight: 700; color: #1e293b; }"
+            ".analysis-text { font-size: 8pt; color: #334155; line-height: 1.6; margin: 8px 0 12px; padding: 8px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; }"
+            "table.triplet { width: 100%; border-collapse: separate; border-spacing: 8px; margin: 8px 0; page-break-inside: avoid; page-break-before: avoid; page-break-after: avoid; }"
+            "table.triplet td { width: 33.3%; vertical-align: top; text-align: center; border: 1px solid #e2e8f0; padding: 4px; background: #fff; }"
+            "table.triplet img { max-width: 100%; max-height: 92mm; width: auto; height: auto; object-fit: contain; display: block; margin: 0 auto; }"
+            ".triplet-title { font-size: 8pt; color: #365b7d; font-weight: 600; margin-bottom: 4px; text-align: center; }"
+            ".triplet-placeholder { width: 100%; height: 120px; background: #f1f5f9; color: #94a3b8; font-size: 8pt; display: flex; align-items: center; justify-content: center; }"
+            ".report-meta { font-size: 8pt; color: #94a3b8; margin-bottom: 8px; text-align: right; }"
+            ".muted { color: #94a3b8; font-size: 8.5pt; text-align: center; padding: 10px; }"
+            "section { page-break-inside: avoid; margin-bottom: 10px; }"
+             ".building { page-break-before: always; page-break-after: avoid; }"
+            ".facade-header { margin-bottom: 6px; }"
+        )
+
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'><style>"
+            + style
+            + "</style></head><body>"
+            + cover
+            + body
+            + "</body></html>"
+        )
+
+    # ------------------------------------------------------------------
+    # Cover page
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _cover(project: dict, summary: dict) -> str:
+        inspection_date = project.get("inspection_date")
+        report_date = project.get("report_date")
+        idate = (
+            inspection_date.strftime("%Y年%m月%d日")
+            if hasattr(inspection_date, "strftime")
+            else _text(inspection_date)
+        )
+        rdate = (
+            report_date.strftime("%Y年%m月%d日")
+            if hasattr(report_date, "strftime")
+            else _text(report_date)
+        )
+
+        info_rows = ""
+        pairs = [
             ("项目名称", project.get("name")),
-            ("所属单位", project.get("org_unit")),
-            ("项目地址", project.get("address")),
-            ("楼栋号信息", project.get("building_floor")),
-            ("备注", project.get("remarks")),
-            ("报告编号", project.get("project_id")),
+            ("报告编号", project.get("report_no")),
+            ("建设单位", project.get("construction_unit")),
+            ("施工单位", project.get("construction_unit_executor")),
+            ("检测单位", project.get("inspection_unit")),
+            ("监理单位", project.get("supervision_unit")),
+            ("测量日期", idate),
+            ("施工阶段", "外立面工程"),
+            ("报告日期", rdate),
         ]
-        info_rows = []
-        for i in range(0, len(info_items), 3):
-            row_cells = ""
-            for j in range(3):
-                idx = i + j
-                if idx < len(info_items):
-                    label, value = info_items[idx]
-                    row_cells += (
-                        f"<td class='info-cell'>"
-                        f"<div class='info-label'>{escape(label)}</div>"
-                        f"<div class='info-value'>{_text(value)}</div></td>"
-                    )
-                else:
-                    row_cells += "<td class='info-cell'></td>"
-            info_rows.append(f"<tr>{row_cells}</tr>")
-        info_html = f"<table class='info-grid'>{''.join(info_rows)}</table>"
-
-        # ============================================
-        # 统计摘要 - 2列2行内嵌table
-        # ============================================
-        total_facades = len(snapshot.get("facades", []))
-        avg_pass_rate = PdfReportRenderer._calc_avg_pass_rate(snapshot)
-        total_windows = PdfReportRenderer._calc_total_windows(snapshot)
-        total_points = PdfReportRenderer._calc_total_points(snapshot)
-        
-        summary_html = f"""
-        <table class='summary-panel'>
-            <tr>
-                <td class='summary-card sc-blue'>
-                    <div class='summary-number'>{total_facades}</div>
-                    <div class='summary-label'>检测立面</div>
-                </td>
-                <td class='summary-card sc-green'>
-                    <div class='summary-number' style='color:#15803d;'>{avg_pass_rate}</div>
-                    <div class='summary-label'>平均合格率</div>
-                </td>
-            </tr>
-            <tr>
-                <td class='summary-card sc-orange'>
-                    <div class='summary-number' style='color:#b45309;'>{total_windows}</div>
-                    <div class='summary-label'>有效窗口</div>
-                </td>
-                <td class='summary-card sc-cyan'>
-                    <div class='summary-number' style='color:#0369a1;'>{total_points}</div>
-                    <div class='summary-label'>立面点数</div>
-                </td>
-            </tr>
-        </table>
-        """
-
-        # ============================================
-        # 修复: 外层table将两者左右并排
-        # ============================================
-        top_section_html = f"""
-        <table class='top-layout'>
-            <tr>
-                <td class='top-left'>
-                    <h3 style='margin-top:0;'>项目基础信息</h3>
-                    {info_html}
-                </td>
-                <td class='top-right'>
-                    <h3 style='margin-top:0;'>项目检测摘要</h3>
-                    {summary_html}
-                </td>
-            </tr>
-        </table>
-        """
-
-        sections = []
-        for facade in snapshot.get("facades", []):
-            quality = facade.get("quality") or {}
-            overall = quality.get("overall") or {}
-            profile = quality.get("profile_snapshot") or {}
-            width, height = PdfReportRenderer._dimensions(facade)
-            thresholds = quality.get("thresholds") or {}
-            
-            overview_metrics = [
-                ("立面编号", facade.get("report_no")),
-                ("立面面积", PdfReportRenderer._number(facade.get("area"), "m²")),
-                ("检测标准", f"{profile.get('standard_name') or '未指定'} {profile.get('version') or ''}".strip()),
-                ("平整度阈值", PdfReportRenderer._number(thresholds.get("flatness_limit_mm"), "mm")),
-                ("垂直度阈值", PdfReportRenderer._number(thresholds.get("verticality_limit_mm"), "mm")),
-                ("平整度合格率", PdfReportRenderer._percent(overall.get("flatness_pass_rate"))),
-                ("垂直度合格率", PdfReportRenderer._percent(overall.get("verticality_pass_rate"))),
-                ("质量状态", "检测完成" if quality else "未检测")
-            ]
-            overview_html = "".join(
-                f"<tr><td class='ov-label'>{escape(label)}</td>"
-                f"<td class='ov-value'>{_text(value)}</td></tr>"
-                for label, value in overview_metrics)
-            
-            parameters = quality.get("parameters") or {}
-            key_metrics = [
-                ("质量有效窗口数", overall.get("quality_valid_window_count"), "个"),
-                ("检测窗口总数", overall.get("window_count") or overall.get("total_window_count"), "个"),
-                ("平整度最大间隙", overall.get("flatness_max_gap_mm"), "mm"),
-                ("平整度窗口平均间隙", overall.get("flatness_avg_gap_mm"), "mm"),
-                ("平整度原始最大间隙", overall.get("flatness_raw_max_gap_mm"), "mm"),
-                ("垂直度最大偏差", overall.get("verticality_deviation_mm"), "mm"),
-                ("垂直度窗口平均偏差", overall.get("verticality_avg_deviation_mm"), "mm"),
-                ("检测靠尺长度", parameters.get("ruler_length_m"), "m")
-            ]
-            detail_rows = []
-            for label, value, unit in key_metrics:
-                if value is not None:
-                    val_text = PdfReportRenderer._number(value, unit)
-                    is_alert = False
-                    try:
-                        if "最大间隙" in label and float(value) > 50:
-                            is_alert = True
-                        elif "最大偏差" in label and float(value) > 50:
-                            is_alert = True
-                    except (TypeError, ValueError):
-                        pass
-                    alert_class = "alert-value" if is_alert else ""
-                    detail_rows.append(
-                        f"<tr><td class='dt-label'>{escape(label)}</td>"
-                        f"<td class='dt-value {alert_class}'>{_text(val_text)}</td></tr>")
-            detail_html = "".join(detail_rows) if detail_rows else "<tr><td colspan='2' class='muted'>暂无详细检测数据</td></tr>"
-
-            image_parts = []
-            for image in facade.get("images", []):
-                if isinstance(image, dict):
-                    path, title = image.get("path"), image.get("title") or "热力图"
-                    mode = image.get("mode", "")
-                else:
-                    path, title = image, "热力图"
-                    mode = ""
-                if path:
-                    limit_val = thresholds.get(f"{mode}_limit_mm", 4.0) if mode else 4.0
-                    max_val = overall.get(f"{mode}_max_gap_mm", limit_val) if mode else limit_val
-                    
-                    image_parts.append(
-                        f"<td class='image-cell'>"
-                        f"<div class='image-card'>"
-                        f"<div class='image-title'>{escape(str(title))}</div>"
-                        f"<div class='image-frame'>"
-                        f"<img src='{Path(path).as_uri()}' /></div>"
-                        f"<div class='image-legend'>"
-                        f"<div class='legend-bar'></div>"
-                        f"<div class='legend-labels'>"
-                        f"<span>合格 &lt;{float(limit_val):.1f}mm</span>"
-                        f"<span>严重 &gt;{float(max_val):.1f}mm</span></div></div></div></td>"
-                    )
-            
-            images_html = "".join(image_parts)
-            image_markup = (
-                f"<table class='image-gallery'><tr>{images_html}</tr></table>"
-                if images_html 
-                else "<p class='muted'>暂无平整度/垂直度热力图结果</p>"
+        for label, value in pairs:
+            info_rows += (
+                f"<tr><td class='ci-label'>{escape(label)}</td>"
+                f"<td class='ci-value'>{_text(value)}</td></tr>"
             )
 
-            sections.append(f"""
-            <section>
-                <div class='facade-header'>
-                    <h2>立面 {facade['report_no']}</h2>
-                    <span class='facade-dim'>{width} &times; {height}</span>
-                </div>
-                <table class='data-columns'>
-                    <tr>
-                        <td class='column-left'>
-                            <h3>立面概览</h3>
-                            <table class='overview-table'>{overview_html}</table>
-                        </td>
-                        <td class='column-right'>
-                            <h3>关键检测数据</h3>
-                            <table class='detail-table'>{detail_html}</table>
-                        </td>
-                    </tr>
-                </table>
-                <h3>可视化结果</h3>
-                {image_markup}
-            </section>
-            """)
+        total_facades = summary.get("total_facades", 0)
+        avg_pass_rate = summary.get("avg_pass_rate", "--")
+        total_area = summary.get("total_area", 0)
+        total_points = summary.get("total_points", 0)
 
-        return f"""<!doctype html><html><head><meta charset='utf-8'><style>
-        @page {{ size:A4; margin:12mm 14mm 14mm; }}
-        
-        body {{ 
-            font-family:'Microsoft YaHei','SimSun',sans-serif; 
-            color:#1f2937; 
-            font-size:9pt; 
-            line-height:1.4; 
-            margin:0;
-        }}
-        
-        h1 {{ 
-            color:#163a63; 
-            font-size:18pt; 
-            margin:0 0 3mm; 
-            border-bottom:2.5px solid #2f75b5; 
-            padding-bottom:3mm; 
-            font-weight:700;
-        }}
-        h2 {{ 
-            color:#163a63; 
-            background:#eaf2fb; 
-            padding:5px 10px; 
-            margin:0 0 6px; 
-            border-left:4px solid #2f75b5; 
-            font-size:12pt;
-        }}
-        h3 {{ 
-            color:#365b7d; 
-            font-size:10pt; 
-            margin:8px 0 4px; 
-            font-weight:600;
-            border-bottom:1px solid #e2e8f0;
-            padding-bottom:2px;
-        }}
-        
-        /* ============================================
-           修复: 顶层左右并排布局
-           ============================================ */
-        table.top-layout {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 0 0 10px;
-        }}
-        td.top-left {{
-            width: 58%;
-            padding-right: 12px;
-            vertical-align: top;
-        }}
-        td.top-right {{
-            width: 42%;
-            padding-left: 12px;
-            vertical-align: top;
-            border-left: 2px solid #e2e8f0;
-        }}
-        
-        /* ============================================
-           项目信息 - 3列2行
-           ============================================ */
-        table.info-grid {{
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 6px;
-        }}
-        td.info-cell {{
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            padding: 10px 16px;
-            width: 33.33%;
-            vertical-align: top;
-        }}
-        .info-label {{
-            font-size: 8pt;
-            color: #64748b;
-            display: block;
-            margin-bottom: 2px;
-        }}
-        .info-value {{
-            font-size: 10pt;
-            color: #1e293b;
-            font-weight: 500;
-            display: block;
-        }}
-        
-        /* ============================================
-           统计摘要 - 2列2行（右侧紧凑布局）
-           ============================================ */
-        table.summary-panel {{
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 12px;
-        }}
-        td.summary-card {{
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            padding: 16px 8px;
-            text-align: center;
-            vertical-align: middle;
-            width: 100%;
-        }}
-        /* 不同卡片顶部彩色条 */
-        td.sc-blue {{ border-top: 3px solid #3b82f6; }}
-        td.sc-green {{ border-top: 3px solid #22c55e; }}
-        td.sc-orange {{ border-top: 3px solid #f59e0b; }}
-        td.sc-cyan {{ border-top: 3px solid #06b6d4; }}
-        
-        .summary-number {{
-            font-size: 16pt;
-            font-weight: 700;
-            color: #163a63;
-            line-height: 1.2;
-        }}
-        .summary-label {{
-            font-size: 7.5pt;
-            color: #64748b;
-            margin-top: 6px;
-        }}
-        
-        /* ============================================
-           立面区域
-           ============================================ */
-        section {{ 
-            page-break-inside: avoid; 
-            margin-bottom: 8px;
-            border: 1px solid #e2e8f0;
-            padding: 8px;
-        }}
-        .facade-header {{
-            margin-bottom: 6px;
-        }}
-        .facade-header h2 {{
-            display: inline;
-        }}
-        .facade-dim {{
-            font-size: 8pt;
-            color: #94a3b8;
-            margin-left: 10px;
-        }}
-        
-        /* ============================================
-           左右分栏
-           ============================================ */
-        table.data-columns {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 6px 0 10px;
-        }}
-        td.column-left {{
-            width: 50%;
-            padding-right: 8px;
-            border-right: 1px solid #e2e8f0;
-            vertical-align: top;
-        }}
-        td.column-right {{
-            width: 50%;
-            padding-left: 8px;
-            vertical-align: top;
-        }}
-        
-        /* ============================================
-           表格样式
-           ============================================ */
-        table.overview-table, table.detail-table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 8.5pt;
-        }}
-        .overview-table td {{
-            padding: 3px 5px;
-            border-bottom: 1px solid #f1f5f9;
-        }}
-        .ov-label {{
-            color: #64748b;
-            width: 40%;
-            font-size: 8pt;
-        }}
-        .ov-value {{
-            color: #1e293b;
-            font-weight: 500;
-            text-align: right;
-        }}
-        .detail-table td {{
-            padding: 3px 5px;
-            border-bottom: 1px solid #f1f5f9;
-        }}
-        .dt-label {{
-            color: #64748b;
-            width: 55%;
-            font-size: 8pt;
-        }}
-        .dt-value {{
-            color: #1e293b;
-            font-weight: 500;
-            text-align: right;
-        }}
-        .alert-value {{
-            color: #dc2626 !important;
-            font-weight: 700;
-        }}
-        
-        /* ============================================
-           图片画廊
-           ============================================ */
-        table.image-gallery {{
-            width: 100%;
-            table-layout: fixed;
-            border-collapse: separate;
-            border-spacing: 10px;
-            margin: 8px 0;
-        }}
-        td.image-cell {{
-            width: 50%;
-            max-width: 50%;
-            overflow: hidden;
-            vertical-align: top;
-        }}
-        .image-card {{
-            background: #fff;
-            border: 1px solid #e2e8f0;
-            padding: 6px;
-        }}
-        .image-title {{
-            font-size: 8pt;
-            color: #365b7d;
-            font-weight: 600;
-            margin-bottom: 4px;
-            text-align: center;
-        }}
-        .image-frame {{
-            background: #f5f7fa;
-            text-align: center;
-            padding: 2px;
-            width: 80%;
-            height: 50mm;
-            overflow: hidden;
-            page-break-inside: avoid;
-        }}
-        .image-frame img {{
-            display: block;
-            width: 100%;
-            max-width: 100%;
-            height: 48mm;
-        }}
-        .image-legend {{
-            margin-top: 2px;
-            padding-top: 2px;
-            border-top: 1px solid #f1f5f9;
-        }}
-        .legend-bar {{
-            height: 6px;
-            background: linear-gradient(to right, #1677c8 0%, #16b8c4 25%, #f2d12e 50%, #f28c28 75%, #c91f2b 100%);
-            margin-bottom: 3px;
-        }}
-        .legend-labels {{
-            font-size: 6.5pt;
-            color: #94a3b8;
-        }}
-        .legend-labels span {{
-            display: inline-block;
-            width: 49%;
-        }}
-        .legend-labels span:last-child {{
-            text-align: right;
-        }}
-        
-        .muted {{ 
-            color: #94a3b8; 
-            font-size: 8.5pt;
-            text-align: center;
-            padding: 10px;
-        }}
-        .report-meta {{
-            font-size: 8pt;
-            color: #94a3b8;
-            margin-bottom: 8px;
-            text-align: right;
-        }}
-        </style></head><body>
-        <h1>建筑外立面质量检测报告</h1>
-        <div class='report-meta'>报告生成时间：{datetime.now():%Y-%m-%d %H:%M}</div>
-        
-        {top_section_html}
-        
-        <h2>建筑立面检测结果</h2>
-        {''.join(sections) or '<p class=\"muted\">暂无立面检测结果</p>'}
-        </body></html>"""
+        return (
+            f"<div class='cover-company'>{_text(project.get('inspection_unit'), 'XX有限公司')}</div>"
+            f"<div class='cover-title'>外立面激光测量检测报告</div>"
+            f"<div class='cover-section-title'>项目检测摘要</div>"
+            f"<table class='summary-cards'>"
+            f"<tr>"
+            f"<td class='summary-card sc-blue'><div class='sc-number'>{total_facades}</div><div class='sc-label'>检测立面</div></td>"
+            f"<td class='summary-card sc-green'><div class='sc-number' style='color:#15803d;'>{avg_pass_rate}</div><div class='sc-label'>平均合格率</div></td>"
+            f"</tr>"
+            f"<tr>"
+            f"<td class='summary-card sc-orange'><div class='sc-number' style='color:#b45309;'>{total_area}</div><div class='sc-label'>检测面积</div></td>"
+            f"<td class='summary-card sc-cyan'><div class='sc-number' style='color:#0369a1;'>{total_points}</div><div class='sc-label'>检测点数</div></td>"
+            f"</tr>"
+            f"</table>"
+            f"<table class='cover-info'>{info_rows}</table>"
+            f"<div style='page-break-after:always;'></div>"
+        )
 
+    # ------------------------------------------------------------------
+    # Body (facades)
+    # ------------------------------------------------------------------
     @staticmethod
-    def _calc_avg_pass_rate(snapshot):
-        facades = snapshot.get("facades", [])
-        rates = []
-        for f in facades:
-            q = f.get("quality") or {}
-            o = q.get("overall") or {}
-            for key in ("flatness_pass_rate", "verticality_pass_rate"):
-                val = o.get(key)
-                if val is not None:
-                    try:
-                        rates.append(float(val))
-                    except (TypeError, ValueError):
-                        pass
-        if not rates:
-            return "--"
-        avg = sum(rates) / len(rates)
-        if avg <= 1:
-            avg *= 100
-        return f"{avg:.1f}%"
+    def _body(facades: list[dict], buildings: list[dict] | None = None) -> str:
+        if not facades:
+            return '<p class="muted">暂无立面检测结果</p>'
 
+        sections = []
+        building_groups = buildings or [{"label": "楼栋 1", "walls": facades}]
+        for building in building_groups:
+            walls = building.get("walls") or []
+            if not walls:
+                continue
+            building_index = len([part for part in sections if "class='building'" in part])
+            building_class = "building" if building_index else "building first-building"
+            sections.append(f"<div class='{building_class}'><h1>{_text(building.get('label'), '楼栋')}</h1></div>")
+            for facade in walls:
+                wd = facade.get("wall_data") or {}
+                number = facade.get("report_no", facade.get("id", 0))
+
+                table_html = PdfReportRenderer._wall_data_table(wd)
+                analysis_html = PdfReportRenderer._analysis_text(wd)
+                images = facade.get("images", [])
+                triplets_html = PdfReportRenderer._triplets(images, number)
+
+                sections.append(
+                    f"<section>"
+                    f"<h2>{_text(facade.get('wall_label'), f'墙面 {number}')} — "
+                    f"PLY { _text(facade.get('ply_id') or facade.get('station_id')) }</h2>"
+                    f"{table_html}"
+                    f"<div class='analysis-text'>{analysis_html}</div>"
+                    f"{triplets_html}"
+                    f"</section>"
+                )
+
+        return "".join(sections)
+
+    # ------------------------------------------------------------------
+    # Wall data table (5 rows x 5 cols)
+    # ------------------------------------------------------------------
     @staticmethod
-    def _calc_total_windows(snapshot):
-        facades = snapshot.get("facades", [])
-        total = 0
-        for f in facades:
-            q = f.get("quality") or {}
-            o = q.get("overall") or {}
-            val = o.get("quality_valid_window_count")
-            if val is not None:
-                try:
-                    total += int(val)
-                except (TypeError, ValueError):
-                    pass
-        return str(total) if total > 0 else "--"
+    def _wall_data_table(wd: dict) -> str:
+        rf = wd.get("ruler_flatness", {})
+        rv = wd.get("ruler_verticality", {})
+        gf = wd.get("global_plane_flatness", {})
+        gv = wd.get("global_plane_verticality", {})
 
+        # ---- 构建同时包含平整度与垂直度的检测标准 ----
+        flat_name = rf.get("standard_name") or "未指定标准"
+        flat_ver = rf.get("version") or ""
+        flat_limit = rf.get("threshold_mm", 4.0)
+
+        vert_name = rv.get("standard_name") or flat_name
+        vert_ver = rv.get("version") or flat_ver
+        vert_limit = rv.get("threshold_mm", 4.0)
+
+        std = f"{flat_name} {flat_ver} [平整度 {flat_limit:.1f}mm / 垂直度 {vert_limit:.1f}mm]".strip()
+        
+        def cell(v):
+            return _num(v, "m²") if isinstance(v, (int, float)) and v > 10 else _num(v, "", 1)
+
+        def pct(v):
+            return _pct(v) if v is not None else "--"
+
+        rows = [
+            f"<tr><td>面层材质</td><td>{_text(rf.get('material'))}</td><td class='wd-header'>检测标准</td><td>{escape(std)}</td></tr>",
+            f"<tr><td class='wd-header'>总测量面积(模拟下尺)</td><td class='wd-header'>合格面积(模拟下尺)</td><td class='wd-header'>不合格面积(模拟下尺)</td><td class='wd-header'>合格率</td></tr>"
+            f"<tr><td>{cell(rf.get('total_area_m2'))}</td><td>{cell(rf.get('pass_area_m2'))}</td><td>{cell(rf.get('fail_area_m2'))}</td><td>{pct(rf.get('area_rate'))}</td></tr>",
+            f"<tr><td class='wd-header'>总测量点数(模拟下尺)</td><td class='wd-header'>合格点数(模拟下尺)</td><td class='wd-header'>不合格点数(模拟下尺)</td><td class='wd-header'>合格率</td></tr>"
+            f"<tr><td>{rf.get('total_points', '--')}</td><td>{rf.get('pass_points', '--')}</td><td>{rf.get('fail_points', '--')}</td><td>{pct(rf.get('point_rate'))}</td></tr>",
+            f"<tr><td class='wd-header'>总测量面积(模拟墙面)</td><td class='wd-header'>合格面积(模拟墙面)</td><td class='wd-header'>不合格面积(模拟墙面)</td><td class='wd-header'>合格率</td></tr>"
+            f"<tr><td>{cell(gf.get('total_area_m2'))}</td><td>{cell(gf.get('pass_area_m2'))}</td><td>{cell(gf.get('fail_area_m2'))}</td><td>{pct(gf.get('area_rate'))}</td></tr>",
+            f"<tr><td class='wd-header'>总测量点数(模拟墙面)</td><td class='wd-header'>合格点数(模拟墙面)</td><td class='wd-header'>不合格点数(模拟墙面)</td><td class='wd-header'>合格率</td></tr>"
+            f"<tr><td>{gf.get('total_points', '--')}</td><td>{gf.get('pass_points', '--')}</td><td>{gf.get('fail_points', '--')}</td><td>{pct(gf.get('point_rate'))}</td></tr>",
+        ]
+
+        return f"<table class='wall-data'>{''.join(rows)}</table>"
+
+    # ------------------------------------------------------------------
+    # Analysis text paragraph
+    # ------------------------------------------------------------------
     @staticmethod
-    def _calc_total_points(snapshot):
-        facades = snapshot.get("facades", [])
-        total = 0
-        for f in facades:
-            q = f.get("quality") or {}
-            o = q.get("overall") or {}
-            val = o.get("point_count")
-            if val is not None:
-                try:
-                    total += int(val)
-                except (TypeError, ValueError):
-                    pass
-        return str(total) if total > 0 else "--"
+    def _analysis_text(wd: dict) -> str:
+        rf = wd.get("ruler_flatness", {})
+        rv = wd.get("ruler_verticality", {})
+        gf = wd.get("global_plane_flatness", {})
+        gv = wd.get("global_plane_verticality", {})
 
+        def line(label, data, metric_label):
+            rate = data.get("area_rate")
+            area = data.get("pass_area_m2")
+            pts = data.get("pass_points")
+            avg = data.get("avg_mm")
+            maxv = data.get("max_mm")
+            rate_str = f"{rate*100:.1f}%" if rate is not None else "--"
+            area_str = f"{area:.2f}m²" if area is not None else "--"
+            pts_str = str(pts) if pts is not None else "--"
+            avg_str = f"{avg:.2f}mm" if avg is not None else "--"
+            max_str = f"{maxv:.2f}mm" if maxv is not None else "--"
+            extreme_label = "最大间隙" if "平整度" in label else "最大偏差"
+            avg_label = "平均间隙" if "平整度" in label else "平均偏差"
+            return (
+                f"{label}【{rate_str}】+合格面积【{area_str}】+合格点数【{pts_str}】"
+                f"+{avg_label}【{avg_str}】+{extreme_label}【{max_str}】"
+            )
+
+        r_overall = wd.get("ruler_overall_rate")
+        g_overall = wd.get("global_plane_overall_rate")
+        r_overall_str = f"{r_overall*100:.1f}%" if r_overall is not None else "--"
+        g_overall_str = f"{g_overall*100:.1f}%" if g_overall is not None else "--"
+
+        text = (
+            f"具体分析：\n"
+            f"此墙整体合格率：【{r_overall_str}】(模拟下尺)；【{g_overall_str}】(模拟墙面)\n"
+            f"{line('平整度面积合格率(模拟下尺)', rf, '平整度')}\n"
+            f"{line('平整度面积合格率(模拟墙面)', gf, '平整度')}\n"
+            f"{line('垂直度面积合格率(模拟下尺)', rv, '垂直度')}\n"
+            f"{line('垂直度面积合格率(模拟墙面)', gv, '垂直度')}\n"
+        )
+        return escape(text).replace("\n", "<br/>")
+
+    # ------------------------------------------------------------------
+    # Image triplets (4 groups x 3 images)
+    # ------------------------------------------------------------------
     @staticmethod
-    def _percent(value):
-        try:
-            number = float(value)
-            if abs(number) <= 1:
-                number *= 100
-            return f"{number:.1f}%"
-        except (TypeError, ValueError):
-            return "--"
+    def _triplets(images: list, facade_no: int) -> str:
+        groups = [
+            ("ruler_flatness_area", "平整度面积合格率(模拟下尺)"),
+            ("ruler_verticality_area", "垂直度面积合格率(模拟下尺)"),
+            ("global_plane_flatness_area", "平整度面积合格率(模拟墙面)"),
+            ("global_plane_verticality_area", "垂直度面积合格率(模拟墙面)"),
+        ]
 
-    @staticmethod
-    def _number(value, unit=""):
-        try:
-            text = f"{float(value):.2f}".rstrip("0").rstrip(".")
-            return f"{text} {unit}".strip()
-        except (TypeError, ValueError):
-            return "--"
+        parts = []
+        for mode, title in groups:
+            group_images = {
+                img.get("key"): img for img in images if img.get("mode") == mode
+            }
 
-    @staticmethod
-    def _dimensions(facade):
-        bbox = facade.get("bbox") or facade.get("bbox_2d") or {}
-        if isinstance(bbox, dict):
-            width, height = bbox.get("width"), bbox.get("height")
-        elif isinstance(bbox, (list, tuple)) and len(bbox) >= 2:
-            width, height = bbox[0], bbox[1]
-        else:
-            width = height = None
-        return (f"{float(width):.2f}" if width is not None else "--",
-                f"{float(height):.2f}" if height is not None else "--")
+            def img_tag(key, default_title):
+                img = group_images.get(key)
+                if img and img.get("path"):
+                    return f"<img src='{Path(img['path']).as_uri()}' alt='{escape(default_title)}'/>"
+                return f"<div class='triplet-placeholder'>{escape(default_title)}<br/>（未生成）</div>"
 
+            parts.append(
+                f"<h3>{escape(title)}</h3>"
+                f"<table class='triplet'>"
+                f"<tr>"
+                f"<td><div class='triplet-title'>点云立面叠加原始热力映射</div>{img_tag('overlay', 'Overlay')}</td>"
+                f"<td><div class='triplet-title'>独立热力图 + 0.5m网格</div>{img_tag('heatmap_grid', 'Heatmap Grid')}</td>"
+                f"<td><div class='triplet-title'>2D照片 + 热力对齐叠加</div>{img_tag('photo', '2D Photo Overlay（未接入）')}</td>"
+                f"</tr>"
+                f"</table>"
+            )
+
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
+    # PDF output
+    # ------------------------------------------------------------------
     @staticmethod
     def write_pdf(html: str, path) -> None:
         output = Path(path).expanduser().resolve()

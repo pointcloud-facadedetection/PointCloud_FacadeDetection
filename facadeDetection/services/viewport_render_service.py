@@ -8,7 +8,8 @@ import numpy as np
 from config.settings import Config
 from utils.array_utils import as_array
 from utils.logging_utils import trace
-from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
+from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode, defect_colormap
+from algorithms.facade.projection import rasterize_facade
 
 
 class ViewportRenderService:
@@ -637,91 +638,19 @@ class ViewportRenderService:
                                 vmax: float | None = None,
                                 quality_results=None,
                                 index_service=None) -> None:
-        """渲染平整度热力图。"""
-        try:
-            data = self.viewport.get_cloud_data(cloud_name)
-            if data is None:
-                return
-            positions = data.get('pos')
-            n_total = len(positions) if positions is not None else 0
-            if n_total == 0:
-                return
-
-            if quality_results is not None:
-                results = quality_results if isinstance(quality_results, dict) else {}
-                if not any(k in results for k in ('defect_local_indices', 'defect_colors')):
-                    results = {r.get('facade_id', r.get('id')): r for r in quality_results}
-
-                all_indices, all_colors = [], []
-                for f in facades or []:
-                    r = results.get(f.get('id')) if isinstance(results, dict) else None
-                    if r is None and isinstance(quality_results, dict) and len(facades) == 1:
-                        r = quality_results
-                    if not r:
-                        continue
-
-                    global_idx = as_array(r.get('__global_indices'), dtype=np.int32)
-                    local_idx = as_array(r.get('defect_local_indices'), dtype=np.int32)
-                    colors = as_array(r.get('defect_colors'), dtype=np.float32).reshape(-1, 3)
-
-                    valid_local = ((local_idx >= 0) &
-                                   (local_idx < len(global_idx)) &
-                                   (np.arange(len(local_idx)) < len(colors)))
-                    if np.any(valid_local):
-                        gi = global_idx[local_idx[valid_local]]
-                        if index_service is not None:
-                            proxy_ids = index_service.map_raw_to_proxy(cloud_name, gi)
-                            displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
-                            if len(displayed) == n_total:
-                                lookup = {int(v): i for i, v in enumerate(displayed)}
-                                gi = np.asarray([lookup.get(int(p), -1) for p in proxy_ids], dtype=np.int64)
-                            else:
-                                gi = proxy_ids
-
-                        valid_global = (gi >= 0) & (gi < n_total)
-                        if np.any(valid_global):
-                            all_indices.append(gi[valid_global])
-                            all_colors.append(colors[np.flatnonzero(valid_local)[valid_global]])
-
-                if all_indices:
-                    idx_cat = np.concatenate(all_indices)
-                    col_cat = np.concatenate(all_colors)
-                    self.colorize_by_rgb(cloud_name, idx_cat, col_cat)
-                return
-
-            # Fallback: 基于平面距离着色
-            all_indices, all_values = [], []
-            for f in facades or []:
-                idx = self._proxy_rows_for_display(
-                    cloud_name, f.get('proxy_indices', f.get('inlier_indices', [])))
-                idx = idx[(idx >= 0) & (idx < n_total)]
-                if len(idx) == 0:
-                    continue
-                model = np.asarray(f.get('plane_model') or [], dtype=float)
-                if model.shape[0] != 4:
-                    continue
-                pts = np.asarray(data['pos'])[idx]
-                n = model[:3]
-                n = n / (np.linalg.norm(n) + 1e-12)
-                d = float(model[3])
-                dist = np.abs(pts @ n + d)
-                all_indices.append(idx)
-                all_values.append(dist.astype(float))
-
-            if not all_indices:
-                return
-            idx_cat = np.concatenate(all_indices, axis=0)
-            val_cat = np.concatenate(all_values, axis=0)
-            self.colorize_by_scalar(cloud_name, idx_cat, val_cat,
-                                    vmin=vmin, vmax=vmax, cmap='turbo')
-
-        except Exception as e:
-            print(f'ViewportRenderService: 渲染质量热力贴图失败: {e}', flush=True)
+        """渲染平整度热力图（已废弃，请使用 render_quality_reports）。"""
+        self.render_quality_reports(cloud_name, facades, index_service=index_service,
+                                    heatmap_mode='flatness')
 
     def apply_quality_colors(self, cloud_name: str, quality_result: dict,
                              base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
                              index_service=None, _colors=None) -> None:
-        """将质量结果应用到点云颜色 - 统一缺陷值热力图。"""
+        """将质量结果应用到点云颜色 - 统一缺陷值热力图（与导出图一致）。
+
+        根据 heatmap_mode 的 method 字段，从 quality_comparison.methods
+        中动态选取对应的窗口集（靠尺法/全局平面法 × 平整度/垂直度）。
+        使用与 result_export_service 一致的 5 节点色标和值域映射。
+        """
         try:
             if not isinstance(quality_result, dict):
                 raise TypeError(f'quality_result must be dict, got {type(quality_result).__name__}')
@@ -733,13 +662,19 @@ class ViewportRenderService:
                 return
             n = len(pos)
 
-            # 根据已保存的立面分割颜色进行重建。
-            # 仅对不属于立面的点使用灰色作为备用颜色。
             colors = (_colors if _colors is not None else self._facade_base_colors(
                 cloud_name, self._facades_cache.get(cloud_name, []), base_color))
             mode = normalize_heatmap_mode(quality_result.get('heatmap_mode'))
             spec = heatmap_spec(mode)
-            windows = quality_result.get('windows')
+
+            method = spec.get('method', 'ruler')
+            metric = spec.get('metric', 'flatness')
+
+            comparison = quality_result.get('quality_comparison', {})
+            methods_data = comparison.get('methods', {})
+            method_data = methods_data.get(method, {})
+            metric_data = method_data.get(metric, {})
+            windows = metric_data.get('windows', [])
 
             if not isinstance(windows, list) or len(windows) == 0:
                 return
@@ -750,12 +685,9 @@ class ViewportRenderService:
             if dataset is None:
                 return
 
-            # Extract centers and values
             centers = np.asarray([r.get('center_xyz', [np.nan] * 3) for r in windows], dtype=np.float32).reshape(-1, 3)
-            
             values_key = spec['value_key']
             values = np.asarray([r.get(values_key, np.nan) for r in windows], dtype=np.float32).reshape(-1)
-
             pass_key = spec['pass_key']
             failed = np.asarray([not bool(r.get(pass_key, True)) for r in windows], dtype=bool)
 
@@ -766,11 +698,9 @@ class ViewportRenderService:
             centers = centers[valid]
             values = values[valid]
 
-            # Get limit for scaling
             limit = float((quality_result.get('thresholds') or {}).get(
                 spec['limit_key'], 4.0))
 
-            # Domain mapping
             domain_raw = np.asarray(quality_result.get('__global_indices', []), dtype=np.int64)
             if len(domain_raw) == 0:
                 return
@@ -781,7 +711,7 @@ class ViewportRenderService:
             if plane.size != 4:
                 return
             plane = plane / (np.linalg.norm(plane[:3]) + 1e-12)
-            
+
             u_axis = np.asarray(quality_result.get('projection_u_axis', []), dtype=np.float64)
             v_axis = np.asarray(quality_result.get('projection_v_axis', []), dtype=np.float64)
             if u_axis.size != 3 or v_axis.size != 3:
@@ -793,88 +723,70 @@ class ViewportRenderService:
                                                     np.mean(centers, axis=0)),
                                dtype=np.float64).reshape(3)
 
-            # Map domain points to grid
             valid_proxy = ((domain_proxy >= 0) &
                            (domain_proxy < len(dataset.index.proxy_points)))
             if not np.any(valid_proxy):
                 return
             domain_proxy = domain_proxy[valid_proxy]
             domain_points = dataset.index.proxy_points[domain_proxy]
-            du = (domain_points - origin) @ u_axis
-            dv = (domain_points - origin) @ v_axis
-            cu = (centers - origin) @ u_axis
-            cv = (centers - origin) @ v_axis
-            
-            step = max(float((quality_result.get('parameters') or {}).get('scan_step_m') or
-                              quality_result.get('step_size_m') or 0.05), 1e-6)
 
-            u_min = float(quality_result.get('projection', {}).get('u_min_m', du.min()))
-            v_min = float(quality_result.get('projection', {}).get('v_min_m', dv.min()))
+            # 复用 projection.py 的标准投影映射：像素级光栅化，非离散窗口块染色。
+            # 与离线 result_export_service 使用同一 rasterize_facade 实现，
+            # 值域、色标、投影轴完全一致，保证三维视口与导出 PNG 内外一致。
+            excess = np.maximum(np.abs(values) - limit, 0.0)
+            scale = max(float(np.percentile(excess[excess > 0], 98)) if np.any(excess > 0) else 0.0,
+                        limit * 0.15, 1e-6)
+            t = np.clip(excess / scale, 0.0, 1.0)
+            heat_colors = defect_colormap(t)  # 统一色标（青→绿→黄→橙→红）
 
-            # Cell keys for domain points and window centers
-            dkey = np.column_stack((np.floor((du - u_min) / step),
-                                    np.floor((dv - v_min) / step))).astype(np.int64)
-            ckey = np.column_stack((np.floor((cu - u_min) / step),
-                                    np.floor((cv - v_min) / step))).astype(np.int64)
+            values_m = (values / 1000.0).astype(np.float64)
+            limit_m = float(limit) / 1000.0
+            global_vmax_m = float((limit + scale) / 1000.0)
 
-            # Build cell value map: take max absolute defect per cell
-            cell_values = {}
-            for key, value in zip(ckey.tolist(), values.tolist()):
-                key_t = tuple(int(x) for x in key)
-                if key_t not in cell_values or abs(float(value)) > abs(cell_values[key_t]):
-                    cell_values[key_t] = float(value)
+            raster = rasterize_facade(
+                centers.astype(np.float64),
+                np.full((len(centers), 3), 0.7),
+                plane,
+                values_m,
+                limit_m,
+                pixel_size=0.05,
+                defect_colors=heat_colors,
+                vmin=limit_m,
+                vmax=global_vmax_m,
+                max_size=2400,
+                projection_origin=origin,
+                projection_u_axis=u_axis,
+                projection_v_axis=v_axis)
+            overlay = raster['overlay_rgba']
+            lo = raster['bounds'][:2]
+            size = raster['pixel_size']
+            h_pix, w_pix = overlay.shape[:2]
 
-            # Map domain points to cells
-            mask = np.asarray([tuple(k) in cell_values for k in dkey], dtype=bool)
-            proxy_ids = domain_proxy[mask]
-            vals = np.asarray([cell_values[tuple(k)] for k in dkey if tuple(k) in cell_values], dtype=np.float32)
+            # 将三维点投影到 UV 并查询对应像素颜色
+            rel_domain = domain_points - origin
+            dom_u = rel_domain @ u_axis
+            dom_v = rel_domain @ v_axis
+            px = np.clip(((dom_u - lo[0]) / size).astype(int), 0, w_pix - 1)
+            py = np.clip((h_pix - 1 - (dom_v - lo[1]) / size).astype(int), 0, h_pix - 1)
+            pix_val = overlay[py, px]
+            opaque = pix_val[:, 3] > 0
 
-            # Map to display rows
-            best = {int(pid): float(value) for pid, value in zip(proxy_ids.tolist(), vals.tolist())}
+            # Map proxy IDs to display rows
             displayed = np.asarray(data.get('proxy_ids', []), dtype=np.int64)
             lookup = {int(v): i for i, v in enumerate(displayed)} if len(displayed) == n else None
-            rows = np.asarray([lookup.get(pid, pid) if lookup else pid for pid in best], dtype=np.int64)
-            values_arr = np.asarray([best[int(pid)] for pid in best], dtype=np.float32)
-
-            valid_rows = (rows >= 0) & (rows < n)
-            if not np.any(valid_rows):
-                return
-
-            finite = values_arr[valid_rows]
-            
-            # Scale only the excess over the applicable limit.
-            excess = np.maximum(np.abs(finite) - limit, 0.0)
-            scale = max(float(np.nanpercentile(excess, 97)) if len(excess) else 0.0, 1e-6)
-            t = np.clip(excess / scale, 0, 1)
-            
-            heat_colors = np.zeros((len(t), 3), dtype=np.float32)
-            
-            # Gray (0.75, 0.75, 0.75) -> Yellow (1, 1, 0) -> Orange (1, 0.5, 0) -> Red (1, 0, 0)
-            mask1 = t <= 0.33
-            tt1 = t[mask1] / 0.33
-            heat_colors[mask1, 0] = 0.75 + 0.25 * tt1
-            heat_colors[mask1, 1] = 0.75 + 0.25 * tt1
-            heat_colors[mask1, 2] = 0.75 - 0.75 * tt1
-            
-            mask2 = (t > 0.33) & (t <= 0.66)
-            tt2 = (t[mask2] - 0.33) / 0.33
-            heat_colors[mask2, 0] = 1.0
-            heat_colors[mask2, 1] = 1.0 - 0.5 * tt2
-            heat_colors[mask2, 2] = 0.0
-            
-            mask3 = t > 0.66
-            tt3 = (t[mask3] - 0.66) / 0.34
-            heat_colors[mask3, 0] = 1.0
-            heat_colors[mask3, 1] = 0.5 - 0.5 * tt3
-            heat_colors[mask3, 2] = 0.0
-
-            colors[rows[valid_rows]] = np.clip(heat_colors, 0, 1)
+            cols = pix_val[:, :3].astype(np.float32) / 255.0
+            for pid, col, vis in zip(domain_proxy.tolist(), cols, opaque):
+                if not vis:
+                    continue
+                row = lookup.get(int(pid), int(pid)) if lookup else int(pid)
+                if 0 <= row < n:
+                    colors[row] = np.clip(col, 0, 1)
 
             trace('quality.heatmap', mode=mode,
                    windows=len(values), raw=len(domain_raw),
-                   proxy=len(domain_proxy), voxels=len(best),
-                   displayed=int(np.sum(valid_rows)),
-                   step=f'{step:.4f}')
+                   proxy=len(domain_proxy), voxels=int(np.count_nonzero(opaque)),
+                   displayed=int(np.count_nonzero(opaque)),
+                   step=f'{scale:.4f}')
 
             if _colors is None:
                 self._update_cloud_color(cloud_name, colors)

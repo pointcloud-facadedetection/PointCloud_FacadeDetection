@@ -4,17 +4,160 @@ from pathlib import Path
 import numpy as np
 import cv2
 from algorithms.facade.projection import rasterize_facade
-from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode
+from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode, defect_colormap, excess_uniform
+from services.heatmap_renderer import FacadeHeatmapTripletRenderer
 
 
 class ResultExportService:
     """
-    导出服务：按需生成热力图 PNG 文件。
+    导出服务：按需生成热力图 PNG 文件与 PDF 报告。
+    重构后输出 4 组 triplet（2 套算法 × 2 指标），每组 3 张子图。
     """
+
+    _QUALITY_MODES = [
+        'ruler_flatness_area', 'ruler_flatness_point',
+        'ruler_verticality_area', 'ruler_verticality_point',
+        'global_plane_flatness_area', 'global_plane_flatness_point',
+        'global_plane_verticality_area', 'global_plane_verticality_point',
+    ]
+
+    # 4 组展示模式（area 视图用于报告图片；point 视图仅保留数据）
+    _DISPLAY_MODES = [
+        'ruler_flatness_area',
+        'ruler_verticality_area',
+        'global_plane_flatness_area',
+        'global_plane_verticality_area',
+    ]
+
+    def __init__(self):
+        self._renderer = FacadeHeatmapTripletRenderer()
+
+    def export_all_heatmaps(self, results_dir, facade_no, points, colors, quality):
+        """
+        导出全部 4 组展示模式的热力图 triplet PNG。
+        返回字典，键为模式名，值为包含 overlay/heatmap_grid/photo 路径的字典。
+        """
+        root = None
+        try:
+            if not isinstance(results_dir, (str, Path)) or str(results_dir) == '':
+                print('[PCFD] export_all_heatmaps: results_dir invalid, skip', flush=True)
+                return {}
+
+            if not isinstance(quality, dict):
+                print('[PCFD] export_all_heatmaps: quality not dict, skip', flush=True)
+                return {}
+
+            root = Path(results_dir) / f'facade_{int(facade_no):03d}'
+            root.mkdir(parents=True, exist_ok=True)
+
+            overall = quality.get('overall', {})
+            plane_model = overall.get('plane_model')
+            if plane_model is None or len(plane_model) != 4:
+                print('[PCFD] export_all_heatmaps: plane_model missing, skip', flush=True)
+                return {}
+
+            comparison = quality.get('quality_comparison', {})
+            methods_data = comparison.get('methods', {})
+
+            exported = {}
+            for mode in self._DISPLAY_MODES:
+                spec = heatmap_spec(mode)
+                method = spec.get('method', 'ruler')
+                metric = spec.get('metric', 'flatness')
+
+                method_dict = methods_data.get(method, {})
+                metric_data = method_dict.get(metric, {})
+                windows = metric_data.get('windows', [])
+
+                if not windows:
+                    print(f'[PCFD] export_all_heatmaps: skip {mode}, no windows', flush=True)
+                    continue
+
+                # 构造临时 quality dict 供渲染器使用
+                temp_quality = {
+                    'windows': windows,
+                    'heatmap_mode': mode,
+                    'overall': overall,
+                    'thresholds': quality.get('thresholds', {}),
+                    'parameters': method_dict.get('parameters', quality.get('parameters', {})),
+                    '__global_indices': quality.get('__global_indices', []),
+                    'projection_origin': quality.get('projection_origin'),
+                    'projection_u_axis': quality.get('projection_u_axis'),
+                    'projection_v_axis': quality.get('projection_v_axis'),
+                }
+
+                try:
+                    triplet = self._renderer.render(
+                        mode=mode,
+                        points=points,
+                        colors=colors,
+                        windows=windows,
+                        plane_model=plane_model,
+                        quality=temp_quality,
+                        pixel_size=0.05,
+                        photo_path=None,  # 预留接口
+                    )
+                except Exception as e:
+                    print(f'[PCFD] export_all_heatmaps: render failed for {mode}: {e}', flush=True)
+                    continue
+
+                # 写入文件
+                prefix = f'facade_{int(facade_no):03d}_{mode}'
+                paths = {}
+                for key, img in triplet.items():
+                    if img is None:
+                        paths[key] = None
+                        continue
+                    suffix = {
+                        'overlay': '_overlay.png',
+                        'heatmap_grid': '_heatmap_grid.png',
+                        'photo': '_photo_overlay.png',
+                    }.get(key, f'_{key}.png')
+                    path = root / (prefix + suffix)
+                    if cv2.imwrite(str(path), img):
+                        paths[key] = str(path)
+                    else:
+                        paths[key] = None
+
+                # 同时生成 report 缩放图（overlay 的缩小版）
+                report_path = root / f'{prefix}_report.png'
+                try:
+                    report_img = self._renderer.fit_report_image(triplet['overlay'])
+                    cv2.imwrite(str(report_path), report_img)
+                    paths['report'] = str(report_path)
+                except Exception:
+                    paths['report'] = None
+
+                exported[mode] = {
+                    'title': spec['title'],
+                    **paths,
+                }
+
+            return exported
+
+        except Exception as e:
+            err_msg = (
+                f"=== export_all_heatmaps 异常 ===\n"
+                f"立面编号: {facade_no}\n"
+                f"输出目录: {root}\n"
+                f"异常类型: {type(e).__name__}\n"
+                f"异常信息: {e}\n"
+                f"堆栈:\n{traceback.format_exc()}"
+            )
+            print(err_msg, flush=True)
+            if root is not None:
+                try:
+                    (root / 'export_all_error.log').write_text(err_msg, encoding='utf-8')
+                except Exception:
+                    pass
+            return {}
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
                        pixel_size=0.05):
-        """Generate defect heatmap PNG. """
+        """
+        兼容旧接口：导出单张热力图（默认导出 overlay）。
+        新实现复用 triplet 渲染器但仅返回 overlay 路径。
+        """
         root = None
         try:
             if not isinstance(results_dir, (str, Path)) or str(results_dir) == '':
@@ -33,65 +176,49 @@ class ResultExportService:
             root = Path(results_dir) / f'facade_{int(facade_no):03d}'
             root.mkdir(parents=True, exist_ok=True)
 
-            pts = np.asarray(points, dtype=float)
-            if pts.ndim != 2 or pts.shape[1] != 3:
-                print(f'[PCFD] export_heatmap: points shape invalid {pts.shape}, skip', flush=True)
-                return None
-
             windows = quality.get('windows') or []
             if len(windows) == 0:
                 print(f'[PCFD] export_heatmap: no windows, skip', flush=True)
                 return None
 
             heatmap_mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
-
-            # 只有同时具有实际测量值且质量检测结果为失败的窗口才可绘制。
-            n_valid = 0
             spec = heatmap_spec(heatmap_mode)
-            for w in windows:
-                fgm = w.get(spec['value_key'], np.nan)
-                try:
-                    if (not bool(w.get(spec['pass_key'], True)) and
-                            np.isfinite(float(fgm))):
-                        n_valid += 1
-                except (TypeError, ValueError):
-                    pass
 
-            if n_valid == 0:
-                print(f'[PCFD] export_heatmap: no valid windows, skip', flush=True)
-                return None
+            triplet = self._renderer.render(
+                mode=heatmap_mode,
+                points=points,
+                colors=colors,
+                windows=windows,
+                plane_model=plane_model,
+                quality=quality,
+                pixel_size=pixel_size,
+                photo_path=None,
+            )
 
-            # 确保栅格图像尺寸在限定范围内。  
-            pixel_size = max(float(pixel_size), 0.01)
-            heatmap_path = self._export_window_heatmap(
-                root, facade_no, pts, colors, windows, plane_model, pixel_size, quality)
-            max_value = overall.get(spec['value_key'])
-            if max_value is None:
-                limit_for_legend = float(quality.get('parameters', {}).get(
-                    spec['limit_key'], quality.get('thresholds', {}).get(
-                        spec['limit_key'], 4.0)))
-                max_value = max((float(w.get(spec['value_key'])) for w in windows
-                                 if np.isfinite(float(w.get(spec['value_key'], np.nan)))),
-                                default=limit_for_legend)
-            legend_path = self._create_heatmap_legend(
-                root,
-                quality.get('parameters', {}).get(
-                    heatmap_spec(heatmap_mode)['limit_key'],
-                    quality.get('thresholds', {}).get(heatmap_spec(heatmap_mode)['limit_key'], 4.0)),
-                float(max_value),
-                heatmap_mode)
+            prefix = f'facade_{int(facade_no):03d}_{heatmap_mode}'
+            overlay_path = root / f'{prefix}_overlay.png'
+            cv2.imwrite(str(overlay_path), triplet['overlay'])
+
+            # report 缩放图
+            report_path = root / f'{prefix}_report.png'
+            report_img = self._renderer.fit_report_image(triplet['overlay'])
+            cv2.imwrite(str(report_path), report_img)
+
+            # heatmap_grid
+            grid_path = root / f'{prefix}_heatmap_grid.png'
+            cv2.imwrite(str(grid_path), triplet['heatmap_grid'])
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
-                  f'heatmap={heatmap_path.name if heatmap_path else None}', flush=True)
+                  f'overlay={overlay_path.name}', flush=True)
 
             return {
                 'root': str(root),
                 'mode': heatmap_mode,
-                'title': heatmap_spec(heatmap_mode)['title'],
-                'heatmap': str(heatmap_path) if heatmap_path else None,
-                'overlay': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_overlay.png'),
-                'report': str(root / f'facade_{int(facade_no):03d}_{heatmap_mode}_report.png'),
-                'legend': str(legend_path) if legend_path else None,
+                'title': spec['title'],
+                'heatmap': str(grid_path),
+                'overlay': str(overlay_path),
+                'report': str(report_path),
+                'legend': None,
             }
 
         except Exception as e:
@@ -111,258 +238,14 @@ class ResultExportService:
                     pass
             return None
 
-    def _filter_base_points(self, pts_local, colors, plane_model, quality):
-        """
-        过滤 base_points，排除视口外的背景点和远离立面主平面的异常点
-        """
-        base_points = np.asarray(pts_local, dtype=float).reshape(-1, 3)
-        if len(base_points) == 0:
-            return base_points, colors
-        
-        # 获取立面投影参数
-        projection = quality.get('projection') or {}
-        projection_origin = quality.get('projection_origin')
-        projection_u_axis = quality.get('projection_u_axis')
-        projection_v_axis = quality.get('projection_v_axis')
-        
-        # 如果有投影参数，过滤掉投影范围外的点（视口背景）
-        if (projection_origin is not None and 
-            projection_u_axis is not None and 
-            projection_v_axis is not None):
-            
-            origin = np.asarray(projection_origin, dtype=float)
-            u_axis = np.asarray(projection_u_axis, dtype=float)
-            v_axis = np.asarray(projection_v_axis, dtype=float)
-            
-            # 计算每个点在UV平面上的投影坐标
-            rel = base_points - origin
-            u = np.dot(rel, u_axis)
-            v = np.dot(rel, v_axis)
-            
-            # 计算立面在UV平面的bbox
-            u_min, u_max = np.percentile(u, [1, 99])
-            v_min, v_max = np.percentile(v, [1, 99])
-            
-            # 添加小margin，过滤掉远离立面主体的点
-            u_margin = (u_max - u_min) * 0.05
-            v_margin = (v_max - v_min) * 0.05
-            
-            in_bounds = ((u >= u_min - u_margin) & (u <= u_max + u_margin) &
-                        (v >= v_min - v_margin) & (v <= v_max + v_margin))
-            
-            base_points = base_points[in_bounds]
-            if colors is not None and len(colors) == len(in_bounds):
-                colors = np.asarray(colors)[in_bounds]
-        
-        # 额外过滤：基于到平面距离的异常值剔除
-        a, b, c, d = plane_model
-        norm = np.sqrt(a*a + b*b + c*c)
-        distances = np.abs(np.dot(base_points, [a, b, c]) + d) / norm
-        
-        # 剔除距离过大的异常点（通常是背景或噪点）
-        dist_threshold = np.percentile(distances, 99.5) * 1.5
-        valid_dist = distances <= max(dist_threshold, 0.5)
-        
-        base_points = base_points[valid_dist]
-        if colors is not None:
-            if len(colors) == len(valid_dist):
-                colors = np.asarray(colors)[valid_dist]
-            else:
-                colors = None
-        
-        return base_points, colors
+    _UNIFIED_LEGEND_NAME = 'legend_unified.png'
 
-    def _export_window_heatmap(self, root, facade_no, pts_local, colors, windows, plane_model, pixel_size, quality):
-        """将窗口结果导出为热力图 PNG 文件，并采用统一的缺陷配色方案。"""
-        mode = normalize_heatmap_mode(quality.get('heatmap_mode'))
-        spec = heatmap_spec(mode)
-        
-        # 提取中心和缺陷值
-        centers_list = []
-        values_list = []
-        
-        for r in windows:
-            pass_key = spec['pass_key']
-            if bool(r.get(pass_key, True)):
-                continue
-            cx = r.get('center_xyz')
-            # 只有当窗口的几何信息和尺寸均有效时，该窗口才可绘制。
-            if cx is not None and len(cx) == 3:
-                try:
-                    if all(np.isfinite(float(x)) for x in cx):
-                        center = [float(x) for x in cx]
-                    else:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-            else:
-                continue
+    def _create_unified_legend(self, root, limit_mm, max_mm):
+        """生成全局唯一标准图例，所有热力图模式共用。"""
+        legend_path = Path(root) / self._UNIFIED_LEGEND_NAME
+        if legend_path.exists():
+            return legend_path
 
-            val = r.get(spec['value_key'], np.nan)
-            
-            try:
-                val = float(val)
-                if not np.isfinite(val):
-                    continue
-            except (TypeError, ValueError):
-                continue
-            centers_list.append(center)
-            values_list.append(val)
-
-        centers = np.asarray(centers_list, dtype=float).reshape(-1, 3)
-        values = np.asarray(values_list, dtype=float)
-
-        if len(centers) == 0 or len(values) == 0 or len(centers) != len(values):
-            raise ValueError('质量结果没有有效窗口，无法导出热力图')
-
-        # Get limit
-        limit_key = spec['limit_key']
-        limit_mm = float(quality.get('parameters', {}).get(
-            limit_key, quality.get('thresholds', {}).get(limit_key, 4.0)))
-        
-        # 修复: 统一单位 - 与视口保持一致
-        values_mm = values  # 保持 mm 单位用于颜色计算
-        limit_m = limit_mm / 1000.0  # 阈值转为 m
-        
-        # 统一缩放因子 - 使用全局最大缺陷值
-        excess_mm = np.maximum(np.abs(values_mm) - limit_mm, 0.0)
-        
-        # 使用全局最大超标量作为缩放基准（与视口一致）
-        # 如果所有值都低于limit，使用limit的10%作为最小缩放
-        global_max_excess = float(np.nanmax(excess_mm)) if np.any(np.isfinite(excess_mm)) else limit_mm * 0.1
-        scale_mm = max(global_max_excess, limit_mm * 0.05)  # 至少保留5%的limit作为缩放
-        
-        t = np.clip(excess_mm / scale_mm, 0.0, 1.0)
-
-        # 统一配色 - 青→黄→橙→红 (与3D视口一致)
-        defect_colors = np.zeros((len(values_mm), 3), dtype=float)
-        
-        # 青色 (0.0, 0.75, 1.0) at t=0 -> 黄色 (1, 1, 0) at t=0.33
-        # -> 橙色 (1, 0.5, 0) at t=0.66 -> 红色 (1, 0, 0) at t=1.0
-        
-        mask1 = t <= 0.33
-        tt1 = t[mask1] / 0.33
-        defect_colors[mask1, 0] = 0.0 + 1.0 * tt1          # R: 0 -> 1
-        defect_colors[mask1, 1] = 0.75 + 0.25 * tt1         # G: 0.75 -> 1
-        defect_colors[mask1, 2] = 1.0 - 1.0 * tt1            # B: 1 -> 0
-        
-        mask2 = (t > 0.33) & (t <= 0.66)
-        tt2 = (t[mask2] - 0.33) / 0.33
-        defect_colors[mask2, 0] = 1.0
-        defect_colors[mask2, 1] = 1.0 - 0.5 * tt2            # G: 1 -> 0.5
-        defect_colors[mask2, 2] = 0.0
-        
-        mask3 = t > 0.66
-        tt3 = (t[mask3] - 0.66) / 0.34
-        defect_colors[mask3, 0] = 1.0
-        defect_colors[mask3, 1] = 0.5 - 0.5 * tt3            # G: 0.5 -> 0
-        defect_colors[mask3, 2] = 0.0
-
-        base_points, _ = self._filter_base_points(pts_local, colors, plane_model, quality)
-        
-        if len(base_points) == 0:
-            raise ValueError('过滤后立面点云为空，无法导出叠加图')
-
-        # Export background is intentionally light so the point-cloud silhouette
-        # remains visible after PDF downscaling.
-        base_colors = np.full((len(base_points), 3), [0.65, 0.70, 0.78], dtype=float)
-
-        # 转换为米单位传入 rasterize_facade
-        values_m = values_mm / 1000.0
-        
-        projection = quality.get('projection') or {}
-        projection_origin = quality.get('projection_origin')
-        projection_u_axis = quality.get('projection_u_axis')
-        projection_v_axis = quality.get('projection_v_axis')
-
-        # 传入与视口一致的参数
-        global_vmax_m = (limit_mm + scale_mm) / 1000.0
-        
-        raster = rasterize_facade(
-            centers, np.full((len(centers), 3), 0.7), plane_model, 
-            values_m, limit_m,
-            pixel_size=pixel_size, 
-            defect_colors=defect_colors, 
-            vmin=limit_m,
-            vmax=global_vmax_m,  # 传入全局vmax确保内部映射一致
-            max_size=2400,
-            base_points=base_points, 
-            base_colors=base_colors,
-            projection_origin=projection_origin,
-            projection_u_axis=projection_u_axis,
-            projection_v_axis=projection_v_axis)
-
-        overlay = raster['overlay_rgba'].copy()
-        alpha = overlay[:, :, 3].astype(np.float32) / 255.0
-
-        if np.any(alpha > 0):
-            rgb = overlay[:, :, :3].astype(np.float32)
-
-            # 优化模糊处理 - 保持缺陷边缘清晰
-            # A small dilation keeps sparse defect windows legible in print.
-            alpha = cv2.dilate(alpha, np.ones((3, 3), np.uint8), iterations=1)
-            alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 0.8)
-            alpha_blur = np.clip(alpha_blur, 1e-6, 1.0)
-            
-            # RGB使用更小的模糊核，保持边缘清晰
-            premul = rgb * alpha[:, :, None]
-            premul_blur = cv2.GaussianBlur(premul, (3, 3), 0.5)
-            
-            rgb_smooth = premul_blur / alpha_blur[:, :, None]
-            overlay[:, :, :3] = np.clip(rgb_smooth, 0, 255).astype(np.uint8)
-            overlay[:, :, 3] = np.clip(alpha_blur * 255, 0, 255).astype(np.uint8)
-
-        overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGBA2BGRA)
-        base_rgb = cv2.cvtColor(raster['base_rgb'], cv2.COLOR_RGB2BGR)
-
-        visible = overlay[:, :, 3:4].astype(np.float32) / 255.0
-
-        # Keep the neutral point-cloud layer subdued while preserving detail.
-        defect_boost = 1.35
-        base_darkened = np.clip(base_rgb.astype(np.float32) * 1.02, 0, 255)
-        
-        boosted_overlay = overlay[:, :, :3].astype(np.float32) * defect_boost
-        boosted_overlay = np.clip(boosted_overlay, 0, 255)
-        
-        composite = (
-            base_darkened * (1.0 - visible[:, :, :1]) +
-            boosted_overlay * visible[:, :, :1]
-        ).astype(np.uint8)
-
-        heatmap_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_heatmap.png'
-        overlay_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_overlay.png'
-
-        if not cv2.imwrite(str(heatmap_path), overlay_bgr):
-            raise RuntimeError('热力图 PNG 写入失败')
-        if not cv2.imwrite(str(overlay_path), composite):
-            raise RuntimeError('合成图 PNG 写入失败')
-
-        report_path = Path(root) / f'facade_{int(facade_no):03d}_{mode}_report.png'
-        report_image = self._fit_report_image(composite)
-        if not cv2.imwrite(str(report_path), report_image):
-            raise RuntimeError('PDF 报告热力图写入失败')
-
-        return heatmap_path
-
-    @staticmethod
-    def _fit_report_image(image, max_width=700, max_height=600):
-        """Create a bounded, letterboxed image for the fixed PDF image box."""
-        source = np.asarray(image, dtype=np.uint8)
-        if source.ndim != 3 or source.shape[0] == 0 or source.shape[1] == 0:
-            raise ValueError('报告图像为空')
-        h, w = source.shape[:2]
-        scale = min(float(max_width) / w, float(max_height) / h, 1.0)
-        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        resized = cv2.resize(source, (nw, nh), interpolation=cv2.INTER_AREA)
-        # Keep the report image contract fixed at 1200x520.  The source is
-        # letterboxed inside this canvas, including for very tall images.
-        canvas = np.full((max_height, max_width, 3), [245, 247, 250], dtype=np.uint8)
-        x, y = (max_width - nw) // 2, (max_height - nh) // 2
-        canvas[y:y + nh, x:x + nw] = resized
-        return canvas
-
-    def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
-        """Create unified heatmap color legend PNG."""
         h, w = 80, 500
         legend = np.ones((h, w, 3), dtype=np.uint8) * 245
 
@@ -374,20 +257,23 @@ class ResultExportService:
 
         for i in range(n_segments):
             t = i / max(n_segments - 1, 1)
-
-            # 图例配色与热力图一致 - 青→黄→橙→红
-            if t <= 0.33:
-                tt = t / 0.33
-                r = int(np.clip((0.0 + 1.0 * tt) * 255, 0, 255))
-                g = int(np.clip((0.75 + 0.25 * tt) * 255, 0, 255))
-                b = int(np.clip((1.0 - 1.0 * tt) * 255, 0, 255))
-            elif t <= 0.66:
-                tt = (t - 0.33) / 0.33
+            if t <= 0.25:
+                tt = t / 0.25
+                r = int(np.clip((0.0 + 0.2 * tt) * 255, 0, 255))
+                g = int(np.clip((0.7 + 0.2 * tt) * 255, 0, 255))
+                b = int(np.clip((1.0 - 0.8 * tt) * 255, 0, 255))
+            elif t <= 0.5:
+                tt = (t - 0.25) / 0.25
+                r = int(np.clip((0.2 + 0.8 * tt) * 255, 0, 255))
+                g = int(np.clip((0.9 + 0.1 * tt) * 255, 0, 255))
+                b = int(np.clip((0.2 - 0.2 * tt) * 255, 0, 255))
+            elif t <= 0.75:
+                tt = (t - 0.5) / 0.25
                 r = 255
                 g = int(np.clip((1.0 - 0.5 * tt) * 255, 0, 255))
                 b = 0
             else:
-                tt = (t - 0.66) / 0.34
+                tt = (t - 0.75) / 0.25
                 r = 255
                 g = int(np.clip((0.5 - 0.5 * tt) * 255, 0, 255))
                 b = 0
@@ -408,6 +294,9 @@ class ResultExportService:
         cv2.putText(legend, "严重", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
         cv2.putText(legend, f"{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
-        legend_path = Path(root) / f'{Path(root).name}_{normalize_heatmap_mode(mode)}_legend.png'
         cv2.imwrite(str(legend_path), legend)
         return legend_path
+
+    def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
+        """兼容旧接口：直接返回全局统一图例。"""
+        return self._create_unified_legend(root, limit_mm, max_mm)

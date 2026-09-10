@@ -27,6 +27,19 @@ class ProjectCard:
     address: str | None = None
     building_floor: str | None = None
     remarks: str | None = None
+    # PDF 报告元信息
+    construction_unit: str | None = None
+    construction_unit_executor: str | None = None
+    inspection_unit: str | None = None
+    supervision_unit: str | None = None
+    client_unit: str | None = None
+    report_no: str | None = None
+    inspection_date: str | None = None
+    report_date: str | None = None
+    inspection_params_json: str | None = None
+    fls_directories: list[str] | None = None
+    pointcloud_files: list[str] | None = None
+    photo_files: list[str] | None = None
 
 
 class ProjectOverviewService:
@@ -72,12 +85,28 @@ class ProjectOverviewService:
     # -------------- 项目管理 --------------
     def list_projects(self) -> list[ProjectCard]:
         items = ProjectRepo.list_projects()
-        return [ProjectCard(
+        return [self._card_from_info(i) for i in items]
+
+    @staticmethod
+    def _card_from_info(i: dict) -> ProjectCard:
+        return ProjectCard(
             project_id=i["project_id"], name=i["name"],
             directory_path=i["directory_path"],
             org_unit=i.get("org_unit"), address=i.get("address"),
             building_floor=i.get("building_floor"), remarks=i.get("remarks"),
-        ) for i in items]
+            construction_unit=i.get("construction_unit"),
+            construction_unit_executor=i.get("construction_unit_executor"),
+            inspection_unit=i.get("inspection_unit"),
+            supervision_unit=i.get("supervision_unit"),
+            client_unit=i.get("client_unit"),
+            report_no=i.get("report_no"),
+            inspection_date=i.get("inspection_date"),
+            report_date=i.get("report_date"),
+            inspection_params_json=i.get("inspection_params_json"),
+            fls_directories=list(i.get("fls_directories") or []),
+            pointcloud_files=list(i.get("pointcloud_files") or []),
+            photo_files=list(i.get("photo_files") or []),
+        )
 
     def create_project(
         self,
@@ -86,6 +115,18 @@ class ProjectOverviewService:
         address: str | None = None,
         remarks: str | None = None,
         building_floor: str | None = None,
+        construction_unit: str | None = None,
+        construction_unit_executor: str | None = None,
+        inspection_unit: str | None = None,
+        supervision_unit: str | None = None,
+        client_unit: str | None = None,
+        report_no: str | None = None,
+        inspection_date: str | None = None,
+        report_date: str | None = None,
+        inspection_params_json: str | None = None,
+        fls_directories: list[str] | None = None,
+        pointcloud_files: list[str] | None = None,
+        photo_files: list[str] | None = None,
     ) -> ProjectCard:
         """创建持久化项目，并向 UI 返回统一的项目卡片模型。"""
         info = ProjectRepo.create_project(
@@ -94,8 +135,17 @@ class ProjectOverviewService:
             address=address,
             remarks=remarks,
             building_floor=building_floor,
+            construction_unit=construction_unit,
+            construction_unit_executor=construction_unit_executor,
+            inspection_unit=inspection_unit,
+            supervision_unit=supervision_unit,
+            client_unit=client_unit,
+            report_no=report_no,
+            inspection_date=inspection_date,
+            report_date=report_date,
+            inspection_params_json=inspection_params_json,
         )
-        return ProjectCard(
+        card = ProjectCard(
             project_id=info["project_uuid"],
             name=info["name"],
             directory_path=info.get("root_dir", info.get("directory_path", "")),
@@ -103,7 +153,18 @@ class ProjectOverviewService:
             address=info.get("address"),
             building_floor=info.get("building_floor"),
             remarks=info.get("remarks"),
+            construction_unit=info.get("construction_unit"),
+            construction_unit_executor=info.get("construction_unit_executor"),
+            inspection_unit=info.get("inspection_unit"),
+            supervision_unit=info.get("supervision_unit"),
+            client_unit=info.get("client_unit"),
+            report_no=info.get("report_no"),
+            inspection_date=info.get("inspection_date"),
+            report_date=info.get("report_date"),
+            inspection_params_json=info.get("inspection_params_json"),
         )
+        self.update_project_assets(card.project_id, fls_directories or [], pointcloud_files or [], photo_files or [])
+        return self.get_project(card.project_id) or card
 
     def open_project(self, directory_path: str) -> ProjectCard:
         # TODO(生命周期/性能): open_project：目录扫描、索引同步和项目激活应避免在 GUI 线程同步执行，并核查重复索引读取与激活失败回滚。
@@ -134,6 +195,16 @@ class ProjectOverviewService:
                         address=proj.get("address"),
                         building_floor=proj.get("building_floor"),
                         remarks=proj.get("remarks"),
+                        construction_unit=proj.get("construction_unit"),
+                        construction_unit_executor=proj.get("construction_unit_executor"),
+                        inspection_unit=proj.get("inspection_unit"),
+                        supervision_unit=proj.get("supervision_unit"),
+                        client_unit=proj.get("client_unit"),
+                        report_no=proj.get("report_no"),
+                        inspection_date=proj.get("inspection_date"),
+                        report_date=proj.get("report_date"),
+                        inspection_params_json=proj.get("inspection_params_json"),
+                        **self.get_project_assets(puid),
                     )
         except Exception:
             pass
@@ -154,17 +225,28 @@ class ProjectOverviewService:
             address=info.get("address"),
             building_floor=info.get("building_floor"),
             remarks=info.get("remarks"),
+            construction_unit=info.get("construction_unit"),
+            construction_unit_executor=info.get("construction_unit_executor"),
+            inspection_unit=info.get("inspection_unit"),
+            supervision_unit=info.get("supervision_unit"),
+            client_unit=info.get("client_unit"),
+            report_no=info.get("report_no"),
+            inspection_date=info.get("inspection_date"),
+            report_date=info.get("report_date"),
+            inspection_params_json=info.get("inspection_params_json"),
         )
-        # 新登记项目：登记目录中的全部 PLY；实际代理构建与渲染由
+        # 新登记项目：登记目录中的全部 PLY/E57；实际代理构建与渲染由
         # StationService 在项目激活后按需完成，避免产生第二条加载链路。
         try:
-            ply_candidates = list(path.glob("*.ply"))
-            for ply_path in ply_candidates:
+            pointcloud_candidates = [item for item in path.iterdir()
+                                     if item.is_file() and
+                                     item.suffix.lower() in {'.ply', '.e57'}]
+            for pointcloud_path in pointcloud_candidates:
                 FileRepo.import_file(project_uuid=pc.project_id,
-                                     src_path=str(ply_path),
+                                     src_path=str(pointcloud_path),
                                      kind=FileKind.raw_pointcloud,
                                      copy_into_project=False)
-            if ply_candidates:
+            if pointcloud_candidates:
                 PointCloudStationRepo.sync_assets(pc.project_id)
         except Exception:
             pass
@@ -246,15 +328,86 @@ class ProjectOverviewService:
         return None
 
     def update_project(self, project_id: str, **fields) -> ProjectCard:
+        resources = {key: fields.pop(key, None) for key in (
+            'fls_directories', 'pointcloud_files', 'photo_files')}
         info = ProjectRepo.update_project(project_id, **fields)
         if info is None:
             raise ValueError('项目不存在或已被删除。')
-        return ProjectCard(
+        card = ProjectCard(
             project_id=info["project_id"], name=info["name"],
             directory_path=info["directory_path"],
             org_unit=info.get("org_unit"), address=info.get("address"),
             building_floor=info.get("building_floor"), remarks=info.get("remarks"),
+            construction_unit=info.get("construction_unit"),
+            construction_unit_executor=info.get("construction_unit_executor"),
+            inspection_unit=info.get("inspection_unit"),
+            supervision_unit=info.get("supervision_unit"),
+            client_unit=info.get("client_unit"),
+            report_no=info.get("report_no"),
+            inspection_date=info.get("inspection_date"),
+            report_date=info.get("report_date"),
+            inspection_params_json=info.get("inspection_params_json"),
         )
+        # The dialog always supplies all three lists.  An empty list is an
+        # intentional clear operation and must be persisted as such.
+        if any(value is not None for value in resources.values()):
+            self.update_project_assets(project_id, resources['fls_directories'] or [],
+                                       resources['pointcloud_files'] or [], resources['photo_files'] or [])
+            # Keep station projections in lockstep with the edited asset list;
+            # otherwise deleted rows reappear until the next application start.
+            PointCloudStationRepo.sync_assets(project_id)
+        return self.get_project(project_id) or card
+
+    def get_project_assets(self, project_uuid: str) -> dict[str, list[str]]:
+        from config.storage import Storage
+        root = Storage.project_root(project_uuid)
+        index = Storage.load_pcfd_index(root) or {}
+        assets = index.get('assets') or {}
+        pointclouds = [a.path for a in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_pointcloud)]
+        photos = [a.path for a in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_image)]
+        return {
+            'fls_directories': list(dict.fromkeys(assets.get('fls_folders') or [])),
+            'pointcloud_files': list(dict.fromkeys(pointclouds)),
+            'photo_files': list(dict.fromkeys(photos)),
+        }
+
+    def update_project_assets(self, project_uuid: str, fls_directories: list[str],
+                              pointcloud_files: list[str], photo_files: list[str]) -> None:
+        """以弹窗列表为事实来源同步资源，支持新增、删除、清空后保存。"""
+        from config.storage import Storage
+        from models.enums import FileKind
+        from pathlib import Path
+        import os
+        fls = [str(Path(p).expanduser().resolve()) for p in fls_directories if p]
+        pcs = [str(Path(p).expanduser().resolve()) for p in pointcloud_files if p]
+        photos = [str(Path(p).expanduser().resolve()) for p in photo_files if p]
+        for p in fls:
+            if not Path(p).is_dir():
+                raise ValueError(f'FLS 目录不存在：{p}')
+        for p in pcs:
+            if not Path(p).is_file() or Path(p).suffix.lower() not in FileService.SUPPORTED_POINT_CLOUD_EXT:
+                raise ValueError(f'点云文件无效或格式不支持：{p}')
+        for p in photos:
+            if not Path(p).is_file() or Path(p).suffix.lower() not in FileService.SUPPORTED_IMAGE_EXT:
+                raise ValueError(f'照片文件无效或格式不支持：{p}')
+        old = self.get_project_assets(project_uuid)
+        for asset in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_pointcloud):
+            if asset.path not in pcs:
+                FileRepo.delete_file(project_uuid, asset.id)
+        for asset in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_image):
+            if asset.path not in photos:
+                FileRepo.delete_file(project_uuid, asset.id)
+        for p in pcs:
+            FileRepo.import_file(project_uuid, p, FileKind.raw_pointcloud, copy_into_project=False)
+        for p in photos:
+            FileRepo.import_file(project_uuid, p, FileKind.raw_image, copy_into_project=False)
+        root = Storage.project_root(project_uuid)
+        index = Storage.load_pcfd_index(root) or {}
+        assets = index.setdefault('assets', {})
+        assets['fls_folders'] = fls
+        assets['raw_pointclouds'] = pcs
+        assets['raw_images'] = photos
+        Storage.save_pcfd_index(root, index)
 
     # -------------- 文件导入 --------------
     def _ensure_file_service(self):
@@ -292,6 +445,15 @@ class ProjectOverviewService:
             directory_path=info["directory_path"],
             org_unit=info.get("org_unit"), address=info.get("address"),
             building_floor=info.get("building_floor"), remarks=info.get("remarks"),
+            construction_unit=info.get("construction_unit"),
+            construction_unit_executor=info.get("construction_unit_executor"),
+            inspection_unit=info.get("inspection_unit"),
+            supervision_unit=info.get("supervision_unit"),
+            client_unit=info.get("client_unit"),
+            report_no=info.get("report_no"),
+            inspection_date=info.get("inspection_date"),
+            report_date=info.get("report_date"),
+            inspection_params_json=info.get("inspection_params_json"),
         )
 
     def prepare_upload_files(self, file_paths: list[str], project_uuid: Optional[str],
