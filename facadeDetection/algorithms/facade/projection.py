@@ -32,6 +32,11 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
               if projection_origin is not None else np.mean(frame_pts, axis=0))
     uv = np.column_stack(((pts-origin) @ u, (pts-origin) @ v))
     frame_uv = np.column_stack(((frame_pts-origin) @ u, (frame_pts-origin) @ v))
+    finite_frame = np.all(np.isfinite(frame_uv), axis=1)
+    frame_uv = frame_uv[finite_frame]
+    frame_rgb = frame_rgb[finite_frame]
+    if len(frame_uv) == 0:
+        raise ValueError('base_points contains no finite facade points')
     lo = frame_uv.min(axis=0)
     hi = frame_uv.max(axis=0)
     size = max(float(pixel_size), 1e-4)
@@ -51,6 +56,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     np.add.at(base_flat, frame_flat, frame_rgb.astype(np.float32))
     base_flat /= np.maximum(np.bincount(frame_flat, minlength=h*w).reshape(-1, 1), 1)
     base = base_flat.reshape(h,w,3)
+    facade_mask = np.bincount(frame_flat, minlength=h*w).reshape(h, w) > 0
     
     # ==================== 统一缺陷热力图 ====================
     abs_gap = np.abs(gaps)
@@ -114,6 +120,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     
     return {
         'base_rgb': (np.clip(base, 0, 1) * 255).astype(np.uint8),
+        'facade_mask': facade_mask,
         'overlay_rgba': overlay,
         'u_axis': u, 'v_axis': v, 'origin': origin, 'bounds': np.r_[lo, hi],
         'pixel_size': size, 'vmin': vmin, 'vmax': vmax, 'count': count,

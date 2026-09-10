@@ -93,8 +93,8 @@ class _SharedArrayFiles:
 class RulerQualityParameters:
     ruler_length_m: float = 2.0
     ruler_width_m: float = .055
-    scan_step_m: float = .05
-    strip_step_m: float = .05
+    scan_step_m: float = 2.0
+    strip_step_m: float = .055
     flatness_angles_deg: tuple = (0., 45., 90., 135.)
     select_band_m: float = .01
     hole_band_m: float = .02
@@ -102,7 +102,7 @@ class RulerQualityParameters:
     top_q: float = 1.
     flatness_limit_mm: float = 8.
     verticality_limit_mm: float = 4. 
-    verticality_bin_size_m: float = .05
+    verticality_bin_size_m: float = 2.0
     min_points: int = 30
     sor_enabled: bool = True
     sor_sigma: float = 4.
@@ -134,9 +134,36 @@ def _unit(value):
 
 def _scan_grid(lo, hi, step, length):
     half = float(length) / 2.0
+    step = max(float(step), 1e-9)
     if hi - lo < length:
-        return np.empty(0, float)
-    return np.unique(np.r_[lo + half, np.arange(lo + half, hi - half + step * 0.5, step), hi - half])
+        # 立面范围小于尺长，生成单个居中窗口保证边界覆盖，标记截断
+        return np.array([(lo + hi) / 2.0]), np.array([True])
+    # 标准滑动：首窗口中心 = lo + half，末窗口中心 = hi - half
+    # 步长 = step，末窗口强制覆盖边界
+    first = lo + half
+    last = hi - half
+    centers = np.arange(first, last + 1e-9, step, dtype=float)
+    # 强制最后一个窗口贴边覆盖，避免 arange 的浮点误差漏掉边界。
+    if centers.size == 0 or abs(float(centers[-1]) - last) > 1e-6:
+        centers = np.concatenate((centers, np.array([last], dtype=float)))
+    clipped = np.zeros(centers.size, dtype=bool)
+    clipped[-1] = True
+    
+    return centers, clipped
+
+
+def _full_window_centers(lo, hi, step, length):
+    """Generate sliding-window centers and force the final edge position."""
+    lo, hi = float(lo), float(hi)
+    length = max(float(length), 1e-9)
+    step = max(float(step), 1e-9)
+    if hi - lo <= length:
+        return np.asarray([(lo + hi) * 0.5], dtype=float)
+    first, last = lo + length * 0.5, hi - length * 0.5
+    centers = np.arange(first, last + 1e-9, step, dtype=float)
+    if centers.size == 0 or abs(float(centers[-1]) - last) > 1e-7:
+        centers = np.r_[centers, last]
+    return centers
 
 
 def _project_direction(points, plane_model, origin, u_axis, v_axis, angle_deg):
@@ -166,13 +193,14 @@ def _build_strips_directional(along, across, w, raw_ids, angle, params):
 
     q_min, q_max = across_sorted.min(), across_sorted.max()
     if q_max - q_min < params.ruler_width_m:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted
+        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
 
     half_width = params.ruler_width_m / 2.0
     strip_step = max(float(params.strip_step_m), 1e-6)
-    strip_centers = np.arange(q_min + half_width, q_max - half_width + 1e-9, strip_step)
+    strip_centers = _full_window_centers(q_min, q_max, strip_step,
+                                         params.ruler_width_m)
     if len(strip_centers) == 0:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted
+        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
 
     strip_lo = strip_centers - half_width
     strip_hi = strip_centers + half_width
@@ -188,27 +216,30 @@ def _build_strips_directional(along, across, w, raw_ids, angle, params):
         strips.append({
             'key': i, 'center_index': int(i), 'across_center': float(c),
             'idx_lo': int(lo_idx), 'idx_hi': int(hi_idx),
-            'along_min': float(a_min - params.ruler_length_m / 2),
-            'along_max': float(a_max + params.ruler_length_m / 2),
+            'along_min': float(a_min),
+            'along_max': float(a_max),
         })
 
     if not strips:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted
+        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
 
     # Generate scan grid independently for each strip
     centres = []
     strip_indices = []
+    scan_clipped = []
     for strip in strips:
         lo = max(float(strip['along_min']), float(along_sorted.min()))
         hi = min(float(strip['along_max']), float(along_sorted.max()))
-        scan = _scan_grid(lo, hi, params.scan_step_m, params.ruler_length_m)
+        scan, clipped = _scan_grid(lo, hi, params.scan_step_m, params.ruler_length_m)
         if scan.size:
             centres.extend((float(a), float(strip['across_center'])) for a in scan)
             strip_indices.extend([strip['center_index']] * len(scan))
+            scan_clipped.extend(clipped.tolist())
 
     centres_grid = np.asarray(centres, dtype=float).reshape(-1, 2)
     strip_idx = np.asarray(strip_indices, dtype=np.int64)
-    return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted
+    scan_clipped_arr = np.asarray(scan_clipped, dtype=bool)
+    return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted, scan_clipped_arr
 
 
 def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted, 
@@ -270,29 +301,38 @@ def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
         'covered_source_ids': result.get('covered_source_ids', _EMPTY_SOURCE_IDS),
     }
 
-def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0, step):
+def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0,
+                              u_step=None, v_step=None):
+    """把窗口中心吸附到 (u, v) 双步长网格，返回网格 key 与吸附后坐标。
+
+    u/v 两个方向的网格间距可以不同：u 方向为横向 strip_step（默认 0.055m），
+    v 方向为竖直 scan_step（默认 2.0m）。若只传一个步长，则两个方向共用。
+    """
     center_xyz = np.asarray(center_xyz, dtype=float)
     rel = center_xyz - origin
     base_u = float(rel @ u_axis)
     base_v = float(rel @ v_axis)
-    step = max(float(step), 1e-6)
-    ku = int(np.round((base_u - u0) / step))
-    kv = int(np.round((base_v - v0) / step))
-    snap_u = float(u0 + ku * step)
-    snap_v = float(v0 + kv * step)
+    if u_step is None and v_step is None:
+        raise ValueError('_snap_window_to_base_grid 需要至少一个步长')
+    u_step = max(float(u_step if u_step is not None else v_step), 1e-6)
+    v_step = max(float(v_step if v_step is not None else u_step), 1e-6)
+    ku = int(np.round((base_u - u0) / u_step))
+    kv = int(np.round((base_v - v0) / v_step))
+    snap_u = float(u0 + ku * u_step)
+    snap_v = float(v0 + kv * v_step)
     snap_xyz = origin + snap_u * u_axis + snap_v * v_axis
     distance = float(np.hypot(base_u - snap_u, base_v - snap_v))
     return (ku, kv), snap_u, snap_v, snap_xyz, distance
 
-def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis, 
-                             u_min_full, v_min_full, params):
-    """Aggregate four directional ruler results using physical coordinate clustering.
+def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
+                         u_min_full, v_min_full, params):
+    """聚合四方向结果 into shared 2m x 2m star windows.
 
-    1. 用物理坐标 (center_xyz) 空间聚类找到同一位置的窗口
-    2. 聚类半径 = scan_step / 2（同一物理位置的不同方向窗口应该很近）
-    3. 对每个聚类，取四个方向的最大 gap
+    A star centre is a physical location, not a rounded centre from four
+    independently generated scans.  Its lattice is transverse ruler width by
+    longitudinal half ruler length, as required by the inspection standard.
     """
-    # Collect all valid windows with their physical positions
+    # 收集所有有效窗口
     all_windows = []
     for angle, windows in windows_by_direction.items():
         for w in windows:
@@ -316,25 +356,27 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 'angle_deg': float(w.get('angle_deg', np.nan)),
                 'depression_source_id': int(w.get('depression_source_id', -1)),
                 'pivot_source_ids': list(w.get('pivot_source_ids', [-1, -1])),
+                'covered_source_ids': np.asarray(w.get('covered_source_ids', _EMPTY_SOURCE_IDS), dtype=np.int64),
             })
 
     if not all_windows:
         return []
 
-    # Convert to array for efficient clustering
+    # 转为数组
     centers = np.array([w['center_xyz'] for w in all_windows])
-
-    # Project to base (u,v) for grid-based clustering
     rel = centers - origin
     base_u = rel @ u_axis
     base_v = rel @ v_axis
 
-    # Use grid snapping for clustering (same as before, but post-hoc)
-    step = max(float(params.scan_step_m), 1e-6)
-    ku = np.round((base_u - u_min_full) / step).astype(np.int64)
-    kv = np.round((base_v - v_min_full) / step).astype(np.int64)
+    # 使用两个步长划分网格
+    step_u = max(float(params.ruler_width_m), 1e-6)
+    step_v = max(float(params.ruler_length_m) / 2.0, 1e-6)
 
-    # Group by grid cell
+    # 计算网格索引（四舍五入）
+    ku = np.round((base_u - u_min_full) / step_u).astype(np.int64)
+    kv = np.round((base_v - v_min_full) / step_v).astype(np.int64)
+
+    # 分组
     grid_groups = {}
     for i, (u, v) in enumerate(zip(ku, kv)):
         key = (int(u), int(v))
@@ -342,19 +384,19 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
 
     rows = []
     for key, members in grid_groups.items():
-        # Group by direction within this cell
+        # 按方向分组
         dir_groups = {}
         for m in members:
             d = m['direction_deg']
             dir_groups.setdefault(d, []).append(m)
 
-        # For each direction, take the best (max gap) measurement
+        # 对每个方向取最大 gap（或可改为取最大值）
         directional = []
         for angle in params.flatness_angles_deg:
             angle_f = float(angle)
             if angle_f not in dir_groups:
                 continue
-            # Take the one with max gap (or the one closest to cell center)
+            # 取最大 gap（绝对值最大）
             best = max(dir_groups[angle_f], 
                       key=lambda x: x['gap_mm'] if np.isfinite(x['gap_mm']) else -np.inf)
             directional.append(best)
@@ -362,26 +404,32 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
         if not directional:
             continue
 
-        # Compute cell center
-        snap_u = u_min_full + key[0] * step
-        snap_v = v_min_full + key[1] * step
+        # 计算网格中心（用于显示）
+        snap_u = u_min_full + key[0] * step_u
+        snap_v = v_min_full + key[1] * step_v
         snap_xyz = origin + snap_u * u_axis + snap_v * v_axis
 
-        # Star-shaped: max gap across directions
+        # 取所有方向的最大绝对偏差（平整度值）
         valid_gaps = [d['gap_mm'] for d in directional if d['coverage_valid'] and np.isfinite(d['gap_mm'])]
         all_gaps = [d['gap_mm'] for d in directional if np.isfinite(d['gap_mm'])]
 
-        flatness_gap = max(valid_gaps) if valid_gaps else np.nan
-        raw_max_gap = max(all_gaps) if all_gaps else np.nan
+        # 若没有有效方向，则使用所有方向的最大值（但可能不合格）
+        if valid_gaps:
+            flatness_gap = max(valid_gaps)
+        else:
+            flatness_gap = max(all_gaps) if all_gaps else np.nan
 
-        valid_members = [d for d in directional if d['coverage_valid'] and np.isfinite(d['gap_mm'])]
-        finite_members = [d for d in directional if np.isfinite(d['gap_mm'])]
-
-        dominant = max(valid_members if valid_members else finite_members,
-                       key=lambda item: item['gap_mm'] if np.isfinite(item['gap_mm']) else -np.inf,
-                       default=None)
-
+        # 通过条件：至少有一个有效方向且 flatness_gap <= limit
         quality_valid = bool(valid_gaps)
+        flatness_pass = bool(quality_valid and np.isfinite(flatness_gap)
+                             and flatness_gap <= params.flatness_limit_mm)
+
+        # 选取主导方向（具有最大 gap 的有效方向）
+        finite_members = [d for d in directional if np.isfinite(d['gap_mm'])]
+        valid_members = [d for d in finite_members if d['coverage_valid']]
+        dominant = max(valid_members if valid_members else finite_members,
+                       key=lambda x: x['gap_mm'] if np.isfinite(x['gap_mm']) else -np.inf,
+                       default=None)
 
         row = {
             'window_id': len(rows),
@@ -390,19 +438,18 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
             'center_xyz': [float(x) for x in snap_xyz],
             'center_uv_base': (float(snap_u), float(snap_v)),
             'flatness_gap_mm': flatness_gap,
-            'flatness_raw_max_gap_mm': raw_max_gap,
-            'flatness_pass': bool(quality_valid and np.isfinite(flatness_gap)
-                                  and flatness_gap <= params.flatness_limit_mm),
+            'flatness_raw_max_gap_mm': max(all_gaps) if all_gaps else np.nan,
+            'flatness_pass': flatness_pass,
             'coverage_valid': quality_valid,
             'direction_count': len(finite_members),
             'quality_direction_count': len(valid_members),
             'hole_ratio': min([d['hole_ratio'] for d in finite_members]) if finite_members else 1.0,
+            'hole_length_m': max([d.get('hole_length_m', 0.0) for d in finite_members]) if finite_members else 0.0,
             'effective_point_count': max([d['effective_point_count'] for d in finite_members]) if finite_members else 0,
             'direction_deg': float(dominant['direction_deg']) if dominant else np.nan,
             'depression_source_id': int(dominant['depression_source_id']) if dominant else -1,
             'pivot_source_ids': list(dominant['pivot_source_ids']) if dominant else [-1, -1],
             'center_uv': (float(snap_u), float(snap_v)),
-            'hole_length_m': 0.0,
             'angle_deg': float(dominant['angle_deg']) if dominant else np.nan,
             'source_direction': float(dominant['direction_deg']) if dominant else np.nan,
             'snap_distance_m': 0.0,
@@ -416,8 +463,18 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 for d in sorted(directional, key=lambda x: x['direction_deg'])
             ],
         }
+        # This is intentionally opt-in: the normal algorithm contract remains
+        # compact, while report export can request the original point domain
+        # needed for point-level heatmap painting.
+        if params.retain_covered_source_ids:
+            row['covered_source_ids'] = np.unique(np.concatenate([
+                d['covered_source_ids'] for d in directional
+                if len(d['covered_source_ids'])
+            ])).astype(np.int64).tolist() if any(
+                len(d['covered_source_ids']) for d in directional) else []
         rows.append(row)
 
+    # 排序：按 v 升序，u 升序
     rows.sort(key=lambda item: (item['center_uv_base'][1], item['center_uv_base'][0]))
     for idx, row in enumerate(rows):
         row['window_id'] = idx
@@ -440,7 +497,7 @@ def _verticality_strip_worker(args):
      surf_u, surf_v, surf_ids,
      v_centers, v_lo_bounds, v_hi_bounds,
      horizontal_axis, vertical_axis, origin,
-     u_axis, v_axis, base_u_min, base_v_min, v_step,
+     u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
      half_width, min_points, ruler_length_m, verticality_limit_mm,
      sor_enabled, sor_k, sor_sigma, sor_w_weight, sor_method,
      select_band, hole_band) = args
@@ -555,7 +612,8 @@ def _verticality_strip_worker(args):
         center_xyz = origin + u_c * horizontal_axis + v_center * vertical_axis
 
         key, snap_u, snap_v, snap_xyz, snap_distance = _snap_window_to_base_grid(
-            center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min, v_step)
+            center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min,
+            u_step, v_step)
 
         # 偏离趋势线最大的点作为 depression_source_id
         trend_vals = a * win_v + b
@@ -665,8 +723,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     u_step = max(float(params.strip_step_m), 1e-6)   # 5cm lateral step
 
     # Window centers
-    v_centers = np.arange(v_min + half, v_max - half + v_step * 0.5, v_step)
-    u_centers = np.arange(u_min + half_width, u_max - half_width + u_step * 0.5, u_step)
+    v_centers = _full_window_centers(v_min, v_max, v_step, params.ruler_length_m)
+    u_centers = _full_window_centers(u_min, u_max, u_step, params.ruler_width_m)
 
     if len(v_centers) == 0 or len(u_centers) == 0:
         return empty('no_verticality_grid')
@@ -710,7 +768,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
                     uj, float(u_c), surf_paths,
                     v_centers, v_lo_bounds, v_hi_bounds,
                     horizontal_axis, vertical_axis, origin,
-                    u_axis, v_axis, base_u_min, base_v_min, v_step,
+                    u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
                     half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
                     params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
                     params.select_band_m, params.hole_band_m,
@@ -728,7 +786,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
                 surf_u, surf_v, surf_ids,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
-                u_axis, v_axis, base_u_min, base_v_min, v_step,
+                u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
                 half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
                 params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
                 params.select_band_m, params.hole_band_m,
@@ -746,7 +804,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
                 surf_u, surf_v, surf_ids,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
-                u_axis, v_axis, base_u_min, base_v_min, v_step,
+                u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
                 half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
                 params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
                 params.select_band_m, params.hole_band_m,
@@ -852,7 +910,7 @@ def _direction_worker(args):
               f'along_range={along_range:.3f}m < ruler_length={params.ruler_length_m}m', flush=True)
         return float(angle), [], projection_time, 0.0, 0.0, np.empty((0, 2), float), along_range, across_range
 
-    strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted = _build_strips_directional(
+    strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted, scan_clipped = _build_strips_directional(
         along, across, w, raw_ids, angle, params)
     n_windows = len(centres_grid)
 
@@ -1089,14 +1147,17 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
             row['verticality_deviation_mm'] = float(vrow.get('verticality_deviation_mm', np.nan))
             row['verticality_pass'] = bool(vrow.get('verticality_pass', False))
 
-    # Update interval statistics with verticality
+    # Update interval statistics with the independent I-ruler rows.  The
+    # verticality grid is not guaranteed to share the star flatness grid_key;
+    # never turn an unmatched I-ruler window into a synthetic failure.
     if intervals:
         for interval in intervals:
             vrows = [
-                row for row in rows
-                if interval['v_min_m'] <= row['center_uv_base'][1] <= interval['v_max_m']
+                row for row in verticality.get('rows', [])
+                if interval['v_min_m'] <= float(row.get('center_uv_base', (np.nan, np.nan))[1]) <= interval['v_max_m']
                 and np.isfinite(row.get('verticality_deviation_mm', np.nan))
             ]
+            passed = [bool(row.get('verticality_pass', False)) for row in vrows]
             interval['verticality_max_deviation_mm'] = (
                 float(np.nanmax([row['verticality_deviation_mm'] for row in vrows])) if vrows else 0.0
             )
@@ -1104,7 +1165,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
                 float(np.mean([row['verticality_deviation_mm'] for row in vrows]))
                 if vrows else np.nan
             )
-            interval['verticality_pass_rate'] = float(np.mean([row['verticality_pass'] for row in vrows])) if vrows else 0.0
+            interval['verticality_pass_rate'] = float(np.mean(passed)) if passed else np.nan
 
     total_elapsed = time.perf_counter() - started
 
