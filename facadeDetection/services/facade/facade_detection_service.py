@@ -57,7 +57,7 @@ class FacadeDetectionService:
     @staticmethod
     def _select_top_facades(facades: list[dict]) -> list[dict]:
         """按最终立面点数稳定选取前 N 个，不改变单个立面的业务索引字段。"""
-        limit = int(getattr(Config, 'MAX_FACADE_COUNT', 15) or 0)
+        limit = int(getattr(Config, 'MAX_FACADE_COUNT', 20) or 0)
         if limit <= 0 or len(facades or []) <= limit:
             return facades or []
         return sorted(

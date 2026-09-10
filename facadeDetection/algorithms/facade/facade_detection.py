@@ -19,7 +19,7 @@ import open3d as o3d
 
 from algorithms.geometry import (
     ensure_normals, classify_plane, project_to_uv,
-    connected_components_2d_grid, connected_components_3d_grid,
+    cluster_normals_direction, connected_components_3d_grid, connected_components_uv_depth_grid,
     estimate_plane_area, plane_axes,
     estimate_point_ranges, adaptive_plane_tolerance, fit_plane_weighted
 )
@@ -115,7 +115,7 @@ def _aabb_gap_m(points_a, points_b):
     return float(np.linalg.norm(gap))
 
 
-def _merge(facades, points, gap_m=3.0, angle_deg=5.0, d_thresh=.08, max_plane_dist=0.05):
+def _merge(facades, points, normals=None, gap_m=3.0, angle_deg=5.0, d_thresh=.08, max_plane_dist=0.05):
     """共面且 UV 邻接合并；增加 3D AABB 快速排斥，禁止合并空间分离或深度双峰的立面。"""
     # 每个 facade 只建立一次 KD-tree；合并循环可能反复访问同一 facade。
     spacing_cache = {}
@@ -154,7 +154,37 @@ def _merge(facades, points, gap_m=3.0, angle_deg=5.0, d_thresh=.08, max_plane_di
                 aabb_gap = _aabb_gap_m(points[ia], points[ib])
                 if aabb_gap > gap_m:
                     continue  # 空间相距超过 gap_m，绝不合并
-                
+
+                # =====  弱平面保护 =====
+                if getattr(Config, 'FACADE_MERGE_PROTECT_WEAK_PLANES', True):
+                    # 若 b 是弱平面（点数显著少于 a，且面积小），保护其不被大面吞并
+                    if (b['point_count'] < max(a['point_count'] * 0.15, 200) and
+                            b['area'] < max(a['area'] * 0.20, 3.0)):
+                        continue
+
+                # ===== 深度中位数差异快速门控 =====
+                # 计算双向中位数平面残差，若均显著则判定为平行异面
+                pa = np.asarray(a['plane_model'], dtype=float)
+                pb = np.asarray(b['plane_model'], dtype=float)
+                na = pa[:3] / (np.linalg.norm(pa[:3]) + 1e-12)
+                nb = pb[:3] / (np.linalg.norm(pb[:3]) + 1e-12)
+                dist_b_on_a = np.median(np.abs(points[ib] @ na + pa[3]))
+                dist_a_on_b = np.median(np.abs(points[ia] @ nb + pb[3]))
+                merge_d_thr = max(d_thresh * 1.8, 0.08)
+                if dist_b_on_a > merge_d_thr and dist_a_on_b > merge_d_thr:
+                    continue
+
+                # ===== 法向残差校验（可选） =====
+                if normals is not None:
+                    normal_residual_deg = float(getattr(Config, 'FACADE_MERGE_NORMAL_RESIDUAL_DEG', 2.0))
+                    if normal_residual_deg > 0.0:
+                        residual_b = np.degrees(np.arccos(np.clip(np.abs(normals[ib] @ na), 0, 1)))
+                        if np.median(residual_b) > normal_residual_deg:
+                            continue
+                        residual_a = np.degrees(np.arccos(np.clip(np.abs(normals[ia] @ nb), 0, 1)))
+                        if np.median(residual_a) > normal_residual_deg:
+                            continue
+
                 spacing = spacing_cache.get(id(a), 0.05)
                 grid = max(0.10, spacing * 2.0)
                 common_n = na + nb
@@ -365,14 +395,28 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
         else:
             # 细部/小面：保守闭合
             close_radius = max(2, int(np.ceil(min_opening_m / uv_grid)))
-        # 上限保护
-        close_radius = min(close_radius, 12)
+        close_radius = min(close_radius,
+                           int(getattr(Config, 'FACADE_UV_CLOSE_MAX_CELLS', 12)))
         
-        comps = connected_components_2d_grid(
-            uv, grid_size=uv_grid,
+        # 计算种子平面上的有符号深度，用于三维分层连通
+        seed_norm = np.linalg.norm(seed[:3]) + 1e-12
+        n_seed = seed[:3] / seed_norm
+        d_seed = float(seed[3]) / seed_norm
+        depths = points[cids] @ n_seed + d_seed
+
+        # 三维分层连通       
+        depth_bin = float(getattr(Config, 'FACADE_DEPTH_LAYER_BIN_M', 0.05))
+        depth_gap = float(getattr(Config, 'FACADE_DEPTH_LAYER_GAP_M', 0.12))
+        
+        comps = connected_components_uv_depth_grid(
+            uv, depths, grid_size=uv_grid,
+            depth_bin=depth_bin,
             min_cells=max(2, int(min_count * .01)),
-            close_radius_cells=close_radius)
+            close_radius_cells=close_radius,
+            depth_gap=depth_gap,
+            connectivity=8)
         
+        # 保持与2D实现完全一致的 fallback 语义
         if not comps and len(cids) <= min_count * 20:
             comps = [np.ones(len(cids), dtype=bool)]
         elif not comps:
@@ -404,6 +448,167 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
     
     return facades, remaining
 
+def _weak_boundary_recall(main_facades, points, normals, remaining, ranges,
+                          tol, cos_tol, spacing, voxel_size, base,
+                          min_count, min_facade_area, irls_iters,
+                          signed_dist_tolerance):
+    if not main_facades or not getattr(Config, 'FACADE_ENABLE_WEAK_BOUNDARY_RECALL', False):
+        return []
+
+    band_m = float(getattr(Config, 'FACADE_WEAK_BOUNDARY_BAND_M', 0.50))
+    weak_min_area = float(getattr(Config, 'FACADE_WEAK_MIN_AREA_M2', 20.0))
+    weak_min_pts = int(getattr(Config, 'FACADE_WEAK_MIN_POINTS', 200))
+    weak_min_angle = float(getattr(Config, 'FACADE_WEAK_MIN_ANGLE_DEG', 30.0))
+    max_per_facade = int(getattr(Config, 'FACADE_WEAK_MAX_PER_FACADE', 4))
+    min_density = float(getattr(Config, 'FACADE_WEAK_MIN_DENSITY', 50.0))
+    min_compact = float(getattr(Config, 'FACADE_WEAK_MIN_COMPACT_RATIO', 0.60))
+    max_components = int(getattr(Config, 'FACADE_WEAK_MAX_COMPONENTS', 3))
+    extend_tol_mult = float(getattr(Config, 'FACADE_WEAK_EXTEND_TOL_MULT', 0.8))
+    extend_angle_deg = float(getattr(Config, 'FACADE_WEAK_EXTEND_ANGLE_DEG', 5.0))
+
+    recalled = []
+    fid = len(main_facades)
+    used = np.zeros(len(points), dtype=bool)
+    for f in main_facades:
+        used[np.asarray(f.get('inlier_indices', []), dtype=int)] = True
+
+    for f in main_facades:
+        if f.get('type') != 'vertical_facade':
+            continue
+
+        pm = np.asarray(f['plane_model'], dtype=float)
+        n = np.asarray(f['normal'], dtype=float)
+        center = np.asarray(f['center'], dtype=float)
+        u, v = plane_axes(n, 'vertical_facade')
+
+        main_ids = np.asarray(f.get('inlier_indices', []), dtype=int)
+        if len(main_ids) == 0:
+            continue
+
+        # 计算主立面 UV bbox
+        local = np.column_stack([
+            (points[main_ids] - center) @ u,
+            (points[main_ids] - center) @ v
+        ])
+        u_min, u_max = float(local[:, 0].min()), float(local[:, 0].max())
+        v_min, v_max = float(local[:, 1].min()), float(local[:, 1].max())
+
+        rem_ids = np.flatnonzero(remaining & ~used)
+        if len(rem_ids) < weak_min_pts:
+            continue
+
+        rem_local = np.column_stack([
+            (points[rem_ids] - center) @ u,
+            (points[rem_ids] - center) @ v
+        ])
+        in_band = (
+            (rem_local[:, 0] >= u_min - band_m) & (rem_local[:, 0] <= u_max + band_m) &
+            (rem_local[:, 1] >= v_min - band_m) & (rem_local[:, 1] <= v_max + band_m)
+        )
+        band_ids = rem_ids[in_band]
+        if len(band_ids) < weak_min_pts:
+            continue
+
+        # 法向差异筛选
+        band_normals = normals[band_ids]
+        cos_main = np.abs(band_normals @ n)
+        cos_weak_thr = np.cos(np.deg2rad(weak_min_angle))
+        weak_mask = cos_main <= cos_weak_thr
+        weak_ids = band_ids[weak_mask]
+
+        if len(weak_ids) < weak_min_pts:
+            continue
+
+        # 法向预聚类
+        clusters = cluster_normals_direction(normals[weak_ids], angle_threshold_deg=weak_min_angle)
+        candidate_list = []
+
+        for mask in clusters:
+            cands = weak_ids[mask]
+            if len(cands) < weak_min_pts:
+                continue
+
+            # 局部 RANSAC（更严格）
+            sub_pcd = o3d.geometry.PointCloud()
+            sub_pcd.points = o3d.utility.Vector3dVector(points[cands].astype(float))
+            local_tol = max(float(np.median(tol[cands])) * 0.6, base * 0.3)
+            local_model, local_inl = sub_pcd.segment_plane(
+                distance_threshold=local_tol,
+                ransac_n=3,
+                num_iterations=200
+            )
+            if len(local_inl) < weak_min_pts:
+                continue
+
+            seed = np.asarray(local_model, float)
+            sn = seed[:3] / (np.linalg.norm(seed[:3]) + 1e-12)
+
+            # 严格扩展（仅 band 内 + 收紧容差 + 法向一致性）
+            band_signed = points[band_ids] @ sn + float(seed[3]) / (np.linalg.norm(seed[:3]) + 1e-12)
+            band_cos = np.abs(normals[band_ids] @ sn)
+            tol_band = tol[band_ids] * extend_tol_mult  # 收紧
+            cos_band = np.cos(np.deg2rad(extend_angle_deg))  # 新加
+            band_ok = (
+                (np.abs(band_signed) <= tol_band) &
+                (band_cos >= cos_band)
+            )
+            ext_ids = band_ids[band_ok]
+
+            if len(ext_ids) < weak_min_pts:
+                continue
+
+            # ---------- 面积校验 ----------
+            info_temp = _info(0, seed, points[ext_ids], ext_ids, ranges[ext_ids])
+            area = info_temp.get('area', 0.0)
+            if area < weak_min_area:
+                continue
+
+            # ---------- 密度校验 ----------
+            density = len(ext_ids) / area if area > 0 else 0.0
+            if density < min_density:
+                continue
+
+            # ---------- 结构完整性校验 ----------
+            # 使用细粒度体素连通域（grid_size = max(voxel_size * 2, 0.1)）
+            grid_size = max(voxel_size * 2, 0.1)
+            comps = connected_components_3d_grid(
+                points[ext_ids],
+                grid_size=grid_size,
+                min_points=max(weak_min_pts // 5, 5)  # 允许小连通域
+            )
+            if not comps:
+                continue
+            # 计算各连通域点数占比
+            sizes = [np.sum(c) for c in comps]
+            total = len(ext_ids)
+            largest_ratio = max(sizes) / total if total > 0 else 0.0
+            if largest_ratio < min_compact or len(comps) > max_components:
+                continue
+
+            # 通过所有校验，计算最终平面
+            final_model = fit_plane_weighted(points[ext_ids], irls_iters=irls_iters)
+            # 再次筛选内点（使用更严格阈值）
+            final_dist = np.abs(points[ext_ids] @ final_model[:3] + final_model[3])
+            final_keep = final_dist <= tol[ext_ids] * 0.9
+            final_ids = ext_ids[final_keep]
+            if len(final_ids) < weak_min_pts:
+                continue
+
+            info = _info(fid, final_model, points[final_ids], final_ids, ranges[final_ids])
+            # 标记弱平面
+            info['weak'] = True
+            # 存储候选用于排序
+            candidate_list.append((info, len(final_ids), area))
+
+        # 按面积/点数降序，限制每立面召回数
+        candidate_list.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        for info, _, _ in candidate_list[:max_per_facade]:
+            recalled.append(info)
+            fid += 1
+            used[np.asarray(info['inlier_indices'], dtype=int)] = True
+
+    return recalled
+
 
 def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_dist=None,
                             min_points_ratio=.003, roi_bounds=None, roi_indices=None,
@@ -411,10 +616,7 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                             range_adaptive=True, scan_origin=None, range_coeff=.0012,
                             normal_relax_deg_per_m=.15, normal_angle_max_deg=15.,
                             irls_iters=2, metadata=None, **_kwargs):
-    """主入口：多分辨率 Hough-IRLS 立面检测。
-    
-    保持与原有 facade_detection.py 完全相同的函数签名和返回结构。
-    """
+    """主入口：多分辨率 Hough-IRLS 立面检测。"""
     started = time.perf_counter()
     # 服务层每次检测都新建 geo 且之后不再复用，允许 ensure_normals 就地写入，
     # 省掉外层 deepcopy 与 ensure_normals 内部第二份 deepcopy（198 万点级
@@ -559,13 +761,24 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     trace("facade.algo.seeds", hough_seeds=len(hough_seeds),
           facades=len(facades),
           seconds=f"{time.perf_counter()-started:.2f}")
+
+    # ===== 主立面边界弱平面召回 =====
+    if getattr(Config, 'FACADE_ENABLE_WEAK_BOUNDARY_RECALL', False):
+        weak_facades = _weak_boundary_recall(
+            facades, points, normals, remaining, ranges,
+            tol, cos_tol, spacing, voxel_size, base,
+            min_count, min_facade_area, irls_iters, signed_dist_tolerance)
+        if weak_facades:
+            facades.extend(weak_facades)
+            trace("facade.algo.weak_recall", recalled=len(weak_facades),
+                  seconds=f"{time.perf_counter()-started:.2f}")
     
     # 后处理
     if enable_merge:
-        facades = _merge(facades, points,
+        facades = _merge(facades, points, normals,
                          gap_m=float(getattr(Config, 'MERGE_UV_DIST_M', 3.0)),
                          angle_deg=float(getattr(Config, 'MERGE_ANGLE_DEG', 5.0)),
-                         d_thresh=float(getattr(Config, 'MERGE_D_THRESH_M', 0.10)),
+                         d_thresh=float(getattr(Config, 'MERGE_D_THRESH_M', 0.08)),
                          max_plane_dist=base)
     trace("facade.algo.merge", facades=len(facades),
           seconds=f"{time.perf_counter()-started:.2f}")
@@ -590,68 +803,104 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     return {'facades': facades, 'remaining': out, 'total_points': n}
 
 
-def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base, 
+def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
                                min_count, voxel_size):
-    """阶段 1：空间化 Hough 投票。3D 粗网格隔离后，每个空间块独立方向+rho投票。
+    """阶段 1：空间化 Hough 投票，增加密度自适应参数以提升稀疏区域检出。
     
     返回 seed 列表，每个 seed 包含 direction, rho, spatial_ids（空间块内点索引）。
     """
     valid = np.flatnonzero(mask)
     if len(valid) < min_count:
         return []
-    
+
     # 方向投票采样
     max_vote = int(getattr(Config, 'HOUGH_MAX_VOTE_POINTS', 100000))
     hough_valid = valid[::max(1, len(valid) // max_vote)] if len(valid) > max_vote else valid
-    
+
     peaks = normal_hough_peaks(
         normals[hough_valid],
         min_support=max(80, int(len(hough_valid) * 0.002)),
         bin_deg=float(getattr(Config, 'HOUGH_NORMAL_BIN_DEG', 2.0)),
-        merge_deg=float(getattr(Config, 'HOUGH_NORMAL_SUPPORT_DEG', 6.0)) - 2.0,  # 收紧
+        merge_deg=float(getattr(Config, 'HOUGH_NORMAL_SUPPORT_DEG', 6.0)) - 2.0,
         max_peaks=int(getattr(Config, 'HOUGH_MAX_DIRECTION_PEAKS', 8)),
         vertical_nz=float(getattr(Config, 'VERTICAL_NZ_THR', 0.30)) + 0.05)
-    
+
     hough_seeds = []
     support_deg = float(getattr(Config, 'HOUGH_NORMAL_SUPPORT_DEG', 6.0))
     cos_support = np.cos(np.deg2rad(support_deg))
-    
+
+    # 读取密度自适应配置
+    density_adaptive = getattr(Config, 'HOUGH_DENSITY_ADAPTIVE', True)
+    low_density_thresh = float(getattr(Config, 'HOUGH_LOW_DENSITY_THRESH', 5.0))
+    low_density_bin_mult = float(getattr(Config, 'HOUGH_LOW_DENSITY_BIN_MULT', 2.0))
+    low_density_min_support_ratio = float(getattr(Config, 'HOUGH_LOW_DENSITY_MIN_SUPPORT_RATIO', 0.2))
+    low_density_min_peak_dist = float(getattr(Config, 'HOUGH_LOW_DENSITY_MIN_PEAK_DIST_M', 0.10))
+    low_density_prominence_ratio = float(getattr(Config, 'HOUGH_LOW_DENSITY_PROMINENCE_RATIO', 0.10))
+
     for peak in peaks:
         direction = np.asarray(peak['normal'], dtype=float)
-        
+
         # 全量法向筛选
         direction_mask = np.abs(normals[valid] @ direction) >= cos_support
         direction_ids = valid[direction_mask]
-        
+
         if len(direction_ids) < min_count:
             continue
-        
-        # ===== 核心：3D 粗网格连通域分离 =====
-        # 粗网格尺寸：max(2m, 40*voxel_size)，足够分离不同建筑/前后墙
+
+        # 3D 粗网格连通域分离
         coarse_grid = max(2.0, voxel_size * 40)
         spatial_comps = connected_components_3d_grid(
             points[direction_ids],
             grid_size=coarse_grid,
             min_points=max(min_count // 2, 50))
-        
+         
         for sp_mask in spatial_comps:
             sp_ids = direction_ids[sp_mask]
             if len(sp_ids) < min_count // 2:
                 continue
-            
-            # rho 投票：只在空间块内，bin_size 自适应
-            sp_ranges = ranges[sp_ids] if len(ranges) else np.zeros(len(sp_ids))
-            adaptive_bin = max(float(voxel_size),
-                              float(np.median(tol[sp_ids])) * 0.8)
-            
+
+            # ===== 密度自适应参数计算 =====
+            if density_adaptive:
+                # 计算该空间块的点密度（点/立方米）
+                block_pts = points[sp_ids]
+                if len(block_pts) >= 3:
+                    # 使用 AABB 体积估计
+                    bbox_vol = np.ptp(block_pts, axis=0).prod()
+                    density = len(sp_ids) / max(bbox_vol, 1e-6)
+                else:
+                    density = float('inf')  # 太小，按正常处理
+
+                is_low_density = density < low_density_thresh
+
+                if is_low_density:
+                    # 低密度：增大 bin，降低支持度，允许更近的峰值，降低突出比
+                    adaptive_bin = max(base * low_density_bin_mult, 0.05)
+                    min_support = max(20, int(min_count * low_density_min_support_ratio))
+                    min_peak_dist = low_density_min_peak_dist
+                    prominence_ratio = low_density_prominence_ratio
+                else:
+                    # 正常密度：使用原有逻辑
+                    adaptive_bin = max(float(voxel_size),
+                                      float(np.median(tol[sp_ids])) * 0.8)
+                    min_support = max(50, min_count // 3)
+                    min_peak_dist = max(0.30, base * 3)
+                    prominence_ratio = 0.08
+            else:
+                # 不启用自适应，统一使用原有参数
+                adaptive_bin = max(float(voxel_size),
+                                  float(np.median(tol[sp_ids])) * 0.8)
+                min_support = max(50, min_count // 3)
+                min_peak_dist = max(0.30, base * 3)
+                prominence_ratio = 0.08
+
             rho_peaks = rho_hough_peaks(
                 points[sp_ids], direction,
                 bin_size=adaptive_bin,
-                min_support=max(50, min_count // 3),
-                min_peak_distance=max(0.30, base * 3),
-                prominence_ratio=0.08,  # 放宽：大立面 rho 分布平缓
-                max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 16)))
-            
+                min_support=min_support,
+                min_peak_distance=min_peak_dist,
+                prominence_ratio=prominence_ratio,
+                max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 24)))
+
             for rho_peak in rho_peaks:
                 hough_seeds.append({
                     'direction': direction,
@@ -659,7 +908,7 @@ def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
                     'spatial_ids': sp_ids,
                     'support': rho_peak.support
                 })
-    
+
     # 按支持度降序，截断
     hough_seeds.sort(key=lambda s: -s['support'])
     max_candidates = int(getattr(Config, 'HOUGH_MAX_CANDIDATES', 16))

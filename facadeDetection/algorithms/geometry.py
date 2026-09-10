@@ -855,6 +855,71 @@ def connected_components_2d_grid(uv_points, grid_size=None, min_cells=3,
 
     return components
 
+
+def connected_components_uv_depth_grid(uv_points, depths, grid_size,
+                                       depth_bin=None, min_cells=3,
+                                       close_radius_cells=0,
+                                       depth_gap=None, connectivity=8):
+    """UV + 深度层稀疏连通域。
+
+    与旧二维实现保持相同的返回契约，但连通图的节点是
+    ``(u_cell, v_cell, depth_layer)``。孔洞闭合只在同一深度层内进行，
+    因此不会把 UV 重叠的前后墙面桥接到一起。
+    """
+    uv = np.asarray(uv_points, dtype=float).reshape(-1, 2)
+    dep = np.asarray(depths, dtype=float).reshape(-1)
+    if len(uv) == 0 or len(uv) != len(dep):
+        return []
+    gs = max(float(grid_size), 1e-6)
+    finite = np.isfinite(dep)
+    if not np.any(finite):
+        return []
+    scale = float(depth_bin or gs)
+    layer = np.rint(dep / scale).astype(np.int64)
+    # A UV cell may contain several depth layers. Preserve each layer's points.
+    cells = {}
+    for i, (u, v, z) in enumerate(zip(uv[:, 0], uv[:, 1], layer)):
+        if not finite[i]:
+            continue
+        key = (int(np.floor(u / gs)), int(np.floor(v / gs)), int(z))
+        cells.setdefault(key, []).append(i)
+    if not cells:
+        return []
+    radius = max(1, int(close_radius_cells))
+    offsets = [(du, dv) for du in range(-radius, radius + 1)
+               for dv in range(-radius, radius + 1)
+               if (du or dv) and (connectivity == 8 or du == 0 or dv == 0)]
+    # Do not connect layers separated by a missing depth bin. This is the
+    # explicit barrier that the former 2D projection could not represent.
+    # 连通域不跨深度层；深度相近的量化误差由 depth_bin 吸收，
+    # 而真实台阶必须保持为独立组件。
+    max_layer_step = 0
+    visited, components = set(), []
+    for start in cells:
+        if start in visited:
+            continue
+        queue = deque([start]); visited.add(start); cluster = []
+        while queue:
+            cu, cv, cz = queue.popleft(); cluster.append((cu, cv, cz))
+            for du, dv in offsets:
+                for dz in range(-max_layer_step, max_layer_step + 1):
+                    nb = (cu + du, cv + dv, cz + dz)
+                    if nb in cells and nb not in visited:
+                        # Adjacent depth layers are allowed only when their
+                        # actual median depths are close; layer id alone is
+                        # not sufficient when bins are sparse.
+                        if abs(dz) and abs(np.median(dep[cells[nb]]) -
+                                           np.median(dep[cells[(cu, cv, cz)]])) > (depth_gap or scale):
+                            continue
+                        visited.add(nb); queue.append(nb)
+        if len(cluster) < min_cells:
+            continue
+        mask = np.zeros(len(uv), dtype=bool)
+        for key in cluster:
+            mask[cells[key]] = True
+        components.append(mask)
+    return components
+
 def connected_components_3d_grid(points, grid_size, min_points=100):
     """基于3D体素网格的26邻域连通域分析。
     
