@@ -18,6 +18,7 @@ from db.connection import (
 from db.connection import IndexProject  # type: ignore
 from models import Project, ResultScene, FileAsset
 from models.enums import FileKind
+from services.dal.file_repo import FileRepo
 from utils.file_lifecycle import ensure_project_folders, gc_project, validate_paths
 
 
@@ -36,7 +37,16 @@ class ProjectRepo:
 
     @staticmethod
     def create_project(name: str, org_unit: str | None = None, address: str | None = None,
-                       remarks: str | None = None, building_floor: str | None = None) -> dict:
+                       remarks: str | None = None, building_floor: str | None = None,
+                       construction_unit: str | None = None,
+                       construction_unit_executor: str | None = None,
+                       inspection_unit: str | None = None,
+                       supervision_unit: str | None = None,
+                       client_unit: str | None = None,
+                       report_no: str | None = None,
+                       inspection_date: datetime | None = None,
+                       report_date: datetime | None = None,
+                       inspection_params_json: str | None = None) -> dict:
         project_uuid = str(_uuid.uuid4())
         # New: create dirs by pinyin abbreviation of name and initialize pcfd index
         try:
@@ -58,7 +68,15 @@ class ProjectRepo:
                     "address": address,
                     "building_floor": building_floor,
                     "remarks": remarks,
-                    "created_at": datetime.now().isoformat(timespec='seconds')
+                    "construction_unit": construction_unit,
+                    "construction_unit_executor": construction_unit_executor,
+                    "inspection_unit": inspection_unit,
+                    "supervision_unit": supervision_unit,
+                    "client_unit": client_unit,
+                    "report_no": report_no,
+                    "inspection_date": inspection_date.isoformat(timespec='seconds') if inspection_date else None,
+                    "report_date": report_date.isoformat(timespec='seconds') if report_date else None,
+                    "inspection_params_json": inspection_params_json,
                 },
                 "paths": {
                     "root_dir": str(dirs["root"]),
@@ -94,6 +112,15 @@ class ProjectRepo:
                 remarks=remarks,
                 building_floor=building_floor,
                 root_dir=str(dirs["root"]),
+                construction_unit=construction_unit,
+                construction_unit_executor=construction_unit_executor,
+                inspection_unit=inspection_unit,
+                supervision_unit=supervision_unit,
+                client_unit=client_unit,
+                report_no=report_no,
+                inspection_date=inspection_date,
+                report_date=report_date,
+                inspection_params_json=inspection_params_json,
             )
             s.add(proj)
             s.flush()
@@ -105,8 +132,6 @@ class ProjectRepo:
         init_index_db()
         upsert_index_project(project_uuid, name, str(dirs["root"]))
 
-        # pcfd index already initialized before DB creation
-
         return {
             "project_uuid": project_uuid,
             "name": name,
@@ -115,6 +140,15 @@ class ProjectRepo:
             "address": address,
             "building_floor": building_floor,
             "remarks": remarks,
+            "construction_unit": construction_unit,
+            "construction_unit_executor": construction_unit_executor,
+            "inspection_unit": inspection_unit,
+            "supervision_unit": supervision_unit,
+            "client_unit": client_unit,
+            "report_no": report_no,
+            "inspection_date": inspection_date,
+            "report_date": report_date,
+            "inspection_params_json": inspection_params_json,
         }
 
     @staticmethod
@@ -124,7 +158,7 @@ class ProjectRepo:
             if not proj:
                 return None
             for k, v in fields.items():
-                if k not in {'id', 'uuid', 'root_dir', 'directory_path'} and hasattr(proj, k):
+                if k not in {'id', 'uuid', 'root_dir'} and hasattr(proj, k):
                     setattr(proj, k, v)
             proj.updated_at = datetime.now()
             s.flush()
@@ -139,6 +173,15 @@ class ProjectRepo:
                     "address": proj.address,
                     "building_floor": proj.building_floor,
                     "remarks": proj.remarks,
+                    "construction_unit": proj.construction_unit,
+                    "construction_unit_executor": proj.construction_unit_executor,
+                    "inspection_unit": proj.inspection_unit,
+                    "supervision_unit": proj.supervision_unit,
+                    "client_unit": proj.client_unit,
+                    "report_no": proj.report_no,
+                    "inspection_date": proj.inspection_date.isoformat(timespec='seconds') if proj.inspection_date else None,
+                    "report_date": proj.report_date.isoformat(timespec='seconds') if proj.report_date else None,
+                    "inspection_params_json": proj.inspection_params_json,
                 })
                 Storage.save_pcfd_index(Path(proj.root_dir), index_data)
             except Exception:
@@ -151,6 +194,15 @@ class ProjectRepo:
                 "address": proj.address,
                 "building_floor": proj.building_floor,
                 "remarks": proj.remarks,
+                "construction_unit": proj.construction_unit,
+                "construction_unit_executor": proj.construction_unit_executor,
+                "inspection_unit": proj.inspection_unit,
+                "supervision_unit": proj.supervision_unit,
+                "client_unit": proj.client_unit,
+                "report_no": proj.report_no,
+                "inspection_date": proj.inspection_date,
+                "report_date": proj.report_date,
+                "inspection_params_json": proj.inspection_params_json,
             }
 
     @staticmethod
@@ -219,6 +271,18 @@ class ProjectRepo:
                 "address": getattr(details, "address", None),
                 "building_floor": getattr(details, "building_floor", None),
                 "remarks": getattr(details, "remarks", None),
+                "construction_unit": getattr(details, "construction_unit", None),
+                "construction_unit_executor": getattr(details, "construction_unit_executor", None),
+                "inspection_unit": getattr(details, "inspection_unit", None),
+                "supervision_unit": getattr(details, "supervision_unit", None),
+                "client_unit": getattr(details, "client_unit", None),
+                "report_no": getattr(details, "report_no", None),
+                "inspection_date": getattr(details, "inspection_date", None),
+                "report_date": getattr(details, "report_date", None),
+                "inspection_params_json": getattr(details, "inspection_params_json", None),
+                "fls_directories": list(((Storage.load_pcfd_index(Path(r.root_dir)) or {}).get("assets") or {}).get("fls_folders") or []),
+                "pointcloud_files": [a.path for a in FileRepo.list_assets_by_kind(r.project_uuid, FileKind.raw_pointcloud)],
+                "photo_files": [a.path for a in FileRepo.list_assets_by_kind(r.project_uuid, FileKind.raw_image)],
             })
         return data[:limit] if limit else data
 

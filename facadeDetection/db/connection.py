@@ -102,6 +102,22 @@ def _project_engine(project_uuid: str):
     with engine.begin() as conn:
         conn.execute(text('DROP TABLE IF EXISTS heatmaps'))
         conn.execute(text('DROP TABLE IF EXISTS processing_runs'))
+        proj_cols = {c['name'] for c in inspect(conn).get_columns('projects')}
+        proj_additions = {
+            'construction_unit': 'TEXT',
+            'construction_unit_executor': 'TEXT',
+            'inspection_unit': 'TEXT',
+            'supervision_unit': 'TEXT',
+            'client_unit': 'TEXT',
+            'report_no': 'TEXT',
+            'inspection_date': 'DATETIME',
+            'report_date': 'DATETIME',
+            'inspection_params_json': 'TEXT',
+        }
+        for name, definition in proj_additions.items():
+            if name not in proj_cols:
+                conn.execute(text(f'ALTER TABLE projects ADD COLUMN {name} {definition}'))
+
         columns = {c['name'] for c in inspect(conn).get_columns('facades')}
         additions = {
             'quality_status': 'TEXT NOT NULL DEFAULT \'pending\'',

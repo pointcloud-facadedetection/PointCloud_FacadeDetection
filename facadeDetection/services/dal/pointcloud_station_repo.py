@@ -78,7 +78,7 @@ class PointCloudStationRepo:
             ).order_by(FileAsset.id)).scalars().all()
             assets = [asset for asset in assets if (
                 str(asset.kind) in (FileKind.raw_pointcloud.value, 'raw_pointcloud')
-                or Path(asset.path or '').suffix.lower() == '.ply'
+                or Path(asset.path or '').suffix.lower() in {'.ply', '.e57'}
             )]
             all_rows = s.execute(select(PointCloudStation).where(
                 PointCloudStation.project_id == p.id
@@ -114,6 +114,11 @@ class PointCloudStationRepo:
                     is_selected=(order == 0))
                 station.last_error = None if valid else reason
                 s.add(station)
+            active_asset_ids = {asset.id for asset in assets}
+            for row in all_rows:
+                if (row.file_asset_id is not None and
+                        row.file_asset_id not in active_asset_ids):
+                    row.is_deleted = True
             s.flush()
             active_rows = s.execute(select(PointCloudStation).where(
                 PointCloudStation.project_id == p.id,

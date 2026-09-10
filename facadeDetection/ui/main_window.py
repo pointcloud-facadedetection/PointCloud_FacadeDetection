@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtGui import QPixmap
 
 from .main_window_config import PAGE_DEFINITIONS
 from .widgets.flow_layout import FlowLayout
@@ -64,8 +65,6 @@ PAGE_BUTTON_NAMES = {
 
 PAGE_HEADER_ACTIONS = {
     'project_overview': (
-        ('导入FLS目录', 'btn_import_fls_dir'),
-        ('直接上传文件', 'btn_upload_files'),
         ('打开项目', 'btn_open_project'),
         ('选择项目', 'btn_select_project'),
         ('新建项目', 'btn_new_project'),
@@ -91,7 +90,6 @@ APPLICATION_TITLE = '点云外立面智能检测平台'
 
 # 每个页面只突出一个主要操作，避免顶部十余个按钮全部使用主色。
 PRIMARY_HEADER_ACTIONS = {
-    'btn_upload_files',
     'btn_facade_detection',
     'btn_open_report_pdf',
 }
@@ -100,13 +98,6 @@ PRIMARY_HEADER_ACTIONS = {
 # 这里只定义它们在顶部命令栏中的视觉归属。
 PAGE_HEADER_GROUPS = {
     'project_overview': (
-        (
-            '文件导入',
-            (
-                'btn_import_fls_dir',
-                'btn_upload_files',
-            ),
-        ),
         (
             '项目管理',
             (
@@ -318,10 +309,17 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         layout.setContentsMargins(24, 12, 0, 12)
         layout.setSpacing(10)
 
-        brand_mark = QLabel('P3D')
+        brand_mark = QLabel()
         brand_mark.setObjectName('applicationBrandMark')
         brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_mark.setFixedSize(44, 44)
+        logo_path = Path(__file__).resolve().parents[1] / 'utils' / 'logo.png'
+        pixmap = QPixmap(str(logo_path))
+        if not pixmap.isNull():
+            brand_mark.setPixmap(pixmap.scaled(
+                36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            brand_mark.setStyleSheet('background:transparent;border:none;')
         brand_mark.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             True,
@@ -755,8 +753,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
 
     def _connect_buttons(self):
         overview_actions = {
-            'btn_import_fls_dir': self._open_import_fls_directory,
-            'btn_upload_files': self._open_upload_file_dialog,
             'btn_open_project': self._open_project_directory,
             'btn_select_project': self._select_project,
             'btn_new_project': self._create_project,
@@ -877,11 +873,41 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         )
 
     def _quality_profile_provider(self):
-        return self._quality_profile_snapshot(
-            getattr(self, '_inspection_profile', None))
+        """质量算子的唯一参数来源：当前项目持久化快照。"""
+        import json
+        from services.inspection_profile import InspectionProfileService
+        project = getattr(self, 'current_project', None)
+        raw = getattr(project, 'inspection_params_json', None)
+        if raw:
+            try:
+                values = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                standard_id = values.get('standard_id')
+                profile = InspectionProfileService.get(standard_id)
+                if profile is not None:
+                    aliases = {
+                        'ruler_length_m': 'measure_height_m',
+                        'step_longitudinal_m': 'scan_step_m',
+                        'step_transverse_m': 'step_size_m',
+                    }
+                    snapshot = {}
+                    for key in (
+                        'interval_size_m', 'window_size_m', 'step_size_m',
+                        'measure_height_m', 'min_points', 'flatness_limit_mm',
+                        'verticality_limit_mm', 'ruler_width_m', 'select_band_m',
+                        'hole_band_m', 'bin_size_m', 'top_q', 'sor_enabled',
+                        'sor_sigma', 'sor_k', 'sor_method', 'sor_w_weight',
+                        'scan_step_m', 'max_hole_ratio'):
+                        source = next((name for name, target in aliases.items() if target == key), key)
+                        if source in values:
+                            snapshot[key] = values[source]
+                    return replace(profile, **snapshot)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        return getattr(self, '_inspection_profile', None)
 
     def _quality_grid_size(self):
-        return float(self.interval_combo.currentData())
+        profile = self._quality_profile_provider()
+        return float(getattr(profile, 'interval_size_m', 20.0))
 
     def _connect_facade_quality_controller(self):
         controller = self.facade_quality_controller
@@ -1162,32 +1188,36 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                 return context
 
         def _show_effect(mode='flatness'):
+            """仅在三维视口渲染热力图，不自动导出 PNG/PDF（导出由用户手动触发）."""
             try:
                 display_quality = dict(quality) if isinstance(quality, dict) else {}
                 display_quality['heatmap_mode'] = mode
                 self.render_facade.apply_quality_colors(
                     cloud, display_quality,
                     index_service=self.facade_service.index_service)
-                context = _export_context(display_quality)
-                exported = ResultExportService().export_heatmap(
-                    context.get('results_dir'), facade_no,
-                    context.get('points'), context.get('colors'), display_quality)
-                if exported and exported.get('heatmap'):
-                    # 仅持久化小型、可移植的工件元数据。
-                    # 运行时点数组保存在 __export_context 中，不会被存储。
-                    artifact = {key: exported.get(key) for key in
-                                ('mode', 'title', 'heatmap', 'overlay', 'report', 'legend')}
-                    quality_report = facade.get('quality_report')
-                    if isinstance(quality_report, dict):
-                        artifacts = quality_report.setdefault('heatmap_artifacts', {})
-                        artifacts[exported.get('mode', mode)] = artifact
-                        self._refresh_report_preview()
-                    self.statusBar().showMessage(
-                        f'热力图已保存：{exported["heatmap"]}', 6000)
-                else:
-                    self.statusBar().showMessage('热力图显示成功，但导出失败，请检查日志。', 5000)
+                self.statusBar().showMessage(
+                    f'已切换至 {mode} 检测效果渲染', 3000)
             except Exception as e:
                 print(f'[PCFD] ui.show_effect_error facade_id={facade_id} error={e}', flush=True)
+
+        # 检测完成后自动导出全部热力图
+        if isinstance(quality, dict) and not quality.get('__auto_exported'):
+            try:
+                context = _export_context(quality)
+                if context.get('results_dir') and context.get('points') is not None:
+                    exporter = ResultExportService()
+                    exported = exporter.export_all_heatmaps(
+                        context.get('results_dir'), facade_no,
+                        context.get('points'), context.get('colors'),
+                        quality)
+                    quality['__auto_exported'] = True
+                    # 将导出路径写回 quality，供 PDF 生成时直接读取
+                    if exported:
+                        quality.setdefault('__export_context', {})
+                        quality['__export_context']['heatmaps'] = exported
+                        quality['__export_context']['results_dir'] = context.get('results_dir')
+            except Exception as e:
+                print(f'[PCFD] ui.auto_export_error facade_id={facade_id} error={e}', flush=True)
 
         def _restore():
             try:
@@ -1350,6 +1380,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             self.current_project_label.setText(f'当前项目：{project.name}')
             self.current_project_label.setToolTip(
                 f'{project.name}\n{project.directory_path}')
+            self._apply_project_inspection_params(project)
         else:
             self.current_project_label.setText('当前项目：未选择')
             self.current_project_label.setToolTip('')
@@ -1357,6 +1388,97 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self._update_overview_workspace()
         self._refresh_report_preview()
         self._update_window_title()
+
+    def _apply_project_inspection_params(self, project):
+        """当项目被激活时，将创建项目时录入的检测参数恢复到 UI 控件。"""
+        import json
+        from services.inspection_profile import InspectionProfileService
+
+        raw = getattr(project, 'inspection_params_json', None)
+        if not raw:
+            return
+        try:
+            p = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            return
+
+        # 标准
+        std_id = p.get('standard_id')
+        if std_id:
+            idx = self.standard_combo.findData(std_id)
+            if idx >= 0:
+                self.standard_combo.blockSignals(True)
+                self.standard_combo.setCurrentIndex(idx)
+                self.standard_combo.blockSignals(False)
+                self._on_standard_changed(idx)
+
+        # 区间
+        interval = p.get('interval_size_m')
+        if interval is not None:
+            idx = self.interval_combo.findData(float(interval))
+            if idx >= 0:
+                self.interval_combo.blockSignals(True)
+                self.interval_combo.setCurrentIndex(idx)
+                self.interval_combo.blockSignals(False)
+
+        # 质量参数控件
+        def _set_spin(spin, value):
+            if value is not None and hasattr(spin, 'setValue'):
+                spin.blockSignals(True)
+                spin.setValue(float(value))
+                spin.blockSignals(False)
+
+        _set_spin(self.quality_length_spin, p.get('ruler_length_m'))
+        # 操作页“滑移步距”对应创建弹窗的纵向采样步长；横向步长
+        # 对应 InspectionProfile.step_size_m，不应覆盖滑移步距。
+        _set_spin(self.quality_step_spin, p.get('step_longitudinal_m'))
+        _set_spin(self.quality_width_spin, p.get('ruler_width_m'))
+        _set_spin(self.quality_select_band_spin, p.get('select_band_m'))
+        _set_spin(self.quality_hole_band_spin, p.get('hole_band_m'))
+        _set_spin(self.quality_bin_size_spin, p.get('bin_size_m'))
+        _set_spin(self.quality_top_q_spin, p.get('top_q'))
+        _set_spin(self.quality_sor_sigma_spin, p.get('sor_sigma'))
+        _set_spin(self.quality_sor_k_spin, p.get('sor_k'))
+        _set_spin(self.quality_sor_w_weight_spin, p.get('sor_w_weight'))
+        _set_spin(self.quality_max_hole_ratio_spin, p.get('max_hole_ratio'))
+        _set_spin(self.quality_min_points_spin, p.get('min_points'))
+
+        # SOR 启用
+        sor_enabled = p.get('sor_enabled')
+        if sor_enabled is not None and hasattr(self, 'quality_sor_check'):
+            self.quality_sor_check.blockSignals(True)
+            self.quality_sor_check.setChecked(bool(sor_enabled))
+            self.quality_sor_check.blockSignals(False)
+
+        # SOR 方法
+        sor_method = p.get('sor_method')
+        if sor_method and hasattr(self, 'quality_sor_method_combo'):
+            idx = self.quality_sor_method_combo.findData(str(sor_method))
+            if idx >= 0:
+                self.quality_sor_method_combo.blockSignals(True)
+                self.quality_sor_method_combo.setCurrentIndex(idx)
+                self.quality_sor_method_combo.blockSignals(False)
+
+        # 同步 _inspection_profile 到项目参数快照
+        profile = InspectionProfileService.get(std_id) if std_id else None
+        if profile is not None:
+            aliases = {
+                'ruler_length_m': 'measure_height_m',
+                'step_longitudinal_m': 'scan_step_m',
+                'step_transverse_m': 'step_size_m',
+            }
+            snapshot = {}
+            for source, target in aliases.items():
+                if p.get(source) is not None:
+                    snapshot[target] = p[source]
+            for key in (
+                    'interval_size_m', 'ruler_width_m', 'select_band_m',
+                    'hole_band_m', 'flatness_limit_mm',
+                    'verticality_limit_mm', 'sor_enabled', 'sor_sigma',
+                    'sor_k', 'sor_method', 'sor_w_weight'):
+                if p.get(key) is not None and hasattr(profile, key):
+                    snapshot[key] = p[key]
+            self._inspection_profile = replace(profile, **snapshot)
 
     def closeEvent(self, event):
         # TODO(生命周期/稳定性): closeEvent：核查关闭期间线程池短超时、原生窗口销毁和 Qt 退出顺序，避免后台任务继续访问已销毁视口导致未响应。

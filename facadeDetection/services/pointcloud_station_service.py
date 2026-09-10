@@ -11,6 +11,7 @@ from utils.logging_utils import log_event
 from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
+from utils.e57_reader import read_e57
 from config.storage import Storage
 import uuid
 
@@ -89,6 +90,8 @@ class PointCloudStationService:
         """Read an already-globalized PLY; never apply transformToGlobal here."""
         # 二进制 PLY 走 memmap 免解析快读；不满足快读条件时回退 Open3D，
         # 两条路径对同一资产逐点一致（uchar rgb /255 归一化语义相同）。
+        if Path(path).suffix.lower() == '.e57':
+            return read_e57(path)
         fast = read_ply_fast(path)
         if fast is not None:
             return fast
