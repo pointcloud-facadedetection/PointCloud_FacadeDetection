@@ -107,16 +107,51 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     
     defect_indices = np.flatnonzero(defect)
     
-    # 像素级聚合：保留每个像素的最大缺陷值
+    # ==================== 高斯 splat 缺陷热力图 ====================
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
     pixel_values = np.full(h*w, -np.inf, dtype=float)
     pixel_ids = flat[defect_indices]
     
-    for p, value, colour in zip(pixel_ids, values, heat):
+    # 保留像素级最大缺陷值（兼容旧语义）
+    for p, value in zip(pixel_ids, values):
         if value > pixel_values[p]:
             pixel_values[p] = value
-            overlay.reshape(-1, 4)[p, :3] = np.clip(colour, 0, 1) * 255
-            overlay.reshape(-1, 4)[p, 3] = 255
+    
+    if len(pixel_ids) > 0:
+        # 按缺陷值加权的高斯 splat，优化渐变过渡效果
+        vmax = float(np.max(values)) if len(values) else 1.0
+        vmin = float(np.min(values)) if len(values) else 0.0
+        value_range = max(vmax - vmin, 1e-6)
+        sigma = 4.0  # 高斯核标准差（像素）
+        radius = max(int(np.ceil(sigma * 3)), 1)
+        
+        # 预计算高斯核
+        y_kernel, x_kernel = np.mgrid[-radius:radius+1, -radius:radius+1]
+        kernel = np.exp(-(x_kernel**2 + y_kernel**2) / (2 * sigma**2))
+        
+        color_acc = np.zeros((h, w, 3), dtype=np.float32)
+        weight_acc = np.zeros((h, w), dtype=np.float32)
+        
+        # 预归一化颜色和权重，保证一组三图共享同一映射（此函数被 overlay 与
+        # heatmap_grid 复用同一 raster 输出，色标天然一致）。
+        for p, value, colour in zip(pixel_ids, values, heat):
+            px = int(p % w)
+            py = int(p // w)
+            x0, x1 = max(0, px - radius), min(w, px + radius + 1)
+            y0, y1 = max(0, py - radius), min(h, py + radius + 1)
+            kx0, kx1 = x0 - px + radius, x1 - px + radius
+            ky0, ky1 = y0 - py + radius, y1 - py + radius
+            if kx0 >= kx1 or ky0 >= ky1:
+                continue
+            importance = max((float(value) - vmin) / value_range, 0.1)
+            weight = kernel[ky0:ky1, kx0:kx1] * importance
+            for c in range(3):
+                color_acc[y0:y1, x0:x1, c] += colour[c] * weight
+            weight_acc[y0:y1, x0:x1] += weight
+
+        mask = weight_acc > 0
+        overlay[mask, :3] = np.clip(color_acc[mask] / weight_acc[mask, None], 0, 1) * 255
+        overlay[mask, 3] = np.clip(weight_acc[mask] * 255, 0, 255)
     
     return {
         'base_rgb': (np.clip(base, 0, 1) * 255).astype(np.uint8),

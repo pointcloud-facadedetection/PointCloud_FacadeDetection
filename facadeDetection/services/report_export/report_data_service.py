@@ -19,7 +19,12 @@ class ReportDataService:
     ]
 
     @staticmethod
-    def build(project, facades=None, project_root=None) -> dict:
+    def build(project, facades=None, project_root=None, facades_by_station=None) -> dict:
+        # 优先使用 facades_by_station（多站点增量拓展模式）
+        if facades_by_station is not None:
+            return ReportDataService._build_by_station(project, facades_by_station, project_root)
+        # 兼容旧模式：扁平 facades 列表
+        project_name = getattr(project, "name", "") if project else ""
         rows = []
         for index, source in enumerate(facades or [], 1):
             item = dict(source or {})
@@ -38,22 +43,16 @@ class ReportDataService:
             item["quality"] = quality
             ReportDataService._ensure_quality_averages(quality)
             item["images"] = ReportDataService._images(project_root, number, quality)
-            # 新增：结构化墙体数据
             item["wall_data"] = ReportDataService._build_wall_data(quality)
-            # A facade is owned by exactly one imported PLY station.  Preserve
-            # this identity in the report snapshot so incremental imports do
-            # not merge walls with the same display number.
             station_id = item.get("station_id")
             item["building_key"] = str(station_id) if station_id is not None else "unbound"
             item["building_label"] = item.get("building_label") or (
                 f"楼栋 {station_id}" if station_id is not None else "未绑定楼栋")
             item["wall_key"] = str(item.get("id") or item.get("display_no") or number)
             item["wall_label"] = item.get("wall_label") or f"墙面 {number}"
-            # Keep the source identity beside the measured result.  Different
-            # PLY imports may reuse facade numbers, so report consumers must
-            # never infer the source from ``report_no`` alone.
-            item["ply_id"] = item.get("ply_id") or item.get("cloud_name") or station_id
+            item["pc_id"] = item.get("pc_id") or item.get("cloud_name") or station_id
             item["ply_path"] = item.get("ply_path") or item.get("source_path")
+            item["project_name"] = project_name
             rows.append(item)
         rows.sort(key=lambda value: (value["report_no"], str(value.get("id", ""))))
         rows.sort(key=lambda value: (value["building_key"], value["report_no"],
@@ -67,27 +66,90 @@ class ReportDataService:
                 "walls": [row for row in rows if row["building_key"] == key],
             })
         return {
-            "project": {
-                "name": getattr(project, "name", "") if project else "未选择项目",
-                "org_unit": getattr(project, "org_unit", None) if project else None,
-                "address": getattr(project, "address", None) if project else None,
-                "building_floor": getattr(project, "building_floor", None) if project else None,
-                "remarks": getattr(project, "remarks", None) if project else None,
-                "project_id": getattr(project, "project_id", None) if project else None,
-                # PDF 报告元信息
-                "construction_unit": getattr(project, "construction_unit", None) if project else None,
-                "construction_unit_executor": getattr(project, "construction_unit_executor", None) if project else None,
-                "inspection_unit": getattr(project, "inspection_unit", None) if project else None,
-                "supervision_unit": getattr(project, "supervision_unit", None) if project else None,
-                "client_unit": getattr(project, "client_unit", None) if project else None,
-                "report_no": getattr(project, "report_no", None) if project else None,
-                "inspection_date": getattr(project, "inspection_date", None) if project else None,
-                "report_date": getattr(project, "report_date", None) if project else None,
-            },
+            "project": ReportDataService._project_meta(project),
             "facades": rows,
             "buildings": buildings,
-            # 全局摘要
             "summary": ReportDataService._calc_summary(rows),
+        }
+
+    @staticmethod
+    def _project_meta(project) -> dict:
+        """Extract project metadata for report cover."""
+        return {
+            "name": getattr(project, "name", "") if project else "未选择项目",
+            "org_unit": getattr(project, "org_unit", None) if project else None,
+            "address": getattr(project, "address", None) if project else None,
+            "building_floor": getattr(project, "building_floor", None) if project else None,
+            "remarks": getattr(project, "remarks", None) if project else None,
+            "project_id": getattr(project, "project_id", None) if project else None,
+            "construction_unit": getattr(project, "construction_unit", None) if project else None,
+            "construction_unit_executor": getattr(project, "construction_unit_executor", None) if project else None,
+            "inspection_unit": getattr(project, "inspection_unit", None) if project else None,
+            "supervision_unit": getattr(project, "supervision_unit", None) if project else None,
+            "client_unit": getattr(project, "client_unit", None) if project else None,
+            "report_no": getattr(project, "report_no", None) if project else None,
+            "inspection_date": getattr(project, "inspection_date", None) if project else None,
+            "report_date": getattr(project, "report_date", None) if project else None,
+        }
+
+    @staticmethod
+    def _build_by_station(project, facades_by_station: dict[int, list[dict]], project_root=None) -> dict:
+        """按站点（点云文件）分组构建报告数据，实现项目-多点云站点-立面墙体的强绑定。
+        全新层级结构：项目基础信息 → 【点云文件名1-墙面1、墙面2...】 → 【点云文件名2-墙面1、墙面2...】
+        """
+        from pathlib import Path
+        project_name = getattr(project, "name", "") if project else ""
+        all_rows = []
+        buildings = []
+        for station_id in sorted(facades_by_station.keys()):
+            station_facades = facades_by_station[station_id]
+            # 从第一个 facade 中提取点云文件名作为 building 标签
+            ply_name = None
+            for f in station_facades:
+                ply_path = f.get('ply_path') or f.get('source_path')
+                if ply_path:
+                    ply_name = Path(ply_path).name
+                    break
+            building_label = ply_name or f"点云站点 {station_id}"
+            building_key = str(station_id)
+            station_rows = []
+            for index, source in enumerate(station_facades, 1):
+                item = dict(source or {})
+                quality = item.get("quality_report")
+                if not ReportDataService._has_written_quality(item, quality):
+                    continue
+                number = item.get("display_no") or item.get("facade_no") or index
+                try:
+                    number = int(number)
+                except (TypeError, ValueError):
+                    number = index
+                item["report_no"] = number
+                item["quality"] = quality
+                ReportDataService._ensure_quality_averages(quality)
+                item["images"] = ReportDataService._images(project_root, number, quality)
+                item["wall_data"] = ReportDataService._build_wall_data(quality)
+                item["building_key"] = building_key
+                item["building_label"] = building_label
+                item["wall_key"] = str(item.get("id") or item.get("display_no") or number)
+                item["wall_label"] = item.get("wall_label") or f"墙面 {number}"
+                item["pc_id"] = item.get("pc_id") or item.get("cloud_name") or station_id
+                item["ply_path"] = item.get("ply_path") or item.get("source_path") or building_label
+                item["project_name"] = project_name
+                station_rows.append(item)
+            # 站内立面按 display_no 排序
+            station_rows.sort(key=lambda v: (int(v.get("report_no") or 0), str(v.get("id", ""))))
+            all_rows.extend(station_rows)
+            if station_rows:
+                buildings.append({
+                    "key": building_key,
+                    "label": building_label,
+                    "walls": station_rows,
+                })
+        return {
+            "project": ReportDataService._project_meta(project),
+            "facades": all_rows,
+            "buildings": buildings,
+            "summary": ReportDataService._calc_summary(all_rows),
         }
 
     # ------------------------------------------------------------------
@@ -174,14 +236,16 @@ class ReportDataService:
             "global_plane_verticality": _extract(global_plane, "verticality"),
         }
 
-        # 整体合格率 = (平整度面积合格率 + 垂直度面积合格率) / 2
+        # 双指标面积参考率：按两个指标各自的物理面积加权，禁止直接平均
+        # 百分比（不同指标的有效面积可能不同）。这不是“同时合格面积率”，
+        # 因为当前结果契约未保留平整度/垂直度联合掩码，故名称明确为参考率。
         for algo in ("ruler", "global_plane"):
             prefix = f"{algo}_"
-            fr = data[f"{prefix}flatness"]["area_rate"]
-            vr = data[f"{prefix}verticality"]["area_rate"]
-            data[f"{prefix}overall_rate"] = (
-                (fr + vr) / 2.0 if fr is not None and vr is not None else None
-            )
+            flat = data[f"{prefix}flatness"]
+            vert = data[f"{prefix}verticality"]
+            total = flat["total_area_m2"] + vert["total_area_m2"]
+            passed = flat["pass_area_m2"] + vert["pass_area_m2"]
+            data[f"{prefix}overall_rate"] = passed / total if total > 0 else None
 
         return data
 
@@ -191,15 +255,21 @@ class ReportDataService:
     @staticmethod
     def _calc_summary(rows: list[dict]) -> dict:
         total_facades = len(rows)
-        rates = []
+        pass_area = 0.0
+        rate_area = 0.0
         total_area = 0.0
         total_points = 0
         for f in rows:
             wd = f.get("wall_data", {})
-            for algo in ("ruler_", "global_plane_"):
-                rate = wd.get(f"{algo}overall_rate")
-                if rate is not None:
-                    rates.append(rate)
+            # 汇总必须使用面积分子/分母，不得平均各墙面百分比。
+            for metric in ("ruler_flatness", "ruler_verticality",
+                           "global_plane_flatness", "global_plane_verticality"):
+                metric_data = wd.get(metric, {})
+                total = float(metric_data.get("total_area_m2", 0.0) or 0.0)
+                passed = float(metric_data.get("pass_area_m2", 0.0) or 0.0)
+                if total > 0:
+                    rate_area += total
+                    pass_area += min(max(passed, 0.0), total)
             # 使用 detection_area_m2（窗口覆盖并集）作为检测面积口径，
             # 回退到 total_area_m2（点云投影面积）以兼容旧数据。
             rf = wd.get("ruler_flatness", {})
@@ -209,7 +279,7 @@ class ReportDataService:
             total_area += area
             total_points += int(rf.get("total_points", 0))
 
-        avg_rate = (sum(rates) / len(rates) * 100) if rates else None
+        avg_rate = (pass_area / rate_area * 100) if rate_area > 0 else None
         return {
             "total_facades": total_facades,
             "avg_pass_rate": f"{avg_rate:.1f}%" if avg_rate is not None else "--",

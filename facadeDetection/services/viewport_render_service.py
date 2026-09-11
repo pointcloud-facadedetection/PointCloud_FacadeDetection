@@ -70,8 +70,24 @@ class ViewportRenderService:
             pass
 
     def show_station_proxy(self, station_id, name, points, colors=None, dataset_id=None):
-        """显示站点代理点云；视口元数据明确标记为 proxy 域。"""
+        """显示站点代理点云；视口元数据明确标记为 proxy 域。
+        若同一 dataset 已显示且点数未变，跳过重复 add_point_cloud 以消除闪烁。"""
         cloud_name = f'pcfd.proxy.station.{station_id}'
+        # 早期短路：检查当前视口是否已显示同 dataset 且点数一致的云
+        try:
+            existing_data = self.viewport.get_cloud_data(cloud_name)
+            if (existing_data is not None and
+                    dataset_id is not None and
+                    existing_data.get('dataset_id') == dataset_id and
+                    len(existing_data.get('pos', [])) == len(points)):
+                # 仅更新元数据，不重新 add_point_cloud
+                existing_data.update({'domain': 'proxy', 'index_space': 'proxy_global',
+                                      'is_processing_cloud': True,
+                                      'station_id': station_id,
+                                      'display_name': name})
+                return cloud_name
+        except Exception:
+            pass
         self.show_point_cloud(cloud_name, points, colors)
         data = self.viewport.get_cloud_data(cloud_name)
         if data is not None:
@@ -500,10 +516,13 @@ class ViewportRenderService:
         tol: float | None = None,
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """
-        核心设计：
-        - 不拟合平面，直接用选中点3D坐标
-        - 各向同性外扩（所有轴等比例），避免方向性偏移
-        - 使用正确的world_per_pixel
+        基于屏幕选框四角反投影生成紧致 3D ROI AABB。
+
+        废弃直接收集命中全部点再求 AABB 的旧逻辑（混入大量前景/背景杂点，
+        造成 BBox 膨胀偏移）。新方案：
+        1. 获取视口深度范围（命中点沿相机 front 方向的 2%-98% 分位深度）
+        2. 屏幕选框四角反投影到 depth_min / depth_max 平面，得到 8 个世界坐标
+        3. 对 8 点求 AABB，适度外扩
         """
         t_start = time.monotonic()
 
@@ -514,74 +533,95 @@ class ViewportRenderService:
                 print("[ROI-BBox] 失败: 无点云数据", flush=True)
                 return None, None
 
-            all_pos = np.asarray(data['pos'], dtype=np.float64).reshape(-1, 3)
+            # 兜底：无屏幕选框信息时回退到旧 AABB（兼容非框选调用）
             idx = np.unique(np.asarray(indices, dtype=int).reshape(-1))
-            idx = idx[(idx >= 0) & (idx < len(all_pos))]
-            if len(idx) < 3:
-                print(f"[ROI-BBox] 失败: 选中点过少 ({len(idx)})", flush=True)
+            idx = idx[(idx >= 0) & (idx < len(data['pos']))]
+            if screen_rect is None and len(idx) >= 3:
+                return self._compute_bbox_from_indices(data['pos'], idx, t_start)
+
+            # ---------- 1. 获取深度范围 ----------
+            depth_min = depth_max = 0.0
+            has_depth = False
+            if screen_rect is not None:
+                try:
+                    interactor = getattr(self.viewport, '_interactor', None)
+                    if interactor is not None:
+                        p1, p2 = screen_rect
+                        d_min, d_max, d_center = interactor.get_depth_range_in_rect(
+                            cloud_name, p1, p2,
+                            percentile_low=2.0, percentile_high=98.0)
+                        if d_min is not None and d_max is not None:
+                            depth_min = float(d_min)
+                            depth_max = float(d_max)
+                            has_depth = True
+                            print(
+                                f"[ROI-BBox] 深度分布: min={depth_min:.3f}, "
+                                f"max={depth_max:.3f}, span={depth_max-depth_min:.3f}, "
+                                f"half_thick={(depth_max-depth_min)*0.5:.3f}",
+                                flush=True,
+                            )
+                except Exception as e:
+                    print(f"[ROI-BBox] 深度统计异常: {e}", flush=True)
+
+            # ---------- 2. 四角反投影 ----------
+            camera = getattr(self.viewport, '_camera', None)
+            if camera is None:
+                print("[ROI-BBox] 失败: 无相机对象", flush=True)
                 return None, None
 
-            seed = all_pos[idx]
-            n_seed = len(seed)
-
-            # ---------- 1. 计算选中点AABB ----------
-            min_raw = np.min(seed, axis=0)
-            max_raw = np.max(seed, axis=0)
-            center_raw = (min_raw + max_raw) / 2.0
-            extent_raw = max_raw - min_raw
-            max_span = float(np.max(extent_raw))
-            
-            print(
-                f"[ROI-BBox] 选中 {n_seed} 点, 范围: "
-                f"[{min_raw[0]:.2f},{min_raw[1]:.2f},{min_raw[2]:.2f}] ~ "
-                f"[{max_raw[0]:.2f},{max_raw[1]:.2f},{max_raw[2]:.2f}], "
-                f"跨度=[{extent_raw[0]:.2f},{extent_raw[1]:.2f},{extent_raw[2]:.2f}]",
-                flush=True,
-            )
-
-            # ---------- 2. 各向同性外扩 ----------
-            # 外扩比例：最大跨度的 5%
-            expand_ratio = 0.05
-            # 绝对最小外扩：1米（保证立面检测有足够空间）
-            expand_min = 1.0
-            # 绝对最大外扩：最大跨度的 10%（防止过度膨胀）
-            expand_max = max_span * 0.10
-            
-            expand = min(max(max_span * expand_ratio, expand_min), expand_max)
-            
-            # 各向同性外扩：所有轴等比例扩展
-            min_bound = min_raw - expand
-            max_bound = max_raw + expand
-
-            # ---------- 3. 可选：相机方向感知的外扩（仅用于厚度方向）----------
-            camera = getattr(self.viewport, '_camera', None)
-            if camera is not None:
-                try:
+            if not has_depth:
+                # 无深度时尝试用 indices 估算一个保守深度
+                if len(idx) >= 3:
+                    pts = np.asarray(data['pos'], dtype=np.float64)[idx]
                     front, _, _ = camera.get_camera_basis()
                     if front is not None:
-                        # 计算选中点沿front方向的深度跨度
-                        depths = (seed - center_raw) @ front
-                        d_min = float(np.min(depths))
-                        d_max = float(np.max(depths))
-                        depth_span = d_max - d_min
-                        
-                        # 如果深度跨度很小（用户正对墙面），额外增加front方向厚度
-                        # 这确保即使选中点都在同一深度层，也有前后余量
-                        if depth_span < max_span * 0.1:  # 深度跨度小于最大跨度的10%
-                            extra_thick = max(max_span * 0.05, 0.3)  # 额外5%或0.3米
-                            
-                            # 向量形式：沿front正负方向各外扩extra_thick/2
-                            half_extra = extra_thick / 2.0
-                            for i in range(3):
-                                if abs(front[i]) > 1e-6:
-                                    delta = half_extra * abs(front[i])
-                                    min_bound[i] -= delta
-                                    max_bound[i] += delta
+                        center = np.mean(pts, axis=0)
+                        depths = (pts - center) @ front
+                        depth_min = float(np.min(depths))
+                        depth_max = float(np.max(depths))
+                        has_depth = True
+                if not has_depth:
+                    print("[ROI-BBox] 失败: 无法获取深度范围", flush=True)
+                    return None, None
 
-                except Exception:
-                    pass
+            p1, p2 = screen_rect
+            x1, x2 = sorted([int(p1.x()), int(p2.x())])
+            y1, y2 = sorted([int(p1.y()), int(p2.y())])
+            rect = (float(x1), float(y1), float(x2), float(y2))
 
-            # 确保min < max
+            corner_pts = camera.unproject_screen_corners(
+                rect, depth_min=depth_min, depth_max=depth_max)
+            if corner_pts is None or len(corner_pts) == 0:
+                print("[ROI-BBox] 失败: 反投影无结果", flush=True)
+                return None, None
+
+            # ---------- 3. 生成 AABB 并适度外扩 ----------
+            min_raw = np.min(corner_pts, axis=0)
+            max_raw = np.max(corner_pts, axis=0)
+            extent_raw = max_raw - min_raw
+            max_span = float(np.max(extent_raw))
+
+            # x-y 平面（垂直于相机 front）外扩 2% + 0.3m
+            # front 方向外扩 5%（深度方向更保守，避免漏掉立面厚度）
+            expand_xy = max(max_span * 0.02, 0.3)
+            expand_z = max(max_span * 0.05, 0.3)
+
+            front, up, right = camera.get_camera_basis()
+            if front is not None:
+                # 将外扩分解到相机坐标系：front 方向单独处理
+                min_bound = min_raw - expand_xy
+                max_bound = max_raw + expand_xy
+                # 额外 front 方向余量
+                for i in range(3):
+                    if abs(front[i]) > 0.5:
+                        delta = expand_z * abs(front[i])
+                        min_bound[i] -= delta
+                        max_bound[i] += delta
+            else:
+                min_bound = min_raw - expand_xy
+                max_bound = max_raw + expand_xy
+
+            # 确保 min < max
             for i in range(3):
                 if min_bound[i] > max_bound[i]:
                     min_bound[i], max_bound[i] = max_bound[i], min_bound[i]
@@ -600,6 +640,27 @@ class ViewportRenderService:
             print(f"[ROI-BBox] 异常 ({elapsed:.3f}s): {e}", flush=True)
             import traceback
             traceback.print_exc()
+            return None, None
+
+    def _compute_bbox_from_indices(self, pos, indices, t_start):
+        """旧路径：直接对索引点求 AABB（兼容非框选调用）。"""
+        try:
+            pts = np.asarray(pos, dtype=np.float64)[indices]
+            min_raw = np.min(pts, axis=0)
+            max_raw = np.max(pts, axis=0)
+            extent = max_raw - min_raw
+            expand = max(float(np.max(extent)) * 0.05, 0.5)
+            min_bound = min_raw - expand
+            max_bound = max_raw + expand
+            elapsed = time.monotonic() - t_start
+            print(
+                f"[ROI-BBox] 成功(索引兜底): Bbox=[{min_bound[0]:.2f},{min_bound[1]:.2f},{min_bound[2]:.2f}] ~ "
+                f"[{max_bound[0]:.2f},{max_bound[1]:.2f},{max_bound[2]:.2f}], 耗时={elapsed:.3f}s",
+                flush=True,
+            )
+            return min_bound, max_bound
+        except Exception as e:
+            print(f"[ROI-BBox] 索引兜底异常: {e}", flush=True)
             return None, None
 
     def _estimate_scene_scale(self, cloud_name: str | None = None) -> float:
@@ -749,7 +810,7 @@ class ViewportRenderService:
                 plane,
                 values_m,
                 limit_m,
-                pixel_size=0.05,
+                pixel_size=0.01,
                 defect_colors=heat_colors,
                 vmin=limit_m,
                 vmax=global_vmax_m,

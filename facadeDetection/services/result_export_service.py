@@ -74,12 +74,25 @@ class ResultExportService:
                     continue
 
                 # 构造临时 quality dict 供渲染器使用
+                # 这是一个严格按 method/metric 隔离的渲染快照；不要把公共
+                # quality 的 parameters/overall 当作另一套算法的回退来源。
+                method_parameters = method_dict.get('parameters')
+                if not isinstance(method_parameters, dict):
+                    method_parameters = {}
+                metric_rates = metric_data.get('rates') or {}
+                method_thresholds = {
+                    key: quality.get('thresholds', {}).get(key)
+                    for key in ('flatness_limit_mm', 'verticality_limit_mm')
+                    if quality.get('thresholds', {}).get(key) is not None
+                }
                 temp_quality = {
                     'windows': windows,
                     'heatmap_mode': mode,
-                    'overall': overall,
-                    'thresholds': quality.get('thresholds', {}),
-                    'parameters': method_dict.get('parameters', quality.get('parameters', {})),
+                    'overall': method_dict.get('overall', {}) if isinstance(method_dict.get('overall', {}), dict) else {},
+                    'thresholds': method_thresholds,
+                    'parameters': method_parameters,
+                    'rates': metric_rates,
+                    'profile_snapshot': quality.get('profile_snapshot', {}),
                     '__global_indices': quality.get('__global_indices', []),
                     'projection_origin': quality.get('projection_origin'),
                     'projection_u_axis': quality.get('projection_u_axis'),
@@ -94,7 +107,7 @@ class ResultExportService:
                         windows=windows,
                         plane_model=plane_model,
                         quality=temp_quality,
-                        pixel_size=0.05,
+                        pixel_size=0.01,
                         photo_path=None,  # 预留接口
                     )
                 except Exception as e:
@@ -153,7 +166,7 @@ class ResultExportService:
             return {}
 
     def export_heatmap(self, results_dir, facade_no, points, colors, quality,
-                       pixel_size=0.05):
+                       pixel_size=0.01):
         """
         兼容旧接口：导出单张热力图（默认导出 overlay）。
         新实现复用 triplet 渲染器但仅返回 overlay 路径。
