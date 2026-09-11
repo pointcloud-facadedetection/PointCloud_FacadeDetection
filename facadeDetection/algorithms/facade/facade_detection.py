@@ -615,19 +615,49 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                             enable_merge=True, enable_grow=False, signed_dist_tolerance=1.,
                             range_adaptive=True, scan_origin=None, range_coeff=.0012,
                             normal_relax_deg_per_m=.15, normal_angle_max_deg=15.,
-                            irls_iters=2, metadata=None, **_kwargs):
-    """主入口：多分辨率 Hough-IRLS 立面检测。"""
+                            irls_iters=2, metadata=None, normals=None, **_kwargs):
+    """主入口：多分辨率 Hough-IRLS 立面检测。
+    
+    当传入 ``normals``（Nx3 ndarray，长度与 pcd 一致且全部有限）时，
+    直接复用该法向量，完全跳过内部 ``ensure_normals`` 的 KD-tree 估计，
+    用于 ROI 检测复用全局预计算法向。
+    """
     started = time.perf_counter()
-    # 服务层每次检测都新建 geo 且之后不再复用，允许 ensure_normals 就地写入，
-    # 省掉外层 deepcopy 与 ensure_normals 内部第二份 deepcopy（198 万点级
-    # 点云的两份完整复制）。法向估计结果与优化前逐点一致。
-    work = ensure_normals(pcd, voxel_size, inplace=True)
-    points, normals = np.asarray(work.points, float), np.asarray(work.normals, float)
+    points = np.asarray(pcd.points, float)
     n = len(points)
     if not n:
-        return {'facades': [], 'remaining': work, 'total_points': 0}
-    trace("facade.algo.normals", points=n,
-          seconds=f"{time.perf_counter()-started:.2f}")
+        return {'facades': [], 'remaining': pcd, 'total_points': 0}
+    
+    # 优先复用外部传入的法向量（全局/ROI 预计算缓存）
+    ext_normals = np.asarray(normals, float) if normals is not None else None
+    if (ext_normals is not None and ext_normals.shape == (n, 3) and
+            np.all(np.isfinite(ext_normals))):
+        # 确保单位化以匹配 ensure_normals 输出语义
+        norms = np.linalg.norm(ext_normals, axis=1, keepdims=True)
+        if np.all(norms > 1e-8):
+            work = pcd
+            work.normals = o3d.utility.Vector3dVector(
+                ext_normals / norms)
+            normals_arr = np.asarray(work.normals, float)
+            trace("facade.algo.normals", points=n,
+                  seconds=f"{time.perf_counter()-started:.2f}")
+            # 复用路径直接跳到后续流程
+            skip_ensure = True
+        else:
+            skip_ensure = False
+    else:
+        skip_ensure = False
+    
+    if not skip_ensure:
+        # 服务层每次检测都新建 geo 且之后不再复用，允许 ensure_normals 就地写入，
+        # 省掉外层 deepcopy 与 ensure_normals 内部第二份 deepcopy（198 万点级
+        # 点云的两份完整复制）。法向估计结果与优化前逐点一致。
+        work = ensure_normals(pcd, voxel_size, inplace=True)
+        normals_arr = np.asarray(work.normals, float)
+        trace("facade.algo.normals", points=n,
+              seconds=f"{time.perf_counter()-started:.2f}")
+
+    normals = normals_arr
     
     meta = metadata or {}
     cfg = meta.get('adaptive_detection', {})
