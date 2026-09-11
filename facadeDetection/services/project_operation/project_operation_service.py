@@ -37,6 +37,8 @@ class ProjectOperationService:
         self.on_facade_results = None
         self._project_uuid: Optional[str] = None
         self._last_facade_results: Optional[list[dict]] = None
+        # 项目级立面结果聚合存储：station_id -> list[dict]，支持多站点增量拓展
+        self._all_facade_results: dict[int, list[dict]] = {}
         self._station_service = None
         parent = viewport.get_widget() if hasattr(viewport, 'get_widget') else None
         self._gui_dispatcher = _GuiDispatcher(parent)
@@ -60,6 +62,28 @@ class ProjectOperationService:
     @last_facade_results.setter
     def last_facade_results(self, results: Optional[list[dict]]):
         self._last_facade_results = results
+
+    @property
+    def all_facade_results(self) -> dict[int, list[dict]]:
+        """返回项目级所有站点的立面检测结果，支持增量拓展。"""
+        return self._all_facade_results
+
+    def set_facade_results_for_station(self, station_id: int, results: list[dict]) -> None:
+        """将某个站点的检测结果写入聚合存储，并同步更新当前活动站点的 last_facade_results。"""
+        self._all_facade_results[station_id] = results or []
+        active_station_id = getattr(self._station_service, '_active_station_id', None)
+        if active_station_id is not None and int(active_station_id) == int(station_id):
+            self._last_facade_results = self._all_facade_results[station_id]
+
+    def get_all_facades_flat(self) -> list[dict]:
+        """返回所有站点全部立面的扁平列表，用于报告生成。"""
+        flat: list[dict] = []
+        for station_id in sorted(self._all_facade_results.keys()):
+            for f in self._all_facade_results[station_id]:
+                item = dict(f)
+                item['station_id'] = station_id
+                flat.append(item)
+        return flat
 
     def set_station_service(self, service):
         self._station_service = service
@@ -97,6 +121,7 @@ class ProjectOperationService:
     def clear_processing_state(self):
         """丢弃临时的外观/ROI状态；切勿删除原始/源数据。"""
         self._last_facade_results = None
+        self._all_facade_results.clear()
         self._last_roi_indices = None
         self._last_roi_bounds = None
         self._quality_result_cache = getattr(self, '_quality_result_cache', {})
@@ -595,6 +620,10 @@ class ProjectOperationService:
                 or not self._task_scheduler.is_current(context)):
             return
         self._last_facade_results = results
+        # 同时写入聚合存储：按当前活动站点 ID 归档
+        active_station_id = getattr(self._station_service, '_active_station_id', None)
+        if active_station_id is not None and results:
+            self._all_facade_results[int(active_station_id)] = results
         if callable(self.on_facade_results):
             try:
                 self.on_facade_results(results)

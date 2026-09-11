@@ -179,16 +179,18 @@ class PointCloudStationService:
         # 兼容旧项目：source_offsets / source_indices 别名
         state_payload = state or {}
         state_offsets = np.asarray(
-            state_payload.get('proxy_source_offsets',
-                              state_payload.get('source_offsets', [])),
+            state_payload.get('proxy_source_offsets')
+            or state_payload.get('source_offsets')
+            or [],
             dtype=np.int64)
         state_indices = np.asarray(
-            state_payload.get('proxy_source_indices',
-                              state_payload.get('source_indices', [])),
+            state_payload.get('proxy_source_indices')
+            or state_payload.get('source_indices')
+            or [],
             dtype=np.int64)
         restored_direct = bool(
             (state or {}).get('enabled') and len(state_offsets) >= 2 and
-            len(state_offsets) == int((state or {}).get('proxy_count', 0)) + 1 and
+            len(state_offsets) == int((state or {}).get('proxy_count') or 0) + 1 and
             len(state_indices) == int(state_offsets[-1]) and
             # 比较等长切片。
             np.all((state_offsets[:-1] >= 0) &
@@ -276,8 +278,8 @@ class PointCloudStationService:
             keep = np.asarray(
                 state.get('keep_proxy_indices', state.get('proxy_keep_indices', [])),
                 dtype=np.int64)
-            base_count = int(state.get('proxy_base_count', len(proxy)))
-            saved_count = int(state.get('proxy_count', len(keep)))
+            base_count = int(state.get('proxy_base_count') or len(proxy))
+            saved_count = int(state.get('proxy_count') or len(keep))
             valid_keep = (len(keep) == saved_count and
                           len(np.unique(keep)) == len(keep) and
                           np.all((keep >= 0) & (keep < len(proxy))))
@@ -403,6 +405,9 @@ class PointCloudStationService:
         log_event(self.project_uuid, 'station.switch', station_id=station.id)
 
     def show_single(self, station):
+        """切换至单个站点视图。若目标已是活动站点，直接返回避免重复渲染。"""
+        if self._active_station_id is not None and int(self._active_station_id) == int(station.id):
+            return
         self.commit_show_single(station, self.prepare_show_single(station))
 
     def merge_selected(self):

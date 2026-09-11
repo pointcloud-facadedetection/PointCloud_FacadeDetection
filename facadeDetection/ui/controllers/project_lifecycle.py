@@ -178,13 +178,17 @@ class ProjectLifecycleController(QObject):
             pass
         try:
             if project_uuid:
+                # 全量恢复：加载所有站点的历史立面检测结果到聚合存储
+                all_historical = self.project_overview_service.load_all_historical_facades(
+                    project_uuid)
+                for station_id, facades in all_historical.items():
+                    self.project_operation_service.set_facade_results_for_station(
+                        station_id, facades)
+                # 当前活动站点的立面列表同步到 UI
                 active_station_id = getattr(self.station_service, '_active_station_id', None)
-                historical = self.project_overview_service.load_historical_facades(
-                    project_uuid, active_station_id)
-                # 通过与新检测相同的状态路径恢复历史立面。
-                # 这将同步列表、渲染器缓存、热力图可用性及报告快照
-                self.project_operation_service.last_facade_results = historical or []
-                self.facade_results_refresh_requested.emit(historical or [])
+                active_facades = all_historical.get(int(active_station_id), []) if active_station_id else []
+                self.project_operation_service.last_facade_results = active_facades
+                self.facade_results_refresh_requested.emit(active_facades)
                 self.report_preview_refresh_requested.emit()
         except Exception as exc:
             self.status_message.emit(f'项目历史数据恢复部分失败：{exc}', 5000)

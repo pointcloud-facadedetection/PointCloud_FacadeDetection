@@ -52,10 +52,20 @@ class ReportPageMixin:
     def _refresh_report_preview(self):
         if not hasattr(self, 'report_preview_browser'):
             return
-        facades = self.project_operation_service.last_facade_results or []
-        self._report_snapshot = ReportDataService.build(
-            self.current_project, facades,
-            getattr(self.current_project, 'directory_path', None))
+        # 使用全量聚合数据生成报告，支持多站点增量拓展
+        all_facades_by_station = getattr(
+            self.project_operation_service, 'all_facade_results', None)
+        if all_facades_by_station:
+            self._report_snapshot = ReportDataService.build(
+                self.current_project,
+                facades_by_station=all_facades_by_station,
+                project_root=getattr(self.current_project, 'directory_path', None))
+        else:
+            # 降级：回退到旧模式（当前活动站点）
+            facades = self.project_operation_service.last_facade_results or []
+            self._report_snapshot = ReportDataService.build(
+                self.current_project, facades,
+                getattr(self.current_project, 'directory_path', None))
         self._report_html = PdfReportRenderer.html(self._report_snapshot)
         self.report_document_title_label.setText('建筑外立面质量检测报告')
         self.report_preview_browser.setHtml(self._report_html)

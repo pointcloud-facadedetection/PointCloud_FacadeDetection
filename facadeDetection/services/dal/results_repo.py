@@ -78,7 +78,15 @@ class ResultsRepo:
             return int(value)
 
         report = serializable(quality)
-        report.pop('__export_context', None)
+        # 保留 export 元数据（热图路径/results_dir），丢弃大型点云数组
+        export_ctx = quality.get('__export_context') if isinstance(quality, dict) else None
+        if isinstance(export_ctx, dict):
+            report['__export_context'] = {
+                k: v for k, v in export_ctx.items()
+                if k in ('heatmaps', 'results_dir')
+            }
+        else:
+            report.pop('__export_context', None)
         # 在 SQLite 中保留质量域。
         if quality_artifact_path and not report.get('__global_indices'):
             report['quality_artifact_path'] = str(quality_artifact_path)

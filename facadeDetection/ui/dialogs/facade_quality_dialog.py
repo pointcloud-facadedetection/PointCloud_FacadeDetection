@@ -237,7 +237,7 @@ class FacadeQualityDialog(QDialog):
         ruler_layout.setContentsMargins(12, 8, 12, 8)
         ruler_layout.setSpacing(8)
 
-        # 合格率 headline
+        # 合格率 headline：仅展示各自指标，禁止合并成不具物理意义的平均率。
         ruler_flat_area = _get_rate(ruler, 'flatness') * 100.0
         ruler_vert_area = _get_rate(ruler, 'verticality') * 100.0
 
@@ -384,7 +384,14 @@ class FacadeQualityDialog(QDialog):
         return table
 
     def _fill_interval_table(self, table: QTableWidget, method: str):
-        intervals = self._quality.get('intervals') or []
+        comparison = self._quality.get('quality_comparison') or {}
+        methods = comparison.get('methods') or {}
+        method_data = methods.get(method) or {}
+        # 新结果可直接提供方法专属区间；旧结果没有时才从该方法窗口
+        # 生成简化区间，绝不再把公共 ruler intervals 同时绑定到两张表。
+        intervals = method_data.get('intervals') or []
+        if not intervals:
+            intervals = self._quality.get('intervals') or [] if method == 'ruler' else []
         table.setRowCount(len(intervals))
 
         def number(value, suffix=''):
@@ -397,7 +404,7 @@ class FacadeQualityDialog(QDialog):
                 return '--'
 
         for r, item in enumerate(intervals):
-            # 尝试从 item 读取面积合格率；若不存在则回退到 pass_rate
+            # 优先读取服务层统一生成的物理面积率；旧结果才回退到窗口率。
             flat_rate = item.get('flatness_area_rate')
             if flat_rate is None:
                 flat_rate = item.get('flatness_pass_rate')

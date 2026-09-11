@@ -318,6 +318,21 @@ class ProjectOverviewService:
             log_event(project_id, 'results.loaded', facades=len(result))
             return result
 
+    def load_all_historical_facades(self, project_id: str) -> dict[int, list[dict]]:
+        """加载项目中所有站点的历史立面检测结果，按 station_id 分组返回。
+        用于项目激活时一次性恢复全量报告数据，支持多站点增量拓展。"""
+        from services.dal.pointcloud_station_repo import PointCloudStationRepo
+        stations = PointCloudStationRepo.list(project_id)
+        all_results: dict[int, list[dict]] = {}
+        for station in stations:
+            if getattr(station, 'last_error', None):
+                continue
+            sid = int(station.id)
+            facades = self.load_historical_facades(project_id, station_id=sid)
+            if facades:
+                all_results[sid] = facades
+        return all_results
+
     def remove_project(self, project_id: str) -> bool:
         return ProjectRepo.delete_project(project_id, hard=True)
 

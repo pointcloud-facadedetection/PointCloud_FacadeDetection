@@ -389,7 +389,8 @@ class FacadeQualityService:
                 # 全局平面窗口：轴对齐，长边沿 v
                 return (cu - hw, cv - hl, cu + hw, cv + hl)
 
-            def _coverage_rates(windows_list, pass_key, length_m, width_m):
+            def _coverage_rates(windows_list, pass_key, length_m, width_m,
+                                bounds=None):
                 """统一去重的面积/点数合格率（布尔掩码并集）。
 
                 面积合格率 = 被合格窗口覆盖且有点的掩码面积 / 有点的掩码总面积。
@@ -405,19 +406,23 @@ class FacadeQualityService:
                             'fail_points': 0,
                             'pass_windows': 0, 'total_windows': 0}
                 res = _DOMAIN_RES
-                support = CoverageMask(q_u0, q_v0, q_u1, q_v1, resolution=res)
+                bu0, bv0, bu1, bv1 = bounds or (q_u0, q_v0, q_u1, q_v1)
+                support = CoverageMask(bu0, bv0, bu1, bv1, resolution=res)
                 rel_pts = filtered_pts - origin_on_plane
                 u_pts = rel_pts @ u_axis
                 v_pts = rel_pts @ v_axis
-                support.mark_pts(u_pts, v_pts)
+                in_domain = ((u_pts >= bu0) & (u_pts <= bu1) &
+                             (v_pts >= bv0) & (v_pts <= bv1))
+                u_domain, v_domain = u_pts[in_domain], v_pts[in_domain]
+                support.mark_pts(u_domain, v_domain)
                 total_area = support.area_m2()
-                cell_u = np.clip(((u_pts - q_u0) / res).astype(np.int64), 0, support.nu - 1)
-                cell_v = np.clip(((v_pts - q_v0) / res).astype(np.int64), 0, support.nv - 1)
+                cell_u = np.clip(((u_domain - bu0) / res).astype(np.int64), 0, support.nu - 1)
+                cell_v = np.clip(((v_domain - bv0) / res).astype(np.int64), 0, support.nv - 1)
                 cell_id = cell_u * support.nv + cell_v
                 cell_counts = np.bincount(cell_id, minlength=support.nu * support.nv)
-                total_points = int(len(u_pts))
+                total_points = int(len(u_domain))
 
-                pass_mask = CoverageMask(q_u0, q_v0, q_u1, q_v1, resolution=res)
+                pass_mask = CoverageMask(bu0, bv0, bu1, bv1, resolution=res)
                 for w in windows_list:
                     if not w.get(pass_key, False):
                         continue
@@ -506,6 +511,95 @@ class FacadeQualityService:
             global_vert_rates = _coverage_rates(global_vert_all, 'verticality_pass',
                                                 global_length, global_width)
 
+            def _method_intervals(rows, include_vertical=False):
+                """按共享 v 轴生成方法专属区间，避免 UI 复用 ruler intervals。"""
+                if not rows:
+                    return []
+                size = max(float(gsize), 1e-6)
+                centers = np.asarray([w.get('center_xyz', [np.nan] * 3)
+                                      for w in rows], dtype=float)
+                finite = np.all(np.isfinite(centers), axis=1)
+                if not np.any(finite):
+                    return []
+                rows = [w for w, ok_ in zip(rows, finite) if ok_]
+                centers = centers[finite]
+                row_v = (centers - origin_on_plane) @ v_axis
+                lo, hi = float(q_v0), float(q_v1)
+                n = max(1, int(np.ceil(max(hi - lo, 0.0) / size)))
+                edges = np.linspace(lo, hi, n + 1)
+                result_intervals = []
+                for i in range(n):
+                    selected = [w for w, value in zip(rows, row_v)
+                                if (edges[i] <= value < edges[i + 1]) or
+                                (i == n - 1 and value == edges[i + 1])]
+                    if not selected:
+                        continue
+                    flat = [float(w['flatness_gap_mm']) for w in selected
+                            if np.isfinite(w.get('flatness_gap_mm', np.nan))]
+                    vert = [float(w['verticality_deviation_mm']) for w in selected
+                            if np.isfinite(w.get('verticality_deviation_mm', np.nan))]
+                    fp = [bool(w.get('flatness_pass', False)) for w in selected
+                          if np.isfinite(w.get('flatness_gap_mm', np.nan))]
+                    vp = [bool(w.get('verticality_pass', False)) for w in selected
+                          if np.isfinite(w.get('verticality_deviation_mm', np.nan))]
+                    result_intervals.append({
+                        'label': f'{edges[i]:.2f}–{edges[i + 1]:.2f}m',
+                        'v_min_m': float(edges[i]), 'v_max_m': float(edges[i + 1]),
+                        'window_count': len(selected),
+                        'valid_window_count': len(selected),
+                        'point_count': int(sum(w.get('point_count', 0) or 0 for w in selected)),
+                        'flatness_max_gap_mm': max(flat, default=0.0),
+                        'flatness_pass_rate': float(np.mean(fp)) if fp else 0.0,
+                        'verticality_max_deviation_mm': max(vert, default=np.nan),
+                        'verticality_area_rate': float(np.mean(vp)) if vp else 0.0,
+                        'flatness_area_rate': float(np.mean(fp)) if fp else 0.0,
+                        'status': 'ok' if flat or vert else 'no_valid_window',
+                    })
+                return result_intervals
+
+            ruler_intervals = list(result.get('intervals') or [])
+            global_intervals = _method_intervals(global_windows)
+
+            def _attach_interval_rates(intervals, flat_rows, vert_rows,
+                                       length_m, width_m):
+                """Add canonical area/point rates to every method interval.
+
+                The denominator is the occupied point domain *inside that
+                interval* and the numerator is the clipped union of passing
+                footprints.  This is deliberately not a mean of window flags.
+                """
+                for interval in intervals:
+                    lo, hi = float(interval['v_min_m']), float(interval['v_max_m'])
+                    def in_interval(row):
+                        center = np.asarray(row.get('center_xyz', [np.nan] * 3), float)
+                        if center.shape != (3,) or not np.all(np.isfinite(center)):
+                            return False
+                        value = float((center - origin_on_plane) @ v_axis)
+                        return lo <= value <= hi
+                    bounds = (q_u0, lo, q_u1, hi)
+                    fr = _coverage_rates([w for w in flat_rows if in_interval(w)],
+                                         'flatness_pass', length_m, width_m, bounds)
+                    vr = _coverage_rates([w for w in vert_rows if in_interval(w)],
+                                         'verticality_pass', length_m, width_m, bounds)
+                    interval['flatness_area_rate'] = fr['area_rate']
+                    interval['flatness_point_rate'] = fr['point_rate']
+                    interval['verticality_area_rate'] = vr['area_rate']
+                    interval['verticality_point_rate'] = vr['point_rate']
+                    # Keep explicit window rate separate from physical area rate.
+                    interval['flatness_window_rate'] = (
+                        fr['pass_windows'] / fr['total_windows']
+                        if fr['total_windows'] else 0.0)
+                    interval['verticality_window_rate'] = (
+                        vr['pass_windows'] / vr['total_windows']
+                        if vr['total_windows'] else 0.0)
+
+            _attach_interval_rates(
+                ruler_intervals, ruler_flat_all, ruler_vert_all,
+                ruler_length, ruler_width)
+            _attach_interval_rates(
+                global_intervals, global_flat_all, global_vert_all,
+                global_length, global_width)
+
             # 全局平面法窗口为空时回退为完整复制原始窗口，避免链路空转
             if not global_flat_all:
                 global_flat_all = [dict(w) for w in global_windows]
@@ -530,6 +624,7 @@ class FacadeQualityService:
                         'rates': ruler_vert_rates,
                     },
                     'parameters': params.snapshot(),
+                    'intervals': ruler_intervals,
                 },
                 'global_plane': {
                     'flatness': {
@@ -542,6 +637,7 @@ class FacadeQualityService:
                     },
                     'parameters': global_result.get('parameters') or {},
                     'overall': global_overall,
+                    'intervals': global_intervals,
                 },
             }
 

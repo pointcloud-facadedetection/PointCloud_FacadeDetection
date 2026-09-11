@@ -434,11 +434,79 @@ class OperationPageMixin:
         return sidebar
 
     def _refresh_station_panel(self, active_station_id=None):
+        """增量式刷新站点列表：仅增删改差异项，保留滚动位置与选中状态，避免整表重绘闪烁。"""
         if not hasattr(self, 'station_list'):
             return
+        stations = self.station_service.list_stations()
+        new_snap = {}
+        for s in stations:
+            new_snap[int(s.id)] = {
+                'display_name': s.display_name,
+                'is_selected': bool(s.is_selected),
+                'last_error': getattr(s, 'last_error', None),
+                'source_path': str(s.source_path or ''),
+            }
+        if not hasattr(self, '_station_list_snapshot') or self.station_list.count() == 0:
+            self._station_list_snapshot = {}
+            self._do_full_refresh(stations, active_station_id)
+            self._station_list_snapshot = dict(new_snap)
+            return
+        old_snap = self._station_list_snapshot
+        self.station_list.blockSignals(True)
+        try:
+            for row in range(self.station_list.count() - 1, -1, -1):
+                item = self.station_list.item(row)
+                sid = int(item.data(Qt.ItemDataRole.UserRole))
+                if sid not in new_snap:
+                    self.station_list.takeItem(row)
+            existing_rows = {}
+            for row in range(self.station_list.count()):
+                item = self.station_list.item(row)
+                existing_rows[int(item.data(Qt.ItemDataRole.UserRole))] = (row, item)
+            for index, (sid, data) in enumerate(new_snap.items()):
+                label = data['display_name']
+                if data['last_error']:
+                    label = f"{label}  [文件失效: {data['last_error']}]"
+                if sid in existing_rows:
+                    row, item = existing_rows[sid]
+                    if item.text() != label:
+                        item.setText(label)
+                    check = Qt.CheckState.Checked if data['is_selected'] else Qt.CheckState.Unchecked
+                    if item.checkState() != check:
+                        item.setCheckState(check)
+                    if item.toolTip() != data['source_path']:
+                        item.setToolTip(data['source_path'])
+                    if data['last_error'] and item.foreground() != Qt.GlobalColor.red:
+                        item.setForeground(Qt.GlobalColor.red)
+                    elif not data['last_error'] and item.foreground() == Qt.GlobalColor.red:
+                        item.setForeground(self.station_list.palette().text().color())
+                    if row != index:
+                        taken = self.station_list.takeItem(row)
+                        self.station_list.insertItem(index, taken)
+                else:
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.ItemDataRole.UserRole, sid)
+                    item.setCheckState(Qt.CheckState.Checked if data['is_selected'] else Qt.CheckState.Unchecked)
+                    item.setToolTip(data['source_path'])
+                    if data['last_error']:
+                        item.setForeground(Qt.GlobalColor.red)
+                    self.station_list.insertItem(index, item)
+        finally:
+            self.station_list.blockSignals(False)
+        self._station_list_snapshot = dict(new_snap)
+        active_station_id = (active_station_id if active_station_id is not None
+                             else getattr(self.station_service, '_active_station_id', None))
+        if active_station_id is not None:
+            for row in range(self.station_list.count()):
+                item = self.station_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == active_station_id:
+                    self.station_list.setCurrentItem(item)
+                    break
+
+    def _do_full_refresh(self, stations, active_station_id=None):
+        """全量重建站点列表（仅首次或恢复时使用）。"""
         self.station_list.blockSignals(True)
         self.station_list.clear()
-        stations = self.station_service.list_stations()
         for station in stations:
             label = station.display_name
             if getattr(station, 'last_error', None):
@@ -451,8 +519,6 @@ class OperationPageMixin:
                 item.setForeground(Qt.GlobalColor.red)
             self.station_list.addItem(item)
         self.station_list.blockSignals(False)
-        active_station_id = (active_station_id if active_station_id is not None
-                             else getattr(self.station_service, '_active_station_id', None))
         if active_station_id is not None:
             for row in range(self.station_list.count()):
                 item = self.station_list.item(row)
@@ -461,8 +527,10 @@ class OperationPageMixin:
                     break
 
     def _on_station_item_changed(self, item):
+        """复选框变更仅累积状态，不触发任何视图刷新；由 timer flush 后按需更新。"""
         try:
-            self._pending_station_selection[item.data(Qt.ItemDataRole.UserRole)] = (
+            sid = item.data(Qt.ItemDataRole.UserRole)
+            self._pending_station_selection[sid] = (
                 item.checkState() == Qt.CheckState.Checked)
             self._station_selection_timer.start()
         except Exception as exc:
@@ -474,25 +542,60 @@ class OperationPageMixin:
         try:
             for station_id, selected in pending.items():
                 self.station_service.set_selected(station_id, selected)
+            # 仅当存在已选站点且当前处于合并显示逻辑下，才刷新合并视口
+            # 单站点模式下复选框变更不触发视口重渲染
+            selected_ids = [sid for sid, sel in pending.items() if sel]
+            if len(selected_ids) >= 2:
+                # 延迟刷新合并视图，避免连续勾选导致多次重渲染
+                QTimer.singleShot(50, self._refresh_merge_view_if_needed)
         except Exception as exc:
             self.statusBar().showMessage(f'保存站点选择失败：{exc}', 5000)
 
+    def _refresh_merge_view_if_needed(self):
+        """若当前应显示合并视图，则执行合并；否则保持当前单站点视图不变。"""
+        try:
+            view_state = self.station_service.list_stations()
+            selected = [s for s in view_state if s.is_selected and not s.last_error]
+            if len(selected) >= 2:
+                self.station_service.merge_selected()
+        except Exception as exc:
+            print(f'[PCFD] merge_refresh_skipped error={exc!r}', flush=True)
+
     def _on_station_clicked(self, item):
         station_id = item.data(Qt.ItemDataRole.UserRole)
+        # 防抖：若当前有挂起的切换或点击同一站点，忽略
+        if getattr(self, '_pending_station_switch_id', None) == station_id:
+            return
+        self._pending_station_switch_id = station_id
+
         station = next((x for x in self.station_service.list_stations() if x.id == station_id), None)
-        if station:
-            self.station_service.show_single(station)
-            # A station switch changes the processing domain.  Replay only
-            # results belonging to the newly active station; never reuse the
-            # previous station's facade indices or colours.
+        if not station:
+            self._pending_station_switch_id = None
+            return
+
+        # 若已是活动站点，仅同步 UI 状态，不触发重渲染
+        current_active = getattr(self.station_service, '_active_station_id', None)
+        if current_active is not None and int(current_active) == int(station_id):
+            self._pending_station_switch_id = None
+            return
+
+        # 立即切换视口（渲染服务内部已有短路保护）
+        self.station_service.show_single(station)
+
+        # 异步恢复立面结果，避免阻塞 GUI 主线程
+        def _deferred_facade_refresh():
             try:
+                self._pending_station_switch_id = None
                 project_id = getattr(self.current_project, 'project_id', None)
                 historical = (self.project_overview_service.load_historical_facades(
                     project_id, station.id) if project_id else [])
-                self.project_operation_service.last_facade_results = historical or []
+                self.project_operation_service.set_facade_results_for_station(station.id, historical or [])
                 self._show_facade_results(historical or [])
             except Exception as exc:
+                self._pending_station_switch_id = None
                 print(f'[PCFD] facade.color_refresh_failed error={exc!r}', flush=True)
+
+        QTimer.singleShot(0, _deferred_facade_refresh)
 
     def _delete_stations(self):
         try:
