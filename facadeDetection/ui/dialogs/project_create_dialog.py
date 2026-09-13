@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtCore import QDate, QUrl, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -135,6 +135,51 @@ class RegionSelector(QWidget):
         return prov, city, dist
 
 
+class ResourceListWidget(QListWidget):
+    """支持从资源管理器拖入文件/文件夹的列表。
+
+    交互契约：拖入的内容只作为"待选路径"交给对话框校验，与"新增"
+    按钮走同一条 ``_add_paths`` 通道，因此校验、去重、落库行为完全一致，
+    不引入第二套资源管理逻辑。
+    """
+
+    pathsDropped = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DropOnly)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+    @staticmethod
+    def _local_paths(event) -> list:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        return [url.toLocalFile() for url in mime.urls()
+                if url.isLocalFile() and url.toLocalFile()]
+
+    def dragEnterEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._local_paths(event)
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        self.pathsDropped.emit(paths)
+
+
 class ProjectCreateDialog(QDialog):
     """
     创建/编辑项目四页签表单：
@@ -142,6 +187,12 @@ class ProjectCreateDialog(QDialog):
       - 报告信息
       - 检测参数
       - 文件导入
+
+    改造要点（对外接口不变：仍只暴露 ``values()`` 与既有控件名）：
+    - 必填项即时校验：项目名称失焦即提示，错误态用动态属性驱动 QSS；
+    - 文件导入支持拖拽 + 计数提示 + 空态引导；
+    - 检测参数按"尺度参数 / 判定阈值 / 离群剔除"分成三组卡片，
+      仅调整排版，取值逻辑与键名保持原样。
     """
 
     def __init__(self, parent=None, project=None):
@@ -158,41 +209,88 @@ class ProjectCreateDialog(QDialog):
     # UI 构建
     # ------------------------------------------------------------------
     def _build_ui(self):
+        self.setObjectName('projectCreateDialog')
         lay = QVBoxLayout(self)
-        lay.setSpacing(12)
+        lay.setContentsMargins(18, 16, 18, 12)
+        lay.setSpacing(10)
 
+        header = QVBoxLayout()
+        header.setSpacing(2)
         title = QLabel("请输入项目信息")
-        title.setStyleSheet("font-size:16px; font-weight:600; color:#333;")
-        lay.addWidget(title)
+        title.setObjectName('formDialogTitle')
+        subtitle = QLabel("检测参数将随项目保存，并在【项目操作】中统一下发使用")
+        subtitle.setObjectName('formDialogSubtitle')
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        lay.addLayout(header)
 
         self.tabs = QTabWidget()
+        self.tabs.setObjectName('formTabs')
         self.tabs.addTab(self._build_basic_tab(), "基础信息")
         self.tabs.addTab(self._build_report_tab(), "报告信息")
         self.tabs.addTab(self._build_inspection_tab(), "检测参数")
         self.tabs.addTab(self._build_import_tab(), "文件导入")
-        lay.addWidget(self.tabs)
+        lay.addWidget(self.tabs, 1)
+
+        # 底部操作条：左侧常驻校验状态，右侧 Save/Cancel。
+        # 单独用一个容器是为了让"当前 Tab 的名称"始终可见，
+        # 用户切页后不会忘记要保存哪一页的修改。
+        footer = QWidget()
+        footer.setObjectName('formFooter')
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 8, 10, 8)
+        footer_layout.setSpacing(10)
+        self.lbl_tab_hint = QLabel()
+        self.lbl_tab_hint.setProperty('uiRole', 'formFooterHint')
+        footer_layout.addWidget(self.lbl_tab_hint, 1)
 
         self.btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         self.btns.accepted.connect(self._on_accept)
         self.btns.rejected.connect(self.reject)
-        lay.addWidget(self.btns)
+        save_button = self.btns.button(QDialogButtonBox.StandardButton.Save)
+        save_button.setProperty('buttonRole', 'primary')
+        save_button.setText('保存')
+        self.btns.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        footer_layout.addWidget(self.btns)
+        lay.addWidget(footer)
 
-        self.resize(600, 580)
-        self.setMinimumSize(560, 480)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(0)
+
+        self.resize(640, 620)
+        self.setMinimumSize(600, 520)
+
+    def _on_tab_changed(self, index: int):
+        name = self.tabs.tabText(index) if index >= 0 else ''
+        self.lbl_tab_hint.setText(f'当前编辑：{name}')
 
     # ---------- 基础信息 ----------
     def _build_basic_tab(self) -> QWidget:
         page = QWidget()
+        page.setObjectName('formTabPage')
         form = QFormLayout(page)
+        form.setContentsMargins(14, 14, 14, 14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(10)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
+        name_box = QWidget()
+        name_layout = QVBoxLayout(name_box)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(3)
         self.edt_name = QLineEdit()
-        self.edt_name.setPlaceholderText("必填")
+        self.edt_name.setPlaceholderText("必填，如：XX花园1号楼外立面")
         self.edt_name.textChanged.connect(self._update_report_no)
-        form.addRow("项目名称：", self.edt_name)
+        self.edt_name.textChanged.connect(self._clear_name_error)
+        self.edt_name.editingFinished.connect(self._validate_name)
+        name_layout.addWidget(self.edt_name)
+        self.lbl_name_hint = QLabel("项目名称用于生成报告编号与报告封面，建议包含楼栋信息")
+        self.lbl_name_hint.setProperty('uiRole', 'fieldHint')
+        name_layout.addWidget(self.lbl_name_hint)
+        form.addRow(self._required_label("项目名称："), name_box)
 
         self.edt_org = QLineEdit()
         self.edt_org.setPlaceholderText("选填")
@@ -202,19 +300,64 @@ class ProjectCreateDialog(QDialog):
         form.addRow("省市区：", self.region_selector)
 
         self.edt_address = QLineEdit()
-        self.edt_address.setPlaceholderText("具体地址，如街道")
+        self.edt_address.setPlaceholderText("具体地址，如街道门牌号")
         form.addRow("详细地址：", self.edt_address)
 
         self.edt_building = QLineEdit()
-        self.edt_building.setPlaceholderText("如：1号楼")
+        self.edt_building.setPlaceholderText("如：1号楼 / A区3栋")
         form.addRow("楼栋号信息：", self.edt_building)
 
         self.edt_remarks = QTextEdit()
-        self.edt_remarks.setPlaceholderText("选填")
+        self.edt_remarks.setPlaceholderText("选填，可填写现场情况说明")
         self.edt_remarks.setFixedHeight(80)
         form.addRow("备注：", self.edt_remarks)
 
         return page
+
+    def _required_label(self, text: str) -> QWidget:
+        """带红色星号的字段标签，让必填项在视觉上先被看到。"""
+        holder = QWidget()
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 6, 0)
+        layout.setSpacing(2)
+        layout.addStretch(1)
+        label = QLabel(text)
+        mark = QLabel("*")
+        mark.setProperty('uiRole', 'requiredMark')
+        layout.addWidget(label)
+        layout.addWidget(mark)
+        return holder
+
+    @staticmethod
+    def _repolish(widget: QWidget):
+        """动态属性改变后必须手动重新应用样式表，Qt 不会自动刷新。"""
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+    # ---------- 内联校验 ----------
+    def _validate_name(self) -> bool:
+        """校验项目名称并把结果写进控件的 ``fieldState`` 动态属性。
+
+        返回是否通过，供 ``_on_accept`` 复用，保证"失焦提示"与
+        "保存拦截"使用的是同一套判定，不会出现口径不一致。
+        """
+        ok = bool(self.edt_name.text().strip())
+        state = '' if ok else 'error'
+        self.edt_name.setProperty('fieldState', state)
+        self.lbl_name_hint.setProperty('fieldState', state)
+        self.lbl_name_hint.setText(
+            "项目名称用于生成报告编号与报告封面，建议包含楼栋信息" if ok
+            else "项目名称为必填项，请填写后再保存")
+        self._repolish(self.edt_name)
+        self._repolish(self.lbl_name_hint)
+        return ok
+
+    def _clear_name_error(self, text: str):
+        """用户开始输入后立即消除错误态，避免红框一直挂着。"""
+        if text.strip() and self.edt_name.property('fieldState') == 'error':
+            self._validate_name()
 
     # ---------- 文件导入 ----------
     def _build_import_tab(self) -> QWidget:
@@ -223,6 +366,8 @@ class ProjectCreateDialog(QDialog):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
         self._resource_lists = {}
+        self._resource_counts = {}
+        self._resource_empties = {}
         sections = (
             ('fls_directories', 'FLS 目录导入', '上传单站点原生 FLS 文件夹', 'directory'),
             ('pointcloud_files', '点云文件上传', '上传多站点拼接处理后点云文件 (E57/PLY)', 'pointcloud'),
@@ -230,15 +375,38 @@ class ProjectCreateDialog(QDialog):
         )
         for key, title, hint, kind in sections:
             box = QGroupBox(title)
+            box.setObjectName('importGroup')
             layout = QVBoxLayout(box)
+            layout.setSpacing(6)
+
+            # 顶部一行：左侧说明，右侧实时计数，用户不必展开列表就知道有没有内容。
+            head = QHBoxLayout()
             hint_label = QLabel(hint)
-            hint_label.setStyleSheet('color:#64748b;font-size:11px;')
-            layout.addWidget(hint_label)
-            listing = QListWidget()
+            hint_label.setProperty('uiRole', 'importEmptyHint')
+            head.addWidget(hint_label, 1)
+            counter = QLabel()
+            counter.setProperty('uiRole', 'importEmptyHint')
+            head.addWidget(counter, 0, Qt.AlignmentFlag.AlignRight)
+            layout.addLayout(head)
+
+            # 列表支持从资源管理器直接拖入，交互路径与"新增"按钮完全一致。
+            listing = ResourceListWidget()
             listing.setObjectName(f'{key}List')
-            listing.setMinimumHeight(70)
+            listing.setProperty('uiRole', 'resourceList')
+            listing.setMinimumHeight(72)
+            listing.setToolTip('可直接从资源管理器拖入文件或文件夹')
+            listing.pathsDropped.connect(
+                lambda paths, k=key, t=title: self._add_paths(k, t, paths))
             self._resource_lists[key] = listing
+            self._resource_counts[key] = counter
             layout.addWidget(listing, 1)
+
+            empty = QLabel('尚未添加内容，可点击「新增」或直接拖拽文件到此处')
+            empty.setProperty('uiRole', 'importEmptyHint')
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._resource_empties[key] = empty
+            layout.addWidget(empty)
+
             actions = QHBoxLayout()
             actions.addStretch(1)
             add = QPushButton('新增')
@@ -249,8 +417,19 @@ class ProjectCreateDialog(QDialog):
             actions.addWidget(clear)
             layout.addLayout(actions)
             outer.addWidget(box, 1)
+            self._refresh_resource_state(key)
         outer.addStretch(1)
         return page
+
+    def _refresh_resource_state(self, key: str):
+        """同步"计数标签 + 空态提示"，让列表当前状态一眼可见。"""
+        count = self._resource_lists[key].count()
+        counter = self._resource_counts.get(key)
+        if counter is not None:
+            counter.setText(f'已添加 {count} 项')
+        empty = self._resource_empties.get(key)
+        if empty is not None:
+            empty.setVisible(count == 0)
 
     def _add_resource(self, key: str, title: str, kind: str):
         if kind == 'directory':
@@ -262,15 +441,29 @@ class ProjectCreateDialog(QDialog):
             else:
                 flt = '照片文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;所有文件 (*)'
             paths, _ = QFileDialog.getOpenFileNames(self, title, '', flt)
-        for path in paths:
-            candidate = str(Path(path).expanduser().resolve())
+        self._add_paths(key, title, paths)
+
+    def _add_paths(self, key: str, title: str, paths) -> int:
+        """统一的路径入库通道：拖拽与「新增」按钮共用，校验口径完全一致。
+
+        返回实际新增条目数，供拖拽结束后的会话内反馈使用。
+        """
+        added = 0
+        for path in paths or ():
+            if not path:
+                continue
+            try:
+                candidate = str(Path(path).expanduser().resolve())
+            except OSError:
+                continue
             if not Path(candidate).exists():
                 QMessageBox.warning(self, title, f'路径不存在：\n{candidate}')
                 continue
-            existing = self._resource_values(key)
-            if candidate in existing:
+            if candidate in self._resource_values(key):
                 continue
             self._append_resource_row(key, candidate)
+            added += 1
+        return added
 
     def _append_resource_row(self, key: str, path: str):
         listing = self._resource_lists[key]
@@ -278,12 +471,17 @@ class ProjectCreateDialog(QDialog):
         row = QWidget()
         layout = QHBoxLayout(row)
         layout.setContentsMargins(6, 3, 4, 3)
-        label = QLabel(path)
+        # 完整路径整行显示会撑破列表宽度，改为"文件名 + 原路径"，
+        # 完整路径仍写入 tooltip，落库时从 tooltip 取值不受显示影响。
+        name = Path(path).name or path
+        label = QLabel(f'{name}    {path}' if name != path else path)
+        label.setProperty('uiRole', 'resourcePath')
         label.setToolTip(path)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(label, 1)
-        remove = QPushButton('删除')
-        remove.setProperty('buttonRole', 'danger')
+        remove = QPushButton('移除')
+        remove.setProperty('uiRole', 'resourceRemove')
+        remove.setToolTip('仅从列表移除，不会删除磁盘文件')
         remove.clicked.connect(
             lambda _=False, i=item, l=listing, title=key:
             self._remove_resource(l, i, title))
@@ -291,6 +489,7 @@ class ProjectCreateDialog(QDialog):
         item.setSizeHint(row.sizeHint())
         listing.addItem(item)
         listing.setItemWidget(item, row)
+        self._refresh_resource_state(key)
 
     def _remove_resource(self, listing: QListWidget, item: QListWidgetItem,
                          title: str):
@@ -299,16 +498,33 @@ class ProjectCreateDialog(QDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             listing.takeItem(listing.row(item))
+            self._refresh_resource_state(self._resource_key_of(listing))
+
+    def _resource_key_of(self, listing: QListWidget) -> str:
+        """由控件反查分组键，供移除条目后刷新对应计数使用。"""
+        for key, widget in self._resource_lists.items():
+            if widget is listing:
+                return key
+        return ''
 
     def _resource_values(self, key: str) -> list[str]:
+        """读取资源路径。
+
+        行内文本为排版做了缩略，因此路径以 tooltip 为准；显示文本只在
+        tooltip 缺失时兜底，保证落库值与用户在列表中看到的内容一致。
+        """
         listing = self._resource_lists[key]
         values = []
         for index in range(listing.count()):
             row = listing.itemWidget(listing.item(index))
-            if row is not None:
-                label = row.findChild(QLabel)
-                if label is not None:
-                    values.append(label.text())
+            if row is None:
+                continue
+            label = row.findChild(QLabel)
+            if label is None:
+                continue
+            path = label.toolTip() or label.text()
+            if path:
+                values.append(path)
         return values
 
     def _clear_resources(self, key: str, title: str):
@@ -318,11 +534,13 @@ class ProjectCreateDialog(QDialog):
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self._resource_lists[key].clear()
+            self._refresh_resource_state(key)
 
     def _load_resources(self, fls, pointclouds, photos):
         for key, values in (('fls_directories', fls), ('pointcloud_files', pointclouds), ('photo_files', photos)):
             for path in dict.fromkeys(str(value) for value in (values or []) if value):
                 self._append_resource_row(key, path)
+            self._refresh_resource_state(key)
 
     # ---------- 报告信息 ----------
     def _build_report_tab(self) -> QWidget:
@@ -365,6 +583,22 @@ class ProjectCreateDialog(QDialog):
 
         return page
 
+    def _make_param_group(self, title: str) -> tuple[QGroupBox, QGridLayout]:
+        """检测参数按语义分组的卡片容器，内部仍是两列表单网格。
+
+        分组只影响排版：控件名、取值范围与 ``values()`` 的键名一律不变，
+        因此不会影响参数向下传递与既有算法取值。
+        """
+        group = QGroupBox(title)
+        group.setObjectName('paramGroup')
+        grid = QGridLayout(group)
+        grid.setContentsMargins(10, 14, 10, 8)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        return group, grid
+
     # ---------- 检测参数 ----------
     def _build_inspection_tab(self) -> QWidget:
         page = QWidget()
@@ -394,22 +628,22 @@ class ProjectCreateDialog(QDialog):
         std_row.addWidget(self.cb_standard, 1)
         layout.addLayout(std_row)
 
+        # 标准对应的限值用"信息条"呈现，比灰色小字更易扫读。
         self.lbl_standard_hint = QLabel()
-        self.lbl_standard_hint.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
+        self.lbl_standard_hint.setObjectName('standardHintChip')
+        self.lbl_standard_hint.setWordWrap(True)
         layout.addWidget(self.lbl_standard_hint)
 
-        # --- 主要参数表单（两列紧凑布局）---
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(6)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
+        # --- 参数分组：尺度参数 / 判定阈值 / SOR，逐段卡片化 ---
+        scale_group, scale_grid = self._make_param_group('尺度参数')
+        grids = {'current': scale_grid}
 
         def _add_row(row: int, label: str, widget: QWidget):
             lbl = QLabel(label)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            grid.addWidget(lbl, row, 0)
-            grid.addWidget(widget, row, 1)
+            current = grids['current']
+            current.addWidget(lbl, row, 0)
+            current.addWidget(widget, row, 1)
             return row + 1
 
         r = 0
@@ -446,6 +680,11 @@ class ProjectCreateDialog(QDialog):
         self.spin_step_transverse.setValue(0.055)
         self.spin_step_transverse.setSuffix(" m")
         r = _add_row(r, "横向采样步长：", self.spin_step_transverse)
+        layout.addWidget(scale_group)
+
+        limit_group, limit_grid = self._make_param_group('判定阈值（由检测标准带出，可微调）')
+        grids['current'] = limit_grid
+        r = 0
 
         self.spin_flatness_limit = QDoubleSpinBox()
         self.spin_flatness_limit.setRange(0.1, 50.0)
@@ -475,10 +714,11 @@ class ProjectCreateDialog(QDialog):
         self.spin_hole_band.setSuffix(" m")
         r = _add_row(r, "空洞带宽：", self.spin_hole_band)
 
-        layout.addLayout(grid)
+        layout.addWidget(limit_group)
 
         # --- SOR 参数 ---
         sor_frame = QGroupBox("SOR 离群剔除")
+        sor_frame.setObjectName('paramGroup')
         sor_layout = QGridLayout(sor_frame)
         sor_layout.setHorizontalSpacing(12)
         sor_layout.setVerticalSpacing(6)
@@ -674,8 +914,9 @@ class ProjectCreateDialog(QDialog):
     # 校验与取值
     # ------------------------------------------------------------------
     def _on_accept(self):
-        if not self.edt_name.text().strip():
-            QMessageBox.warning(self, "提示", "项目名称为必填项！")
+        # 与失焦提示共用同一校验函数：不再用模态框遮挡字段，只在表单内
+        # 高亮并切到出错的 Tab，用户修正后可直接再次保存。
+        if not self._validate_name():
             self.tabs.setCurrentIndex(0)
             self.edt_name.setFocus()
             return

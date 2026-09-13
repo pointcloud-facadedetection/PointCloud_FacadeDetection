@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from ui.widgets.station_panel import StationPanel
 from ui.widgets.pointcloud_controls import PointCloudControls
+from ui.widgets.step_nav_bar import StepNavBar
 from services.inspection_profile import InspectionProfileService
 
 
@@ -51,7 +52,7 @@ class OperationPageMixin:
         viewport_panel.setObjectName('viewportPanel')
         viewport_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         viewport_layout = QVBoxLayout(viewport_panel)
-        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        viewport_layout.setContentsMargins(8, 0, 8, 8)
         viewport_layout.setSpacing(0)
         viewport_heading_row = QHBoxLayout()
         viewport_heading_row.setContentsMargins(16, 6, 16, 6)
@@ -65,35 +66,30 @@ class OperationPageMixin:
         viewport_state.setObjectName('viewportStateLabel')
         viewport_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         viewport_heading_row.addWidget(viewport_state)
+        viewport_title.setVisible(False)
+        viewport_state.setVisible(False)
         viewport_layout.addLayout(viewport_heading_row)
 
-        # 新增检测标准配置沿用当前扁平工作台样式，不再恢复旧页面标题卡片。
-        config_bar = QFrame()
-        config_bar.setObjectName('inspectionConfigBar')
-        config_bar.setProperty('uiRole', 'inspectionConfig')
-        config_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        config_layout = QHBoxLayout(config_bar)
-        config_layout.setContentsMargins(16, 6, 16, 6)
-        config_layout.setSpacing(8)
-        config_layout.addWidget(QLabel('墙面标准'))
+        # 检测标准与区间不再在项目操作页暴露编辑入口：统一由【创建/编辑项目】
+        # 表单下发（main_window 会同步这两个控件），此处仅作为隐藏数据载体
+        # 保留，_on_standard_changed 继续据此解析 _inspection_profile。
         self.standard_combo = QComboBox()
         for profile in InspectionProfileService.all():
             self.standard_combo.addItem(
                 f'{profile.standard_name} · {profile.version}', profile.standard_id)
-        config_layout.addWidget(self.standard_combo)
+        self.standard_combo.setVisible(False)
         self.standard_summary = QLabel()
         self.standard_summary.setObjectName('standardSummary')
-        self.standard_summary.setProperty('uiRole', 'supportingText')
-        config_layout.addWidget(self.standard_summary, 1)
-        config_layout.addWidget(QLabel('区间'))
+        self.standard_summary.setVisible(False)
         self.interval_combo = QComboBox()
         for value in (3.0, 5.0, 10.0, 20.0):
             self.interval_combo.addItem(f'{value:g}m', value)
         self.interval_combo.setCurrentIndex(3)
-        config_layout.addWidget(self.interval_combo)
-        viewport_layout.addWidget(config_bar)
+        self.interval_combo.setVisible(False)
         self.standard_combo.currentIndexChanged.connect(self._on_standard_changed)
         self._on_standard_changed(0)
+
+        # 步骤导航栏由命令栏（main_window._install_step_nav）统一装配，
         viewport_layout.addWidget(self.render_facade.widget(), 1)
 
         self.operation_splitter.addWidget(self.left_dock)
@@ -113,6 +109,12 @@ class OperationPageMixin:
             self._remember_operation_splitter_sizes
         )
         body_layout.addWidget(self.operation_splitter, 1)
+        # 左侧 panel 默认隐藏：三维视口是主工作区，站点管理按需展开。
+        # 复用既有折叠链路（_sidebar_collapsed / _update_sidebar_toggle_button），
+        # 使默认态与用户手动"收起"完全一致：宽度记忆、图标、tooltip 共用一套逻辑。
+        self._sidebar_collapsed['left'] = True
+        self.left_dock.hide()
+        self._update_sidebar_toggle_button('left')
         return page
 
     def _on_standard_changed(self, _index):
@@ -168,13 +170,9 @@ class OperationPageMixin:
         self.lbl_facade_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.lbl_facade_summary)
         
-        self.btn_evaluate_selected = QPushButton('评估立面质量')
-        self.btn_evaluate_selected.setToolTip('对右侧列表当前选中的立面执行质量评估')
-        self.btn_evaluate_selected.clicked.connect(self._evaluate_selected_facade)
-        self.btn_evaluate_selected.setMinimumHeight(40)
-        self.btn_evaluate_selected.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay.addWidget(self.btn_evaluate_selected)
+        # 原"评估立面质量"按钮已由顶部步骤④取代，此处不再重复提供入口。
 
+        # 热力切换显示：按改造要求从右侧面板迁移到左侧站点管理面板。
         self.btn_heatmap_toggle = QPushButton('热力切换显示')
         self.btn_heatmap_toggle.setObjectName('btn_heatmap_toggle')
         self.btn_heatmap_toggle.setToolTip('在平整度热力与垂直度热力之间切换')
@@ -182,8 +180,13 @@ class OperationPageMixin:
         self.btn_heatmap_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_heatmap_toggle.clicked.connect(self._toggle_heatmap_display)
         self.btn_heatmap_toggle.setEnabled(False)
-        lay.addWidget(self.btn_heatmap_toggle)
-        
+        left_panel = self.left_dock.findChild(QWidget, 'leftDockPanel')
+        left_layout = left_panel.layout() if left_panel is not None else None
+        if left_layout is not None:
+            left_layout.addWidget(self.btn_heatmap_toggle)
+        else:
+            lay.addWidget(self.btn_heatmap_toggle)
+
         # 立面列表
         from PySide6.QtWidgets import QListWidget
         self.list_facades = QListWidget()
@@ -349,6 +352,9 @@ class OperationPageMixin:
         reset.clicked.connect(self._reset_quality_parameters)
         config_layout.addWidget(reset)
         
+        # 检测参数不再在项目操作页暴露编辑入口：统一由【创建/编辑项目】表单下发。
+        # 控件保留为不可见的数据载体，供质量控制器与"恢复标准参数"读取默认值。
+        config.setVisible(False)
         lay.addWidget(config, 0)
         lay.addStretch(0)
         

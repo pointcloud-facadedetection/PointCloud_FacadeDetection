@@ -494,9 +494,20 @@ QWidget[uiRole="sidebarBody"] {
     border: none;
 }
 
+/* 三维视口（外层容器）：主工作区"画框"。
+   白底 + 1px 描边 + 10px 圆角把白色页面与深色视口隔开。
+   注意：内嵌的 Open3D 原生 GLFW surface 本身是直角矩形，因此外层圆角
+   必须由 8px 的布局留白（operation_page 的 viewport_layout）喂出来，
+   而不是靠面板自身裁切；内层再由 open3dViewport 的描边与圆角收边，
+   四角才不会露出灰缝。 */
 QWidget#viewportPanel {
+    /* 视口面板是三维视图的卡片外框：只在四角做圆角、四周描一圈细边，
+       面板本身用中性底色，让内部的深色 Open3D 视图成为唯一视觉主体。
+       配合 operation_page 中 8px 的内容边距，卡片与左右侧栏之间始终留白，
+       圆角不会被相邻面板裁掉。 */
     background-color: #FFFFFF;
-    border: none;
+    border: 1px solid #DCE3EC;
+    border-radius: 10px;
 }
 
 QLabel#viewportStateLabel {
@@ -509,9 +520,11 @@ QLabel#viewportStateLabel {
 }
 
 QWidget#open3dViewport {
+    /* 深色画布与面板圆角保持同一个视觉半径；描边取比底色略亮的冷灰，
+       在浅色工作台上形成清晰的画布边界，不再是"深块直接切边"。 */
     background-color: #111827;
-    border: 1px solid #B7C4D5;
-    border-radius: 0;
+    border: 1px solid #C3CFDF;
+    border-radius: 9px;
 }
 
 /* Report workspace: stable page title, flat sub-navigation and one viewer. */
@@ -647,6 +660,201 @@ QToolTip {
     border: 1px solid #334155;
     padding: 5px 8px;
 }
+
+/* ------------------------------------------------------------------
+   次级按钮：介于主蓝与危险红之间，用于取消、更多、辅助操作。
+   进度窗"取消"与顶部"更多"菜单按钮都复用该角色，保证视觉一致。
+   ------------------------------------------------------------------ */
+QPushButton[buttonRole="secondary"] {
+    color: #1E40AF;
+    background-color: #FFFFFF;
+    border: 1px solid #BFD3F5;
+    border-radius: 6px;
+    padding: 6px 16px;
+    min-height: 20px;
+    font-weight: 600;
+}
+
+QPushButton[buttonRole="secondary"]:hover {
+    color: #1D4ED8;
+    background-color: #EFF6FF;
+    border-color: #93B4F0;
+}
+
+QPushButton[buttonRole="secondary"]:pressed {
+    color: #1E3A8A;
+    background-color: #DBEAFE;
+    border-color: #7BA4EC;
+}
+
+QPushButton[buttonRole="secondary"]:disabled {
+    color: #94A3B8;
+    background-color: #F8FAFC;
+    border-color: #E2E8F0;
+}
+
+/* ------------------------------------------------------------------
+   统一进度窗（TaskProgressDialog / LoadingDialog）
+   ------------------------------------------------------------------ */
+QDialog QLabel#taskProgressTitle {
+    color: #0F172A;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QDialog QLabel#taskProgressMessage {
+    color: #334155;
+    font-size: 12px;
+}
+
+QDialog QLabel#taskProgressStatus {
+    color: #64748B;
+    font-size: 11px;
+}
+
+QProgressBar {
+    color: #0F172A;
+    background-color: #E8EDF5;
+    border: 1px solid #D8E0EC;
+    border-radius: 6px;
+    min-height: 18px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+QProgressBar::chunk {
+    background-color: #2F6BFF;
+    border-radius: 5px;
+    margin: 1px;
+}
+
+/* 不定量模式（setRange(0,0)）下 Qt 会绘制忙碌条纹，隐藏文字避免重叠 */
+QProgressBar[busy="true"] {
+    text-align: center;
+}
+
+/* ------------------------------------------------------------------
+   顶部"更多"下拉菜单按钮：与步骤栏同高，视觉权重低于主按钮。
+   ------------------------------------------------------------------ */
+QToolButton[uiRole="headerMore"] {
+    color: #1E40AF;
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-weight: 600;
+}
+
+QToolButton[uiRole="headerMore"]:hover {
+    color: #1D4ED8;
+    background-color: #EFF6FF;
+    border-color: #93B4F0;
+}
+
+QToolButton[uiRole="headerMore"]:pressed,
+QToolButton[uiRole="headerMore"]:checked {
+    color: #1E3A8A;
+    background-color: #DBEAFE;
+    border-color: #7BA4EC;
+}
+
+QToolButton[uiRole="headerMore"]:disabled {
+    color: #94A3B8;
+    background-color: #F8FAFC;
+    border-color: #E2E8F0;
+}
+
+QToolButton[uiRole="headerMore"]::menu-indicator {
+    image: none;
+    width: 0px;
+}
+
+/* ------------------------------------------------------------------
+   顶部步骤导航栏（StepNavBar）
+   四步业务漏斗：数据处理 → 区域选取 → 立面提取 → 质量评估
+   视觉状态由动态属性 [stepState] / [badgeState] 驱动，组件本身不感知业务。
+   ------------------------------------------------------------------ */
+QWidget#stepNavBar {
+    background-color: transparent;
+    border: none;
+}
+
+QFrame#stepChip {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 8px;
+    min-height: 44px;
+}
+
+QFrame#stepChip:hover {
+    background-color: #F5F7FB;
+    border-color: #CBD5E1;
+}
+
+QFrame#stepChip[stepState="active"] {
+    background-color: #EFF6FF;
+    border-color: #3B82F6;
+}
+
+/* 已完成步骤：淡蓝底 + 蓝色描边，与主色体系保持同一层级 */
+QFrame#stepChip[stepState="done"] {
+    background-color: #F8FAFF;
+    border-color: #BFDBFE;
+}
+
+QLabel#stepChipTitle {
+    color: #0F172A;
+    font-size: 15px;
+    font-weight: 600;
+    background-color: transparent;
+}
+
+QFrame#stepChip[stepState="active"] QLabel#stepChipTitle {
+    color: #1E40AF;
+}
+
+QFrame#stepChip[stepState="done"] QLabel#stepChipTitle {
+    color: #334155;
+}
+
+QLabel#stepBadge {
+    color: #FFFFFF;
+    background-color: #94A3B8;
+    border: none;
+    border-radius: 17px;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QLabel#stepBadge[badgeState="active"] {
+    background-color: #1E40AF;
+}
+
+QLabel#stepBadge[badgeState="done"] {
+    background-color: #2F6BFF;
+    font-size: 17px;
+}
+
+/* 步骤失败：徽标 ✗ 用醒目的玫红，与"完成"的蓝、进行中的深蓝明确区分。 */
+QLabel#stepBadge[badgeState="failed"] {
+    background-color: #E11D48;
+    font-size: 17px;
+}
+
+QFrame#stepChip[stepState="failed"] {
+    border: 1px solid #FDA4AF;
+    background-color: #FFF1F2;
+}
+
+QFrame#stepChip[stepState="failed"] QLabel#stepChipTitle {
+    color: #9F1239;
+}
+
+/* 四步等宽均分：卡片最小宽度保证窄窗口下文字不被裁切。 */
+QFrame#stepChip {
+    min-width: 132px;
+}
 """
 
 
@@ -693,4 +901,8 @@ def apply_application_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLORS["surface"]))
     palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(COLORS["text_muted"]))
     app.setPalette(palette)
-    app.setStyleSheet(APPLICATION_STYLE_SHEET)
+    # 表单样式单列在 form_styles 中，此处与其拼接成一份完整 QSS，
+    # 保证全局只调用一次 setStyleSheet（重复设置会让已有样式表失效）。
+    from .form_styles import FORM_STYLE_SHEET
+
+    app.setStyleSheet(APPLICATION_STYLE_SHEET + FORM_STYLE_SHEET)

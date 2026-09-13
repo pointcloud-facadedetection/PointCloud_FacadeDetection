@@ -22,7 +22,9 @@ from services.report_export import ReportDataService, PdfReportRenderer
 
 
 REPORT_PDF_FILTER = 'PDF 文件 (*.pdf)'
-REPORT_EMPTY_TITLE = '请选择PDF上传'
+REPORT_EMPTY_TITLE = '建筑外立面质量检测报告'
+MODEL_EXPORT_FILTER = 'PLY 点云 (*.ply)'
+
 
 
 class ReportPageMixin:
@@ -151,25 +153,19 @@ class ReportPageMixin:
         self.report_preview_state_stack.addWidget(report_document_page)
         report_preview_layout.addWidget(self.report_preview_state_stack, 1)
 
-        heatmap_page = QWidget()
-        heatmap_page.setObjectName('reportHeatmapPage')
-        heatmap_page.setProperty('uiRole', 'contentArea')
-        heatmap_page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        heatmap_layout = QVBoxLayout(heatmap_page)
-        heatmap_layout.setContentsMargins(0, 0, 0, 0)
-
-        # 保留稳定的控件接口，后续算法视口可以直接替换此占位控件。
-        heatmap_placeholder = TechnicalCanvas('heatmap')
-        heatmap_placeholder.setObjectName('heatmapPlaceholder')
-        heatmap_layout.addWidget(heatmap_placeholder, 1)
-
+        # 按改造要求删除热力图展示切换：报告页只保留 PDF 报告预览这一种内容。
+        # report_navigation_stack 作为稳定的单页容器保留，避免影响既有装配
+        # 顺序与 _set_report_navigation(0) 的调用方。
         self.report_navigation_stack.addWidget(report_preview_page)
-        self.report_navigation_stack.addWidget(heatmap_page)
         body_layout.addWidget(self.report_navigation_stack, 1)
         return page
 
     def _create_report_navigation(self):
-        """创建报告预览和热力图之间的页面内导航。"""
+        """创建报告页命令栏右侧的视图切换区。
+
+        改造后报告页只剩 PDF 报告预览一种内容，热力图切换按钮已删除；
+        这里返回的容器保留稳定对象名，仅承载“预览状态”提示，不再参与页面切换。
+        """
         panel = QWidget()
         panel.setObjectName('reportNavigation')
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -179,44 +175,19 @@ class ReportPageMixin:
 
         self.report_navigation_group = QButtonGroup(self)
         self.report_navigation_group.setExclusive(True)
-        navigation_items = (
-            ('报告预览', 'btn_report_preview_navigation'),
-            ('热力图', 'btn_heatmap_navigation'),
-        )
-        for index, (label, object_name) in enumerate(navigation_items):
-            button = QPushButton(label)
-            button.setObjectName(object_name)
-            button.setProperty('uiRole', 'navigationItem')
-            button.setProperty('navigationLevel', 'internal')
-            button.setCheckable(True)
-            button.setChecked(index == self._report_navigation_index)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(
-                lambda _checked=False, target_index=index:
-                self._set_report_navigation(target_index)
-            )
-            self.report_navigation_group.addButton(button, index)
-            navigation_layout.addWidget(button)
-
+        # 只保留“报告预览”一项；热力图导航按钮已按改造要求移除。
+        self.report_navigation_group.addButton(QPushButton(panel), 0)
         return panel
 
     def _set_report_navigation(self, page_index):
-        """切换报告页内部内容，不改变底部四个主页面。"""
+        """报告页内容唯一（PDF 预览），保留该方法作为稳定调用入口。"""
         if not 0 <= page_index < self.report_navigation_stack.count():
             return
 
         self._report_navigation_index = page_index
         self.report_navigation_stack.setCurrentIndex(page_index)
-        button = self.report_navigation_group.button(page_index)
-        if button is not None:
-            button.setChecked(True)
-
-        title = (
-            '热力图'
-            if page_index == 1
-            else self._current_report_pdf_name or REPORT_EMPTY_TITLE
-        )
-        self.report_document_title_label.setText(title)
+        self.report_document_title_label.setText(
+            self._current_report_pdf_name or REPORT_EMPTY_TITLE)
         current_page_key = PAGE_DEFINITIONS[
             self.page_stack.currentIndex()
         ][1]
@@ -224,17 +195,61 @@ class ReportPageMixin:
             self._update_window_title('report_export')
 
     def _open_report_pdf(self):
-        pdf_path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            '选择 PDF 报告',
-            self._last_upload_directory,
-            REPORT_PDF_FILTER,
-        )
-        if not pdf_path:
+        """【打开 PDF】已重构为【导出模型】。
+
+        业务：选择当前项目的站点（或全部站点）→ 对源点云做 voxel=0.2 的
+        downsample → 以 PLY 格式导出到用户指定路径。耗时步骤全部在后台
+        线程池执行，并由 TaskProgressController 提供模态进度弹窗。
+        """
+        if self.current_project is None:
+            QMessageBox.information(self, '导出模型', '请先创建或选择项目。')
+            return
+        stations = self._exportable_stations()
+        if not stations:
+            QMessageBox.information(
+                self, '导出模型',
+                '当前项目没有可用站点，请先导入并处理点云。')
             return
 
-        self._last_upload_directory = str(Path(pdf_path).parent)
-        self.show_report_pdf(pdf_path)
+        station = self._prompt_export_station(stations)
+        if station is None:
+            return
+
+        default_name = f'{self._sanitize_export_name(station.display_name)}_export.ply'
+        default_dir = Path(self.current_project.directory_path) / 'exports'
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            '导出模型',
+            str(default_dir / default_name),
+            MODEL_EXPORT_FILTER,
+        )
+        if not path:
+            return
+        self.model_export_controller.export_station(station, path)
+
+    # ------------------------------------------------------------------
+    # 【导出模型】入口辅助：站点枚举 / 站点选择 / 文件名清洗
+    # ------------------------------------------------------------------
+    def _exportable_stations(self):
+        """返回当前项目可导出的站点（排除资产失效项）。"""
+        controller = getattr(self, 'model_export_controller', None)
+        if controller is not None:
+            return controller.exportable_stations()
+        return []
+
+    def _prompt_export_station(self, stations):
+        """选择要导出的站点；单站点直接返回，多站点弹对话框。"""
+        controller = getattr(self, 'model_export_controller', None)
+        if controller is None:
+            return stations[0] if stations else None
+        return controller.prompt_station(self, stations)
+
+    @staticmethod
+    def _sanitize_export_name(name):
+        """把站点名转换为可安全用于文件名的字符串。"""
+        text = str(name or '').strip() or 'station'
+        return ''.join(ch if ch not in '\\/:*?"<>|' else '_' for ch in text)
 
     def _set_report_pdf_status(self, text, state='neutral'):
         """Update PDF status text and its Corporate Clean semantic color."""

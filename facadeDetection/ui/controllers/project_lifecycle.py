@@ -21,7 +21,9 @@ class ProjectLifecycleController(QObject):
     page_change_requested = Signal(int)
     load_started = Signal()               # 后台计算段开始（显示加载窗口）
     load_progress = Signal(int, str)      # (百分比, 进度文本)
-    load_finished = Signal()              # 加载会话结束：完成/失败/被取消（关闭加载窗口）
+    # 加载会话结束（success, message）：完成 / 失败 / 被取消都发一次，
+    # UI 侧据此决定进度条是刷到 100% 还是保留当前值，然后自动关闭弹窗。
+    load_finished = Signal(bool, str)
 
     def __init__(self, project_overview_service, pointcloud_service,
                  station_service, project_operation_service, render_service,
@@ -126,13 +128,13 @@ class ProjectLifecycleController(QObject):
         """
         def run(worker):
             worker.check_cancelled()
-            worker.signals.progress.emit(10, '正在激活项目数据')
+            worker.signals.progress.emit(-1, '正在激活项目数据')
             self.project_overview_service.activate_project(project_uuid)
             try:
-                worker.signals.progress.emit(30, '正在准备站点数据')
+                worker.signals.progress.emit(-1, '正在准备站点数据')
                 self.pointcloud_service.set_project(project_uuid)
                 self.station_service.set_project(project_uuid)
-                worker.signals.progress.emit(60, '正在恢复站点视图')
+                worker.signals.progress.emit(-1, '正在恢复站点视图')
                 prepared_view = self.station_service.prepare_restore_view()
             except Exception as exc:
                 raise RuntimeError(f'站点恢复失败：{exc}') from exc
@@ -215,7 +217,8 @@ class ProjectLifecycleController(QObject):
             return
         self._active_load_worker = None
         self._load_in_progress = False
-        self.load_finished.emit()
+        # 失败同样落终态：保留当前百分比，便于判断停在哪一阶段。
+        self.load_finished.emit(False, '处理失败')
         self.status_message.emit('点云加载失败', 5000)
         self.warning_requested.emit('点云加载', error)
 
@@ -226,7 +229,7 @@ class ProjectLifecycleController(QObject):
             return
         self._active_load_worker = None
         self._load_in_progress = False
-        self.load_finished.emit()
+        self.load_finished.emit(True, '处理完成')
         self.status_cleared.emit()
         try:
             result = result or {}
@@ -289,6 +292,27 @@ class ProjectLifecycleController(QObject):
             self.dispose_project_runtime()
         self.project_generation += 1
 
+    def cancel_active_load(self):
+        """中止当前加载/导入/激活任务（进度窗"关闭"按钮的落点）。
+
+        与 :meth:`dispose_project_runtime` 的区别在于**不动项目运行时**：
+        这里只取消准备段 worker 并递增 project_generation 让迟到结果失效，
+        场景资源、质量缓存等都原样保留，用户可以立刻重试同一次导入。
+        """
+        worker = self._active_load_worker
+        if worker is None:
+            return
+        self._load_in_progress = False
+        try:
+            worker.cancel()
+        except Exception:
+            pass
+        self._active_load_worker = None
+        # 代际门控：被取消的 worker 即使稍后返回结果也会被 on_load_* 丢弃。
+        self.project_generation += 1
+        # 用户主动中止：终态为"已中止"，进度条保留中止时的真实百分比。
+        self.load_finished.emit(False, '已中止')
+
     def dispose_project_runtime(self):
         # TODO(内存/生命周期): _dispose_project_runtime：建立可验证的项目资源释放清单。
         """Single GUI-thread disposal gate for project switches and close."""
@@ -299,7 +323,7 @@ class ProjectLifecycleController(QObject):
             worker.cancel()
             self._active_load_worker = None
             # 被取消的 worker 不会再走完成/失败回调，加载窗口须在此关闭
-            self.load_finished.emit()
+            self.load_finished.emit(False, '已中止')
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:

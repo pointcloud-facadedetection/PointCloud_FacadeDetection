@@ -33,14 +33,27 @@ from .widgets.window_chrome import (
     WindowResizeHandle,
 )
 from .widgets.technical_canvas import TechnicalCanvas
+from .widgets.step_nav_bar import StepNavBar
 from .pages.overview_page import OverviewPageMixin
 from .pages.operation_page import OperationPageMixin
 from .pages.report_page import ReportPageMixin
 from .controllers.facade_quality import FacadeQualityController
 from .controllers.registration import RegistrationController
 from .controllers.project_lifecycle import ProjectLifecycleController
+from .controllers.model_export import ModelExportController
+from .controllers.task_progress import (
+    TASK_DENOISE,
+    TASK_DETECTION,
+    TASK_LOAD,
+    TASK_MODEL_EXPORT,
+    TASK_QUALITY,
+    TASK_QUALITY_BATCH,
+    TASK_REGION,
+    TASK_REPORT,
+    TASK_UPLOAD,
+    TaskProgressController,
+)
 from .dialogs.facade_quality_dialog import FacadeQualityDialog
-from .dialogs.loading_dialog import LoadingDialog
 from services.inspection_review import InspectionReviewService
 from services.project_operation import ProjectOperationService
 from services.project_overview import ProjectOverviewService
@@ -81,7 +94,11 @@ PAGE_HEADER_ACTIONS = {
     ),
     'inspection_review': (),
     'report_export': (
-        ('打开 PDF', 'btn_open_report_pdf'),
+        # 【打开 PDF】已按业务要求整体重构为【导出模型】：
+        # 选择项目站点 → 源点云 voxel=0.2 下采样 → 导出 PLY。
+        # 对象名沿用 btn_open_report_pdf，避免影响页面装配顺序与测试断言；
+        # 控件文案、工具提示与连接的回调均已替换为导出模型语义。
+        ('导出模型', 'btn_open_report_pdf'),
         ('导出质量报告', 'btn_export_quality_report'),
     ),
 }
@@ -183,7 +200,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self.current_project = None
         self.header_buttons = {}
         self.page_header_layouts = {}
-        self._sidebar_collapsed = {'left': False, 'right': False}
+        # 左侧"站点/点云显示"面板默认收拢：外立面检测的主视线是三维视口，
+        # 左栏只在需要切换站点或调点云显示参数时展开。右栏（检测结果）
+        # 是常态可用的复核面板，因此保持展开。
+        self._sidebar_collapsed = {'left': True, 'right': False}
         # 默认定位到 data/projects，便于跨机迁移
         try:
             Storage.ensure_base_dirs()
@@ -208,6 +228,26 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         # 加载/项目代际状态（_active_load_worker、_load_in_progress、
         # _project_generation）由 ProjectLifecycleController 持有，
         # _project_generation 经下方同名 property 委托访问。
+        # 全局唯一的模态进度控制器：所有重要耗时操作（点云加载/去噪、区域
+        # 选取、立面提取、质量评估、批量评估、模型导出）共享同一套
+        # "模态弹窗 + 每 5 秒刷新一次进度 + 终态强制收尾"的进度体验。
+        self.task_progress = TaskProgressController(self)
+        # 【导出模型】编排控制器：站点选择、后台 voxel=0.2 下采样导出 PLY、
+        # 进度弹窗与结果提示都收拢在控制器内；报告页只保留一次点击的入口。
+        self.model_export_controller = ModelExportController(
+            station_service=self.station_service,
+            pool=self._load_pool,
+            project_provider=lambda: getattr(self, 'current_project', None),
+            progress=self.task_progress,
+            parent=self,
+        )
+        self.model_export_controller.status_message.connect(
+            lambda message, timeout: self.statusBar().showMessage(
+                message, timeout))
+        self.model_export_controller.warning_requested.connect(
+            lambda message: QMessageBox.warning(self, '导出模型', message))
+        self.model_export_controller.info_requested.connect(
+            lambda message: QMessageBox.information(self, '导出模型', message))
         self._pending_station_selection = {}
         self._station_selection_timer = QTimer(self)
         self._station_selection_timer.setSingleShot(True)
@@ -237,6 +277,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             context_provider=self._quality_context,
             profile_provider=self._quality_profile_provider,
             grid_size_provider=self._quality_grid_size,
+            progress=self.task_progress,
             parent=self,
         )
         self._connect_facade_quality_controller()
@@ -255,6 +296,15 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             parent=self,
         )
         self._connect_lifecycle_controller()
+        # "关闭即中止"绑定：加载/导入/激活与模型导出两条链路的 worker
+        # 都挂到统一的取消处理器上，关闭进度窗即取消对应后台进程。
+        self.task_progress.set_cancel_handler(
+            TASK_LOAD, self.lifecycle_controller.cancel_active_load)
+        self.task_progress.set_cancel_handler(
+            TASK_MODEL_EXPORT, self.model_export_controller.cancel_active_export)
+        # 其余任务的"右上角关闭即中止"落点：一次耗时常同时挂着后台 worker、
+        # 调度器排队任务等多处，故用 add_cancel_handler 逐个登记，取消时全跑一遍。
+        self._register_task_cancel_handlers()
         # service 层的信息弹窗与取色交互上移到本窗口（时机与文案不变）。
         self.project_operation_service.info_requested.connect(
             self._show_operation_info)
@@ -263,6 +313,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self._setup_ui()
         self._create_resize_handles()
         self._connect_buttons()
+        # 步骤 √ 只有在业务真正完成后才回填，故绑定放在控件与命令连接就绪之后。
+        self._bind_step_completion_signals()
         # Hook: 当结果准备就绪时，在右侧停靠栏中显示立面统计数据
         try:
             self.project_operation_service.on_facade_results = self._show_facade_results
@@ -587,6 +639,243 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         body_layout.addWidget(review_canvas, 1)
         return page
 
+    # ------------------------------------------------------------------
+    # 项目操作页：四步业务流程编排
+    # 步骤栏只做两件事——把点击转发给既有命令、在业务真正结束后回填 √。
+    # 算法、数据模型与原有命令按钮全部保持原状。
+    # ------------------------------------------------------------------
+    STEP_DATA = 0        # ① 数据处理
+    STEP_REGION = 1      # ② 区域选取
+    STEP_FACADE = 2      # ③ 立面提取
+    STEP_QUALITY = 3     # ④ 质量评估
+
+    #: 步骤序号 -> 承接该业务的既有命令按钮对象名
+    STEP_BUTTONS = {
+        STEP_DATA: 'btn_denoise',
+        STEP_REGION: 'btn_select_detection_area',
+        STEP_FACADE: 'btn_facade_detection',
+    }
+
+    STEP_TIPS = (
+        '对已加载站点执行点云处理',
+        '框选或更新检测区域，可重复点击以重新选取',
+        '在选定区域内执行立面检测',
+        '对已标记为“处理”的立面执行质量评估',
+    )
+
+    def _install_step_nav(self, header_layout):
+        """在项目操作页命令栏位置装配顶部四步导航栏。"""
+        self.step_nav = StepNavBar()
+        for index, tip in enumerate(self.STEP_TIPS):
+            self.step_nav.chips[index].set_tooltip(tip)
+        self.step_nav.step_clicked.connect(self._on_step_nav_clicked)
+        # stretch=1：四步导航栏吞掉侧栏开关组之外的全部宽度，配合
+        # StepNavBar 内部四个卡片相同的 stretch，实现"均分铺满整个顶层栏"。
+        header_layout.addWidget(self.step_nav, 1)
+        for button in (getattr(self, 'left_sidebar_button', None),
+                       getattr(self, 'right_sidebar_button', None)):
+            if button is not None:
+                button.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                     QSizePolicy.Policy.Fixed)
+
+    def _on_step_nav_clicked(self, index):
+        """步骤点击只触发既有命令按钮，行为与改造前完全一致。"""
+        if index == self.STEP_QUALITY:
+            # ④ 复用原“评估选中立面”（按“处理”标记批量评估）。
+            nav = getattr(self, 'step_nav', None)
+            if nav is not None:
+                nav.reset_to_running(index)
+            try:
+                self._evaluate_selected_facade()
+            except Exception as exc:
+                self.statusBar().showMessage(f'质量评估失败：{exc}', 8000)
+            return
+        button_name = self.STEP_BUTTONS.get(index)
+        button = self.header_buttons.get(button_name) if button_name else None
+        if button is None:
+            return
+        # 重做该步：自身进入执行态（清掉上一次的 ✗），下游结果一并失效，
+        # 之后再靠业务完成/失败信号回填 √ 或 ✗，绝不"点击即打勾"。
+        self.step_nav.reset_to_running(index)
+        self._begin_step_task(index)
+        button.click()
+
+    #: 步骤序号 -> 该步耗时计算对应的进度任务键
+    STEP_TASK_KEYS = {
+        STEP_DATA: TASK_DENOISE,
+        STEP_FACADE: TASK_DETECTION,
+    }
+
+    STEP_TASK_TITLES = {
+        TASK_DENOISE: '点云去噪',
+        TASK_DETECTION: '立面提取',
+        TASK_QUALITY: '质量评估',
+        TASK_QUALITY_BATCH: '质量评估',
+        TASK_MODEL_EXPORT: '导出模型',
+    }
+
+    def _register_task_cancel_handlers(self):
+        """把每个任务的"全部相关进程"中止落点登记到统一进度控制器。
+
+        回调只做置取消标志这类轻量操作（worker.cancel / 调度器 cancel_all），
+        绝不在 GUI 线程 join 或阻塞等待，避免关窗时反而卡住界面。
+        """
+        # 去噪/立面提取/质量评估都跑在项目级调度器与质量 worker 上，
+        # 任一任务被中止都要把这两条链路一并停掉，避免"窗口关了线程还在跑"。
+        for key in (TASK_DENOISE, TASK_DETECTION, TASK_QUALITY,
+                    TASK_QUALITY_BATCH):
+            self.task_progress.add_cancel_handler(
+                key, self._cancel_project_computation)
+        region = getattr(self.project_operation_service,
+                         'cancel_region_selection', None)
+        if callable(region):
+            self.task_progress.add_cancel_handler(TASK_REGION, region)
+        report = getattr(self.report_export_service, 'cancel_export', None)
+        if callable(report):
+            self.task_progress.add_cancel_handler(TASK_REPORT, report)
+
+    def _cancel_project_computation(self):
+        """中止当前项目全部后台计算：质量 worker + 调度器排队任务。"""
+        worker = getattr(self.facade_quality_controller,
+                         'active_quality_worker', None)
+        if worker is not None:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+            self.facade_quality_controller.active_quality_worker = None
+        try:
+            self.project_operation_service.invalidate_async_jobs()
+        except Exception:
+            pass
+
+    def _begin_step_task(self, index):
+        """为某个耗时步骤立起模态进度窗；无对应任务的步骤（②区域选取）跳过。"""
+        task_key = self.STEP_TASK_KEYS.get(index)
+        if task_key is not None:
+            self._begin_task_progress(task_key)
+
+    def _begin_task_progress(self, task_key):
+        """立起模态进度窗：可取消、5 秒节流、文案极简。
+
+        起始为不定量模式（算法未回报百分比前不假装知道进度），一旦后台
+        回报真实百分比，update_progress 会自动切回定量显示。
+        """
+        title = self.STEP_TASK_TITLES.get(task_key, '任务进行中')
+        self.task_progress.begin(
+            task_key, title, '任务处理中',
+            determinate=False, cancellable=True)
+
+    def _on_step_task_finished(self, index, task_key, success):
+        """耗时步骤的统一收尾：先给进度窗定终态，再回填步骤徽标。
+
+        顺序很关键——先 finish 让进度条落到 100%（成功）/保留当前值（失败），
+        再改徽标，避免用户看到"进度条还停在 60% 但步骤已打勾"的割裂感。
+        """
+        self.task_progress.finish(task_key, success)
+        if success:
+            self._mark_step_done(index)
+        else:
+            self._mark_step_failed(index)
+
+    def _mark_step_done(self, index):
+        """仅在对应业务动作真正执行完毕后调用，避免“点击即打勾”。"""
+        nav = getattr(self, 'step_nav', None)
+        if nav is not None:
+            nav.mark_done(index)
+
+    def _mark_step_failed(self, index):
+        """业务失败时把步骤标成 ✗；重跑该步会自动清除失败标记。"""
+        nav = getattr(self, 'step_nav', None)
+        if nav is not None:
+            nav.mark_failed(index)
+        # 失败即代表该步结果无效，下游步骤必须重新执行。
+        if nav is not None:
+            nav.reset_after(index)
+
+    def _bind_step_completion_signals(self):
+        """把 √ 状态、进度窗收尾与**真实进度信号**挂到服务层。
+
+        改造后每条业务链路都是"进度信号 → 节流写进度窗"、
+        "完成/失败信号 → 先收进度窗、再改徽标"。
+        """
+        service = self.project_operation_service
+
+        # ---- (1) 进度信号接线 ----
+        for task_key, names in (
+            (TASK_DENOISE,
+             ('denoise_progress', 'denoise_progress_changed')),
+            (TASK_DETECTION,
+             ('detection_progress', 'facade_detection_progress')),
+            (TASK_REGION,
+             ('region_progress', 'selection_progress')),
+        ):
+            for name in names:
+                signal = getattr(service, name, None)
+                if signal is None:
+                    continue
+                # 默认参数 _k=task_key 规避 Python 闭包晚绑定
+                signal.connect(
+                    lambda percent, text='', _k=task_key:
+                    self.task_progress.report(
+                        _k, percent, text or '任务处理中'))
+                break
+
+        # ---- (2) 去噪 / 立面提取：完成 → 立改徽标 √ ----
+        for signal_name, index, task_key in (
+            ('denoise_finished', self.STEP_DATA, TASK_DENOISE),
+            ('detection_finished', self.STEP_FACADE, TASK_DETECTION),
+        ):
+            signal = getattr(service, signal_name, None)
+            if signal is not None:
+                signal.connect(
+                    lambda _payload=None, _i=index, _k=task_key:
+                    self._on_step_task_finished(_i, _k, True))
+
+        # ---- (3) 去噪 / 立面提取：失败 → 保留当前进度 + 徽标 ✗ ----
+        for signal_name, index, task_key in (
+            ('denoise_failed', self.STEP_DATA, TASK_DENOISE),
+            ('detection_failed', self.STEP_FACADE, TASK_DETECTION),
+        ):
+            signal = getattr(service, signal_name, None)
+            if signal is not None:
+                signal.connect(
+                    lambda _payload=None, _i=index, _k=task_key:
+                    self._on_step_task_finished(_i, _k, False))
+
+        # ---- (4) 区域选取：完成 / 失败（补齐步骤 ② 的终态收尾）----
+        for signal_name, index, task_key, ok in (
+            ('region_finished', self.STEP_REGION, TASK_REGION, True),
+            ('region_failed', self.STEP_REGION, TASK_REGION, False),
+        ):
+            signal = getattr(service, signal_name, None)
+            if signal is not None:
+                signal.connect(
+                    lambda _payload=None, _i=index, _k=task_key, _ok=ok:
+                    self._on_step_task_finished(_i, _k, _ok))
+
+        # ---- (5) 质量评估：批量 + 单个 + 失败 ----
+        controller = self.facade_quality_controller
+        batch_finished = getattr(controller, 'batch_finished', None)
+        if batch_finished is not None:
+            batch_finished.connect(
+                lambda _payload=None: self._mark_step_done(self.STEP_QUALITY))
+        quality_completed = getattr(controller, 'quality_completed', None)
+        if quality_completed is not None:
+            quality_completed.connect(
+                lambda *_args: self._mark_step_done(self.STEP_QUALITY))
+        quality_failed = getattr(controller, 'quality_failed', None)
+        if quality_failed is not None:
+            quality_failed.connect(
+                lambda *_args: self._mark_step_failed(self.STEP_QUALITY))
+
+    def _on_quality_batch_progress(self, current, total):
+        """把批量评估的 (已完成, 总数) 换算成真实百分比喂给进度窗。"""
+        total = max(int(total or 0), 1)
+        current = max(0, min(int(current or 0), total))
+        percent = int(round(100.0 * current / total))
+        self.task_progress.report(TASK_QUALITY_BATCH, percent, '任务处理中')
+
     def _create_page_header(self, page_key):
         panel = QWidget()
         panel.setObjectName(f'{page_key}HeaderPanel')
@@ -599,6 +888,13 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             header_layout = QHBoxLayout(panel)
             header_layout.setContentsMargins(6, 6, 14, 6)
             header_layout.setSpacing(8)
+        elif page_key == 'project_operation':
+            # 项目操作页改为等宽横向布局：四步导航栏必须"均分铺满整个顶层栏"，
+            panel.setMinimumHeight(64)
+            panel.setMaximumHeight(64)
+            header_layout = QHBoxLayout(panel)
+            header_layout.setContentsMargins(12, 6, 12, 6)
+            header_layout.setSpacing(10)
         else:
             panel.setMaximumHeight(200)
             panel.installEventFilter(self)
@@ -642,6 +938,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             group.setProperty('uiRole', 'commandGroup')
             group.setProperty('groupLast', group_index == len(groups) - 1)
             group.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            if page_key == 'project_operation':
+                # 八个原子命令已由顶部四步流程承载；分组壳仍创建（按钮续存并
+                # 保持信号连接），只是不再占位，避免命令栏出现整片空白。
+                group.setVisible(False)
             group_layout = QHBoxLayout(group)
             group_layout.setContentsMargins(8, 4, 16, 4)
             group_layout.setSpacing(8)
@@ -659,11 +959,20 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                     button.setProperty('buttonRole', 'primary')
                 button.setMinimumSize(100, 36)
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
+                if page_key == 'project_operation':
+                    # 项目操作页的八个原子命令已由顶部四步业务流程取代。
+                    # 按钮仍照常创建并连信号（_connect_buttons 依赖对象名属性），
+                    # 只是不再显示，作为隐藏的命令载体延长其生命周期。
+                    button.setVisible(False)
                 setattr(self, button_name, button)
                 self.header_buttons[button_name] = button
                 group_layout.addWidget(button)
 
             header_layout.addWidget(group)
+
+        if page_key == 'project_operation':
+            # 顶部导航栏：数据处理 → 区域选取 → 立面提取 → 质量评估
+            self._install_step_nav(header_layout)
 
         if page_key == 'report_export':
             # 报告内部切换与“打开 PDF”同处一个命令栏，释放原独立标题行。
@@ -1337,21 +1646,29 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
     def _clear_lifecycle_status(self):
         self.statusBar().clearMessage()
 
+    # 点云加载/导入/激活：统一走 TaskProgressController 的 TASK_LOAD 任务，
+    # 与其它耗时操作共享"模态 + 每 5 秒刷新 + 终态必刷"体验。
+    # 加载各阶段耗时差异很大（解析 E57 可长达数分钟），无法预先给出可靠
+    # 百分比，因此起始为不定量模式；一旦 worker 回报真实百分比，
+    # update_progress 会自动恢复定量显示。
     def _show_loading_dialog(self):
-        if getattr(self, '_loading_dialog', None) is None:
-            self._loading_dialog = LoadingDialog(self)
-        self._loading_dialog.update_progress(0, '正在加载点云，请稍候...')
-        self._loading_dialog.show()
+        # 进度条为真实进度：worker 的各阶段真实百分比经 report 节流上屏；
+        # 尚未回报百分比时显示不定量动画，不伪造递增。
+        self.task_progress.begin(
+            TASK_LOAD, '点云加载', '任务处理中',
+            determinate=False, cancellable=True)
+        # 兼容旧属性：历史代码/测试通过 _loading_dialog 探测控件。
+        self._loading_dialog = self.task_progress.dialog(TASK_LOAD)
 
     def _update_loading_dialog(self, percent, text):
-        dialog = getattr(self, '_loading_dialog', None)
-        if dialog is not None and dialog.isVisible():
-            dialog.update_progress(percent, text)
+        # 真实进度直写节流器：后台回报多少就是多少，终态时强制刷到 100%。
+        self.task_progress.report(TASK_LOAD, percent, '任务处理中')
 
-    def _hide_loading_dialog(self):
-        dialog = getattr(self, '_loading_dialog', None)
-        if dialog is not None:
-            dialog.hide()
+    def _hide_loading_dialog(self, success=True, message='处理完成'):
+        # load_finished 现在携带终态：成功刷到 100% 并短暂停留后关闭；
+        # 失败/中止保留当前真实百分比，避免"实际没跑完却显示 100%"。
+        self.task_progress.finish(TASK_LOAD, bool(success), message)
+
 
     def _reset_facade_list(self):
         if hasattr(self, 'list_facades'):
@@ -1609,7 +1926,13 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         if panel.width() <= 0:
             return
 
-        header_layout = self.page_header_layouts[panel]
+        # 页面可能在构造期注册过 header panel，但重建页面/切换项目后
+        # 残留在 _header_resize_pending 里的旧 widget 已被销毁，
+        # 此时查表会 KeyError。用 get() 兜底即可安全跳过。
+        header_layout = self.page_header_layouts.get(panel)
+        if header_layout is None:
+            self._header_resize_pending.discard(panel)
+            return
         content_height = header_layout.heightForWidth(panel.width())
         target_height = max(56, min(content_height, 200))
 

@@ -10,10 +10,10 @@ import numpy as np
 
 # ── 图片尺寸限制 ──
 _TARGET_IMG_MAX_W = 200
-_TARGET_IMG_MAX_H = 300
+_TARGET_IMG_MAX_H = 280
 # 色条单独限制：更宽以防止畸变
 _COLORBAR_MAX_W = 80
-_COLORBAR_MAX_H = 300
+_COLORBAR_MAX_H = 280
 
 
 def _text(value, fallback="--"):
@@ -131,13 +131,60 @@ class PdfReportRenderer:
         facades = snapshot.get("facades", [])
         cover = PdfReportRenderer._cover(project, summary)
         body = PdfReportRenderer._body(facades, snapshot.get("buildings"))
+        footer = PdfReportRenderer._footer(project, summary)
         style = PdfReportRenderer._style()
         return (
             "<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<style>{style}</style></head><body>"
             + cover
             + body
+            + footer
             + "</body></html>"
+        )
+
+    # ------------------------------------------------------------------
+    # Footer page: 结论与声明
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _footer(project: dict, summary: dict) -> str:
+        """报告结尾的结论摘要、声明与签章表。
+
+        只使用 snapshot 中已存在的字段，缺字段按占位符输出，
+        不引入任何新的数据来源，保证与既有业务数据结构完全兼容。
+        """
+        report_date = project.get("report_date")
+        rdate = (
+            report_date.strftime("%Y年%m月%d日")
+            if hasattr(report_date, "strftime")
+            else _text(report_date)
+        )
+        total_facades = summary.get("total_facades", 0)
+        avg_pass_rate = summary.get("avg_pass_rate", "--")
+        total_area = summary.get("total_area", 0)
+        total_points = summary.get("total_points", 0)
+        conclusion = (
+            "本项目共检测外立面 "
+            f"{escape(str(total_facades))} 面，"
+            f"累计检测面积 {escape(str(total_area))}，"
+            f"累计检测点数 {escape(str(total_points))}，"
+            f"双指标面积参考合格率 {escape(str(avg_pass_rate))}。"
+            "平整度与垂直度按现行标准分别判定，"
+            "具体分部数据见各立面章节。"
+        )
+        return (
+            "<div class='report-footer'>"
+            "<h1>结论与声明</h1>"
+            "<h2>检测结论</h2>"
+            f"<div class='statement'>{conclusion}</div>"
+            "<h2>报告声明</h2>"
+            "<div class='statement'>"
+            "1. 本报告依据三维激光扫描点云自动分析结果编制，"
+            "检测数据仅对本次受检部位负责。<br/>"
+            "2. 报告中平整度、垂直度分别独立判定，"
+            "所列合格率均为单指标统计值，不作为联合验收结论。<br/>"
+            "3. 报告中各项数据均以毫米（mm）为单位。<br/>"
+            "</div>"
+            "</div>"
         )
 
     # ------------------------------------------------------------------
@@ -146,59 +193,90 @@ class PdfReportRenderer:
     @staticmethod
     def _style() -> str:
         return (
-            "@page { size:A4; margin:10mm 12mm 10mm; }"
+            # 页边距预留装订边与页脚空间，符合 A4 工业检测报告常规版式。
+            "@page { size:A4; margin:14mm 13mm 16mm 15mm; }"
             "body { font-family:'Microsoft YaHei','SimSun',sans-serif;"
-            " color:#1f2937; font-size:9pt; line-height:1.35; margin:0; }"
-            "h1 { color:#163a63; font-size:16pt; margin:0 0 3mm;"
+            " color:#1f2937; font-size:9.5pt; line-height:1.42; margin:0; }"
+            "p { margin:0 0 4px; }"
+            "h1 { color:#163a63; font-size:16pt; margin:0 0 4mm;"
             " border-bottom:2.5px solid #2f75b5; padding-bottom:2mm;"
             " font-weight:700; text-align:center; }"
-            "h2 { color:#163a63; background:#eaf2fb; padding:4px 8px;"
-            " margin:0 0 5px; border-left:4px solid #2f75b5;"
+            # 二级标题：左侧色条 + 淡底，页内不跨页断裂。
+            "h2 { color:#163a63; background:#eaf2fb; padding:5px 8px;"
+            " margin:6px 0 6px; border-left:4px solid #2f75b5;"
             " font-size:11pt; page-break-after:avoid; }"
-            "h3 { color:#365b7d; font-size:9pt; margin:2px 0 3px;"
+            "h3 { color:#365b7d; font-size:9.5pt; margin:3px 0 4px;"
             " font-weight:600; border-bottom:1px solid #e2e8f0;"
-            " padding-bottom:1px; page-break-after:avoid; text-align:center; }"
+            " padding-bottom:2px; page-break-after:avoid; text-align:center; }"
 
             # ── 封面 ──
-            ".cover-wrap { text-align:center; page-break-inside:avoid; padding-top:14mm; }"
-            ".cover-title { font-size:17pt; font-weight:700; color:#163a63;"
-            " margin:0 auto 10px; padding-bottom:6px;"
-            " border-bottom:2px solid #2f75b5; width:80%; line-height:1.5; }"
-            ".cover-section-title { font-size:12pt; font-weight:700;"
-            " color:#2f75b5; margin:8px 0 6px; text-align:center; }"
-            "table.summary-cards { width:70%; margin:0 auto 10px;"
-            " border-collapse:separate; border-spacing:6px; }"
-            "td.summary-card { background:#f8fafc; border:1px solid #e2e8f0;"
-            " padding:8px 4px; text-align:center; vertical-align:middle; }"
+            ".cover-wrap { text-align:center; page-break-inside:avoid;"
+            " padding:6mm 0 0; }"
+            # 顶部机构标识带：工业报告的"抬头"，比裸标题更规范。
+            ".cover-org-band { border-bottom:3px solid #1d4f91;"
+            " padding-bottom:4mm; margin-bottom:8mm; }"
+            ".cover-org { font-size:13pt; font-weight:700; color:#1d4f91;"
+            " letter-spacing:2px; }"
+            ".cover-org-en { font-size:7.5pt; color:#64748b;"
+            " letter-spacing:1px; margin-top:2px; }"
+            ".cover-title { font-size:22pt; font-weight:700; color:#163a63;"
+            " margin:0 auto 4mm; padding-bottom:3mm;"
+            " border-bottom:2px solid #2f75b5; width:86%; line-height:1.4;"
+            " letter-spacing:4px; }"
+            ".cover-doc-code { font-size:9.5pt; color:#475569;"
+            " margin-bottom:10mm; letter-spacing:1px; }"
+            ".cover-section-title { font-size:11.5pt; font-weight:700;"
+            " color:#2f75b5; margin:7mm 0 4mm; text-align:center; }"
+            "table.summary-cards { width:74%; margin:0 auto 8mm;"
+            " border-collapse:separate; border-spacing:7px; }"
+            "td.summary-card { background:#f8fafc; border:1px solid #dbe3ed;"
+            " padding:10px 4px; text-align:center; vertical-align:middle; }"
             "td.sc-blue  { border-top:3px solid #3b82f6; }"
             "td.sc-green { border-top:3px solid #22c55e; }"
             "td.sc-orange{ border-top:3px solid #f59e0b; }"
             "td.sc-cyan  { border-top:3px solid #06b6d4; }"
-            ".sc-number { font-size:15pt; font-weight:700; color:#163a63;"
+            ".sc-number { font-size:16pt; font-weight:700; color:#163a63;"
             " line-height:1.2; }"
-            ".sc-label { font-size:7.5pt; color:#64748b; margin-top:2px; }"
-            "table.cover-info { width:75%; margin:0 auto;"
-            " border-collapse:collapse; font-size:9.5pt; }"
-            "table.cover-info td { padding:3px 6px;"
-            " vertical-align:middle; text-align:center; }"
-            ".ci-label { width:35%; color:#64748b; font-size:9pt; }"
-            ".ci-value { width:65%; color:#1e293b; font-weight:500; }"
+            ".sc-label { font-size:7.5pt; color:#64748b; margin-top:3px; }"
+            # 封面信息表加完整边框，形成"项目信息卡"，比悬浮文字更正式。
+            "table.cover-info { width:80%; margin:0 auto;"
+            " border-collapse:collapse; font-size:9.5pt;"
+            " border:1px solid #cbd5e1; }"
+            "table.cover-info td { padding:4px 8px;"
+            " vertical-align:middle; text-align:center;"
+            " border:1px solid #e2e8f0; }"
+            ".ci-label { width:32%; color:#475569; font-size:9pt;"
+            " background:#f1f5f9; font-weight:600; }"
+            ".ci-value { width:68%; color:#1e293b; font-weight:500; }"
+            # 封面底部签章区：标准化报告的必要收尾元素。
+            ".cover-signature { width:80%; margin:12mm auto 0;"
+            " font-size:9pt; color:#334155; text-align:left;"
+            " border-top:1px solid #cbd5e1; padding-top:5px;"
+            " line-height:1.7; }"
+            ".cover-note { color:#64748b; font-size:8pt; }"
 
             # ── 数据表 ──
             "table.wall-data { width:100%; border-collapse:collapse;"
-            " font-size:8.5pt; margin:5px 0; }"
-            "table.wall-data td { border:1px solid #cbd5e1; padding:3px 5px;"
+            " font-size:8.5pt; margin:6px 0 8px; }"
+            "table.wall-data td { border:1px solid #cbd5e1; padding:4px 5px;"
             " text-align:center; vertical-align:middle; }"
             "table.wall-data td:first-child { background:#f1f5f9;"
             " font-weight:600; color:#475569; }"
             "table.wall-data td:last-child { background:#f8fafc;"
             " font-weight:600; color:#163a63; }"
-            ".wd-header { background:#e2e8f0 !important;"
-            " font-weight:700; color:#1e293b; }"
-            ".analysis-text { font-size:7.5pt; color:#334155;"
-            " line-height:1.45; margin:4px 0 6px; padding:5px 7px;"
+            # 指标分组表头：深蓝底白字，一眼区分"模拟下尺 / 模拟墙面"。
+            ".wd-header { background:#1d4f91 !important;"
+            " font-weight:700; color:#ffffff !important;"
+            " font-size:8.5pt; padding:5px 4px !important; }"
+            # 分组小标题行：淡蓝底居中，作为数据块之间的分节标识。
+            ".wd-group { background:#e8f0fb !important;"
+            " font-weight:700; color:#1d4f91 !important;"
+            " letter-spacing:1px; }"
+            ".analysis-text { font-size:8pt; color:#334155;"
+            " line-height:1.5; margin:4px 0 7px; padding:6px 8px;"
             " background:#f8fafc; border:1px solid #e2e8f0;"
-            " border-radius:4px; page-break-inside:avoid; }"
+            " border-left:3px solid #2f75b5;"
+            " border-radius:3px; page-break-inside:avoid; }"
 
             # ── 三图组：关键修复 ──
             ".triplet-page { page-break-before:always; }"
@@ -224,6 +302,19 @@ class PdfReportRenderer:
             " text-align:center; padding:10px; }"
             "section { margin-bottom:0; }"
             ".building { page-break-before:always; }"
+            # 报告结尾的结论与声明区，补齐标准化报告的固定结构。
+            ".report-footer { page-break-before:always; }"
+            ".report-footer table.sign-table { width:100%;"
+            " border-collapse:collapse; font-size:9pt; margin-top:8px; }"
+            ".report-footer table.sign-table td {"
+            " border:1px solid #cbd5e1; padding:8px;"
+            " text-align:left; vertical-align:top; height:58px; }"
+            ".report-footer table.sign-table td.sign-role {"
+            " width:20%; background:#f1f5f9; font-weight:600;"
+            " color:#475569; text-align:center; vertical-align:middle; }"
+            ".report-footer .statement { font-size:8.5pt; color:#334155;"
+            " line-height:1.6; margin-top:8px; padding:8px 10px;"
+            " background:#f8fafc; border:1px solid #e2e8f0; }"
         )
 
     # ------------------------------------------------------------------
@@ -267,12 +358,18 @@ class PdfReportRenderer:
         total_area = summary.get("total_area", 0)
         total_points = summary.get("total_points", 0)
 
+        org = project.get("inspection_unit") or "深圳瑞捷技术股份有限公司"
+        report_no = project.get("report_no")
+
         return (
             "<div class='cover-wrap'>"
-            "<div class='cover-spacer'></div>"
-            "<div class='cover-title'>"
-            "深圳瑞捷技术股份有限公司<br/>外立面激光测量检测报告"
+            # 顶部机构抬头带：标准化报告的固定视觉锚点。
+            "<div class='cover-org-band'>"
+            f"<div class='cover-org'>{escape(str(org))}</div>"
+            "<div class='cover-org-en'>FACADE LASER SCANNING INSPECTION</div>"
             "</div>"
+            "<div class='cover-title'>外立面激光测量检测报告</div>"
+            f"<div class='cover-doc-code'>报告编号：{_text(report_no)}</div>"
             "<div class='cover-section-title'>项目检测摘要</div>"
             "<table class='summary-cards'>"
             "<tr>"
@@ -293,6 +390,15 @@ class PdfReportRenderer:
             "<table class='cover-info'>"
             f"{info_rows}"
             "</table>"
+            # 封面签章区：说明报告用途与生效条件，收尾更规范。
+            "<div class='cover-signature'>"
+            f"<div>检测机构：{_text(org)}</div>"
+            "<div>报告说明：本报告数据来源于三维激光扫描点云自动分析，"
+            "检测结果仅对本次受检部位有效。</div>"
+            "<div>签发日期："
+            f"{rdate if rdate != '--' else datetime.now().strftime('%Y年%m月%d日')}"
+            "</div>"
+            "</div>"
             "</div>"
         )
 
@@ -386,13 +492,14 @@ class PdfReportRenderer:
         global_point = paired_rate(gf, gv, "point_rate")
 
         rows = [
-            # 行1：材质 + 标准
-            f"<tr>"
+            # 行1：材质 + 标准（表头样式，突出关键判定依据）
+            f"<tr class='wd-header'>"
             f"<td>面层材质</td><td>{_text(rf.get('material'))}</td>"
             f"<td>检测标准</td><td>{escape(std)}</td>"
             f"</tr>",
             # 行2：模拟下尺·面积
-            f"<tr>"
+            f"<tr class='wd-group'><td colspan='4'>一、模拟下尺（靠尺法）</td></tr>",
+            f"<tr class='wd-header'>"
             f"<td>总测量面积<br/>(模拟下尺)</td>"
             f"<td>合格面积<br/>(模拟下尺)</td>"
             f"<td>不合格面积<br/>(模拟下尺)</td>"
@@ -405,7 +512,7 @@ class PdfReportRenderer:
             f"<td>{ruler_area}</td>"
             f"</tr>",
             # 行3：模拟下尺·点数
-            f"<tr>"
+            f"<tr class='wd-header'>"
             f"<td>总测量点数<br/>(模拟下尺)</td>"
             f"<td>合格点数<br/>(模拟下尺)</td>"
             f"<td>不合格点数<br/>(模拟下尺)</td>"
@@ -418,7 +525,8 @@ class PdfReportRenderer:
             f"<td>{ruler_point}</td>"
             f"</tr>",
             # 行4：模拟墙面·面积
-            f"<tr>"
+            f"<tr class='wd-group'><td colspan='4'>二、模拟墙面（面域法）</td></tr>",
+            f"<tr class='wd-header'>"
             f"<td>总测量面积<br/>(模拟墙面)</td>"
             f"<td>合格面积<br/>(模拟墙面)</td>"
             f"<td>不合格面积<br/>(模拟墙面)</td>"
@@ -431,7 +539,7 @@ class PdfReportRenderer:
             f"<td>{global_area}</td>"
             f"</tr>",
             # 行5：模拟墙面·点数
-            f"<tr>"
+            f"<tr class='wd-header'>"
             f"<td>总测量点数<br/>(模拟墙面)</td>"
             f"<td>合格点数<br/>(模拟墙面)</td>"
             f"<td>不合格点数<br/>(模拟墙面)</td>"

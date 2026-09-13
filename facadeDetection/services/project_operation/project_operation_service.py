@@ -14,6 +14,8 @@ class _GuiDispatcher(QObject):
     denoise_failed = Signal(str)
     detection_finished = Signal(object)
     detection_failed = Signal(str)
+    denoise_progress = Signal(int, str)
+    detection_progress = Signal(int, str)
     info_requested = Signal(str, str)    # (标题, 正文)，信息弹窗上移到 UI 层
     color_pick_requested = Signal()      # 取色弹窗上移到 UI 层
 
@@ -51,9 +53,17 @@ class ProjectOperationService:
         self._gui_dispatcher.detection_failed.connect(
             self._on_detection_failed, Qt.ConnectionType.QueuedConnection)
         self._task_scheduler = RuntimeTaskScheduler(parent)
+        self._task_scheduler = RuntimeTaskScheduler(parent)
         # 供 UI 层连接的信息弹窗/取色请求信号（service 不再直接弹窗）。
         self.info_requested = self._gui_dispatcher.info_requested
         self.color_pick_requested = self._gui_dispatcher.color_pick_requested
+        # 把完成/失败/进度信号导出为公共属性。
+        self.denoise_finished = self._gui_dispatcher.denoise_finished
+        self.denoise_failed = self._gui_dispatcher.denoise_failed
+        self.detection_finished = self._gui_dispatcher.detection_finished
+        self.detection_failed = self._gui_dispatcher.detection_failed
+        self.denoise_progress = self._gui_dispatcher.denoise_progress
+        self.detection_progress = self._gui_dispatcher.detection_progress
 
     @property
     def last_facade_results(self) -> Optional[list[dict]]:
