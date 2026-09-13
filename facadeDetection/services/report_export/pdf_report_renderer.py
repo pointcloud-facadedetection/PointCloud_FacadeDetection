@@ -10,10 +10,10 @@ import numpy as np
 
 # ── 图片尺寸限制 ──
 _TARGET_IMG_MAX_W = 200
-_TARGET_IMG_MAX_H = 365
+_TARGET_IMG_MAX_H = 300
 # 色条单独限制：更宽以防止畸变
 _COLORBAR_MAX_W = 80
-_COLORBAR_MAX_H = 365
+_COLORBAR_MAX_H = 300
 
 
 def _text(value, fallback="--"):
@@ -38,34 +38,65 @@ def _pct(value):
         return "--"
 
 
-def _auto_trim(img: QImage, threshold: int = 245) -> QImage:
-    """裁掉图片四周接近纯白的空白边距，让热力图内容紧凑。"""
+def _auto_trim(img: QImage, threshold: int = 255) -> QImage:
+    """裁掉图片四周透明或接近纯白的空白边距。
+
+    统一策略：把"透明"或"三通道都接近纯白"判为背景。
+    """
     try:
-        gray = img.convertToFormat(QImage.Format.Format_Grayscale8)
-        w, h = gray.width(), gray.height()
-        bpl = gray.bytesPerLine()
-        buf = gray.bits()
-        arr = np.frombuffer(buf, np.uint8, h * bpl).reshape(h, bpl)[:, :w]
-        mask = arr < threshold
-        cols = np.where(mask.any(axis=0))[0]
-        rows = np.where(mask.any(axis=1))[0]
+        w, h = img.width(), img.height()
+        if w <= 0 or h <= 0:
+            return img
+
+        if img.hasAlphaChannel():
+            conv = img.convertToFormat(QImage.Format.Format_RGBA8888)
+            bpl = conv.bytesPerLine()
+            buf = conv.constBits()
+            arr = np.frombuffer(buf, np.uint8, h * bpl).reshape(h, bpl)
+            rgba = arr[:, :w * 4].reshape(h, w, 4)
+            transparent = rgba[:, :, 3] < 16
+            near_white = (
+                (rgba[:, :, 0] > threshold)
+                & (rgba[:, :, 1] > threshold)
+                & (rgba[:, :, 2] > threshold)
+            )
+            content = ~(transparent | near_white)
+        else:
+            conv = img.convertToFormat(QImage.Format.Format_RGB888)
+            bpl = conv.bytesPerLine()
+            buf = conv.constBits()
+            arr = np.frombuffer(buf, np.uint8, h * bpl).reshape(h, bpl)
+            rgb = arr[:, :w * 3].reshape(h, w, 3)
+            content = ~(
+                (rgb[:, :, 0] > threshold)
+                & (rgb[:, :, 1] > threshold)
+                & (rgb[:, :, 2] > threshold)
+            )
+
+        cols = np.where(content.any(axis=0))[0]
+        rows = np.where(content.any(axis=1))[0]
         if len(cols) == 0 or len(rows) == 0:
             return img
-        # 留 2px 内边距，避免贴边
-        x0, x1 = max(0, cols[0] - 2), min(w - 1, cols[-1] + 2)
-        y0, y1 = max(0, rows[0] - 2), min(h - 1, rows[-1] + 2)
-        return img.copy(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+        x0 = max(0, int(cols[0]) - 2)
+        x1 = min(w - 1, int(cols[-1]) + 2)
+        y0 = max(0, int(rows[0]) - 2)
+        y1 = min(h - 1, int(rows[-1]) + 2)
+        nw, nh = x1 - x0 + 1, y1 - y0 + 1
+        if nw <= 0 or nh <= 0:
+            return img
+        return img.copy(x0, y0, nw, nh)
     except Exception:
         return img
 
 
 def _fit_image_size(path, max_w=_TARGET_IMG_MAX_W, max_h=_TARGET_IMG_MAX_H):
-    """读取图片 → 裁白边 → 等比缩放到 [max_w, max_h] 内（允许放大）。"""
+    """读取图片 → 裁白边 → 等比缩放到 [max_w, max_h] 内（允许放大）。 """
     try:
         img = QImage(str(path))
         if img.isNull():
             return None, None
-        img = _auto_trim(img)          # ← 关键：先裁空白
+        img = _auto_trim(img)          # 先裁空白
         w, h = img.width(), img.height()
         if w <= 0 or h <= 0:
             return None, None
@@ -76,13 +107,15 @@ def _fit_image_size(path, max_w=_TARGET_IMG_MAX_W, max_h=_TARGET_IMG_MAX_H):
 
 
 def _is_colorbar(path) -> bool:
-    """启发式判断：宽高比 < 0.35 视为色条/legend 图。"""
+    """启发式判断：宽高比视为色条/legend 图。  """
     try:
         img = QImage(str(path))
         if img.isNull():
             return False
         w, h = img.width(), img.height()
-        return w > 0 and h > 0 and (w / float(h)) < 0.35
+        if w <= 0 or h <= 0:
+            return False
+        return (w / float(h)) < 0.10
     except Exception:
         return False
 

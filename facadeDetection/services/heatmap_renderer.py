@@ -24,7 +24,7 @@ class FacadeHeatmapTripletRenderer:
     _OVERLAY_BASE_COLOR = np.array([230, 232, 235], dtype=np.uint8)
     _OVERLAY_FILL_COLOR = (238, 240, 243)
     # 独立热力图背景：近纯白
-    _HEATMAP_BG_COLOR = 252
+    _HEATMAP_BG_COLOR = 248
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,8 +59,18 @@ class FacadeHeatmapTripletRenderer:
         ))
         limit_m = limit_mm / 1000.0
 
-        # 点云底图颜色：提浅到近浅灰白，热力色块在浅底上更醒目
-        base_colors = np.full((len(points), 3), [0.88, 0.90, 0.92], dtype=float)
+        # ---- 画布边界保障 ----
+        pts_arr = np.asarray(points, dtype=float).reshape(-1, 3)
+        def_arr = np.asarray(defect_points, dtype=float).reshape(-1, 3)
+        if len(pts_arr) and len(def_arr):
+            merged_base = np.vstack([pts_arr, def_arr])
+        elif len(pts_arr):
+            merged_base = pts_arr
+        else:
+            merged_base = def_arr
+
+        base_colors = np.full((len(merged_base), 3),
+                          [0.38, 0.42, 0.47], dtype=float)
 
         excess = np.maximum(np.abs(values) - limit_mm, 0.0)
         vmax_m = (
@@ -83,11 +93,10 @@ class FacadeHeatmapTripletRenderer:
             projection_origin=quality.get("projection_origin"),
             projection_u_axis=quality.get("projection_u_axis"),
             projection_v_axis=quality.get("projection_v_axis"),
-            base_points=points,
+            base_points=merged_base,
             base_colors=base_colors,
         )
 
-        # 两张图共用 raster["overlay_rgba"] 的原始 RGB 前景
         overlay = self._build_overlay(raster)
         heatmap_grid = self._build_isolated_heatmap_with_grid(raster, self.GRID_STEP_M)
 
@@ -100,7 +109,33 @@ class FacadeHeatmapTripletRenderer:
             else None
         )
 
-        return {"overlay": overlay, "heatmap_grid": heatmap_grid, "photo": photo}
+        # 统一转为 3 通道 BGR 再返回
+        return {
+            "overlay": self._to_bgr(overlay),
+            "heatmap_grid": self._to_bgr(heatmap_grid),
+            "photo": self._to_bgr(photo) if photo is not None else None,
+        }
+
+    @staticmethod
+    def _to_bgr(image: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """将 4 通道 BGRA 转为 3 通道 BGR。
+
+        alpha=0 的区域用近白色填充（与 _HEATMAP_BG_COLOR 一致），
+        确保后续保存为 PNG 时无透明区域，避免 _auto_trim 误判。
+        """
+        if image is None:
+            return None
+        img = np.asarray(image, dtype=np.uint8)
+        if img.ndim != 3:
+            return img
+        if img.shape[2] == 4:
+            alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+            bgr = img[:, :, :3].astype(np.float32)
+            # alpha=0 → 白色背景；alpha=255 → 原色
+            white = np.full_like(bgr, 252.0)
+            blended = (bgr * alpha + white * (1.0 - alpha)).astype(np.uint8)
+            return blended
+        return img  # 已是 3 通道
 
     # ------------------------------------------------------------------
     # Sample preparation
@@ -155,9 +190,9 @@ class FacadeHeatmapTripletRenderer:
 
     @staticmethod
     def _prepare_subgrid(windows, spec, quality):
-        """把失败窗口沿靠尺方向展开为 5cm 物理块（与统计同源）
+        """把窗口沿靠尺方向展开为物理块（与统计同源）。
 
-        过滤规则（与统计口径一致）：
+        过滤规则：
           - pass_key 显式为 False                      → 保留
           - pass_key 缺失/为 True 但 |value| > limit   → 保留（兜底）
           - 其余                                       → 丢弃
@@ -167,7 +202,6 @@ class FacadeHeatmapTripletRenderer:
         u_axis = np.asarray(quality.get("projection_u_axis"), dtype=float)
         v_axis = np.asarray(quality.get("projection_v_axis"), dtype=float)
 
-        # 投影轴/原点缺失或非有限 → 回退窗口中心散点，绝不返回空图
         if (origin.shape != (3,) or not np.all(np.isfinite(origin))
                 or u_axis.shape != (3,) or not np.all(np.isfinite(u_axis))
                 or v_axis.shape != (3,) or not np.all(np.isfinite(v_axis))):
@@ -177,7 +211,6 @@ class FacadeHeatmapTripletRenderer:
         u_axis = u_axis / max(np.linalg.norm(u_axis), 1e-12)
         v_axis = v_axis / max(np.linalg.norm(v_axis), 1e-12)
 
-        # 限值字段与统计数据保持完全一致
         profile = quality.get("profile_snapshot", {}) or {}
         limit = float(profile.get(
             spec["limit_key"],
@@ -188,22 +221,24 @@ class FacadeHeatmapTripletRenderer:
         ))
 
         # 靠尺物理尺寸
-        length = float(params.get("ruler_length_m",
-                                  params.get("window_length_m", 2.0)))
-        width = float(params.get("ruler_width_m",
-                                 params.get("window_width_m", 0.055)))
-        # 全局平面法无靠尺时退化为 0.5m×0.5m 的块
+        method = spec.get("method", "ruler")
+        if method == "global_plane":
+            length = float(params.get("window_length_m", 2.0))
+            width = float(params.get("window_width_m", 0.055))
+        else:
+            length = float(params.get("ruler_length_m",
+                                      params.get("window_length_m", 2.0)))
+            width = float(params.get("ruler_width_m",
+                                     params.get("window_width_m", 0.055)))
         if length <= 0 or width <= 0:
-            length, width = 0.5, 0.5
+            length, width = 2.0, 0.055
 
-        # 全局平面与垂直度都严格使用 I 字：长轴沿立面竖向 v_axis。
-        # 靠尺平整度才使用算法输出的 direction_deg（米字方向）。
-        global_plane = spec.get("method") == "global_plane"
-        vertical = spec.get("metric") == "verticality"
+        # 全局平面或垂直度 → 竖直 I 字；靠尺平整度 → 米字 direction_deg
+        global_plane = (method == "global_plane")
+        vertical = (spec.get("metric") == "verticality")
+
         centers, values = [], []
-
         for window in windows or []:
-            # ---- 值过滤：只保留真正超限的窗口 ----
             try:
                 value = float(window.get(spec["value_key"], np.nan))
             except (TypeError, ValueError):
@@ -212,12 +247,11 @@ class FacadeHeatmapTripletRenderer:
                 continue
 
             pass_value = window.get(spec["pass_key"])
-            explicit_fail = (pass_value is False)
+            explicit_fail = False if pass_value is None else (not bool(pass_value))
             value_exceeds = abs(value) > limit
             if not (explicit_fail or value_exceeds):
                 continue
 
-            # ---- 中心点校验 ----
             center = np.asarray(window.get("center_xyz"), dtype=float)
             if center.shape != (3,) or not np.all(np.isfinite(center)):
                 continue
@@ -233,17 +267,19 @@ class FacadeHeatmapTripletRenderer:
             along = np.cos(rad) * u_axis + np.sin(rad) * v_axis
             across = -np.sin(rad) * u_axis + np.cos(rad) * v_axis
 
-            n_long = max(1, int(np.ceil(length / 0.05)))
-            n_wide = 1
+            # 沿长轴 5cm 步长；沿横轴 2.5cm 步长（保证 5.5cm 宽完全覆盖）
+            step_long = 0.05
+            step_wide = 0.025
+            n_long = max(1, int(np.ceil(length / step_long)))
+            n_wide = max(1, int(np.ceil(width / step_wide)))
             for i in range(n_long):
+                a = (i + 0.5) * length / n_long - length / 2
                 for j in range(n_wide):
-                    a = (i + 0.5) * length / n_long - length / 2
                     b = (j + 0.5) * width / n_wide - width / 2
                     centers.append(center + a * along + b * across)
                     values.append(value)
 
         if not centers:
-            # 没有可用失败窗口 → 回退中心散点
             return FacadeHeatmapTripletRenderer._prepare_windows(
                 windows, spec, quality)
 
@@ -304,17 +340,65 @@ class FacadeHeatmapTripletRenderer:
     # ------------------------------------------------------------------
     # Overlay（点云底图 + 热力）
     # ------------------------------------------------------------------
+    # def _build_overlay(self, raster: dict) -> np.ndarray:
+    #     """点云底图 + 缺陷热力叠加（BGR）。 """
+    #     overlay_rgba = np.asarray(raster["overlay_rgba"])
+    #     h, w = overlay_rgba.shape[:2]
+
+    #     base_rgb = raster.get("base_rgb")
+    #     facade_mask = np.asarray(raster.get("facade_mask"), dtype=bool)
+
+    #     if base_rgb is None:
+    #         base_rgb = np.full((h, w, 3), self._OVERLAY_BASE_COLOR.tolist(),
+    #                            dtype=np.uint8)
+    #     else:
+    #         base_rgb = np.asarray(base_rgb, dtype=np.uint8).copy()
+    #         if facade_mask.shape == base_rgb.shape[:2]:
+    #             # 精确判定：mask 为 False 的像素就是"无点云投影"的位置
+    #             base_rgb[~facade_mask] = self._OVERLAY_BASE_COLOR
+    #         else:
+    #             # 形状不匹配的兜底：以"接近全黑"判定为空像素
+    #             empty = np.all(base_rgb < 4, axis=2)
+    #             base_rgb[empty] = self._OVERLAY_BASE_COLOR
+
+    #     base_rgb = base_rgb.astype(np.float32)
+    #     overlay_rgb = overlay_rgba[:, :, :3].astype(np.float32)
+    #     visible = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
+
+    #     composite_rgb = (
+    #         base_rgb * (1.0 - visible[:, :, :1])
+    #         + overlay_rgb * visible[:, :, :1]
+    #     )
+    #     composite_bgr = cv2.cvtColor(
+    #         np.clip(composite_rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR
+    #     )
+    #     return self._crop_to_facade(composite_bgr, raster,
+    #                                 fill=self._OVERLAY_FILL_COLOR)
     def _build_overlay(self, raster: dict) -> np.ndarray:
-        """点云底图 + 缺陷热力叠加（BGR）。 """
+        """点云底图 + 缺陷热力叠加（BGR）。
+
+        关键：用 facade_mask 精确识别"无点云投影"像素并填充浅灰底色，
+        而不是把 rasterize_facade 输出的 0（黑）保留下来。
+        """
         overlay_rgba = np.asarray(raster["overlay_rgba"])
         h, w = overlay_rgba.shape[:2]
 
         base_rgb = raster.get("base_rgb")
+        facade_mask = np.asarray(raster.get("facade_mask"), dtype=bool)
+
         if base_rgb is None:
             base_rgb = np.full((h, w, 3), self._OVERLAY_BASE_COLOR.tolist(),
                                dtype=np.uint8)
-        base_rgb = np.asarray(base_rgb, dtype=np.float32)
+        else:
+            base_rgb = np.asarray(base_rgb, dtype=np.uint8).copy()
+            if facade_mask.shape == base_rgb.shape[:2]:
+                # 无点云像素填底色；有点云像素保留原色（深灰）
+                base_rgb[~facade_mask] = self._OVERLAY_BASE_COLOR
+            else:
+                empty = np.all(base_rgb < 4, axis=2)
+                base_rgb[empty] = self._OVERLAY_BASE_COLOR
 
+        base_rgb = base_rgb.astype(np.float32)
         overlay_rgb = overlay_rgba[:, :, :3].astype(np.float32)
         visible = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
 
@@ -323,7 +407,8 @@ class FacadeHeatmapTripletRenderer:
             + overlay_rgb * visible[:, :, :1]
         )
         composite_bgr = cv2.cvtColor(
-            np.clip(composite_rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR
+            np.clip(composite_rgb, 0, 255).astype(np.uint8),
+            cv2.COLOR_RGB2BGR,
         )
         return self._crop_to_facade(composite_bgr, raster,
                                     fill=self._OVERLAY_FILL_COLOR)
@@ -413,18 +498,37 @@ class FacadeHeatmapTripletRenderer:
     @staticmethod
     def _crop_to_facade(image: np.ndarray, raster: dict,
                         fill=(245, 245, 245)) -> np.ndarray:
-        """裁剪到立面有效区，并统一为 BGRA（4 通道）。"""
+        """裁剪到立面有效区。"""
         mask = np.asarray(raster.get("facade_mask"), dtype=bool)
         if mask.shape != image.shape[:2] or not np.any(mask):
+            if image.ndim == 3 and image.shape[2] == 4:
+                return image[:, :, :3].copy()
             return image
-        ys, xs = np.where(mask)
+
+        # 行/列方向的覆盖率：某行/列只要在整幅高度/宽度上占比超过
+        # min_ratio 才纳入 bbox，避免单个孤立像素拉大范围。
+        min_ratio = 0.02
+        h, w = mask.shape
+        col_cov = mask.sum(axis=0) / float(h)
+        row_cov = mask.sum(axis=1) / float(w)
+        cols = np.where(col_cov >= min_ratio)[0]
+        rows = np.where(row_cov >= min_ratio)[0]
+        if len(cols) == 0 or len(rows) == 0:
+            cols = np.where(mask.any(axis=0))[0]
+            rows = np.where(mask.any(axis=1))[0]
+            if len(cols) == 0 or len(rows) == 0:
+                if image.ndim == 3 and image.shape[2] == 4:
+                    return image[:, :, :3].copy()
+                return image
+
+        x0, x1 = int(cols[0]), int(cols[-1])
+        y0, y1 = int(rows[0]), int(rows[-1])
+
         if image.ndim == 3 and image.shape[2] == 4:
-            result = image.copy()
+            cropped = image[y0:y1 + 1, x0:x1 + 1, :3]
         else:
-            result = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
-        result[~mask, 3] = 0
-        return result[int(ys.min()):int(ys.max()) + 1,
-                      int(xs.min()):int(xs.max()) + 1]
+            cropped = image[y0:y1 + 1, x0:x1 + 1]
+        return cropped.copy()
 
     def _build_photo_overlay(
         self, raster: dict, photo_path: str
@@ -441,40 +545,42 @@ class FacadeHeatmapTripletRenderer:
     # ------------------------------------------------------------------
     @staticmethod
     def _embed_legend(image: np.ndarray, raster: dict) -> np.ndarray:
-        """在图左侧嵌入紧凑色标（4 通道输出）。"""
+        """在图左侧嵌入紧凑色标（3 通道 BGR 输出）。 """
         src = np.asarray(image)
         if src.ndim != 3 or src.shape[0] == 0 or src.shape[1] == 0:
             return image
-        has_alpha = src.shape[2] == 4
-        bgr = src[:, :, :3]
+        if src.shape[2] == 4:
+            src = src[:, :, :3]
+        bgr = src
         h, w = bgr.shape[:2]
 
-        gutter = max(24, min(38, int(round(h * 0.045))))
-        canvas = np.full((h, w + gutter, 4 if has_alpha else 3), 248,
-                         dtype=np.uint8)
-        canvas[:, gutter:, :3] = bgr
-        if has_alpha:
-            canvas[:, gutter:, 3] = src[:, :, 3]
-            canvas[:, :gutter, 3] = 255
+        # ── 紧凑 gutter：仅容纳色条本身 + 小间隙 ──
+        bar_w = max(10, min(14, int(round(h * 0.012))))   # 10~14px
+        gap = 10                                            # 色条到热力图的间隙
+        gutter = bar_w + gap + 2                           # 左内边距 2px
 
-        bar_x = max(6, gutter // 2 - 5)
-        bar_w = max(6, min(9, gutter // 3))
-        top, bottom = max(12, int(h * 0.18)), min(h - 12, int(h * 0.78))
+        canvas = np.full((h, w + gutter, 3), 248, dtype=np.uint8)
+        canvas[:, gutter:, :] = bgr
+
+        bar_x = 2
+        top = max(12, int(h * 0.12))
+        bottom = min(h - 12, int(h * 0.88))
         count = max(bottom - top, 1)
         t = np.linspace(0.0, 1.0, count)
         colours = (np.clip(defect_colormap(t), 0.0, 1.0) * 255).astype(np.uint8)
-        canvas[top:bottom, bar_x:bar_x + bar_w, :3] = colours[:, ::-1][:, None, :]
+        canvas[top:bottom, bar_x:bar_x + bar_w, :] = colours[:, ::-1][:, None, :]
         cv2.rectangle(canvas, (bar_x, top), (bar_x + bar_w - 1, bottom - 1),
-                      (70, 70, 70, 255) if has_alpha else (70, 70, 70), 1)
+                      (70, 70, 70), 1)
 
         limit_m = float(raster.get('vmin', 0.0))
         max_m = float(raster.get('vmax', limit_m))
-        cv2.putText(canvas, f'{limit_m * 1000:.1f}', (2, top - 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, .26,
-                    (45, 45, 45, 255) if has_alpha else (45, 45, 45), 1)
-        cv2.putText(canvas, f'{max_m * 1000:.1f}', (2, bottom + 9),
-                    cv2.FONT_HERSHEY_SIMPLEX, .26,
-                    (45, 45, 45, 255) if has_alpha else (45, 45, 45), 1)
+        # 数值写在色条上下方（左侧空间不足，改用横向偏移）
+        cv2.putText(canvas, f'{limit_m * 1000:.1f}',
+                    (bar_x, top - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, .24, (45, 45, 45), 1)
+        cv2.putText(canvas, f'{max_m * 1000:.1f}',
+                    (bar_x, bottom + 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, .24, (45, 45, 45), 1)
         return canvas
 
     # ------------------------------------------------------------------

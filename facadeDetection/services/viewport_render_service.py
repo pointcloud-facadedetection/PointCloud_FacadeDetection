@@ -31,6 +31,17 @@ class ViewportRenderService:
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
+        # Keep the initial PLY RGB contract explicit at the viewport boundary.
+        # Invalid colors must not silently be bound as a malformed Open3D
+        # attribute; no-color input remains a supported gray fallback.
+        if colors is not None:
+            candidate = np.asarray(colors, dtype=np.float32)
+            if candidate.shape != (len(points), 3) or not np.all(np.isfinite(candidate)):
+                trace('viewport.colors.invalid', cloud=name,
+                      point_count=len(points), color_shape=tuple(candidate.shape))
+                colors = None
+            else:
+                colors = np.ascontiguousarray(np.clip(candidate, 0.0, 1.0))
         # 给定视口应提供用于添加点数据的 API。
         if hasattr(self.viewport, 'add_point_cloud'):
             self.viewport.add_point_cloud(name=name, points=points, colors=colors)

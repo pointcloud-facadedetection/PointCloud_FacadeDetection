@@ -641,21 +641,31 @@ def _verticality_strip_worker(args):
 
     return uj, rows
 
-def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, params, u_min_full=None, v_min_full=None):
+def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
+                         params, u_min_full=None, v_min_full=None):
     """
-    垂直度 = 墙面整体相对于铅垂线的倾斜程度
-    
+    垂直度 = 墙面相对于铅垂线的倾斜程度（I 形靠尺）
+
     建模逻辑：
         1. 统一数据清洗（SOR → select_band → hole_band）与平整度对齐
         2. 并行策略与平整度一致（parallel_mode + n_jobs）
-        3. 最终指标：|a| * 2000mm（2m 高度处的水平偏移）
+        3. 最终指标：|a| * ruler_length_m * 1000 mm（尺长端点的水平偏移）
+
+    ★ I 形窗口遍历策略：
+        窗口纵向（竖直）= ruler_length_m  (默认 2.0m)
+        窗口横向（水平）= ruler_width_m   (默认 0.055m)
+        步长：纵向 = ruler_length_m（尺长）、横向 = ruler_width_m（尺宽）
     """
     started = time.perf_counter()
 
     def empty(reason):
-        return {'ok': False, 'reason': reason, 'verticality_deviation_mm': np.nan,
-                'verticality_max_angle_deg': np.nan, 'verticality_pass': False,
-                'verticality_pass_rate': 0.0, 'rows': []}
+        return {'ok': False, 'reason': reason,
+                'verticality_deviation_mm': np.nan,
+                'verticality_avg_deviation_mm': np.nan,
+                'verticality_max_angle_deg': np.nan,
+                'verticality_pass': False,
+                'verticality_pass_rate': 0.0,
+                'rows': []}
 
     if not params.verticality_enabled:
         return empty('verticality_disabled')
@@ -664,9 +674,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     if plane_model.shape[0] != 4:
         return empty('invalid_plane_model')
 
-    # ===================================================================
-    # Step 1: 确定真实竖直方向
-    # ===================================================================
+    # ---- Step 1: 真实竖直方向 ----
     normal = plane_model[:3] / np.linalg.norm(plane_model[:3])
     gravity = np.asarray(params.gravity_axis, dtype=float)
     gravity = gravity / np.linalg.norm(gravity)
@@ -683,26 +691,21 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
         return empty('degenerate_horizontal_axis')
     horizontal_axis = horizontal_axis / h_norm
 
-    # ===================================================================
-    # Step 2: 投影到 (H, V, N) 坐标系
-    # ===================================================================
+    # ---- Step 2: 投影到 (H, V, N) ----
     rel = points - origin
-    u_h = rel @ horizontal_axis   # 水平横向偏移 (H)
-    v_v = rel @ vertical_axis     # 真实竖直坐标 (V)
-    w_n = rel @ normal            # 距立面平面的距离 (N)
+    u_h = rel @ horizontal_axis
+    v_v = rel @ vertical_axis
+    w_n = rel @ normal
 
-    # ===================================================================
-    # Step 3: 表面点过滤
-    # ===================================================================
+    # ---- Step 3: 表面点过滤 ----
     surface_band = float(getattr(params, 'select_band_m', 0.02))
     surf_mask = np.abs(w_n) <= surface_band
     n_surf = int(np.count_nonzero(surf_mask))
-
     if n_surf < params.min_points:
         return empty(f'too_few_surface_points:{n_surf}')
 
-    surf_u = u_h[surf_mask]  # H (horizontal lateral)
-    surf_v = v_v[surf_mask]  # V (true vertical)
+    surf_u = u_h[surf_mask]
+    surf_v = v_v[surf_mask]
     surf_ids = raw_ids[surf_mask]
 
     v_min = float(surf_v.min())
@@ -710,19 +713,16 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
     u_min = float(surf_u.min())
     u_max = float(surf_u.max())
 
-    v_span = v_max - v_min
-    u_span = u_max - u_min
-
-    if v_span < params.ruler_length_m:
+    if (v_max - v_min) < params.ruler_length_m:
         return empty('verticality_domain_too_short')
 
-    half = params.ruler_length_m / 2.0             # 1.0m
-    half_width = params.ruler_width_m / 2.0          # 0.0275m
+    half = params.ruler_length_m / 2.0
+    half_width = params.ruler_width_m / 2.0
 
-    v_step = max(float(params.scan_step_m), 1e-6)   # 5cm vertical step
-    u_step = max(float(params.strip_step_m), 1e-6)   # 5cm lateral step
+    # ★ 关键修正：I 形靠尺窗口步长 = 纵向尺长 / 横向尺宽
+    v_step = max(float(params.ruler_length_m), 1e-6)
+    u_step = max(float(params.ruler_width_m), 1e-6)
 
-    # Window centers
     v_centers = _full_window_centers(v_min, v_max, v_step, params.ruler_length_m)
     u_centers = _full_window_centers(u_min, u_max, u_step, params.ruler_width_m)
 
@@ -731,27 +731,24 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
 
     print(f'[PCFD] verticality.grid '
           f'v_centers={len(v_centers)} u_centers={len(u_centers)} '
-          f'total_windows_est={len(v_centers)*len(u_centers)}', flush=True)
+          f'v_step={v_step:.3f}m u_step={u_step:.3f}m '
+          f'total_windows_est={len(v_centers) * len(u_centers)}', flush=True)
 
-    # ===================================================================
-    # Step 4: 全局按 H (horizontal) 排序 —— searchsorted 要求有序数组
-    # ===================================================================
+    # ---- Step 4: 全局按 H 排序（searchsorted 需要有序数组） ----
     u_order = np.argsort(surf_u, kind='stable')
     surf_u = surf_u[u_order]
     surf_v = surf_v[u_order]
     surf_ids = surf_ids[u_order]
 
-    # 统一 grid_key 基准，与平整度一致
-    base_u_min = float(u_min_full) if u_min_full is not None else float((points @ u_axis).min())
-    base_v_min = float(v_min_full) if v_min_full is not None else float((points @ v_axis).min())
+    base_u_min = (float(u_min_full) if u_min_full is not None
+                  else float((points @ u_axis).min()))
+    base_v_min = (float(v_min_full) if v_min_full is not None
+                  else float((points @ v_axis).min()))
 
-    # 预计算所有 v 窗口边界
     v_lo_bounds = v_centers - half
     v_hi_bounds = v_centers + half
 
-    # ===================================================================
-    # Step 5: 并行逐横向 strip 处理
-    # ===================================================================
+    # ---- Step 5: 并行处理（进程/线程/串行） ----
     n_workers = min(len(u_centers), params.n_jobs, os.cpu_count() or 1)
 
     if n_workers > 1 and params.parallel_mode == 'process':
@@ -769,8 +766,10 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
                     v_centers, v_lo_bounds, v_hi_bounds,
                     horizontal_axis, vertical_axis, origin,
                     u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
-                    half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
-                    params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+                    half_width, params.min_points, params.ruler_length_m,
+                    params.verticality_limit_mm,
+                    params.sor_enabled, params.sor_k, params.sor_sigma,
+                    params.sor_w_weight, params.sor_method,
                     params.select_band_m, params.hole_band_m,
                 ))
             strip_results = _pool_map(
@@ -779,24 +778,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
         finally:
             shared.cleanup()
     elif n_workers > 1:
-        args_list = []
-        for uj, u_c in enumerate(u_centers):
-            args_list.append((
-                uj, float(u_c),
-                surf_u, surf_v, surf_ids,
-                v_centers, v_lo_bounds, v_hi_bounds,
-                horizontal_axis, vertical_axis, origin,
-                u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
-                half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
-                params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
-                params.select_band_m, params.hole_band_m,
-            ))
         print(f'[PCFD] verticality.parallel_thread workers={n_workers} '
               f'strips={len(u_centers)}', flush=True)
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = [pool.submit(_verticality_strip_worker, args) for args in args_list]
-            strip_results = [f.result() for f in futures]
-    else:
         args_list = []
         for uj, u_c in enumerate(u_centers):
             args_list.append((
@@ -805,45 +788,46 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
                 u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
-                half_width, params.min_points, params.ruler_length_m, params.verticality_limit_mm,
-                params.sor_enabled, params.sor_k, params.sor_sigma, params.sor_w_weight, params.sor_method,
+                half_width, params.min_points, params.ruler_length_m,
+                params.verticality_limit_mm,
+                params.sor_enabled, params.sor_k, params.sor_sigma,
+                params.sor_w_weight, params.sor_method,
                 params.select_band_m, params.hole_band_m,
             ))
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_verticality_strip_worker, args)
+                       for args in args_list]
+            strip_results = [f.result() for f in futures]
+    else:
         print(f'[PCFD] verticality.sequential strips={len(u_centers)}', flush=True)
+        args_list = []
+        for uj, u_c in enumerate(u_centers):
+            args_list.append((
+                uj, float(u_c),
+                surf_u, surf_v, surf_ids,
+                v_centers, v_lo_bounds, v_hi_bounds,
+                horizontal_axis, vertical_axis, origin,
+                u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
+                half_width, params.min_points, params.ruler_length_m,
+                params.verticality_limit_mm,
+                params.sor_enabled, params.sor_k, params.sor_sigma,
+                params.sor_w_weight, params.sor_method,
+                params.select_band_m, params.hole_band_m,
+            ))
         strip_results = [_verticality_strip_worker(args) for args in args_list]
 
-    # 按 uj 排序保证确定性输出顺序
     strip_results.sort(key=lambda x: x[0])
 
-    # 合并结果
+    # ---- Step 6: 合并 ---- 
     rows = []
     total_valid = 0
     processed_strips = 0
-
     for uj, strip_rows in strip_results:
         if strip_rows:
             processed_strips += 1
             rows.extend(strip_rows)
             total_valid += len(strip_rows)
 
-            if processed_strips % 50 == 0:
-                elapsed = time.perf_counter() - started
-                print(f'[PCFD] verticality.progress '
-                      f'strips={processed_strips}/{len(u_centers)} '
-                      f'valid_windows={total_valid} '
-                      f'seconds={elapsed:.1f}', flush=True)
-
-    # 最终进度日志
-    if processed_strips > 0:
-        elapsed = time.perf_counter() - started
-        print(f'[PCFD] verticality.progress '
-              f'strips={processed_strips}/{len(u_centers)} '
-              f'valid_windows={total_valid} '
-              f'seconds={elapsed:.1f}', flush=True)
-
-    # ===================================================================
-    # Step 6: 汇总统计
-    # ===================================================================
     finite_rows = [r for r in rows if np.isfinite(r['verticality_deviation_mm'])]
     pass_rows = [r['verticality_pass'] for r in finite_rows]
     deviation_values = [r['verticality_deviation_mm'] for r in finite_rows]
@@ -852,24 +836,28 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin, p
 
     elapsed = time.perf_counter() - started
     print(f'[PCFD] verticality.summary '
-          f'windows_total={len(v_centers)*len(u_centers)} '
+          f'windows_total={len(v_centers) * len(u_centers)} '
           f'valid_windows={len(rows)} '
           f'rows={len(finite_rows)} '
-          f'max_deviation_mm={max((r["verticality_deviation_mm"] for r in finite_rows), default=np.nan):.3f} '
+          f'max_deviation_mm='
+          f'{max((r["verticality_deviation_mm"] for r in finite_rows), default=np.nan):.3f} '
           f'avg_deviation_mm={average_deviation:.3f} '
-          f'max_angle_deg={max((r["verticality_angle_deg"] for r in finite_rows), default=np.nan):.3f} '
+          f'max_angle_deg='
+          f'{max((r["verticality_angle_deg"] for r in finite_rows), default=np.nan):.3f} '
           f'pass_rate={float(np.mean(pass_rows)) if pass_rows else 0.0:.3f} '
           f'seconds={elapsed:.2f}', flush=True)
 
     return {
         'ok': bool(rows),
         'reason': '' if rows else 'no_verticality_rows',
-        'verticality_deviation_mm': max((r['verticality_deviation_mm'] for r in finite_rows), default=np.nan),
+        'verticality_deviation_mm': max(
+            (r['verticality_deviation_mm'] for r in finite_rows), default=np.nan),
         'verticality_avg_deviation_mm': average_deviation,
-        'verticality_max_angle_deg': max((r['verticality_angle_deg'] for r in finite_rows), default=np.nan),
+        'verticality_max_angle_deg': max(
+            (r['verticality_angle_deg'] for r in finite_rows), default=np.nan),
         'verticality_pass': bool(pass_rows and all(pass_rows)),
         'verticality_pass_rate': float(np.mean(pass_rows)) if pass_rows else 0.0,
-        'rows': rows,
+        'rows': rows,          # ← 完整行，供统计与热力图统一使用
     }
 
 def _direction_worker_mmap(args):
@@ -972,7 +960,8 @@ def _unpack_direction_result(result):
     return tuple(result[:8])
 
 
-def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, params=None):
+def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
+                          params=None):
     params = params or RulerQualityParameters()
     started = time.perf_counter()
     points = np.asarray(points, float).reshape(-1, 3)
@@ -1010,8 +999,11 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
           f'u_range={u_range_full:.3f}m v_range={v_range_full:.3f}m '
           f'points={len(points)}', flush=True)
 
-    # Parallel computation for each direction
-    n_workers = min(len(params.flatness_angles_deg), params.n_jobs, os.cpu_count() or 1)
+    # ==============================================================
+    # 平整度（星形米字）—— 四方向并行
+    # ==============================================================
+    n_workers = min(len(params.flatness_angles_deg), params.n_jobs,
+                    os.cpu_count() or 1)
 
     if params.parallel_mode == 'process' and n_workers > 1:
         print(f'[PCFD] quality.parallel_process workers={n_workers} '
@@ -1026,10 +1018,9 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
                     points_path, raw_ids_path, plane_model, origin,
                     u_axis, v_axis, angle, params.snapshot()
                 ))
-            # 常驻池 worker 数按 n_jobs 取齐，与垂直度共用同一池，
-            # spawn 固定开销整个会话只付一次
-            results = _pool_map(min(int(params.n_jobs), os.cpu_count() or 1),
-                                _direction_worker_mmap, args_list)
+            results = _pool_map(
+                min(int(params.n_jobs), os.cpu_count() or 1),
+                _direction_worker_mmap, args_list)
         finally:
             shared.cleanup()
     else:
@@ -1052,24 +1043,28 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
 
     for direction_result in results:
         (angle, window_results, proj_time, prep_time, total_time,
-         centres_grid, along_range, across_range) = _unpack_direction_result(direction_result)
+         centres_grid, along_range, across_range) = _unpack_direction_result(
+            direction_result)
         direction_results[float(angle)] = window_results
         direction_ranges[float(angle)] = (along_range, across_range)
         total_projection_time += proj_time
         total_prep_time += prep_time
 
-    # 用物理坐标聚类实现真米字
     rows = _aggregate_star_rows(
         direction_results, origin, u_axis, v_axis,
         u_min_full, v_min_full, params)
 
     valid_rows = [r for r in rows if r.get('coverage_valid', False)]
-    finite_rows = [r for r in valid_rows if np.isfinite(r['flatness_gap_mm'])]
-    raw_rows = [r for r in rows if np.isfinite(r['flatness_raw_max_gap_mm'])]
+    finite_rows = [r for r in valid_rows
+                   if np.isfinite(r['flatness_gap_mm'])]
+    raw_rows = [r for r in rows
+                if np.isfinite(r['flatness_raw_max_gap_mm'])]
 
     n_candidates = sum(len(v) for v in direction_results.values())
-    n_geometry = sum(1 for v in direction_results.values() for r in v if r.get('ok'))
-    n_quality = sum(1 for v in direction_results.values() for r in v if r.get('ok') and r.get('coverage_valid'))
+    n_geometry = sum(1 for v in direction_results.values()
+                     for r in v if r.get('ok'))
+    n_quality = sum(1 for v in direction_results.values()
+                    for r in v if r.get('ok') and r.get('coverage_valid'))
     n_failed = n_candidates - n_geometry
 
     print(f'[PCFD] quality.windows_summary '
@@ -1079,10 +1074,9 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
           f'failed={n_failed} '
           f'aggregated={len(rows)}', flush=True)
 
-    # Interval statistics
+    # ---- 平整度区间统计 ----
     size = max(float(params.interval_size_m), 1e-6)
     intervals = []
-
     if rows:
         centers_array = np.array([r['center_xyz'] for r in rows])
         rel_centers = centers_array - origin
@@ -1091,21 +1085,26 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         v_span = v_max_full - v_min_full
         n_intervals = max(1, int(np.ceil(v_span / size)))
         edges = np.linspace(v_min_full, v_max_full, n_intervals + 1)
-        interval_ids = np.minimum(np.searchsorted(edges, center_v, side='right') - 1,
-                                  n_intervals - 1)
+        interval_ids = np.minimum(
+            np.searchsorted(edges, center_v, side='right') - 1,
+            n_intervals - 1)
         for i in range(n_intervals):
-            interval_rows = [r for r, iid in zip(rows, interval_ids) if iid == i]
+            interval_rows = [r for r, iid in zip(rows, interval_ids)
+                             if iid == i]
             v_lo, v_hi = float(edges[i]), float(edges[i + 1])
-            # 复用顶部已算好的 v_all（同一表达式 (points-origin)@v_axis），
-            # 不再每个 interval 对全量点重算
             point_v = v_all
             point_mask = (point_v >= v_lo) & (
-                (point_v < v_hi) if i < n_intervals - 1 else (point_v <= v_hi)
+                (point_v < v_hi) if i < n_intervals - 1
+                else (point_v <= v_hi)
             )
-            world_z = points[point_mask, 2] if np.any(point_mask) else np.empty(0)
-            valid_interval_rows = [r for r in interval_rows if r.get('coverage_valid', False)]
-            gaps = [r['flatness_gap_mm'] for r in valid_interval_rows if np.isfinite(r['flatness_gap_mm'])]
-            raw_gaps = [r['flatness_raw_max_gap_mm'] for r in interval_rows if np.isfinite(r['flatness_raw_max_gap_mm'])]
+            world_z = points[point_mask, 2] if np.any(point_mask) \
+                else np.empty(0)
+            valid_interval_rows = [r for r in interval_rows
+                                   if r.get('coverage_valid', False)]
+            gaps = [r['flatness_gap_mm'] for r in valid_interval_rows
+                    if np.isfinite(r['flatness_gap_mm'])]
+            raw_gaps = [r['flatness_raw_max_gap_mm'] for r in interval_rows
+                        if np.isfinite(r['flatness_raw_max_gap_mm'])]
             passes = [r['flatness_pass'] for r in valid_interval_rows]
             intervals.append({
                 'label': (f'{float(world_z.min()):.2f}–{float(world_z.max()):.2f}m'
@@ -1125,47 +1124,50 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
             })
         intervals.sort(key=lambda x: x['v_min_m'])
 
-    verticality = _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, 
-                                          origin, params, u_min_full=u_min_full, v_min_full=v_min_full)
+    # ==============================================================
+    # 垂直度（I 形靠尺）—— 独立计算，不与星形窗口合并
+    # ==============================================================
+    verticality = _compute_verticality(
+        points, raw_ids, plane_model, u_axis, v_axis, origin, params,
+        u_min_full=u_min_full, v_min_full=v_min_full)
 
-    # Build verticality lookup by grid_key
-    verticality_rows = {}
-    for item in verticality.get('rows', []):
-        key = item.get('grid_key')
+    # 将垂直度数据按 grid_key 合并到 windows 行（接口契约要求）
+    verticality_by_key = {}
+    for vrow in verticality.get('rows', []):
+        key = vrow.get('grid_key')
         if key is not None:
-            verticality_rows[key] = item
-
-    # Merge verticality into flatness rows
+            verticality_by_key[key] = vrow
     for row in rows:
-        vrow = verticality_rows.get(tuple(row.get('grid_key', ())))
-        if vrow is None:
-            row['verticality_angle_deg'] = np.nan
-            row['verticality_deviation_mm'] = np.nan
-            row['verticality_pass'] = False
+        key = row.get('grid_key')
+        vrow = verticality_by_key.get(key)
+        if vrow is not None:
+            row['verticality_deviation_mm'] = vrow['verticality_deviation_mm']
+            row['verticality_angle_deg'] = vrow['verticality_angle_deg']
+            row['verticality_pass'] = vrow['verticality_pass']
         else:
-            row['verticality_angle_deg'] = float(vrow.get('verticality_angle_deg', np.nan))
-            row['verticality_deviation_mm'] = float(vrow.get('verticality_deviation_mm', np.nan))
-            row['verticality_pass'] = bool(vrow.get('verticality_pass', False))
+            row['verticality_deviation_mm'] = np.nan
+            row['verticality_angle_deg'] = np.nan
+            row['verticality_pass'] = False
 
-    # Update interval statistics with the independent I-ruler rows.  The
-    # verticality grid is not guaranteed to share the star flatness grid_key;
-    # never turn an unmatched I-ruler window into a synthetic failure.
     if intervals:
         for interval in intervals:
             vrows = [
                 row for row in verticality.get('rows', [])
-                if interval['v_min_m'] <= float(row.get('center_uv_base', (np.nan, np.nan))[1]) <= interval['v_max_m']
+                if interval['v_min_m']
+                <= float(row.get('center_uv_base', (np.nan, np.nan))[1])
+                <= interval['v_max_m']
                 and np.isfinite(row.get('verticality_deviation_mm', np.nan))
             ]
-            passed = [bool(row.get('verticality_pass', False)) for row in vrows]
+            passed = [bool(row.get('verticality_pass', False))
+                      for row in vrows]
             interval['verticality_max_deviation_mm'] = (
-                float(np.nanmax([row['verticality_deviation_mm'] for row in vrows])) if vrows else 0.0
-            )
+                float(np.nanmax([row['verticality_deviation_mm']
+                                 for row in vrows])) if vrows else 0.0)
             interval['verticality_avg_deviation_mm'] = (
                 float(np.mean([row['verticality_deviation_mm'] for row in vrows]))
-                if vrows else np.nan
-            )
-            interval['verticality_pass_rate'] = float(np.mean(passed)) if passed else np.nan
+                if vrows else np.nan)
+            interval['verticality_pass_rate'] = (
+                float(np.mean(passed)) if passed else np.nan)
 
     total_elapsed = time.perf_counter() - started
 
@@ -1178,27 +1180,40 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
           f'prep={total_prep_time:.2f}s '
           f'total={total_elapsed:.2f}s', flush=True)
 
-    # FIX: Ensure all required fields are present for dialog
     overall = {
         'point_count': len(points),
         'candidate_window_count': n_candidates,
         'geometry_valid_window_count': n_geometry,
         'quality_valid_window_count': n_quality,
         'failed_window_count': n_failed,
-        'flatness_max_gap_mm': max((r['flatness_gap_mm'] for r in finite_rows), default=0.),
-        'flatness_avg_gap_mm': float(np.mean([r['flatness_gap_mm'] for r in finite_rows])) if finite_rows else np.nan,
-        'flatness_raw_max_gap_mm': max((r['flatness_raw_max_gap_mm'] for r in raw_rows), default=0.),
-        'flatness_pass_rate': float(np.mean([r['flatness_pass'] for r in valid_rows])) if valid_rows else 0.,
-        'quality_pass_rate': float(np.mean([r['flatness_pass'] for r in valid_rows])) if valid_rows else 0.,
-        'flatness_valid_rate': float(np.mean([r['coverage_valid'] for r in rows])) if rows else 0.,
-        'max_hole_ratio': max((r['hole_ratio'] for r in rows), default=0.),
-        # FIX: Ensure verticality fields use correct names and have valid values
-        'verticality_deviation_mm': verticality.get('verticality_deviation_mm', np.nan),
-        'verticality_avg_deviation_mm': verticality.get('verticality_avg_deviation_mm', np.nan),
-        'verticality_max_deviation_mm':verticality.get('verticality_deviation_mm', np.nan),
-        'verticality_max_angle_deg': verticality.get('verticality_max_angle_deg', np.nan),
+        'flatness_max_gap_mm': max(
+            (r['flatness_gap_mm'] for r in finite_rows), default=0.),
+        'flatness_avg_gap_mm': (float(np.mean(
+            [r['flatness_gap_mm'] for r in finite_rows]))
+            if finite_rows else np.nan),
+        'flatness_raw_max_gap_mm': max(
+            (r['flatness_raw_max_gap_mm'] for r in raw_rows), default=0.),
+        'flatness_pass_rate': (float(np.mean(
+            [r['flatness_pass'] for r in valid_rows]))
+            if valid_rows else 0.),
+        'quality_pass_rate': (float(np.mean(
+            [r['flatness_pass'] for r in valid_rows]))
+            if valid_rows else 0.),
+        'flatness_valid_rate': (float(np.mean(
+            [r['coverage_valid'] for r in rows])) if rows else 0.),
+        'max_hole_ratio': max(
+            (r['hole_ratio'] for r in rows), default=0.),
+        'verticality_deviation_mm': verticality.get(
+            'verticality_deviation_mm', np.nan),
+        'verticality_avg_deviation_mm': verticality.get(
+            'verticality_avg_deviation_mm', np.nan),
+        'verticality_max_deviation_mm': verticality.get(
+            'verticality_deviation_mm', np.nan),
+        'verticality_max_angle_deg': verticality.get(
+            'verticality_max_angle_deg', np.nan),
         'verticality_pass': verticality.get('verticality_pass', False),
-        'verticality_pass_rate': verticality.get('verticality_pass_rate', 0.0),
+        'verticality_pass_rate': verticality.get(
+            'verticality_pass_rate', 0.0),
         'plane_model': plane_model.tolist(),
         'normal': plane_model[:3].tolist(),
         'center': origin.tolist(),
@@ -1207,7 +1222,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
     return {
         'ok': True,
         'parameters': params.snapshot(),
-        'windows': rows,
+        'windows': rows,                    # 平整度（星形）行
         'intervals': intervals,
         'interval_size_m': size,
         'interval_count': len(intervals),
@@ -1224,7 +1239,15 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis, 
         'verticality': {
             'ok': verticality.get('ok', False),
             'verticality_pass': verticality.get('verticality_pass', False),
-            'verticality_pass_rate': verticality.get('verticality_pass_rate', 0.0),
+            'verticality_pass_rate': verticality.get(
+                'verticality_pass_rate', 0.0),
+            'verticality_deviation_mm': verticality.get(
+                'verticality_deviation_mm', np.nan),
+            'verticality_avg_deviation_mm': verticality.get(
+                'verticality_avg_deviation_mm', np.nan),
+            'verticality_max_angle_deg': verticality.get(
+                'verticality_max_angle_deg', np.nan),
+            'rows': verticality.get('rows', []),   # 完整垂直度行
         },
         'performance': {
             'projection_seconds': total_projection_time,

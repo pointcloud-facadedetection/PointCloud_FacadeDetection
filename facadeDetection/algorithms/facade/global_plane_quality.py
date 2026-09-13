@@ -185,7 +185,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
     p95_mm = float(np.percentile(abs_r[inliers], 95) * 1000) if inliers.any() else np.inf
     fit_accepted = bool(
-        inlier_ratio >= 0.75
+        inlier_ratio >= 0.50
         and p95_mm <= 50.0
         and angle_to_ref <= float(angle_limit_deg)
     )

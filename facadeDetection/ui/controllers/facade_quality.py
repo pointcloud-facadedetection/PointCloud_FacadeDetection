@@ -2,6 +2,9 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from config.storage import Storage
 from utils.workers import QualityWorker
+import re
+from pathlib import Path
+import numpy as np
 
 
 class FacadeQualityController(QObject):
@@ -14,6 +17,8 @@ class FacadeQualityController(QObject):
     report_preview_refresh_requested = Signal()
     heatmap_button_refresh_requested = Signal()
     show_dialog_requested = Signal(str, object, object)  # (cloud, facade, quality)
+    batch_progress = Signal(int, int)
+    batch_finished = Signal(list)
 
     def __init__(self, facade_service, render_facade, render_service,
                  pointcloud_service, project_operation_service,
@@ -41,6 +46,27 @@ class FacadeQualityController(QObject):
         self._quality_request_token = 0
         self._quality_request_cache_key = None
         self.active_quality_worker = None
+        self._batch_queue = []
+        self._batch_results = []
+        self._batch_total = 0
+        self._batch_current = 0
+
+    def _quality_results_dir(self, project_uuid, facade):
+        """返回 results/站点名/立面ID，站点名仅用于目录显示且安全化。"""
+        base = Path(Storage.ensure_project_dirs(project_uuid)['results'])
+        station_id = facade.get('station_id')
+        name = None
+        try:
+            for station in self.station_service.list_stations():
+                if station_id is not None and int(station.id) == int(station_id):
+                    name = station.display_name
+                    break
+        except Exception:
+            pass
+        safe = re.sub(r'[\\/*?:"<>|]', '_', str(name or f'station_{station_id or "unknown"}'))
+        safe = safe.strip(' ._')[:80] or 'unknown'
+        # ResultExportService 在此目录下再建立 facade_xxx 子目录。
+        return base / safe
 
     def process_facade_results(self, results):
         """清空质量缓存并刷新立面着色，返回按 id 去重后的立面列表。"""
@@ -109,7 +135,7 @@ class FacadeQualityController(QObject):
             self.warning_requested.emit('请先选择项目。')
             return
         # 高质量的 PNG 导出文件将保存到当前项目的结果文件夹中。
-        results_dir = Storage.ensure_project_dirs(project_uuid)['results']
+        results_dir = self._quality_results_dir(project_uuid, f)
 
         facade_copy = dict(f)
         facade_id = int(facade_copy.get('id', 0))
@@ -158,6 +184,131 @@ class FacadeQualityController(QObject):
         worker.signals.finished.connect(
             lambda facade, quality: self._on_quality_finished(token, cloud, facade, quality))
         self._pool.start(worker)
+
+    def evaluate_facades_batch(self, facades):
+        """顺序复用 QualityWorker 执行多个完整立面，批量链路不发结果 Dialog。"""
+        if self._batch_queue:
+            self.warning_requested.emit('已有批量质量检测正在执行。')
+            return
+        cloud = self.active_cloud_name()
+        project_uuid, generation = self._context_provider()
+        if not cloud or not project_uuid or not facades:
+            return
+        profile = self._profile_provider()
+        grid_size = float(self._grid_size_provider())
+        self._batch_results = []
+        self._batch_current = 0
+        self._batch_total = len(facades)
+        self._batch_queue = []
+        for facade in facades:
+            item = dict(facade)
+            dataset = self.facade_service.get_dataset(cloud)
+            item['__quality_request_context'] = {
+                'project_uuid': project_uuid, 'project_generation': generation,
+                'station_id': item.get('station_id', getattr(self.station_service, '_active_station_id', None)),
+                'dataset_id': getattr(dataset, 'dataset_id', None),
+                'dataset_revision': getattr(dataset, 'revision', None), 'cloud_name': cloud,
+            }
+            self._batch_queue.append((cloud, item, {
+                'profile': profile, 'grid_size': grid_size,
+                'results_dir': self._quality_results_dir(project_uuid, item),
+            }))
+        self.status_message.emit(f'开始批量质量检测，共 {self._batch_total} 个立面...', 0)
+        self._run_next_batch()
+
+    def _run_next_batch(self):
+        if not self._batch_queue:
+            results = self._batch_results
+            self._batch_results = []
+            self.batch_finished.emit(results)
+            self.report_preview_refresh_requested.emit()
+            self.status_message.emit(f'批量检测完成，共 {len(results)} 个立面。', 5000)
+            return
+        cloud, facade, kwargs = self._batch_queue.pop(0)
+        self._batch_current += 1
+        self.batch_progress.emit(self._batch_current, self._batch_total)
+        self.status_message.emit(f'[{self._batch_current}/{self._batch_total}] 正在检测立面 #{facade.get("display_no", facade.get("id", 0))}...', 0)
+        worker = QualityWorker(self.facade_service, cloud, facade, kwargs)
+        self.active_quality_worker = worker
+        worker.signals.finished.connect(lambda f, q: self._on_batch_finished(cloud, f, q))
+        self._pool.start(worker)
+
+    def _upsert_facade_to_aggregated(self, facade):
+        """将单/批量完成的立面结果按 ID 更新到项目级聚合存储。"""
+        station_id = facade.get('station_id')
+        if station_id is None or not hasattr(self.project_operation_service, 'set_facade_results_for_station'):
+            return
+        all_results = self.project_operation_service.all_facade_results.get(int(station_id), [])
+        fid = int(facade.get('id', -1))
+        updated = False
+        for i, item in enumerate(list(all_results)):
+            if int(item.get('id', -2)) == fid:
+                all_results[i] = dict(facade)
+                updated = True
+                break
+        if not updated:
+            all_results.append(dict(facade))
+        self.project_operation_service.set_facade_results_for_station(int(station_id), all_results)
+
+    def _on_batch_finished(self, cloud, facade, quality):
+        """批量完成处理：成功结果入库；不发单立面 Dialog 信号。"""
+        try:
+            valid = isinstance(quality, dict) and quality.get('ok', True)
+            valid = valid and int((quality.get('overall') or {}).get('quality_valid_window_count', 0) or 0) > 0
+            if valid:
+                self._export_batch_heatmaps(cloud, facade, quality)
+                dataset = self.facade_service.get_dataset(cloud)
+                project_uuid, _ = self._context_provider()
+                self.facade_service.commit_quality_success(
+                    project_uuid, int(facade.get('id', 0)), quality,
+                    display_no=facade.get('display_no'), facade_data=facade,
+                    dataset_revision=getattr(dataset, 'revision', None),
+                    color=self.render_service.facade_color_for(facade, facade.get('display_no')))
+                facade['quality_status'] = 'complete'
+                facade['quality_report'] = quality
+                for current in self.project_operation_service.last_facade_results or []:
+                    if int(current.get('id', -1)) == int(facade.get('id', -2)):
+                        current.update(quality_status='complete', quality_report=quality)
+                        break
+                # 同步到项目级聚合存储，确保 PDF 报告预览即时刷新
+                self._upsert_facade_to_aggregated(facade)
+            self.quality_reports = [r for r in self.quality_reports if (r.get('facade') or {}).get('id') != facade.get('id')]
+            self.quality_reports.append({'facade': facade, 'quality': quality})
+            self._batch_results.append({'facade': facade, 'quality': quality})
+        except Exception as exc:
+            print(f'[PCFD] batch quality handling failed: {exc!r}', flush=True)
+        finally:
+            self.active_quality_worker = None
+            self.report_preview_refresh_requested.emit()
+            self._run_next_batch()
+
+    def _export_batch_heatmaps(self, cloud, facade, quality):
+        """批量模式生成与单立面相同的 PNG 资产，但不打开结果窗口。"""
+        if not isinstance(quality, dict) or quality.get('__auto_exported'):
+            return
+        dataset = self.facade_service.get_dataset(cloud)
+        ids = np.asarray(facade.get('proxy_indices') or
+                         facade.get('inlier_indices') or [], dtype=np.int64)
+        if len(ids) and dataset.index.has_source_mapping():
+            ids = dataset.index.proxy_to_source_ids(ids, deduplicate=True)
+        ids = ids[(ids >= 0) & (ids < len(dataset.processed_raw_points))]
+        if not len(ids):
+            return
+        from services.result_export_service import ResultExportService
+        points = np.asarray(dataset.processed_raw_points)[ids]
+        colors = np.tile(np.asarray(self.render_service.facade_color_for(
+            facade, facade.get('display_no')), dtype=float), (len(points), 1))
+        context = quality.setdefault('__export_context', {})
+        results_dir = context.get('results_dir')
+        if not results_dir:
+            project_uuid, _ = self._context_provider()
+            results_dir = self._quality_results_dir(project_uuid, facade)
+        exported = ResultExportService().export_all_heatmaps(
+            results_dir, int(facade.get('display_no', facade.get('id', 0))),
+            points, colors, quality)
+        context['results_dir'] = str(results_dir)
+        context['heatmaps'] = exported
+        quality['__auto_exported'] = True
 
     def on_quality_failed(self, token, error):
         if token != self._quality_request_token:
@@ -324,6 +475,8 @@ class FacadeQualityController(QObject):
                                     'dataset_revision': getattr(dataset, 'revision', None)})
                     break
             self.heatmap_button_refresh_requested.emit()
+            # 同步到项目级聚合存储，确保 PDF 报告预览即时刷新
+            self._upsert_facade_to_aggregated(f)
         except Exception as exc:
             print(f'[PCFD] quality.persist_failed facade_id={facade_no} error={exc!r}', flush=True)
             self.warning_requested.emit(f'算法已完成，但结果保存失败：{exc}')

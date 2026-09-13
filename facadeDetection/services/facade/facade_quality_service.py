@@ -477,7 +477,7 @@ class FacadeQualityService:
             # only; verticality measurements are merged into the canonical
             # result windows above.  Do not read the removed
             # ``verticality.windows`` key or the I-ruler area becomes zero.
-            ruler_vert_all = [dict(w) for w in result.get('windows', [])
+            ruler_vert_all = [dict(w) for w in result.get('verticality', {}).get('rows', [])
                               if np.isfinite(w.get('verticality_deviation_mm', np.nan))]
             for w in ruler_vert_all:
                 w.setdefault('actual_area_m2', ruler_length * ruler_width)
