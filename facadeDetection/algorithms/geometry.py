@@ -7,6 +7,8 @@ import open3d as o3d
 import copy
 from collections import deque
 
+from utils.dist_reader import NORMALIZED_RANGE_SPAN_M
+
 log = logging.getLogger("facadeDetection.pointcloud")
 
 
@@ -111,6 +113,39 @@ def adaptive_outlier_indices(points, ranges, std_ratio=2.5, n_shells=8):
         threshold = med + std_ratio * max(mad, .15 * med, 1e-6)
         keep[np.where(mask)[0][d > threshold]] = False
     
+    return np.flatnonzero(keep).astype(np.int32)
+
+
+def scale_invariant_outlier_indices(points, std_ratio=2.5, min_points=200):
+    """无真实测距时的尺度无关统计滤波。
+
+    ``bbox_normalized`` 链路的 ranges 是包围盒归一化的**无量纲代理值**，
+    只服务于分层下采样。若把它继续喂给 ``adaptive_outlier_indices``，
+    壳层边界就变成伪距离分界：近壳层会混入真实远处的点、远壳层会混入
+    真实近处的点，两边的密度统计都被污染，复杂立面（阳台、雨棚、栏杆）
+    上的有效点会被成片误删。
+
+    这里改用最近邻距离——它与扫描距离无关、与场景尺度无关——做一次全局
+    稳健阈值判定，既保留去噪能力，又不会因伪距离分壳而误删有效点云。
+    """
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    n = len(pts)
+    if n < max(int(min_points), 3):
+        # 点数过少时统计量不可靠，宁可不去噪也不误删。
+        return np.arange(n, dtype=np.int32)
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(pts)
+    nn = np.asarray(cloud.compute_nearest_neighbor_distance(), dtype=np.float64)
+    finite = np.isfinite(nn)
+    if not np.any(finite):
+        return np.arange(n, dtype=np.int32)
+    values = nn[finite]
+    med = float(np.median(values))
+    mad = 1.4826 * float(np.median(np.abs(values - med)))
+    threshold = med + float(std_ratio) * max(mad, 0.15 * med, 1e-9)
+    keep = np.ones(n, dtype=bool)
+    keep[~finite] = False
+    keep[finite] = values <= threshold
     return np.flatnonzero(keep).astype(np.int32)
 
 
@@ -304,6 +339,10 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     rng = np.asarray(ranges, dtype=np.float32).reshape(-1)
     if len(pts) != len(rng):
         raise ValueError("points and ranges length mismatch")
+    # 三条链路（尤其 .dist 文本解析与 float64 计算路径）都可能带入
+    # NaN/Inf 距离。NaN 会让 `rng >= lo` 恒为 False，所有壳层被跳过，
+    rng = np.where(np.isfinite(rng), rng, 0.0).astype(np.float32, copy=False)
+    rng = np.maximum(rng, 0.0)
     src = np.arange(len(pts), dtype=np.int32)
     if not len(pts):
         return (np.empty((0, 3), np.float32), None,
@@ -320,7 +359,16 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     proxy_parts, color_parts, range_parts, source_parts, rep_parts = [], [], [], [], []
     # Proxy construction must cover every Source row.  A display crop belongs
     # to a later decision, not to the persistent mapping.
-    lo = float(kwargs.pop("min_range", 0.0)); crop = float(kwargs.pop("crop_range", np.max(rng)))
+    lo = float(kwargs.pop("min_range", 0.0))
+    crop = float(kwargs.pop("crop_range", np.max(rng) if len(rng) else 0.0))
+    if not np.isfinite(crop) or crop <= 0:
+        crop = float(np.max(rng)) if len(rng) and np.isfinite(np.max(rng)) else 1.0
+    # min_range 高于全部距离时，壳层循环会把所有点排除，proxy 退化为空。
+    # 此时把下限回落到实际最小距离，保证代理域恒非空。
+    if len(rng) and lo > float(np.min(rng)):
+        lo = max(0.0, float(np.min(rng)))
+    if lo >= crop:
+        crop = lo + max(float(rng.max()) if len(rng) else 1.0, 1e-6)
     elev = np.zeros(len(pts), np.float32) if elevations is None else np.asarray(elevations, dtype=np.float32)
     elev_low = kwargs.get("elevation_low_scale", 1.0)
     elev_high = kwargs.get("elevation_high_scale", .75)
@@ -391,6 +439,8 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
         shell_results = [_build_shell(*job) for job in shell_jobs]
 
     for proxy_p, color_p, range_p, reps, groups in shell_results:
+        if len(proxy_p) == 0:
+            continue
         proxy_parts.append(proxy_p)
         range_parts.append(range_p)
         # 代表点是组内距质心最近的源行，不一定是 CSR 组首；
@@ -399,6 +449,13 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
         source_parts.extend(groups)
         if col is not None:
             color_parts.append(color_p)
+    if not proxy_parts:
+        # 全部壳层为空（极端距离域）时退化为恒等代理：每个源点自身就是一个
+        # 代理点。保持 CSR 契约成立，而不是抛错中断整条检测链路。
+        return (pts.copy(), (col.copy() if col is not None else None),
+                np.arange(len(pts) + 1, dtype=np.int64),
+                np.arange(len(pts), dtype=np.int32),
+                rng.copy(), np.arange(len(pts), dtype=np.int32))
     # 每个距离壳层的点数通常不同，不能用 np.asarray 将其直接拼成
     # 规则数组；vstack 才是这里所需的“按行合并”。
     proxy = np.vstack(proxy_parts).astype(np.float32, copy=False)
@@ -406,11 +463,94 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
     offsets[1:] = np.cumsum([len(x) for x in source_parts], dtype=np.int64)
     indices = np.concatenate(source_parts).astype(np.int32, copy=False) if source_parts else np.empty(0, np.int32)
     proxy_colors = (np.vstack(color_parts).astype(np.float32, copy=False)
-                    if col is not None else None)
-    proxy_ranges = np.concatenate(range_parts).astype(np.float32, copy=False)
+                    if (col is not None and color_parts) else None)
+    proxy_ranges = (np.concatenate(range_parts).astype(np.float32, copy=False)
+                    if range_parts else np.empty(0, np.float32))
     representatives = (np.concatenate(rep_parts).astype(np.int32, copy=False)
                        if rep_parts else np.empty(0, np.int32))
     return proxy, proxy_colors, offsets, indices, proxy_ranges, representatives
+
+
+def build_proxy_domain(points, colors, ranges, scan_origin=None,
+                       elevations=None, distance_source=None):
+    """三条导入链路唯一的代理域构建入口。
+
+    FLS 转换 PLY / E57 转换 PLY / 原生 PLY 上传此前的取样逻辑分散在各
+    链路内部，一旦某条链路缺少距离信息，分层下采样便退化，Proxy -> Source
+    CSR 映射随之丢失（``has_source_mapping()`` 翻转为 False）。下游热力
+    Overlay 依赖该映射对齐 ``__global_indices`` 与传入点云，于是出现错位。
+
+    本函数收口为单一出口契约：无论调用方来自哪条链路，返回的字段集合、
+    dtype 与内存模型完全一致，且 ``has_source_mapping()`` 恒为 True。
+    """
+    pts = np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3))
+    rng = np.ascontiguousarray(np.asarray(ranges, dtype=np.float32).reshape(-1))
+    if len(pts) != len(rng):
+        raise ValueError("points and ranges length mismatch")
+    col = (None if colors is None else np.ascontiguousarray(
+        np.asarray(colors, dtype=np.float32).reshape(-1, 3)))
+    if col is not None and len(col) != len(pts):
+        raise ValueError("colors length mismatch")
+
+    if len(pts) == 0:
+        return {
+            'proxy_points': np.empty((0, 3), np.float32),
+            'proxy_colors': None,
+            'proxy_source_offsets': np.zeros(1, dtype=np.int64),
+            'proxy_source_indices': np.empty(0, dtype=np.int32),
+            'ranges': np.empty(0, dtype=np.float32),
+            'representatives': np.empty(0, dtype=np.int32),
+            'distance_source': distance_source or 'computed',
+            'proxy_count': 0,
+            'source_count': 0,
+        }
+
+    kwargs = {}
+    if elevations is not None:
+        kwargs['elevations'] = np.asarray(elevations, dtype=np.float32).reshape(-1)
+
+    # min_range 归零：归一化分支的近点可能贴近 0，旧的 0.5m 下限会把它们
+    # 整体排除在壳层之外。crop_range 至少覆盖归一化跨度，保证分层完整。
+    crop = max(float(rng.max()), NORMALIZED_RANGE_SPAN_M)
+    (proxy, proxy_colors, offsets, indices,
+     proxy_ranges, representatives) = stratified_proxy_build(
+        pts, col, rng, min_range=0.0, crop_range=crop, **kwargs)
+
+    # ---- 出口归一化：三条链路在此完全对齐 ----
+    proxy = np.ascontiguousarray(np.asarray(proxy, dtype=np.float32).reshape(-1, 3))
+    offsets = np.ascontiguousarray(np.asarray(offsets, dtype=np.int64).reshape(-1))
+    indices = np.ascontiguousarray(np.asarray(indices, dtype=np.int32).reshape(-1))
+    proxy_ranges = np.ascontiguousarray(
+        np.asarray(proxy_ranges, dtype=np.float32).reshape(-1))
+    representatives = np.ascontiguousarray(
+        np.asarray(representatives, dtype=np.int32).reshape(-1))
+
+    n = len(proxy)
+    # 契约兜底：代理数必须与 CSR 行数一致；否则退化为恒等映射，
+    # 仍然保持 CSR 语义而不是让映射整体消失。
+    if len(offsets) != n + 1 or len(indices) != int(offsets[-1] if len(offsets) else 0):
+        offsets = np.arange(n + 1, dtype=np.int64)
+        indices = np.arange(n, dtype=np.int32)
+    if len(proxy_ranges) != n:
+        proxy_ranges = np.zeros(n, dtype=np.float32)
+    if len(representatives) != n:
+        representatives = (indices[offsets[:-1]] if n else
+                           np.empty(0, dtype=np.int32))
+    if proxy_colors is not None:
+        proxy_colors = np.ascontiguousarray(
+            np.asarray(proxy_colors, dtype=np.float32).reshape(-1, 3))
+
+    return {
+        'proxy_points': proxy,
+        'proxy_colors': proxy_colors,
+        'proxy_source_offsets': offsets,
+        'proxy_source_indices': indices,
+        'ranges': proxy_ranges,
+        'representatives': representatives,
+        'distance_source': distance_source or 'computed',
+        'proxy_count': n,
+        'source_count': len(pts),
+    }
 
 
 def fit_plane_svd(points):

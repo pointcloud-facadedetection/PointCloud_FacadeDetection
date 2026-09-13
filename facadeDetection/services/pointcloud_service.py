@@ -341,14 +341,30 @@ class PointCloudService:
                       f"skip denoise", flush=True)
                 return None
 
-            from algorithms.geometry import adaptive_outlier_indices
-            keep_proxy = adaptive_outlier_indices(
-                pts, ranges,
-                std_ratio=float(kwargs.get("std_ratio", 2.5)),
-                n_shells=int(kwargs.get("n_shells", 8)),
-            )
+            # 距离域语义分流：只有真实测距（.dist / 测站欧氏距离）才允许按距离分壳做统计滤波。
+            density_source = str(meta.get("density_source") or "").strip()
+            if not density_source:
+                # 兼容旧快照：有真实测站视作 dist 语义，否则按归一化处理。
+                density_source = ("station_origin"
+                                  if meta.get("scan_origins") is not None
+                                  else "bbox_normalized")
+            metric_ranges = density_source in ("dist", "station_origin")
+            from algorithms.geometry import (
+                adaptive_outlier_indices, scale_invariant_outlier_indices)
+            std_ratio = float(kwargs.get("std_ratio", 2.5))
+            if metric_ranges:
+                keep_proxy = adaptive_outlier_indices(
+                    pts, ranges, std_ratio=std_ratio,
+                    n_shells=int(kwargs.get("n_shells", 8)),
+                )
+            else:
+                # 尺度无关兜底：最近邻距离与场景尺度无关，保留去噪能力，
+                # 且不会因伪距离分壳而误删有效点云。
+                keep_proxy = scale_invariant_outlier_indices(
+                    pts, std_ratio=std_ratio)
             print(f"[PCFD] denoise.adaptive proxy={n_before} keep={len(keep_proxy)} "
-                  f"removed={n_before - len(keep_proxy)}", flush=True)
+                  f"removed={n_before - len(keep_proxy)} density={density_source}",
+                  flush=True)
 
         # ============================================================
         # 标准数据：走传统 o3d 路径

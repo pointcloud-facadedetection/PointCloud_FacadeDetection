@@ -1646,14 +1646,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
     def _clear_lifecycle_status(self):
         self.statusBar().clearMessage()
 
-    # 点云加载/导入/激活：统一走 TaskProgressController 的 TASK_LOAD 任务，
-    # 与其它耗时操作共享"模态 + 每 5 秒刷新 + 终态必刷"体验。
-    # 加载各阶段耗时差异很大（解析 E57 可长达数分钟），无法预先给出可靠
-    # 百分比，因此起始为不定量模式；一旦 worker 回报真实百分比，
-    # update_progress 会自动恢复定量显示。
+    # 点云加载/导入/激活：统一走 TaskProgressController 的 TASK_LOAD 任务
     def _show_loading_dialog(self):
-        # 进度条为真实进度：worker 的各阶段真实百分比经 report 节流上屏；
-        # 尚未回报百分比时显示不定量动画，不伪造递增。
         self.task_progress.begin(
             TASK_LOAD, '点云加载', '任务处理中',
             determinate=False, cancellable=True)
@@ -1665,8 +1659,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self.task_progress.report(TASK_LOAD, percent, '任务处理中')
 
     def _hide_loading_dialog(self, success=True, message='处理完成'):
-        # load_finished 现在携带终态：成功刷到 100% 并短暂停留后关闭；
-        # 失败/中止保留当前真实百分比，避免"实际没跑完却显示 100%"。
+        # load_finished 现在携带终态：成功刷到 100% 并短暂停留后关闭
         self.task_progress.finish(TASK_LOAD, bool(success), message)
 
 

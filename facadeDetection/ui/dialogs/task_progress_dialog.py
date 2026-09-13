@@ -294,7 +294,7 @@ class TaskProgressDialog(QDialog):
             self._bar.setValue(100)
         else:
             # 失败时保留当前进度值，仅更新文案，便于用户判断停在哪一步
-            self._reporter.flush_now(None, message or '处理失败')
+            self._reporter.flush_now(-1, message or '处理失败')
         self._status_label.setText(self._status_text())
 
         self._btn_cancel.setEnabled(False)

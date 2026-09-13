@@ -28,7 +28,7 @@ class ThrottledReporter(QObject):
     """把高频进度回报合并为固定间隔的低频 UI 刷新。"""
 
     #: (percent, text)
-    flushed = Signal(int, str)
+    flushed = Signal(object, str)
 
     def __init__(self, interval_ms: int = DEFAULT_INTERVAL_MS, parent=None):
         super().__init__(parent)

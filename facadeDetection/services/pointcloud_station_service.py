@@ -9,7 +9,9 @@ from services import proxy_cache
 from services.dal.file_repo import FileRepo
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
-from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
+from algorithms.geometry import (
+    build_proxy_domain, stratified_proxy_build, estimate_elevation_angles,
+)
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
 from config.storage import Storage
@@ -306,20 +308,35 @@ class PointCloudStationService:
             })
             print(f'[PCFD] proxy_cache.restored station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)}', flush=True)
-        elif dist_path.exists():
+        else:
+            # 三条链路（FLS 转换 PLY / E57 转换 PLY / 原生 PLY 上传）同一个代理域构建器。
             dist = read_dist(dist_path, points, metadata)
+            if not len(dist.scan_origins):
+                # 快照里的测站可作为补充来源；仍无则归一化分支已生效。
+                saved_origins = (state or {}).get('scan_origins')
+                if saved_origins:
+                    dist.scan_origins = np.asarray(
+                        saved_origins, dtype=np.float32).reshape(-1, 3)
             elevations = (estimate_elevation_angles(points, dist.scan_origins)
                           if len(dist.scan_origins) else None)
-            proxy, proxy_colors, offsets, indices, ranges, representatives = stratified_proxy_build(
+            built = build_proxy_domain(
                 points, colors, dist.ranges_m,
-                scan_origin=dist.scan_origins if len(dist.scan_origins) else None,
-                elevations=elevations)
+                scan_origin=(dist.scan_origins if len(dist.scan_origins) else None),
+                elevations=elevations,
+                distance_source=dist.source)
+            proxy = built['proxy_points']
+            proxy_colors = built['proxy_colors']
+            offsets = built['proxy_source_offsets']
+            indices = built['proxy_source_indices']
+            ranges = built['ranges']
+            representatives = built['representatives']
             metadata.update({
                 'proxy_source_offsets': offsets,
                 'proxy_source_indices': indices,
                 'ranges': ranges,
                 'scan_origins': dist.scan_origins.tolist(),
                 'distance_source': dist.source,
+                'density_source': dist.density_source,
                 'distance_warnings': dist.warnings,
             })
             # 重建结果对同一资产是确定的，落盘后重开项目可直接命中缓存；
@@ -330,27 +347,9 @@ class PointCloudStationService:
                 scan_origins=dist.scan_origins, distance_source=dist.source,
                 representative_ids=representatives,
                 proxy_points=proxy, proxy_colors=proxy_colors)
-        else:
-            # 兜底：若去噪快照携带代理 CSR，从中重建代理点云，
-            # 避免 proxy 退化为 raw 导致后续去噪 keep 索引失效。
-            if (state and state.get('enabled') and
-                    len(state_offsets) >= 2 and
-                    len(state_offsets) == int(state.get('proxy_base_count') or 0) + 1 and
-                    len(state_indices) == int(state_offsets[-1]) and
-                    np.all((state_indices >= 0) & (state_indices < len(points)))):
-                representative_ids = state_indices[state_offsets[:-1]]
-                proxy = points[representative_ids]
-                proxy_colors = colors[representative_ids] if colors is not None else None
-                metadata.update({
-                    'proxy_source_offsets': state_offsets,
-                    'proxy_source_indices': state_indices.astype(np.int32, copy=False),
-                    'ranges': np.zeros(len(proxy), dtype=np.float32),
-                    'proxy_reconstructed': True,
-                })
-                print(f'[PCFD] proxy.reconstructed station={station.id} '
-                      f'proxy={len(proxy)} raw={len(points)}', flush=True)
-            else:
-                proxy, proxy_colors = points, colors
+            print(f'[PCFD] proxy.built station={station.id} '
+                  f'proxy={len(proxy)} raw={len(points)} '
+                  f'density={dist.density_source}', flush=True)
         self.pointcloud.register_source_asset(source_id, points, colors,
                                               {'ply_path': station.source_path})
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
@@ -429,10 +428,23 @@ class PointCloudStationService:
                 new_meta['denoise_fallback_reason'] = (
                     f'base_count={base_count} proxy={len(proxy)} '
                     f'keep={len(keep)} saved={saved_count}')
-                # 清除旧的 CSR 偏移以避免下游误用
-                for key in ('proxy_source_offsets', 'proxy_source_indices',
-                            'ranges', 'source_offsets', 'source_indices'):
-                    new_meta.pop(key, None)
+                n_alive = len(proxy)
+                alive_offsets = new_meta.get('proxy_source_offsets')
+                alive_indices = new_meta.get('proxy_source_indices')
+                if (alive_offsets is None or alive_indices is None or
+                        len(np.asarray(alive_offsets)) != n_alive + 1 or
+                        len(np.asarray(alive_indices)) !=
+                        int(np.asarray(alive_offsets)[-1] if n_alive else 0)):
+                    new_meta['proxy_source_offsets'] = np.arange(
+                        n_alive + 1, dtype=np.int64)
+                    new_meta['proxy_source_indices'] = np.arange(
+                        n_alive, dtype=np.int32)
+                new_meta['ranges'] = np.asarray(
+                    new_meta.get('ranges', np.zeros(n_alive, dtype=np.float32)),
+                    dtype=np.float32)
+                if len(new_meta['ranges']) != n_alive:
+                    new_meta['ranges'] = np.zeros(n_alive, dtype=np.float32)
+                new_meta['identity_mapping'] = True
                 dataset = self.pointcloud.register_dataset(
                     dataset_id, proxy,
                     proxy_colors if proxy_colors is not None else None,

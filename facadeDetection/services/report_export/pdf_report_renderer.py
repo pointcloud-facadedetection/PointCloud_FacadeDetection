@@ -11,9 +11,18 @@ import numpy as np
 # ── 图片尺寸限制 ──
 _TARGET_IMG_MAX_W = 200
 _TARGET_IMG_MAX_H = 280
-# 色条单独限制：更宽以防止畸变
-_COLORBAR_MAX_W = 80
+# 色条单独限制
+_COLORBAR_MAX_W = 96
 _COLORBAR_MAX_H = 280
+# 色条与相邻热力图之间的最小间隙
+_COLORBAR_GAP_PX = 12
+
+# A4 版心宽度
+_A4_CONTENT_W_PX = 688
+# 2 组图/页 的硬约束下，单组图片可用高度。
+_TRIPLET_ROW_MAX_H = 300
+# 表格边框与单元格内边距在三列上占用的横向像素。
+_TRIPLET_BORDER_PX = 24
 
 
 def _text(value, fallback="--"):
@@ -278,19 +287,28 @@ class PdfReportRenderer:
             " border-left:3px solid #2f75b5;"
             " border-radius:3px; page-break-inside:avoid; }"
 
-            # ── 三图组：关键修复 ──
+            # ── 三图组 ──
             ".triplet-page { page-break-before:always; }"
             ".triplet-group { page-break-inside:avoid; margin:0 0 6px;"
             " text-align:center; }"
             ".triplet-group:last-child { margin-bottom:0; }"
-            # 不用 table-layout:fixed，让内容自然分布
-            "table.triplet { width:100%; border-collapse:separate;"
-            " border-spacing:2px; margin:0; page-break-inside:avoid; }"
+            # 用 table-layout:fixed + 显式列宽，让三列严格按 _column_widths
+            # 的预算铺满版心，不受单张图片宽高比影响而互相挤压。
+            "table.triplet { width:100%; table-layout:fixed;"
+            " border-collapse:separate; border-spacing:2px; margin:0;"
+            " page-break-inside:avoid; }"
             "table.triplet td { vertical-align:top; text-align:center;"
-            " border:1px solid #e2e8f0; padding:2px; background:#fff; }"
-            "table.triplet img { display:block; margin:0 auto 1px; }"
+            " border:1px solid #e2e8f0; padding:2px; background:#fff;"
+            " overflow:hidden; }"
+            "table.triplet img { display:block; margin:0 auto 1px;"
+            " max-width:100%; }"
+            # 色条列：左侧留出可见间隙，避免色条紧贴相邻热力图
+            "table.triplet td.triplet-bar { padding-left:12px;"
+            " padding-right:6px; }"
             ".triplet-title { font-size:7.5pt; color:#365b7d;"
-            " font-weight:600; margin-top:1px; text-align:center; }"
+            " font-weight:600; margin-top:1px; text-align:center;"
+            " white-space:nowrap; overflow:hidden;"
+            " text-overflow:ellipsis; }"
             ".triplet-placeholder { background:#f1f5f9; color:#94a3b8;"
             " font-size:7.5pt; line-height:1.3; text-align:center;"
             " padding:60px 4px; margin:0 auto; }"
@@ -600,17 +618,47 @@ class PdfReportRenderer:
         )
 
     # ------------------------------------------------------------------
-    # Image triplets — 核心修复
+    # Image triplets
     # ------------------------------------------------------------------
     @staticmethod
+    def _column_widths(cells: list) -> list:
+        """按"铺满 A4 版心"反推每列图片的目标宽度。
+        """
+        n = len(cells) or 1
+        n_bars = sum(1 for _, is_bar in cells if is_bar)
+        n_normals = max(1, n - n_bars)
+        # 色条列加宽后自身占位；其余列分摊剩余宽度。
+        bar_budget = n_bars * (_COLORBAR_MAX_W + _COLORBAR_GAP_PX)
+        normal_budget = max(
+            40, (_A4_CONTENT_W_PX - _TRIPLET_BORDER_PX - bar_budget) // n_normals)
+        sizes = []
+        for _, is_bar in cells:
+            if is_bar:
+                sizes.append((_COLORBAR_MAX_W, _TRIPLET_ROW_MAX_H))
+            else:
+                sizes.append((normal_budget, _TRIPLET_ROW_MAX_H))
+        return sizes
+
+    @staticmethod
     def _triplets(images: list, facade_no: int) -> str:
-        """输出 4 组三图，按 2 组/页 组织。"""
+        """输出 4 组三图，按 2 组/页 组织。
+
+        版面契约：每组一页两行，行内图片按 heatmap 实际宽度自适应铺满
+        A4 版心宽度（最多 3 图 + 边框），色条单独成列并留间隙。
+        """
         groups = [
             ("ruler_flatness_area", "平整度面积合格率(模拟下尺)"),
             ("ruler_verticality_area", "垂直度面积合格率(模拟下尺)"),
             ("global_plane_flatness_area", "平整度面积合格率(模拟墙面)"),
             ("global_plane_verticality_area", "垂直度面积合格率(模拟墙面)"),
         ]
+
+        # 列定义保持"两组图同一页"的高度契约不变，仅让横向宽度自适应。
+        columns = (
+            ('overlay', 'Overlay', '点云立面热力映射图'),
+            ('heatmap_grid', 'Heatmap Grid', '独立热力网格图'),
+            ('photo', '2D Photo Overlay', '2D现场热力映射图'),
+        )
 
         def render_group(mode: str, title: str) -> str:
             group_images = {
@@ -619,50 +667,65 @@ class PdfReportRenderer:
                 if img.get("mode") == mode
             }
 
-            def img_tag(key, default_title):
+            # 先探测每列是否为色条，再按版心宽度分配各列上限。
+            cell_paths = []
+            for key, _, _ in columns:
                 img = group_images.get(key)
-                if not (img and img.get("path")):
-                    return (
+                path = img.get("path") if img else None
+                cell_paths.append((path, bool(path) and _is_colorbar(path)))
+            limits = PdfReportRenderer._column_widths(cell_paths)
+
+            cells_html = []
+            for (key, default_title, caption), (path, is_bar), (max_w, max_h) in zip(
+                columns, cell_paths, limits
+            ):
+                if not path:
+                    cells_html.append(
+                        "<td>"
                         "<div class='triplet-placeholder'"
                         " style='width:150px;height:280px;'>"
                         f"{escape(default_title)}<br/>（未生成）"
                         "</div>"
+                        f"<div class='triplet-title'>{escape(caption)}</div>"
+                        "</td>"
                     )
-                path = img["path"]
-                # 色条用更宽的约束，防止畸变
-                if _is_colorbar(path):
-                    w, h = _fit_image_size(
-                        path,
-                        max_w=_COLORBAR_MAX_W,
-                        max_h=_COLORBAR_MAX_H,
-                    )
-                else:
-                    w, h = _fit_image_size(path)
+                    continue
+                w, h = _fit_image_size(path, max_w=max_w, max_h=max_h)
                 if w is None:
-                    return (
+                    cells_html.append(
+                        "<td>"
                         "<div class='triplet-placeholder'"
                         " style='width:150px;height:280px;'>"
                         f"{escape(default_title)}<br/>（读取失败）"
                         "</div>"
+                        f"<div class='triplet-title'>{escape(caption)}</div>"
+                        "</td>"
                     )
-                return (
+                    continue
+                # 色条列额外加左内边距，与相邻热力图拉开可见间隙。
+                td_cls = " class='triplet-bar'" if is_bar else ""
+                cells_html.append(
+                    f"<td{td_cls}>"
                     f"<img src='{Path(path).as_uri()}'"
                     f" width='{w}' height='{h}'"
                     f" alt='{escape(default_title)}'/>"
+                    f"<div class='triplet-title'>{escape(caption)}</div>"
+                    "</td>"
                 )
 
+            # table-layout:fixed 下必须给出显式列宽，否则三列等宽会把
+            # 按版心预算放大的热力图裁掉。列宽与 _column_widths 的预算一致，
+            # 色条列按其自身宽度收窄，剩余宽度全部分给热力图列。
+            colgroup = "<colgroup>" + "".join(
+                f"<col width='{w}'/>" for w, _ in limits
+            ) + "</colgroup>"
             return (
                 "<div class='triplet-group'>"
                 f"<h3>{escape(title)}</h3>"
                 "<table class='triplet'>"
-                "<tr>"
-                f"<td>{img_tag('overlay', 'Overlay')}"
-                "<div class='triplet-title'>点云立面热力映射图</div></td>"
-                f"<td>{img_tag('heatmap_grid', 'Heatmap Grid')}"
-                "<div class='triplet-title'>独立热力网格图</div></td>"
-                f"<td>{img_tag('photo', '2D Photo Overlay')}"
-                "<div class='triplet-title'>2D现场热力映射图</div></td>"
-                "</tr></table>"
+                + colgroup
+                + "<tr>" + "".join(cells_html) + "</tr>"
+                "</table>"
                 "</div>"
             )
 

@@ -70,7 +70,7 @@ class FacadeHeatmapTripletRenderer:
             merged_base = def_arr
 
         base_colors = np.full((len(merged_base), 3),
-                          [0.38, 0.42, 0.47], dtype=float)
+                          [0.80, 0.83, 0.86], dtype=float)
 
         excess = np.maximum(np.abs(values) - limit_mm, 0.0)
         vmax_m = (
@@ -554,33 +554,48 @@ class FacadeHeatmapTripletRenderer:
         bgr = src
         h, w = bgr.shape[:2]
 
-        # ── 紧凑 gutter：仅容纳色条本身 + 小间隙 ──
-        bar_w = max(10, min(14, int(round(h * 0.012))))   # 10~14px
-        gap = 10                                            # 色条到热力图的间隙
-        gutter = bar_w + gap + 2                           # 左内边距 2px
+        # ── gutter：色条 + 数值刻度 + 与热力图之间留出呼吸间隙 ──
+        # 旧参数把色条压到 10~14px 宽、间隙仅 10px，色条与热力图几乎贴在一起，
+        # 数值也没有承载空间。这里按图高自适应放大：色条 22~34px，
+        # 间隙至少 18px，并给左上/左下刻度预留 label_w。
+        bar_w = int(np.clip(round(h * 0.030), 22, 34))
+        gap = int(np.clip(round(h * 0.022), 18, 30))
+        label_w = int(np.clip(round(h * 0.055), 34, 62))
+        pad = 6
+        gutter = pad + label_w + bar_w + gap
 
         canvas = np.full((h, w + gutter, 3), 248, dtype=np.uint8)
         canvas[:, gutter:, :] = bgr
 
-        bar_x = 2
-        top = max(12, int(h * 0.12))
-        bottom = min(h - 12, int(h * 0.88))
+        bar_x = pad + label_w
+        top = max(int(h * 0.10), 24)
+        bottom = min(h - max(int(h * 0.10), 24), h - 20)
+        if bottom - top < 40:
+            top, bottom = 12, max(h - 12, 13)
         count = max(bottom - top, 1)
         t = np.linspace(0.0, 1.0, count)
         colours = (np.clip(defect_colormap(t), 0.0, 1.0) * 255).astype(np.uint8)
+        # 热力色带从冷端(下)到暖端(上)排布，与热力图"越红越严重"的直觉一致。
         canvas[top:bottom, bar_x:bar_x + bar_w, :] = colours[:, ::-1][:, None, :]
-        cv2.rectangle(canvas, (bar_x, top), (bar_x + bar_w - 1, bottom - 1),
-                      (70, 70, 70), 1)
+        cv2.rectangle(canvas, (bar_x - 1, top - 1),
+                      (bar_x + bar_w, bottom), (110, 115, 125), 1)
 
         limit_m = float(raster.get('vmin', 0.0))
         max_m = float(raster.get('vmax', limit_m))
-        # 数值写在色条上下方（左侧空间不足，改用横向偏移）
-        cv2.putText(canvas, f'{limit_m * 1000:.1f}',
-                    (bar_x, top - 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, .24, (45, 45, 45), 1)
-        cv2.putText(canvas, f'{max_m * 1000:.1f}',
-                    (bar_x, bottom + 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, .24, (45, 45, 45), 1)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = float(np.clip(h / 1400.0, 0.30, 0.42))
+        thick = 1
+        # 三道刻度：下限 / 中值 / 上限，右对齐到色条左侧。
+        mid_m = (limit_m + max_m) * 0.5
+        for value_m, y in ((max_m, top + 4), (mid_m, (top + bottom) // 2),
+                           (limit_m, bottom - 2)):
+            text = f'{value_m * 1000:.1f}'
+            (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+            cv2.putText(canvas, text, (bar_x - 4 - tw, min(max(y, th), h - 2)),
+                        font, scale, (60, 62, 68), thick, cv2.LINE_AA)
+        # 单位说明放在色条顶端上方，避免与刻度重叠。
+        cv2.putText(canvas, 'mm', (bar_x, max(top - 6, 12)),
+                    font, scale, (90, 92, 98), thick, cv2.LINE_AA)
         return canvas
 
     # ------------------------------------------------------------------

@@ -132,13 +132,16 @@ class TaskProgressController(QObject):
 
     def report(self, task_key: str, percent: Optional[int],
                text: str = '') -> None:
-        """节流写入进度；``percent=None`` 时只更新阶段文案。"""
+        """节流写入进度；``percent=None`` 时只更新阶段文案。
+
+        不定量护栏：弹窗不存在或已终态时不报错，避免后台线程在 GUI 关闭后仍然写进度。
+        """
         dialog = self._dialogs.get(task_key)
         if dialog is None or dialog.is_finished:
             return
-        # 不定量模式：丢弃百分比，仅更新文案，保持滚动动画。
+        # 不定量阶段：丢弃百分比，仅更新文案，保持滚动动画。
         if dialog._bar.maximum() == 0:
-            dialog.report_progress(None, text)
+            dialog.report_progress(-1, text)
             return
         dialog.report_progress(percent, text)
 
