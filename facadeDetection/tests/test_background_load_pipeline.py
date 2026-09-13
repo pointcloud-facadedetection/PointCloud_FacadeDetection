@@ -455,7 +455,7 @@ class _AsyncFakeOverview:
         self._on_compute = on_compute
 
     def create_load_worker(self, operation, project_uuid, *,
-                           file_paths=None, directory=None):
+                           file_paths=None, directory=None, directories=None):
         self.worker_count += 1
         def run(worker):
             worker.check_cancelled()

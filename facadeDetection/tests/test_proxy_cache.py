@@ -333,7 +333,8 @@ class TestProxyCache:
         proxy_dir = harness.cache_path.parent
         raw_dir = harness.raw_points_path.parent
 
-        rows = [SimpleNamespace(id=7, is_selected=True, registered_path=None)]
+        rows = [SimpleNamespace(id=7, is_selected=True, registered_path=None,
+                                file_asset_id=None)]
         list_results = [rows, []]  # 删除前选中列表、删除后剩余列表
         monkeypatch.setattr(svc, 'list_stations',
                             lambda: list_results.pop(0))

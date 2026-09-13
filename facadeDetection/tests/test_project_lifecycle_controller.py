@@ -38,7 +38,7 @@ class FakeOverviewService:
         self.log.append(('overview.commit', len(prepared or [])))
 
     def create_load_worker(self, operation, project_uuid, *,
-                           file_paths=None, directory=None):
+                           file_paths=None, directory=None, directories=None):
         """与真实 ProjectOverviewService 相同的 worker 契约：计算段在
         worker.run() 内执行，结果携带 prepared/uploaded 供 GUI 回调提交。"""
         def run(worker):
@@ -47,14 +47,30 @@ class FakeOverviewService:
                         'uploaded': self.upload_files(file_paths, project_uuid),
                         'prepared': []}
             if operation == 'fls':
+                dirs = list(directories or [])
+                if directory:
+                    dirs.append(directory)
+                all_results = [self.import_fls_directory(d, project_uuid) for d in dirs]
+                merged = {
+                    'success': any(r.get('success') for r in all_results),
+                    'message': '; '.join(
+                        r.get('message', '') for r in all_results
+                        if not r.get('success') and r.get('message')) or '',
+                    'ply_paths': [p for r in all_results for p in r.get('ply_paths', [])],
+                    'uploaded': sum(r.get('uploaded', 1) for r in all_results if r.get('success')),
+                }
                 return {'operation': operation,
-                        'result': self.import_fls_directory(directory, project_uuid)}
+                        'result': merged, 'results': all_results}
             raise ValueError(f'未知加载操作: {operation}')
         return PointCloudLoadWorker(run)
 
     def load_historical_facades(self, uuid, station_id):
         self.log.append(('overview.historical', uuid, station_id))
         return [{'id': 1}]
+
+    def load_all_historical_facades(self, uuid):
+        self.log.append(('overview.historical', uuid, None))
+        return {1: [{'id': 1}]}
 
 
 class FakePointCloudService:
@@ -106,6 +122,8 @@ class FakeStationService:
         self.log.append(('station.restore_view',))
         self.commit_threads.append(threading.get_ident())
         self.commit_count += 1
+        if prepared is not None and prepared[0] is not None:
+            self._active_station_id = prepared[0].id
 
 
 class FakeOperationService:
@@ -118,6 +136,9 @@ class FakeOperationService:
 
     def clear_processing_state(self):
         self.log.append(('op.clear_state',))
+
+    def set_facade_results_for_station(self, station_id, facades):
+        self.log.append(('op.set_facade_results', station_id))
 
     def set_active_project_uuid(self, uuid):
         self.log.append(('op.set_uuid', uuid))
@@ -214,6 +235,7 @@ def test_activate_full_sequence(env):
         ('station.restore_view',),
         ('op.set_uuid', 'uuid-1'),
         ('overview.historical', 'uuid-1', None),
+        ('op.set_facade_results', 1),
     ]
     assert ('set_project', project) in rec.events
     assert ('station_panel', None) in rec.events

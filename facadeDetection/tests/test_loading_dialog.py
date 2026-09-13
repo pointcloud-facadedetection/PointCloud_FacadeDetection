@@ -90,7 +90,7 @@ def _recorder(controller):
 class TestLoadLifecycleSignals:
     def test_upload_emits_started_progress_finished_in_order(self, qapp):
         log = []
-        def factory(operation, project_uuid, *, file_paths=None, directory=None):
+        def factory(operation, project_uuid, *, file_paths=None, directory=None, directories=None):
             def run(worker):
                 return {'operation': operation, 'uploaded': ['f1'], 'prepared': []}
             return PointCloudLoadWorker(run)
@@ -115,7 +115,7 @@ class TestLoadLifecycleSignals:
 
     def test_failed_worker_also_closes_dialog(self, qapp):
         log = []
-        def factory(operation, project_uuid, *, file_paths=None, directory=None):
+        def factory(operation, project_uuid, *, file_paths=None, directory=None, directories=None):
             def run(worker):
                 raise RuntimeError('模拟解析失败')
             return PointCloudLoadWorker(run)
