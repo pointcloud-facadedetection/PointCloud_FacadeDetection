@@ -11,7 +11,12 @@ def normalize_colors(colors, count):
     if colors.ndim == 1 and colors.shape[0] == 3:
         return np.tile(colors, (count, 1))
 
-    colors = colors.reshape(-1, 3)
+    try:
+        colors = colors.reshape(-1, 3)
+    except ValueError:
+        return np.full((count, 3), 0.7, dtype=np.float32)
+    if not np.all(np.isfinite(colors)):
+        return np.full((count, 3), 0.7, dtype=np.float32)
     colors = np.clip(colors, 0.0, 1.0)
 
     if len(colors) != count:

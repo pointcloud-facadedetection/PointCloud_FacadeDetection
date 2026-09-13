@@ -245,6 +245,73 @@ class ViewportInteractor:
         """Return the nearest visible point under a screen position."""
         return self.pick_nearest_point(pos, cloud_name=cloud_name)
 
+    def get_depth_range_in_rect(self, cloud_name, start, end,
+                                 percentile_low=2.0, percentile_high=98.0):
+        """
+        根据屏幕矩形选框，投影点云并返回框内点的深度范围统计。
+
+        不返回全部索引，仅用于 ROI BBox 深度边界计算。
+
+        Args:
+            cloud_name: 点云名称
+            start, end: 选框对角点（QPoint，逻辑像素坐标）
+            percentile_low, percentile_high: 深度百分位边界（抗噪）
+
+        Returns:
+            tuple: (depth_min, depth_max, center_depth) 或 (None, None, None)
+        """
+        name = cloud_name or self.scene.active_name
+        data = self.scene.get_cloud_data(name)
+        if data is None:
+            return None, None, None
+
+        pos = data.get("pos")
+        if pos is None or len(pos) == 0:
+            return None, None, None
+
+        x1, x2 = sorted([int(start.x()), int(end.x())])
+        y1, y2 = sorted([int(start.y()), int(end.y())])
+
+        if (x2 - x1) < 1 or (y2 - y1) < 1:
+            return None, None, None
+
+        n = int(len(pos))
+        chunk = 1_000_000
+        depths = []
+        base = 0
+
+        while base < n:
+            tail = min(n, base + chunk)
+            pts = pos[base:tail]
+            proj = self.camera.project_points(pts)
+            if proj is None:
+                base = tail
+                continue
+            screen, valid = proj
+            if screen is None or len(screen) == 0:
+                base = tail
+                continue
+
+            m = (
+                valid
+                & (screen[:, 0] >= x1)
+                & (screen[:, 0] <= x2)
+                & (screen[:, 1] >= y1)
+                & (screen[:, 1] <= y2)
+            )
+            if np.any(m):
+                depths.extend(screen[m, 2].tolist())
+            base = tail
+
+        if not depths:
+            return None, None, None
+
+        depths_arr = np.asarray(depths, dtype=np.float64)
+        d_min = float(np.percentile(depths_arr, percentile_low))
+        d_max = float(np.percentile(depths_arr, percentile_high))
+        d_center = float(np.median(depths_arr))
+        return d_min, d_max, d_center
+
     def select_indices_in_rect(self, cloud_name, start, end):
         """
         根据屏幕矩形选框，投影点云并返回框内点的全局索引。

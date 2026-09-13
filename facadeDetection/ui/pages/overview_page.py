@@ -406,24 +406,51 @@ class OverviewPageMixin:
         if dlg.exec() != int(QDialog.DialogCode.Accepted):
             return
 
+        values = dlg.values()
+
+        # 保存旧资源列表用于计算差集
+        old_fls = set(getattr(project, 'fls_directories', []) or [])
+        old_pcs = set(getattr(project, 'pointcloud_files', []) or [])
+
         try:
             updated_project = self.project_overview_service.update_project(
-                project_id, **dlg.values()
+                project_id, **values
             )
         except (ValueError, OSError) as error:
             QMessageBox.warning(self, '编辑项目', str(error))
             return
 
-        # 当前项目被重命名时，同步顶部项目名、概览摘要和窗口标题。
-        if (
+        # 计算新增资源（编辑项目只导入新增项，不重复加载已有项）
+        new_fls = [d for d in (values.get('fls_directories') or []) if d not in old_fls]
+        new_pcs = [p for p in (values.get('pointcloud_files') or []) if p not in old_pcs]
+
+        is_current = (
             self.current_project is not None
             and self.current_project.project_id == project_id
-        ):
+        )
+
+        if is_current:
             self._set_current_project(updated_project)
-            # Refresh the live station projection immediately after editing;
-            # downstream detection/report services read this project session.
+
+        # 当前项目新增资源需同步视口；非当前项目仅需后台转换 FLS
+        if new_fls:
+            self._start_load('fls', project_id, directories=new_fls)
+        elif new_pcs:
+            self._start_load('upload', project_id, file_paths=new_pcs)
+        elif is_current:
+            # 无新增资源（或仅删除）时刷新现有视口与面板
             try:
                 self.station_service.refresh()
+                stations = self.station_service.list_stations()
+                if stations:
+                    active_id = getattr(self.station_service, '_active_station_id', None)
+                    active_exists = any(
+                        int(s.id) == int(active_id) for s in stations
+                        if active_id is not None)
+                    if not active_exists:
+                        self.station_service.show_single(stations[0])
+                else:
+                    self.render_service.clear_scene_display()
                 self._refresh_station_panel()
             except Exception as error:
                 QMessageBox.warning(self, '编辑项目', f'资源已保存，但站点视图刷新失败：{error}')

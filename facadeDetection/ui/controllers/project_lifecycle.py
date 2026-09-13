@@ -45,7 +45,7 @@ class ProjectLifecycleController(QObject):
         self._active_load_worker = None
 
     def start_load(self, operation, project_id, *, file_paths=None,
-                   directory=None, project=None):
+                   directory=None, directories=None, project=None):
         """upload/fls/activate：计算段后台执行，Open3D 提交段回 GUI。
 
         worker 只做准备段；完成信号经队列投递回 GUI 线程后，由
@@ -96,7 +96,7 @@ class ProjectLifecycleController(QObject):
         try:
             worker = self.project_overview_service.create_load_worker(
                 operation, project_id,
-                file_paths=file_paths, directory=directory)
+                file_paths=file_paths, directory=directory, directories=directories)
         except Exception as exc:
             self._load_in_progress = False
             self.on_load_failed(generation, str(exc))
@@ -157,6 +157,17 @@ class ProjectLifecycleController(QObject):
         project_uuid = result.get('project_uuid')
         self.station_panel_refresh_requested.emit(None)
         prepared = result.get('prepared_view')
+        # E57 从不在项目恢复阶段重新解析；如果其生成的 cache PLY 被清理，
+        # 保留站点记录并明确提示操作者通过原始 E57 重导/重转换。
+        unavailable = [row.display_name for row in self.station_service.list_stations()
+                       if getattr(row, 'last_error', None) and
+                       'cache PLY' in str(row.last_error)]
+        if unavailable:
+            self.warning_requested.emit(
+                'E57 缓存缺失',
+                '以下 E57 站点的 cache PLY 不存在，已跳过恢复：\n- ' +
+                '\n- '.join(unavailable) +
+                '\n\n请在项目中重新导入对应原始 E57 以重新生成缓存。')
         if prepared is not None and prepared[0] is None:
             # 空项目：与旧同步路径一致，跳过后续项目级状态切换
             self.render_service.clear_scene_display()

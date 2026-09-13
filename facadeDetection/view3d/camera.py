@@ -368,3 +368,73 @@ class CameraController:
 
     def set_scene_scale_provider(self, provider):
         self._scene_scale_provider = provider
+
+    # ------------------------------------------------------------------
+    # 屏幕矩形四角反投影到世界坐标（ROI BBox 紧致生成，正交投影专用）
+    # ------------------------------------------------------------------
+    def unproject_screen_corners(self, rect, depth_min=0.0, depth_max=0.0):
+        """
+        将屏幕矩形四个角点反投影到指定深度范围的世界坐标。
+
+        正交投影下映射为线性：
+            world = lookat
+                    + (sx - w/2) * wpp * right
+                    - (sy - h/2) * wpp * up
+                    + depth * front
+
+        Args:
+            rect: (x1, y1, x2, y2) 屏幕像素坐标（逻辑像素，左上角原点）
+            depth_min, depth_max: 沿相机 front 方向的深度偏移量
+
+        Returns:
+            np.ndarray: (8, 3) 世界坐标数组，若失败返回 None
+        """
+        ctr = self.adapter.get_view_control()
+        if ctr is None or self.viewport_widget is None:
+            return None
+        if not self.is_orthographic():
+            return None
+
+        try:
+            w, h, dpr = self._viewport_metrics()
+            lookat = np.asarray(self._safe_get(ctr, 'get_lookat', [0, 0, 0]), dtype=float)
+            front = np.asarray(self._safe_get(ctr, 'get_front', [0, 0, -1]), dtype=float)
+            up = np.asarray(self._safe_get(ctr, 'get_up', [0, 1, 0]), dtype=float)
+
+            front = front / (np.linalg.norm(front) + 1e-12)
+            up = up - front * float(np.dot(front, up))
+            up = up / (np.linalg.norm(up) + 1e-12)
+            right = np.cross(front, up)
+            right = right / (np.linalg.norm(right) + 1e-12)
+
+            wpp = self.get_world_per_pixel()
+            if wpp is None or wpp <= 0:
+                # fallback 到旧公式
+                try:
+                    zoom = float(self._safe_get(ctr, 'get_zoom', 0.6))
+                except Exception:
+                    zoom = 0.6
+                scene_scale = self._estimate_scene_scale()
+                scene_factor = max(0.2, min(scene_scale / 10.0, 3.0))
+                pan_base = float(getattr(Config, 'PAN_BASE_SPEED', 0.06))
+                zoom_factor = 0.6 / max(zoom, 0.02)
+                wpp = pan_base * zoom_factor * scene_factor / max(1.0, dpr)
+                wpp = max(wpp, 1e-6)
+
+            x1, y1, x2, y2 = map(float, rect)
+            corners_screen = [
+                (x1, y1), (x2, y1),
+                (x1, y2), (x2, y2),
+            ]
+
+            pts = []
+            for sx, sy in corners_screen:
+                dx = (sx - w * 0.5) * wpp
+                dy = -(sy - h * 0.5) * wpp
+                base = lookat + dx * right + dy * up
+                pts.append(base + depth_min * front)
+                pts.append(base + depth_max * front)
+
+            return np.asarray(pts, dtype=np.float64).reshape(8, 3)
+        except Exception:
+            return None

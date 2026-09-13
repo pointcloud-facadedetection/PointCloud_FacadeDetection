@@ -20,6 +20,11 @@ class PointCloudScene:
 
     def add_cloud(self, name, positions, colors=None, point_size=0.3, reset_view=False):
         positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
+        has_source_colors = (
+            colors is not None and np.asarray(colors).size == len(positions) * 3 and
+            np.asarray(colors).reshape(-1, 3).shape[0] == len(positions) and
+            np.all(np.isfinite(np.asarray(colors)))
+        )
         colors = np.ascontiguousarray(normalize_colors(colors, len(positions)).astype(np.float32))
 
         had_clouds = bool(self.point_data)
@@ -27,6 +32,8 @@ class PointCloudScene:
             "pos": positions,
             "color": colors,
             "size": max(self.MIN_POINT_SIZE, min(float(point_size), self.MAX_POINT_SIZE)),
+            "has_source_colors": has_source_colors,
+            "color_source": "ply_rgb" if has_source_colors else "fallback_gray",
             "_render_sequence": 0,
         }
         self.active_name = name

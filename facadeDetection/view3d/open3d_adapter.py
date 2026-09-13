@@ -80,11 +80,20 @@ class Open3DAdapter:
         opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
         opt.point_size = self.MIN_POINT_PIXEL_SIZE
         opt.show_coordinate_frame = True
+        # 强制使用点云自带颜色；避免 Open3D 默认以 Default/XCoordinate 等模式
+        try:
+            opt.point_color_option = o3d.visualization.RenderOption.PointColorOption.Color
+        except Exception:
+            pass
         self.request_render('render.options')
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):
         if not self._assert_owner():
             return
+        # RenderOption is process/window state, not geometry state.  Reassert
+        # Color immediately before the first (and replacement) cloud upload so
+        # native Open3D defaults cannot hide valid PLY RGB attributes.
+        self.configure_render_options()
         old = self.geometries.get(name)
         if old is not None:
             try:

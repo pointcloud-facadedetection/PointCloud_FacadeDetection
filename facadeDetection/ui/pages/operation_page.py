@@ -168,10 +168,10 @@ class OperationPageMixin:
         self.lbl_facade_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.lbl_facade_summary)
         
-        self.btn_evaluate_selected = QPushButton('评估选中立面')
+        self.btn_evaluate_selected = QPushButton('评估立面质量')
         self.btn_evaluate_selected.setToolTip('对右侧列表当前选中的立面执行质量评估')
         self.btn_evaluate_selected.clicked.connect(self._evaluate_selected_facade)
-        self.btn_evaluate_selected.setMinimumHeight(34)
+        self.btn_evaluate_selected.setMinimumHeight(40)
         self.btn_evaluate_selected.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self.btn_evaluate_selected)
 
@@ -190,6 +190,12 @@ class OperationPageMixin:
         self.list_facades.setObjectName('lstFacades')
         self.list_facades.setSpacing(4)
         self.list_facades.setUniformItemSizes(False)
+        # 单选保持原交互；按住 Ctrl/Shift 可复用同一评估按钮批量检测。
+        self.list_facades.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        
+        # 保持原有单选交互；批量入口由控制层保留，UI 不强制改变列表选择模式。
+        # 这样旧用户无需学习 Ctrl/Shift 多选，单立面只要标记“完整”即可评估。
+        # self.list_facades.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.list_facades.itemClicked.connect(self._on_facade_item_clicked)
         lay.addWidget(self.list_facades, 3)
         

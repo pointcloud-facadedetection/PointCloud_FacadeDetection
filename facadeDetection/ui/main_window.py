@@ -1028,9 +1028,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
 
             status = self._facade_review_status(f)
             action_button = QPushButton(
-                '完整' if status == 'complete' else '确认完整')
-            action_button.setFixedWidth(72)
-            action_button.setMinimumHeight(26)
+                '处理' if status == 'complete' else '标记处理')
+            action_button.setFixedWidth(84)
+            action_button.setMinimumHeight(32)
             action_button.setStyleSheet("""
                 QPushButton {
                     font-size: 11px;
@@ -1045,7 +1045,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                     border-color: #94a3b8;
                 }
             """)
-            action_button.setToolTip('点击切换完整/不完整；仅完整立面允许质量计算')
+            action_button.setToolTip('点击确认立面状态；仅标记立面允许质量计算')
             action_button.clicked.connect(
                 lambda _=False, obj=f, button=action_button:
                 self._toggle_facade_review_status(obj, button))
@@ -1092,7 +1092,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         item = self.list_facades.currentItem()
         if item is not None and int((item.data(Qt.ItemDataRole.UserRole) or {}).get('id', -1)) == int(facade.get('id', -2)):
             item.setData(Qt.ItemDataRole.UserRole, facade)
-        button.setText('完整' if status == 'complete' else '不完整')
+        button.setText('处理' if status == 'complete' else '不处理')
         if hasattr(self.project_operation_service, 'persist_facade_review_status'):
             self.project_operation_service.persist_facade_review_status(facade)
 
@@ -1110,19 +1110,39 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             value = (facade or {}).get('preview_status')
         return value if value in {'complete', 'incomplete'} else 'pending'
 
+    def _collect_complete_facades(self) -> tuple[list[dict], int]:
+        """返回 (完整立面列表, 被跳过的数量)。
+
+        供批量评估按钮与其它潜在入口复用，避免各处重复实现筛选逻辑。
+        """
+        latest = self.project_operation_service.last_facade_results or []
+        complete = [
+            f for f in latest
+            if self._facade_review_status(f) == 'complete'
+        ]
+        return complete, len(latest) - len(complete)
+    
     def _evaluate_selected_facade(self):
-        item = self.list_facades.currentItem()
-        if item is None:
-            QMessageBox.information(self, '质量评估', '请先在右侧结果列表中选择一个立面。')
+        """触屏友好的批量评估入口（基于“处理”标记，不依赖多选）。"""
+        facades, skipped = self._collect_complete_facades()
+        if not facades:
+            if skipped == 0:
+                QMessageBox.information(
+                    self, '质量评估',
+                    '当前没有可评估的立面，请先执行立面检测。')
+            else:
+                QMessageBox.information(
+                    self, '质量评估',
+                    '尚未有任何立面被标记为“处理”。\n'
+                    '请先在结果列表中点击“标记处理”，再执行质量检测。')
             return
-        facade = item.data(Qt.ItemDataRole.UserRole)
-        if facade:
-            if self._facade_review_status(facade) != 'complete':
-                QMessageBox.information(self, '质量评估', '请先人工确认该立面为完整立面。')
-                return
-            current = next((f for f in (self.project_operation_service.last_facade_results or [])
-                            if int(f.get('id', -1)) == int(facade.get('id', -2))), facade)
-            self.facade_quality_controller.evaluate_facade(current)
+        if skipped:
+            self.statusBar().showMessage(
+                f'已自动跳过 {skipped} 个未标记为处理的立面', 4000)
+        if len(facades) == 1:
+            self.facade_quality_controller.evaluate_facade(facades[0])
+        else:
+            self.facade_quality_controller.evaluate_facades_batch(facades)
 
     def _on_facade_item_clicked(self, item):
         f = item.data(Qt.ItemDataRole.UserRole)
@@ -1178,8 +1198,11 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                     colors[:] = np.asarray(
                         self.render_service.facade_color_for(facade), dtype=float)
                 project_uuid = getattr(self.current_project, 'project_id', None)
-                results_dir = (Storage.ensure_project_dirs(project_uuid)['results']
-                               if project_uuid else None)
+                if project_uuid:
+                    results_dir = self.facade_quality_controller._quality_results_dir(
+                        project_uuid, facade)
+                else:
+                    results_dir = None
                 return {'results_dir': results_dir, 'points': points,
                         'colors': colors}
             except Exception as exc:
@@ -1343,10 +1366,11 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             self.station_list.blockSignals(False)
 
     def _start_load(self, operation, project_id, *, file_paths=None,
-                    directory=None, project=None):
+                    directory=None, directories=None, project=None):
         self.lifecycle_controller.start_load(
             operation, project_id,
-            file_paths=file_paths, directory=directory, project=project)
+            file_paths=file_paths, directory=directory, directories=directories,
+            project=project)
 
     def _prepare_project_activation(self, project_id):
         self.lifecycle_controller.prepare_project_activation(project_id)
