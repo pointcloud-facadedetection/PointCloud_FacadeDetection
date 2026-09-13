@@ -6,14 +6,55 @@ from algorithms.registration import (
     audit_exported_global_transform, estimate_xy_initial_transform,
 )
 from services import proxy_cache
+from services.dal.file_repo import FileRepo
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.logging_utils import log_event
 from algorithms.geometry import stratified_proxy_build, estimate_elevation_angles
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
-from utils.e57_reader import read_e57
 from config.storage import Storage
 import uuid
+
+def _safe_int(value, default: int = 0) -> int:
+    """Convert value to int, returning default if value is None or invalid."""
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_denoise_state(state):
+    """将持久化的去噪状态安全归一化，兼容旧字段与 None 污染。
+    
+    返回的新 dict 中所有数值字段均为安全 Python int；数组字段均为
+    list（可能为空），绝不包含 None。
+    """
+    if not state:
+        return {}
+    out = {}
+    # 标量字段安全提取
+    for key in ('enabled', 'proxy_count', 'proxy_base_count'):
+        raw = state.get(key)
+        if key == 'enabled':
+            out[key] = bool(raw) if raw is not None else False
+        else:
+            out[key] = _safe_int(raw, 0)
+    # 数组字段：过滤 None 并展平
+    for key in ('proxy_source_offsets', 'proxy_source_indices', 'ranges',
+                'keep_proxy_indices', 'source_offsets', 'source_indices',
+                'proxy_keep_indices'):
+        raw = state.get(key)
+        if isinstance(raw, list):
+            cleaned = [x for x in raw if x is not None]
+            out[key] = cleaned
+        elif isinstance(raw, np.ndarray):
+            out[key] = raw.tolist()
+        else:
+            out[key] = []
+    return out
+
 
 class PointCloudStationService:
     def __init__(self, render_service, project_uuid=None, pointcloud_service=None):
@@ -47,6 +88,24 @@ class PointCloudStationService:
     def set_selected(self, station_id, selected):
         PointCloudStationRepo.set_selected(self.project_uuid, station_id, selected)
 
+    @staticmethod
+    def _rebuild_csr_for_keep(old_offsets, old_indices, keep_proxy):
+        """从保留的 proxy 索引重建 CSR 映射。"""
+        n_new = len(keep_proxy)
+        if n_new == 0:
+            return np.zeros(1, dtype=np.int64), np.empty(0, dtype=np.int32)
+        counts = old_offsets[keep_proxy + 1] - old_offsets[keep_proxy]
+        new_offsets = np.zeros(n_new + 1, dtype=np.int64)
+        new_offsets[1:] = np.cumsum(counts, dtype=np.int64)
+        total = int(new_offsets[-1])
+        if total == 0:
+            return new_offsets, np.empty(0, dtype=np.int32)
+        offsets_in_group = np.arange(total, dtype=np.int64) - np.repeat(
+            new_offsets[:-1], counts)
+        gather = np.repeat(old_offsets[keep_proxy], counts) + offsets_in_group
+        new_indices = old_indices[gather].astype(np.int32, copy=False)
+        return new_offsets, new_indices
+
     def delete_selected(self):
         rows = [x for x in self.list_stations() if x.is_selected]
         if not rows:
@@ -56,9 +115,13 @@ class PointCloudStationService:
         if self.pointcloud is not None:
             for row in rows:
                 self.pointcloud.release_station_domain(row.id)
-        PointCloudStationRepo.delete(self.project_uuid, [x.id for x in rows])
+        # 删除站点前同步删除关联的 FileAsset 和缓存
         for row in rows:
+            if row.file_asset_id is not None:
+                FileRepo.delete_file(self.project_uuid, row.file_asset_id,
+                                     delete_disk=False)
             proxy_cache.delete_station_cache(self.project_uuid, row.id)
+        PointCloudStationRepo.delete(self.project_uuid, [x.id for x in rows])
         for path in result_paths:
             result = Path(path)
             # 配准结果在一次操作中由所有参与站点共享；
@@ -91,7 +154,7 @@ class PointCloudStationService:
         # 二进制 PLY 走 memmap 免解析快读；不满足快读条件时回退 Open3D，
         # 两条路径对同一资产逐点一致（uchar rgb /255 归一化语义相同）。
         if Path(path).suffix.lower() == '.e57':
-            return read_e57(path)
+            raise RuntimeError('站点运行时只允许读取 cache PLY；请重新导入原始 E57')
         fast = read_ply_fast(path)
         if fast is not None:
             return fast
@@ -146,8 +209,8 @@ class PointCloudStationService:
                     self._global_coordinate_metadata(station.source_path))
                 self._station_fingerprints[station.id] = fingerprint_key
         if existing is not None and self._station_fingerprints.get(station.id) == fingerprint_key:
-            state = PointCloudStationRepo.get_denoise_state(
-                self.project_uuid, station.id)
+            state = _normalize_denoise_state(PointCloudStationRepo.get_denoise_state(
+                self.project_uuid, station.id))
             if not (state and state.get('enabled') and
                     not (existing.metadata or {}).get('denoise_restored')):
                 self._dataset_ids[station.id] = dataset_id
@@ -169,7 +232,8 @@ class PointCloudStationService:
                 self.project_uuid, station.id, fingerprint_key,
                 points=points, colors=colors)
         source_id = f'{dataset_id}:source'
-        state = PointCloudStationRepo.get_denoise_state(self.project_uuid, station.id)
+        state = _normalize_denoise_state(PointCloudStationRepo.get_denoise_state(
+            self.project_uuid, station.id))
         dist_path = Path(station.source_path).with_suffix('.dist')
         metadata = {'source_id': source_id, 'station_id': station.id,
                     'project_uuid': self.project_uuid,
@@ -197,9 +261,10 @@ class PointCloudStationService:
                    (state_offsets[1:] >= state_offsets[:-1])) and
             np.all((state_indices >= 0) & (state_indices < len(points))) and
             np.all(np.diff(state_offsets) > 0))
-        # 缓存只代表 dist 重建分支的结果；dist 已消失时不得用缓存改变语义。
+        # 代理缓存与 dist 文件独立：只要指纹匹配即可加载。
+        # dist 文件仅用于首次重建，后续重载完全依赖缓存的代理数组本体。
         cached_proxy = None
-        if not restored_direct and dist_path.exists():
+        if not restored_direct:
             cached_proxy = proxy_cache.load_proxy_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 source_count=len(points))
@@ -266,7 +331,26 @@ class PointCloudStationService:
                 representative_ids=representatives,
                 proxy_points=proxy, proxy_colors=proxy_colors)
         else:
-            proxy, proxy_colors = points, colors
+            # 兜底：若去噪快照携带代理 CSR，从中重建代理点云，
+            # 避免 proxy 退化为 raw 导致后续去噪 keep 索引失效。
+            if (state and state.get('enabled') and
+                    len(state_offsets) >= 2 and
+                    len(state_offsets) == int(state.get('proxy_base_count') or 0) + 1 and
+                    len(state_indices) == int(state_offsets[-1]) and
+                    np.all((state_indices >= 0) & (state_indices < len(points)))):
+                representative_ids = state_indices[state_offsets[:-1]]
+                proxy = points[representative_ids]
+                proxy_colors = colors[representative_ids] if colors is not None else None
+                metadata.update({
+                    'proxy_source_offsets': state_offsets,
+                    'proxy_source_indices': state_indices.astype(np.int32, copy=False),
+                    'ranges': np.zeros(len(proxy), dtype=np.float32),
+                    'proxy_reconstructed': True,
+                })
+                print(f'[PCFD] proxy.reconstructed station={station.id} '
+                      f'proxy={len(proxy)} raw={len(points)}', flush=True)
+            else:
+                proxy, proxy_colors = points, colors
         self.pointcloud.register_source_asset(source_id, points, colors,
                                               {'ply_path': station.source_path})
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
@@ -274,7 +358,7 @@ class PointCloudStationService:
         self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
         if state and state.get('enabled') and not restored_direct:
-            # 兼容旧项目：proxy_keep_indices 别名
+            # 兼容旧项目：proxy_keep_indices / keep_proxy_indices 别名
             keep = np.asarray(
                 state.get('keep_proxy_indices', state.get('proxy_keep_indices', [])),
                 dtype=np.int64)
@@ -283,7 +367,9 @@ class PointCloudStationService:
             valid_keep = (len(keep) == saved_count and
                           len(np.unique(keep)) == len(keep) and
                           np.all((keep >= 0) & (keep < len(proxy))))
+
             # 后续的去噪运行存储的是相对于上一次去噪后代理的索引。
+            # 如果 base_count 与当前 proxy 长度不一致，尝试通过 CSR 映射翻译。
             if base_count != len(proxy):
                 translated = self._translate_denoise_keep_to_base(
                     proxy, metadata, state)
@@ -291,45 +377,66 @@ class PointCloudStationService:
                     keep = translated
                     valid_keep = True
                     base_count = len(proxy)
-            # 在代理基数计数被持久化之前创建的旧状态可能由逐点代理生成。
-            legacy_direct = (valid_keep and base_count != len(proxy) and
-                             not state.get('proxy_source_offsets') and
-                             len(keep) == saved_count and
-                             np.all((keep >= 0) & (keep < len(proxy))))
-            if (base_count == len(proxy) and valid_keep):
-                metadata = dict(dataset.metadata or {})
+                    print(f'[PCFD] denoise.translated station={station.id} '
+                          f'keep={len(keep)} proxy={len(proxy)}', flush=True)
+
+            # 严格校验：去噪索引必须匹配当前代理基数
+            if base_count == len(proxy) and valid_keep:
+                new_meta = dict(dataset.metadata or {})
                 # 去噪快照来自 JSON（list）；运行期统一转回 ndarray
                 # 兼容旧项目：source_offsets / source_indices 别名
-                for key, dtype, aliases in (('proxy_source_offsets', np.int64, ('source_offsets',)),
-                                   ('proxy_source_indices', np.int32, ('source_indices',)),
-                                   ('ranges', np.float32, ())):
+                for key, dtype, aliases in (
+                        ('proxy_source_offsets', np.int64, ('source_offsets',)),
+                        ('proxy_source_indices', np.int32, ('source_indices',)),
+                        ('ranges', np.float32, ())):
                     value = state.get(key)
                     if value is None:
-                        value = next((state.get(alias) for alias in aliases if state.get(alias) is not None), None)
+                        value = next((state.get(alias) for alias in aliases
+                                      if state.get(alias) is not None), None)
                     if value is not None:
-                        metadata[key] = np.asarray(value, dtype=dtype)
+                        new_meta[key] = np.asarray(value, dtype=dtype)
+
+                # 去噪后需要重建 CSR：keep 索引相对于当前 proxy，
+                # 但 source_indices 仍指向原始 raw 点，只需按 keep 重新切片。
+                old_offsets = dataset.index.source_raw_offsets
+                old_indices = dataset.index.source_raw_indices
+                if (old_offsets is not None and old_indices is not None and
+                        len(old_offsets) == len(proxy) + 1):
+                    new_offsets, new_indices = self._rebuild_csr_for_keep(
+                        old_offsets, old_indices, keep)
+                    new_meta['proxy_source_offsets'] = new_offsets
+                    new_meta['proxy_source_indices'] = new_indices
+                    if 'ranges' in new_meta:
+                        old_ranges = np.asarray(new_meta['ranges'], dtype=np.float32)
+                        if len(old_ranges) == len(proxy):
+                            new_meta['ranges'] = old_ranges[keep]
+                    new_meta['denoise_restored'] = True
+
                 dataset = self.pointcloud.register_dataset(
                     dataset_id, proxy[keep],
                     proxy_colors[keep] if proxy_colors is not None else None,
-                    metadata=metadata)
+                    metadata=new_meta)
                 print(f'[PCFD] denoise.restored station={station.id} '
                       f'proxy={len(keep)} raw={len(points)}', flush=True)
-            elif legacy_direct:
-                dataset = self.pointcloud.register_dataset(
-                    dataset_id, proxy[keep],
-                    proxy_colors[keep] if proxy_colors is not None else None,
-                    metadata=dict(dataset.metadata or {}))
-                print(f'[PCFD] denoise.restored_legacy station={station.id} '
-                      f'proxy={len(keep)} base={len(proxy)} expected={base_count}',
-                      flush=True)
             else:
-                # 当存在去噪快照但无法重放时，绝不静默发布含噪基础代理。
-                print(f'[PCFD] denoise.restore_invalid station={station.id} '
+                # 去噪快照无法重放时：兜底加载原始 PLY（不报错），
+                # 但保留去噪元数据提示用户重新去噪。
+                print(f'[PCFD] denoise.restore_fallback station={station.id} '
                       f'base={len(proxy)} expected={base_count} '
                       f'keep={len(keep)} saved={saved_count}', flush=True)
-                raise RuntimeError(
-                    f'站点 {station.display_name} 的去噪状态与当前代理点云不一致，'
-                    '为避免展示原始噪点云，请重新执行去噪。')
+                new_meta = dict(dataset.metadata or {})
+                new_meta['denoise_fallback'] = True
+                new_meta['denoise_fallback_reason'] = (
+                    f'base_count={base_count} proxy={len(proxy)} '
+                    f'keep={len(keep)} saved={saved_count}')
+                # 清除旧的 CSR 偏移以避免下游误用
+                for key in ('proxy_source_offsets', 'proxy_source_indices',
+                            'ranges', 'source_offsets', 'source_indices'):
+                    new_meta.pop(key, None)
+                dataset = self.pointcloud.register_dataset(
+                    dataset_id, proxy,
+                    proxy_colors if proxy_colors is not None else None,
+                    metadata=new_meta)
         # 检测估计的代理法向对同一资产是确定的；随缓存恢复挂到 dataset，
         # 下次检测/重开直接复用，不再重复估计。去噪子集长度与缓存代理数
         # 不一致时跳过，由检测按现行逻辑估计。

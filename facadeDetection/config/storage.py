@@ -155,9 +155,39 @@ class Storage:
 
     @classmethod
     def resolve_project_root(cls, project_uuid: str) -> Path:
-        # Cached
-        if project_uuid in cls._uuid_root_cache:
-            return cls._uuid_root_cache[project_uuid]
+        """Resolve the canonical on-disk root for a project UUID.
+
+        The global index database is authoritative for projects created with a
+        human-readable directory name.  UUID-named directories are retained
+        solely as a legacy compatibility fallback.
+        """
+        if not project_uuid:
+            raise ValueError('project_uuid 不能为空')
+
+        # The index is the only source which survives a process restart without
+        # guessing a directory from the UUID.  Import lazily: db.connection
+        # imports Storage during its own module initialisation.
+        try:
+            from db.connection import IndexProject, index_session
+            from sqlalchemy import select
+            with index_session() as session:
+                row = session.execute(select(IndexProject).where(
+                    IndexProject.project_uuid == project_uuid)).scalar_one_or_none()
+            if row and row.root_dir:
+                root = Path(row.root_dir).expanduser().resolve()
+                projects_root = cls.PROJECTS_ROOT.resolve()
+                if root.parent == projects_root:
+                    cls._uuid_root_cache[project_uuid] = root
+                    return root
+        except Exception:
+            # Startup and damaged-index compatibility paths continue below.
+            pass
+
+        # Cached values are valid only when no authoritative index row exists.
+        cached = cls._uuid_root_cache.get(project_uuid)
+        if cached is not None:
+            return cached
+
         # 1) legacy path
         legacy = cls.PROJECTS_ROOT / project_uuid
         if legacy.exists():

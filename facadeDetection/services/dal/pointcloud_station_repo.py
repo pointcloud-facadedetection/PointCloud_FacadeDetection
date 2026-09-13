@@ -4,14 +4,32 @@ from db.connection import project_session
 from models import Project, FileAsset, PointCloudStation, PointCloudViewState
 from models.enums import FileKind
 from services.dal.file_repo import FileRepo
+from utils.logging_utils import log_event
 
 class PointCloudStationRepo:
+    @staticmethod
+    def _runtime_path(asset):
+        """Return the PLY consumed by runtime, never an original E57 path."""
+        raw_path = Path(asset.path or '')
+        if raw_path.suffix.lower() != '.e57':
+            return raw_path, None
+        cache_path = Path((asset.meta_json or {}).get('cache_path') or '')
+        if cache_path.is_file() and cache_path.suffix.lower() == '.ply':
+            return cache_path, None
+        if raw_path.is_file():
+            return None, 'E57 已导入但 cache PLY 丢失，请重新导入原始 E57'
+        return None, '原始 E57 与 cache PLY 均不存在，请重新选择 E57 文件'
+
     @staticmethod
     def get_asset_fingerprint(project_uuid, station_id):
         """返回某个站点的持久化source fingerprint
 
         将此查找操作保存在存储库中，既避免了依赖脱离的 ORM关系，
         又使运行时缓存键与文件名无关。
+
+        对于 E57 资产，若已生成 cache PLY，则返回 cache PLY 的指纹；
+        这样去噪/代理缓存与 cache 内容严格绑定，原始 E57 移动/删除
+        不影响已就绪站点的恢复。
         """
         with project_session(project_uuid) as s:
             row = s.get(PointCloudStation, int(station_id))
@@ -20,6 +38,14 @@ class PointCloudStationRepo:
             asset = s.get(FileAsset, row.file_asset_id) if row.file_asset_id else None
             if asset is None:
                 return (str(row.source_path), None, None)
+            # E57 运行时身份是其 cache PLY，指纹必须反映 cache 内容
+            if Path(asset.path or '').suffix.lower() == '.e57':
+                meta = dict(asset.meta_json or {})
+                cache_path = meta.get('cache_path')
+                cache_sha = meta.get('cache_sha256')
+                cache_size = meta.get('cache_size_bytes')
+                if cache_path and cache_sha:
+                    return (str(cache_path), cache_sha, cache_size)
             return (str(asset.path), asset.sha256, asset.size_bytes)
 
     @staticmethod
@@ -88,11 +114,21 @@ class PointCloudStationRepo:
             for order, asset in enumerate(assets):
                 valid, reason = FileRepo.validate_asset(asset)
                 asset.meta_json = dict(asset.meta_json or {}, validation_status=reason)
+                runtime_path, cache_reason = PointCloudStationRepo._runtime_path(asset)
+                if cache_reason:
+                    valid, reason = False, cache_reason
+                    log_event(project_uuid, 'e57.cache.missing', asset_id=asset.id,
+                              source_path=asset.path,
+                              cache_path=(asset.meta_json or {}).get('cache_path'))
+                elif Path(asset.path or '').suffix.lower() == '.e57':
+                    # 导入完成后 cache PLY 是唯一运行时资产。原 E57 可移动/归档，
+                    # 不能因此阻断项目恢复，也绝不回退去读取其复杂元数据。
+                    valid, reason = True, 'ok'
                 key = f'{project_uuid}:{asset.sha256 or asset.id}'
                 if asset.id in existing:
                     row = existing[asset.id]
                     row.is_deleted = False
-                    row.source_path = asset.path
+                    row.source_path = str(runtime_path or asset.path)
                     row.last_error = None if valid else reason
                     row.display_name = asset.original_name or Path(asset.path).name
                     row.display_order = order
@@ -102,7 +138,7 @@ class PointCloudStationRepo:
                     row = by_key[key]
                     row.file_asset_id = asset.id
                     row.is_deleted = False
-                    row.source_path = asset.path
+                    row.source_path = str(runtime_path or asset.path)
                     row.last_error = None if valid else reason
                     row.display_name = asset.original_name or Path(asset.path).name
                     row.display_order = order
@@ -110,7 +146,7 @@ class PointCloudStationRepo:
                 station = PointCloudStation(project_id=p.id, file_asset_id=asset.id,
                     station_key=key,
                     display_name=asset.original_name or Path(asset.path).name,
-                    source_path=asset.path, display_order=order,
+                    source_path=str(runtime_path or asset.path), display_order=order,
                     is_selected=(order == 0))
                 station.last_error = None if valid else reason
                 s.add(station)

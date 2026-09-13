@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
@@ -9,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Generator, List, Optional
 
 try:
     from utils.logging_utils import trace
@@ -79,19 +80,41 @@ def _emit(lines: List[str], line: str, callback: Optional[Callable[[str], None]]
         print(line, flush=True)
 
 
-def _load_pybind_converter(dll_dir: str | None = None):
+@contextlib.contextmanager
+def _pybind_dll_context(dll_dir: str | None = None) -> Generator[Path, None, None]:
+    """临时将 FlsConverter DLL 目录加入搜索路径，退出时自动恢复。
+
+    防止 FLS 转换器的依赖 DLL（如 libe57、VC++ runtime）污染进程全局
+    PATH，导致后续 pye57/E57 转换加载到错误 DLL 版本。
+    """
     dll_path = Path(dll_dir or os.getenv("FLS_CONVERTER_DLL_DIR", DEFAULT_DLL_DIR))
     if not dll_path.exists():
         raise FileNotFoundError(
             f"FlsConverter DLL 目录不存在: {dll_path}. "
             "请设置环境变量 FLS_CONVERTER_DLL_DIR 指向 pybind 包目录。"
         )
-    if hasattr(os, "add_dll_directory"):
-        os.add_dll_directory(str(dll_path))
-    os.environ["PATH"] = str(dll_path) + os.pathsep + os.environ.get("PATH", "")
-    if str(dll_path) not in sys.path:
-        sys.path.insert(0, str(dll_path))
-    return importlib.import_module("FlsConverter")
+
+    original_path = os.environ.get("PATH", "")
+    original_sys_path = sys.path.copy()
+    added_dll_dir = None
+
+    try:
+        if hasattr(os, "add_dll_directory"):
+            added_dll_dir = os.add_dll_directory(str(dll_path))
+        os.environ["PATH"] = str(dll_path) + os.pathsep + original_path
+        if str(dll_path) not in sys.path:
+            sys.path.insert(0, str(dll_path))
+        yield dll_path
+    finally:
+        os.environ["PATH"] = original_path
+        sys.path[:] = original_sys_path
+        if added_dll_dir is not None:
+            added_dll_dir.close()
+
+
+def _load_pybind_converter(dll_dir: str | None = None):
+    with _pybind_dll_context(dll_dir) as dll_path:
+        return importlib.import_module("FlsConverter")
 
 
 def _load_scan_meta(json_path: Path, ply_path: Path, point_count: int) -> ScanMeta:
@@ -240,13 +263,14 @@ def convert_fls_to_ply(
     start = time.perf_counter()
 
     try:
-        fls = _load_pybind_converter(dll_dir)
-        py_result = fls.convert(
-            fls_folder=str(fls_path),
-            output_dir=str(ply_dir),
-            merge_scans=merge_scans,
-            use_gps=use_gps,
-        )
+        with _pybind_dll_context(dll_dir):
+            fls = importlib.import_module("FlsConverter")
+            py_result = fls.convert(
+                fls_folder=str(fls_path),
+                output_dir=str(ply_dir),
+                merge_scans=merge_scans,
+                use_gps=use_gps,
+            )
     except Exception as exc:
         result.elapsed_sec = time.perf_counter() - start
         result.success = False

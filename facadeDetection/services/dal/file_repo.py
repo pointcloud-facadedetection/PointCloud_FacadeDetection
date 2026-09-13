@@ -24,6 +24,21 @@ def _sha256(path: Path) -> str:
 
 class FileRepo:
     @staticmethod
+    def get_asset(project_uuid: str, asset_id: int) -> Optional[FileAsset]:
+        with project_session(project_uuid) as s:
+            asset = s.get(FileAsset, int(asset_id))
+            return asset if asset is not None and not asset.is_deleted else None
+
+    @staticmethod
+    def update_cache_metadata(project_uuid: str, asset_id: int, metadata: dict) -> None:
+        """Persist conversion metadata after the cache artifact is atomically ready."""
+        with project_session(project_uuid) as s:
+            asset = s.get(FileAsset, int(asset_id))
+            if asset is None or asset.is_deleted:
+                raise ValueError(f'点云资产不存在: {asset_id}')
+            asset.meta_json = dict(asset.meta_json or {}, **(metadata or {}))
+
+    @staticmethod
     def list_assets(project_uuid: str, *, pointcloud_only: bool = False) -> list[FileAsset]:
         with project_session(project_uuid) as s:
             proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one_or_none()

@@ -21,7 +21,7 @@ from config.storage import Storage
 from utils.convert_fls2ply import convert_fls_to_ply
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
-from utils.e57_reader import read_e57
+from services.e57_cache_service import ensure_e57_cache
 from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
 
@@ -109,6 +109,12 @@ class FileService:
 
         load_path = Path(asset.path) if asset else src
         name = asset.original_name if asset else src.name
+        # E57 是仅导入格式：在这里一次性固化成项目 cache PLY，后续统一
+        # 复用已有 PLY 读取、代理缓存、检测、渲染和报告链路。
+        if kind == FileKind.raw_pointcloud and src.suffix.lower() == '.e57':
+            if not project_uuid or asset is None:
+                raise ValueError('E57 导入必须绑定项目，才能生成可恢复的 cache PLY')
+            load_path = ensure_e57_cache(project_uuid, asset)
         if kind == FileKind.raw_pointcloud:
             started = time.perf_counter()
             print(f"[PCFD] load.begin path={load_path}", flush=True)
@@ -245,6 +251,26 @@ class FileService:
             self.render_service.show_image(name=prepared.name, image=prepared.image)
         return prepared.asset
 
+    def reconvert_e57_asset(self, project_uuid: str, asset_id: int,
+                            source_path: Optional[str] = None) -> str:
+        """Regenerate a missing/corrupt E57 cache PLY for a persisted station.
+
+        UI may pass a replacement ``source_path`` after the original E57 was moved.
+        The normal station refresh then clears ``last_error`` and resumes the PLY flow.
+        """
+        asset = FileRepo.get_asset(project_uuid, asset_id)
+        if asset is None:
+            raise ValueError(f'E57 资产不存在: {asset_id}')
+        source = Path(source_path or asset.path).resolve()
+        if source.suffix.lower() != '.e57' or not source.is_file():
+            raise FileNotFoundError(f'未找到可重新导入的 E57: {source}')
+        # Replacement source support remains explicit: the FileAsset source is
+        # updated by the caller's re-import flow; normal cache generation uses
+        # the persisted path to keep provenance consistent.
+        if source != Path(asset.path).resolve():
+            raise ValueError('替换原始 E57 请使用重新导入流程，不能仅重建 cache')
+        return str(ensure_e57_cache(project_uuid, asset, force=True))
+
     def import_fls_directory(self, dir_path: str, project_uuid: Optional[str],
                              progress_cb=None) -> dict:
         """
@@ -317,6 +343,10 @@ class FileService:
                         kind=FileKind.raw_pointcloud,
                         copy_into_project=False,
                     )
+                    if asset is not None:
+                        FileRepo.update_cache_metadata(project_uuid, asset.id, {
+                            'fls_source_dir': str(src),
+                        })
                 source_pts, source_cols = self._load_point_cloud(p)
                 scan_meta = next((s for s in getattr(result, 'scans', [])
                                   if str(getattr(s, 'ply_path', '')) == str(Path(p).resolve())), None)
@@ -429,22 +459,51 @@ class FileService:
     def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         # 二进制 PLY 走 memmap 免解析快读；不满足条件时回退 Open3D，行为不变
         if Path(path).suffix.lower() == '.e57':
-            return read_e57(path)
+            raise RuntimeError('E57 必须在导入时转换为 cache PLY，禁止进入运行时读取链路')
         fast = read_ply_fast(path)
         if fast is not None:
-            return fast
-        pcd = o3d.io.read_point_cloud(path)
-        try:
-            pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)
-            pts = pts if pts.flags.c_contiguous else np.ascontiguousarray(pts)
-            cols = None
-            if pcd.has_colors():
-                candidate = np.asarray(pcd.colors, dtype=np.float32).reshape(-1, 3)
-                if len(candidate) == len(pts):
-                    cols = candidate if candidate.flags.c_contiguous else np.ascontiguousarray(candidate)
-            return pts, cols
-        finally:
-            del pcd
+            pts, cols = fast
+        else:
+            pcd = o3d.io.read_point_cloud(path)
+            try:
+                pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)
+                pts = pts if pts.flags.c_contiguous else np.ascontiguousarray(pts)
+                cols = None
+                if pcd.has_colors():
+                    candidate = np.asarray(pcd.colors, dtype=np.float32).reshape(-1, 3)
+                    if len(candidate) == len(pts):
+                        cols = candidate if candidate.flags.c_contiguous else np.ascontiguousarray(candidate)
+            finally:
+                del pcd
+
+        # === 统一规范化：所有链路进入内存模型前对齐 ===
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            raise ValueError(f"点云坐标形状异常: {pts.shape}")
+
+        # 1) 过滤非有限坐标
+        finite_mask = np.isfinite(pts).all(axis=1)
+        pts = pts[finite_mask]
+        if cols is not None:
+            if len(cols) == len(finite_mask):
+                cols = cols[finite_mask]
+            else:
+                cols = None
+
+        if len(pts) == 0:
+            raise ValueError(f"PLY 无非有限坐标点: {path}")
+
+        # 2) 颜色值域统一归一化到 [0,1] float32
+        if cols is not None:
+            cols = np.asarray(cols, dtype=np.float32).reshape(-1, 3)
+            if cols.max() > 1.0 + 1e-6:
+                cols = cols / 255.0
+            cols = np.clip(cols, 0.0, 1.0)
+            cols = np.ascontiguousarray(cols, dtype=np.float32)
+
+        # 3) 确保 C-contiguous float32
+        pts = np.ascontiguousarray(pts, dtype=np.float32)
+
+        return pts, cols
 
     def _load_image(self, path: str) -> np.ndarray:
         img = o3d.io.read_image(path)

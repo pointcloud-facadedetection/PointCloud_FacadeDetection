@@ -102,6 +102,14 @@ class ProjectRepo:
         except Exception:
             pass
 
+        # Publish the authoritative directory before opening the per-project
+        # database.  project_session() resolves project.db through Storage, so
+        # delaying this until after the session would create a second legacy
+        # data/projects/<uuid>/ tree on first project creation.
+        init_index_db()
+        upsert_index_project(project_uuid, name, str(dirs["root"]))
+        Storage._uuid_root_cache[project_uuid] = Path(dirs["root"]).resolve()
+
         # Create per-project DB and seed Project + default scene
         with project_session(project_uuid) as s:
             proj = Project(
@@ -127,10 +135,6 @@ class ProjectRepo:
             scene = ResultScene(project_id=proj.id, name="Scene 1", is_active=True)
             s.add(scene)
             s.flush()
-
-        # Update global index DB
-        init_index_db()
-        upsert_index_project(project_uuid, name, str(dirs["root"]))
 
         return {
             "project_uuid": project_uuid,

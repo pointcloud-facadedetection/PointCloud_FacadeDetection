@@ -15,6 +15,7 @@ from services.viewport_render_service import ViewportRenderService
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
 from utils.workers import PointCloudLoadWorker
 from models.enums import FileKind
+from services.e57_cache_service import ensure_e57_cache
 
 
 @dataclass
@@ -52,7 +53,7 @@ class ProjectOverviewService:
         self._file_service: Optional[FileService] = None
 
     def create_load_worker(self, operation: str, project_uuid: str,
-                           *, file_paths=None, directory=None):
+                           *, file_paths=None, directory=None, directories=None):
         """构建后台加载 worker：计算段（解析/注册/转换）在池线程执行。
 
         结果中的 prepared 对象携带全部待提交数组，Open3D 提交段由 GUI
@@ -69,16 +70,34 @@ class ProjectOverviewService:
                         'prepared': prepared, 'uploaded': uploaded}
             return PointCloudLoadWorker(run)
         if operation == 'fls':
+            dirs = list(directories or [])
+            if directory:
+                dirs.append(directory)
             def run(worker):
-                worker.check_cancelled()
-                result = self.import_fls_directory(
-                    directory, project_uuid,
-                    progress_cb=lambda done, total, name:
-                        worker.signals.progress.emit(
-                            int(10 + 80 * done / max(total, 1)),
-                            f'正在导入站点 {name} ({done}/{total})'))
+                all_results = []
+                total_success = 0
+                for idx, d in enumerate(dirs):
+                    worker.check_cancelled()
+                    result = self.import_fls_directory(
+                        d, project_uuid,
+                        progress_cb=lambda done, total, name, i=idx, n=len(dirs):
+                            worker.signals.progress.emit(
+                                int(10 + 80 * (i + done / max(total, 1)) / max(n, 1)),
+                                f'正在导入站点 {name} ({done}/{total})'))
+                    all_results.append(result)
+                    if result.get('success'):
+                        total_success += result.get('uploaded', 1)
+                # 兼容单结果接口：合并为统一的 result
+                merged = {
+                    'success': total_success > 0,
+                    'message': '; '.join(
+                        r.get('message', '') for r in all_results
+                        if not r.get('success') and r.get('message')) or '',
+                    'ply_paths': [p for r in all_results for p in r.get('ply_paths', [])],
+                    'uploaded': total_success,
+                }
                 return {'operation': operation, 'project_uuid': project_uuid,
-                        'result': result}
+                        'result': merged, 'results': all_results}
             return PointCloudLoadWorker(run)
         raise ValueError(f'未知加载操作: {operation}')
 
@@ -242,10 +261,12 @@ class ProjectOverviewService:
                                      if item.is_file() and
                                      item.suffix.lower() in {'.ply', '.e57'}]
             for pointcloud_path in pointcloud_candidates:
-                FileRepo.import_file(project_uuid=pc.project_id,
-                                     src_path=str(pointcloud_path),
-                                     kind=FileKind.raw_pointcloud,
-                                     copy_into_project=False)
+                asset = FileRepo.import_file(project_uuid=pc.project_id,
+                                             src_path=str(pointcloud_path),
+                                             kind=FileKind.raw_pointcloud,
+                                             copy_into_project=False)
+                if pointcloud_path.suffix.lower() == '.e57':
+                    ensure_e57_cache(pc.project_id, asset)
             if pointcloud_candidates:
                 PointCloudStationRepo.sync_assets(pc.project_id)
         except Exception:
@@ -257,6 +278,16 @@ class ProjectOverviewService:
         if not project_id:
             raise ValueError('项目标识为空，无法激活项目')
         ProjectRepo.load_and_activate(project_id)
+        # 补偿旧项目及历史旁路登记的 E57：先生成 cache，再同步站点。
+        # 原始 E57 缺失时保留结构化错误，由站点层提示重导，不回退解析 E57。
+        for asset in FileRepo.list_assets_by_kind(project_id, FileKind.raw_pointcloud):
+            if Path(asset.path or '').suffix.lower() != '.e57':
+                continue
+            try:
+                ensure_e57_cache(project_id, asset)
+            except Exception as exc:
+                log_event(project_id, 'e57.cache.ensure_failed', asset_id=asset.id,
+                          source_path=asset.path, error=repr(exc))
         # 在用户界面请求列表之前，先重建站点投影。
         stats = PointCloudStationRepo.sync_assets(project_id)
         log_event(project_id, 'stations.synced', **stats)
@@ -388,9 +419,15 @@ class ProjectOverviewService:
 
     def update_project_assets(self, project_uuid: str, fls_directories: list[str],
                               pointcloud_files: list[str], photo_files: list[str]) -> None:
-        """以弹窗列表为事实来源同步资源，支持新增、删除、清空后保存。"""
+        """以弹窗列表为事实来源同步资源，支持新增、删除、清空后保存。
+
+        FLS 目录会被实际转换并导入；E57 生成 cache PLY 后统一按 PLY 处理；
+        原生 PLY 直接导入；照片仅记录元数据。
+        """
         from config.storage import Storage
         from models.enums import FileKind
+        from services import proxy_cache
+        from services.dal.pointcloud_station_repo import PointCloudStationRepo
         from pathlib import Path
         import os
         fls = [str(Path(p).expanduser().resolve()) for p in fls_directories if p]
@@ -406,16 +443,63 @@ class ProjectOverviewService:
             if not Path(p).is_file() or Path(p).suffix.lower() not in FileService.SUPPORTED_IMAGE_EXT:
                 raise ValueError(f'照片文件无效或格式不支持：{p}')
         old = self.get_project_assets(project_uuid)
+        old_fls = set(old.get('fls_directories') or [])
+
+        # 删除阶段：清理已移除资源的 FileAsset、缓存和站点投影
+        # 1) FLS：删除由已移除 FLS 目录生成的全部 PLY 资产
         for asset in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_pointcloud):
-            if asset.path not in pcs:
+            meta = dict(asset.meta_json or {})
+            fls_src = meta.get('fls_source_dir')
+            if fls_src and fls_src not in fls:
+                station = PointCloudStationRepo.get_by_asset_id(project_uuid, asset.id)
+                if station is not None:
+                    proxy_cache.delete_station_cache(project_uuid, station.id)
                 FileRepo.delete_file(project_uuid, asset.id)
+                continue
+            # 2) 普通点云：不在新列表中的直接删除
+            if asset.path not in pcs and not fls_src:
+                station = PointCloudStationRepo.get_by_asset_id(project_uuid, asset.id)
+                if station is not None:
+                    proxy_cache.delete_station_cache(project_uuid, station.id)
+                FileRepo.delete_file(project_uuid, asset.id)
+        # 3) 照片
         for asset in FileRepo.list_assets_by_kind(project_uuid, FileKind.raw_image):
             if asset.path not in photos:
                 FileRepo.delete_file(project_uuid, asset.id)
+
+        # 导入阶段：顺序执行，避免并发竞争
+        # 1) FLS 目录（实际转换 → PLY → 注册）
+        new_fls = [d for d in fls if d not in old_fls]
+        for d in new_fls:
+            res = self.import_fls_directory(d, project_uuid)
+            if not res.get('success'):
+                raise RuntimeError(f"FLS 导入失败：{res.get('message', d)}")
+
+        # 2) E57 / 原生 PLY
+        existing_pcs = {a.path for a in FileRepo.list_assets_by_kind(
+            project_uuid, FileKind.raw_pointcloud)}
         for p in pcs:
-            FileRepo.import_file(project_uuid, p, FileKind.raw_pointcloud, copy_into_project=False)
+            if p in existing_pcs:
+                continue
+            asset = FileRepo.import_file(
+                project_uuid, p, FileKind.raw_pointcloud,
+                copy_into_project=False)
+            if Path(p).suffix.lower() == '.e57':
+                ensure_e57_cache(project_uuid, asset)
+
+        # 3) 照片
+        existing_photos = {a.path for a in FileRepo.list_assets_by_kind(
+            project_uuid, FileKind.raw_image)}
         for p in photos:
-            FileRepo.import_file(project_uuid, p, FileKind.raw_image, copy_into_project=False)
+            if p not in existing_photos:
+                FileRepo.import_file(
+                    project_uuid, p, FileKind.raw_image,
+                    copy_into_project=False)
+
+        # 同步站点投影
+        PointCloudStationRepo.sync_assets(project_uuid)
+
+        # 持久化 pcfd 索引
         root = Storage.project_root(project_uuid)
         index = Storage.load_pcfd_index(root) or {}
         assets = index.setdefault('assets', {})
