@@ -20,6 +20,7 @@ import open3d as o3d
 from algorithms.geometry import (
     ensure_normals, classify_plane, project_to_uv,
     cluster_normals_direction, connected_components_3d_grid, connected_components_uv_depth_grid,
+    cluster_depth_significant,
     estimate_plane_area, plane_axes,
     estimate_point_ranges, adaptive_plane_tolerance, fit_plane_weighted
 )
@@ -81,7 +82,15 @@ def _dilate_cells(cells, rad):
     return out
 
 
-def _check_depth_single_peak(points, plane_model, max_plane_dist):
+def _fill_ratio(info):
+    """立面填充率：凸包面积 / UV bbox 面积。合并与完形回收共用。"""
+    bb = info.get('bbox_2d') or {}
+    span = max((bb.get('u_max', 0) - bb.get('u_min', 0)) *
+               (bb.get('v_max', 0) - bb.get('v_min', 0)), 1e-6)
+    return float(info.get('area', 0.0)) / span
+
+
+def _check_depth_single_peak(points, plane_model, max_plane_dist, tolerance=None):
     """检查点集在平面深度方向是否单峰，避免合并两个平行立面。"""
     pts = np.asarray(points, dtype=np.float64)
     if len(pts) < 100:
@@ -90,6 +99,22 @@ def _check_depth_single_peak(points, plane_model, max_plane_dist):
     n = pm[:3] / (np.linalg.norm(pm[:3]) + 1e-12)
     d = float(pm[3] / (np.linalg.norm(pm[:3]) + 1e-12))
     signed = pts @ n + d
+
+    # 显著台阶判据（优先）：直方图谷值法受分箱数影响，8cm 级退台常被
+    # 平滑掉；这里用与阶段 3 同一套"显著台阶"切层，只要切出两层且
+    # 两层都占有实质点数，即判定为深度双峰。
+    seg_labels, seg_medians = cluster_depth_significant(
+        signed,
+        (float(np.median(tolerance)) if tolerance is not None else None),
+        min_gap=max(float(max_plane_dist) * 1.5, 0.04),
+        min_points=max(50, len(pts) // 10))
+    if len(seg_medians) > 1:
+        floor_pts = max(50, int(len(pts) * 0.10))
+        strong = [m for k, m in enumerate(seg_medians)
+                  if int(np.count_nonzero(seg_labels == k)) >= floor_pts]
+        if len(strong) > 1 and (max(strong) - min(strong)) > max_plane_dist * 1.5:
+            return False
+
     n_bins = max(20, int(np.sqrt(len(pts)) / 3))
     counts, edges = np.histogram(signed, bins=n_bins)
     for k in range(2, len(counts) - 2):
@@ -171,7 +196,11 @@ def _merge(facades, points, normals=None, gap_m=3.0, angle_deg=5.0, d_thresh=.08
                 dist_b_on_a = np.median(np.abs(points[ib] @ na + pa[3]))
                 dist_a_on_b = np.median(np.abs(points[ia] @ nb + pb[3]))
                 merge_d_thr = max(d_thresh * 1.8, 0.08)
-                if dist_b_on_a > merge_d_thr and dist_a_on_b > merge_d_thr:
+                # 单向显著即拒（OR 而非 AND）：缺陷 2 中强弱两个平行面点数
+                # 悬殊，主面点落在自身平面上的中位数会被"面厚"稀释到门槛
+                # 以下，AND 门控随即失效并把异面并掉。窄面点落在主面平面上的
+                # 残差是真实台阶位移，单侧就已经足够显著。
+                if dist_b_on_a > merge_d_thr or dist_a_on_b > merge_d_thr:
                     continue
 
                 # ===== 法向残差校验（可选） =====
@@ -276,6 +305,26 @@ def _postprocess(facades, points, normals, tol, cos_tol, spacing, voxel_size, mi
                     else:
                         add = np.array([], dtype=int)
         
+        # ===== 阶段 5：完形回收两闸 =====
+        # 前面的平面距离/法向/UV/AABB/3D 连通域五道门控都只回答"这个点像不像
+        # 贴在该墙面上"，都不回答"它是不是属于同一个物理面"。回收点在重拟合
+        # 中拥有投票权，一次错误吸附就会把平面参数拖向邻面——这是异面粘连
+        # 在流程中的最后一处入口；同时也会把四周散点吸进来虚增面积。
+        if len(add):
+            # 闸1（深度段一致性）：回收点必须与被回收立面处于同一个显著
+            #     深度台阶。台阶判据与阶段 3 同源，保证"阶段 3 分开的、
+            #     阶段 5 不会重新粘上"。
+            base_signed = points[ids] @ n + f['plane_model'][3]
+            add_signed = points[add] @ n + f['plane_model'][3]
+            tol_seg = max(float(np.median(tol[add])), 0.03)
+            seg_labels, seg_medians = cluster_depth_significant(
+                np.r_[base_signed, add_signed], tol_seg,
+                min_gap=float(getattr(Config, 'FACADE_DEPTH_LAYER_GAP_M', 0.12)),
+                min_points=max(20, len(ids) // 50))
+            if len(seg_medians) > 1:
+                main_seg = int(np.argmin(np.abs(seg_medians)))
+                add = add[seg_labels[len(ids):] == main_seg]
+
         # 限制回收比例
         max_add = max(len(ids) // 3, 5000)
         if len(add) > max_add:
@@ -286,15 +335,20 @@ def _postprocess(facades, points, normals, tol, cos_tol, spacing, voxel_size, mi
             new_model = fit_plane_weighted(points[all_ids], irls_iters=2)
             new_n = new_model[:3] / (np.linalg.norm(new_model[:3]) + 1e-12)
             if abs(new_n @ n) >= np.cos(np.deg2rad(5.0)):
-                f.update(_info(f['id'], new_model, points[all_ids], all_ids, np.zeros(len(all_ids))))
-                assigned[add] = True
+                new_info = _info(f['id'], new_model, points[all_ids], all_ids,
+                                 np.zeros(len(all_ids)))
+                # 闸2（形态守恒）：回收不得让 fill_ratio 明显下降。"完形"的
+                #     本意是补孔洞（凸包不变、面积不变），若回收把立面四周
+                #     无法构成墙面的散点吸进来，bbox 会被撑大而凸包几乎不动，
+                #     fill_ratio 随之跌落——此时宁可保留原立面。
+                slack = float(getattr(Config, 'FACADE_RECLAIM_FILL_SLACK', 0.05))
+                if _fill_ratio(new_info) >= _fill_ratio(f) - slack:
+                    f.update(new_info)
+                    assigned[add] = True
     
     # 结果分类字段
     for f in facades:
-        bb = f.get('bbox_2d') or {}
-        span = max((bb.get('u_max', 0) - bb.get('u_min', 0)) * 
-                   (bb.get('v_max', 0) - bb.get('v_min', 0)), 1e-6)
-        fill = f['area'] / span
+        fill = _fill_ratio(f)
         f['fill_ratio'] = round(float(fill), 3)
         f['wall_kind'] = 'fragment' if fill < .25 else ('fenestrated' if fill < .55 else 'solid')
     
@@ -327,7 +381,25 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
             signed_sp = points[spatial_ids] @ sn - rho
             near_mask = np.abs(signed_sp) <= max(base * 3, 0.15)
             local_ids = spatial_ids[near_mask]
-            
+
+            # ===== 阶段 2：RANSAC 子集深度段隔离 =====
+            # rho 窗口（base*3，约 6~15cm）会把"法向一致、深度略有差异"的
+            # 异面一并纳入。不隔离时 RANSAC 用单个平面同时吃掉台阶两侧，
+            # 得到"平面很干净但跨台"的错误参数——异面粘连在阶段 2 就已成型。
+            # 这里只保留与 seed rho（anchor=0）同属一个显著深度段的点；
+            # 段数不足或剩余点过少时退化为原逻辑，保证行为兼容。
+            if (getattr(Config, 'FACADE_RANSAC_DEPTH_ISOLATE', True)
+                    and len(local_ids) >= 200):
+                seg_labels, seg_medians = cluster_depth_significant(
+                    signed_sp[near_mask], tol[local_ids],
+                    min_gap=float(getattr(Config, 'FACADE_RANSAC_DEPTH_MIN_GAP_M', 0.04)),
+                    min_points=max(50, len(local_ids) // 20))
+                if len(seg_medians) > 1:
+                    keep_seg = int(np.argmin(np.abs(seg_medians)))
+                    seg_sel = seg_labels == keep_seg
+                    if np.count_nonzero(seg_sel) >= max(150, min_count // 3):
+                        local_ids = local_ids[seg_sel]
+
             if len(local_ids) >= 200:
                 sub_pcd = o3d.geometry.PointCloud()
                 sub_pcd.points = o3d.utility.Vector3dVector(points[local_ids])
@@ -384,17 +456,23 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
         uv_grid = max(float(voxel_size) * 2.0, local_spacing * 1.5, 0.05)
         
         # ===== 阶段 3：自适应孔洞闭合 =====
-        # 判断是否为"主立面候选"：Hough seed 支持度高
+        # 原判据只看 Hough 支持度：凡是"主立面"一律用大闭合半径做 BFS 扩张，
+        # 门窗洞口两侧的拐角窄面被桥接进主立面；凡是"细部"一律保守闭合，
+        # 凸窗小墙面被切碎成低于 min_count 的碎片后丢弃。
+        # 改按 UV 展开跨度判定：跨度大（连续幕墙）才需要大半径跨越门窗；
+        # 跨度小（拐角窄面、凸窗侧壁）保持保守，避免被邻面吞并。
         is_major = (seed_kind == 'hough' and 
                     seed_info.get('support', 0) > min_count * 2)
         min_opening_m = float(getattr(Config, 'FACADE_MIN_OPENING_M', 0.5))
-        
-        if is_major:
-            # 主立面：允许跨越 min_opening_m * 2.5 的缝隙（大玻璃幕墙）
-            close_radius = max(3, int(np.ceil(min_opening_m * 2.5 / uv_grid)))
+        big_radius = max(3, int(np.ceil(min_opening_m * 2.5 / uv_grid)))
+        small_radius = max(2, int(np.ceil(min_opening_m / uv_grid)))
+
+        if getattr(Config, 'FACADE_CLOSE_RADIUS_BY_SPAN', True) and len(uv):
+            span = max(float(np.ptp(uv[:, 0])), float(np.ptp(uv[:, 1])))
+            # 跨度 >= 4 倍门窗洞宽才视为连续幕墙
+            close_radius = big_radius if span >= min_opening_m * 4.0 else small_radius
         else:
-            # 细部/小面：保守闭合
-            close_radius = max(2, int(np.ceil(min_opening_m / uv_grid)))
+            close_radius = big_radius if is_major else small_radius
         close_radius = min(close_radius,
                            int(getattr(Config, 'FACADE_UV_CLOSE_MAX_CELLS', 12)))
         
@@ -414,7 +492,8 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
             min_cells=max(2, int(min_count * .01)),
             close_radius_cells=close_radius,
             depth_gap=depth_gap,
-            connectivity=8)
+            connectivity=8,
+            tolerances=tol[cids])
         
         # 保持与2D实现完全一致的 fallback 语义
         if not comps and len(cids) <= min_count * 20:
@@ -422,8 +501,20 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
         elif not comps:
             continue
         
+        # ===== 阶段 3：组件消费顺序 =====
+        # 原按点数贪心消费，大组件先写死 remaining=False；弱平面（拐角窄面、
+        # 门窗侧壁）点数少，被吞掉后再无第二次机会。改用"UV 展开格数优先"：
+        # 窄面点数少但沿立面展开格数可观，可先于大组件被消费，减少错合并。
+        def _comp_rank(m):
+            n_pts = int(m.sum())
+            if n_pts <= 0:
+                return (0, 0)
+            sub = uv[np.asarray(m, dtype=bool)]
+            cells = np.unique(np.floor(sub / uv_grid).astype(np.int64), axis=0)
+            return (int(len(cells)), n_pts)
+
         consumed = set()
-        for mask in sorted(comps, key=lambda x: int(x.sum()), reverse=True):
+        for mask in sorted(comps, key=_comp_rank, reverse=True):
             comp = cids[mask]
             if len(comp) < min_count:
                 continue
@@ -931,15 +1022,87 @@ def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
                 prominence_ratio=prominence_ratio,
                 max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 24)))
 
+            # 同方向、同空间块内的 rho 峰构成一组"台阶竞争关系"，
+            # 并峰判定需在组内做，而不是全局按 30cm 硬距离砍。
+            block_key = (tuple(np.round(direction, 3)),
+                         int(np.floor(float(np.median(points[sp_ids] @ direction)) /
+                                      max(adaptive_bin, 1e-6))))
             for rho_peak in rho_peaks:
                 hough_seeds.append({
                     'direction': direction,
                     'rho': rho_peak.value,
                     'spatial_ids': sp_ids,
-                    'support': rho_peak.support
+                    'support': rho_peak.support,
+                    'block': block_key,
+                    'bin': float(adaptive_bin),
                 })
 
-    # 按支持度降序，截断
-    hough_seeds.sort(key=lambda s: -s['support'])
+    # ===== 阶段 1：候选选择 = 分块配额 + 谷深比并峰 + 弱峰保底 =====
+    # 原实现直接按 support 全局排序截断前 K，把拐角窄面、门窗侧壁这类
+    # 支持度天然偏低但真实存在的立面一次性抹掉；而 min_peak_distance(30cm)
+    # 会让 30cm 内的两个平行墙面在投票层就并成一个峰——这正是缺陷 1 与
+    # 缺陷 2 的共同第一现场。
+    if not hough_seeds:
+        return []
     max_candidates = int(getattr(Config, 'HOUGH_MAX_CANDIDATES', 16))
-    return hough_seeds[:max_candidates]
+    per_block = max(1, int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 4)))
+
+    # (1) 分块配额：每个空间块（同方向）最多保留 per_block 个峰，
+    #     防止单块的多个 rho 峰挤占其他块的候选资格。
+    groups = {}
+    for s in hough_seeds:
+        groups.setdefault(s['block'], []).append(s)
+    quota = []
+    for members in groups.values():
+        members.sort(key=lambda s: -s['support'])
+        quota.extend(members[:per_block])
+
+    # (2) 并峰判据由"距离过近即并"改为"谷深比"：两峰之间若存在真实谷值
+    #     （谷 < 两侧峰 30%），说明是两个物理台阶，必须都保留；只有两峰
+    #     重叠在同一支撑上时才算同一台阶而并峰。
+    quota.sort(key=lambda s: -s['support'])
+    kept = []
+    for s in quota:
+        duplicate = False
+        for t in kept:
+            if t['block'] != s['block']:
+                continue
+            gap = abs(float(s['rho']) - float(t['rho']))
+            if gap > max(4.0 * float(s['bin']), 0.06):
+                continue  # 相距足够远，本就是两个台阶，并存
+            smaller = min(float(s['support']), float(t['support']))
+            larger = max(float(s['support']), float(t['support']))
+            if larger > 0 and smaller / larger >= float(
+                    getattr(Config, 'HOUGH_PEAK_MERGE_VALLEY_RATIO', 0.30)):
+                continue  # 谷浅：两峰并存，不并峰
+            duplicate = True
+            break
+        if not duplicate:
+            kept.append(s)
+
+    # (3) 弱峰保底通道：support 达门槛、且在块内深度方向"孤立"
+    #     （±1.5m 内无其他同向峰）的种子强制入表，让窄面候选不被主立面挤掉。
+    kept.sort(key=lambda s: -s['support'])
+    selected = list(kept[:max_candidates])
+    selected_ids = {id(s) for s in selected}
+    weak_floor = int(getattr(Config, 'HOUGH_MAX_WEAK_SEEDS', 16))
+    weak_min_support = max(20, int(min_count *
+                                   float(getattr(Config, 'HOUGH_WEAK_SUPPORT_RATIO', 0.20))))
+    if weak_floor > 0:
+        rest = [s for s in kept if id(s) not in selected_ids]
+        rest.sort(key=lambda s: -s['support'])
+        added = 0
+        for s in rest:
+            if added >= weak_floor or s['support'] < weak_min_support:
+                break
+            isolated = True
+            for t in kept:
+                if t is s or t['block'] != s['block']:
+                    continue
+                if abs(float(t['rho']) - float(s['rho'])) < 1.5:
+                    isolated = False
+                    break
+            if isolated:
+                selected.append(s)
+                added += 1
+    return selected

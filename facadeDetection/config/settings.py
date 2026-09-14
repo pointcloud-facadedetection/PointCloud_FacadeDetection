@@ -174,3 +174,15 @@ class Config:
 
     # 质量评估：是否采用“垂直约束参考面”用于平整度（不影响垂直度计算）
     QUALITY_VERTICAL_REF_PLANE = False
+
+    # --- Robust global plane fitting fallback constants ---
+    GLOBAL_PLANE_HUBER_DELTA_M: float = 0.015
+    GLOBAL_PLANE_MAX_ITERATIONS: int = 500
+    GLOBAL_PLANE_ANGLE_LIMIT_DEG: float = 3.0
+    GLOBAL_PLANE_MIN_INLIER_RATIO: float = 0.30
+    GLOBAL_PLANE_MAX_P95_MM: float = 100.0
+    GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK: bool = True
+    GLOBAL_PLANE_PARTITION_DEPTH_GAP_M: float = 0.08
+    GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO: float = 0.10
+    GLOBAL_PLANE_OUTLIER_SIGMA: float = 3.0
+    GLOBAL_PLANE_FINAL_GATE_SIGMA: float = 2.5

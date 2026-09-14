@@ -146,13 +146,42 @@ class FacadeQualityService:
             plane_model = plane_model / norm
 
             # 鲁棒全局平面拟合：先验法向量 + Huber IRLS（全量点）
+            # 新参数优先从 profile 读取，无则回退 Config 常量，保证老项目兼容
+            from config.settings import Config
             global_fit = fit_global_plane(
                 filtered_pts,
                 reference_plane=plane_model,
                 seed=int(getattr(profile, 'global_plane_seed', 42)),
-                huber_delta_m=float(getattr(profile, 'global_plane_huber_delta_m', .010)),
-                max_iterations=int(getattr(profile, 'global_plane_max_iterations', 500)),
-                angle_limit_deg=float(getattr(profile, 'global_plane_angle_limit_deg', 2.)),
+                huber_delta_m=float(getattr(
+                    profile, 'global_plane_huber_delta_m',
+                    getattr(Config, 'GLOBAL_PLANE_HUBER_DELTA_M', 0.015))),
+                max_iterations=int(getattr(
+                    profile, 'global_plane_max_iterations',
+                    getattr(Config, 'GLOBAL_PLANE_MAX_ITERATIONS', 500))),
+                angle_limit_deg=float(getattr(
+                    profile, 'global_plane_angle_limit_deg',
+                    getattr(Config, 'GLOBAL_PLANE_ANGLE_LIMIT_DEG', 3.0))),
+                outlier_sigma=float(getattr(
+                    profile, 'global_plane_outlier_sigma',
+                    getattr(Config, 'GLOBAL_PLANE_OUTLIER_SIGMA', 3.0))),
+                final_gate_sigma=float(getattr(
+                    profile, 'global_plane_final_gate_sigma',
+                    getattr(Config, 'GLOBAL_PLANE_FINAL_GATE_SIGMA', 2.5))),
+                min_inlier_ratio=float(getattr(
+                    profile, 'global_plane_min_inlier_ratio',
+                    getattr(Config, 'GLOBAL_PLANE_MIN_INLIER_RATIO', 0.30))),
+                max_p95_mm=float(getattr(
+                    profile, 'global_plane_max_p95_mm',
+                    getattr(Config, 'GLOBAL_PLANE_MAX_P95_MM', 100.0))),
+                enable_partition_fallback=bool(getattr(
+                    profile, 'global_plane_enable_partition_fallback',
+                    getattr(Config, 'GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK', True))),
+                partition_depth_gap_m=float(getattr(
+                    profile, 'global_plane_partition_depth_gap_m',
+                    getattr(Config, 'GLOBAL_PLANE_PARTITION_DEPTH_GAP_M', 0.08))),
+                partition_min_points_ratio=float(getattr(
+                    profile, 'global_plane_partition_min_points_ratio',
+                    getattr(Config, 'GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO', 0.10))),
             )
             if not global_fit.get('fit_accepted', False):
                 trace('quality.reject', facade_no=facade_no,

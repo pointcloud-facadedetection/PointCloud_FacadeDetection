@@ -23,21 +23,43 @@ def _proxy_build_max_workers():
 
 # ==================== 距离自适应几何工具 ====================
 
+def _normalize_scan_origins(scan_origin):
+    """把测站参数归一为形状 (M,3) 且 M>=1 的数组。
+
+    上游有多条来源会把 ``scan_origins`` 传成空容器（例如 proxy 以
+    ``bbox_normalized`` 密度构建时，缓存里就是空列表 ``[]``，而读取端用
+    ``is not None`` 判断，空列表照样透传进来）。空容器经 ``reshape(-1, 3)``
+    得到 ``(0, 3)``，会让后面的 ``np.stack([... for o in origins])`` 收到空
+    列表并抛 ``ValueError: need at least one array to stack``——立面检测在
+    法向估计之后的第一行就崩溃。
+
+    语义上"没有测站"与"测站为坐标系原点"在本模块完全等价（外层
+    ``estimate_point_ranges`` 的 None 分支即取零原点），因此这里统一折叠为
+    单个零原点，既修掉崩溃，又保证测站缺失时退化为 bbox/零原点口径。
+    """
+    if scan_origin is None:
+        return np.zeros((1, 3), dtype=float)
+    origins = np.asarray(scan_origin, dtype=float).reshape(-1, 3)
+    if origins.shape[0] == 0:
+        return np.zeros((1, 3), dtype=float)
+    return origins
+
+
 def estimate_point_ranges(points, scan_origin=None):
     """计算每个点到最近测站的距离。"""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    origins = np.zeros((1, 3), dtype=float) if scan_origin is None else np.asarray(scan_origin, dtype=float).reshape(-1, 3)
     if not len(pts):
         return np.empty(0, dtype=np.float32)
+    origins = _normalize_scan_origins(scan_origin)
     return np.min(np.stack([np.linalg.norm(pts - o, axis=1) for o in origins], axis=1), axis=1)
 
 
 def estimate_elevation_angles(points, scan_origin=None):
     """计算每个点相对测站的高度角（elevation），用于高度方向密度补偿。"""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    origins = np.zeros((1, 3), dtype=float) if scan_origin is None else np.asarray(scan_origin, dtype=float).reshape(-1, 3)
     if not len(pts):
         return np.empty(0, dtype=np.float32)
+    origins = _normalize_scan_origins(scan_origin)
     if len(origins) == 1:
         # 单测站快路径：最近测站恒为第 0 个，跳过 N×M×3 临时数组与 argmin。
         # 数学与原实现逐项相同（pts - o 的广播结果一致）。
@@ -996,15 +1018,95 @@ def connected_components_2d_grid(uv_points, grid_size=None, min_cells=3,
     return components
 
 
+def cluster_depth_significant(depths, tolerance=None, min_gap=None, min_points=20):
+    """按"显著台阶"把平面法向深度序列切层（噪声鲁棒，O(N log N)）。
+
+    立面分割中的两类误判都源于深度分层方式：
+      * ``rint(dep/bin)`` 舍入量化会把 5cm 以内的台差并入同一层；
+      * 固定 bin 的层边界效应使 8~12cm 台差"时连时不连"，结果随点位漂移。
+
+    本函数只在"间隙同时大于 2 倍局部测量噪声与 min_gap"处切层，切分结果
+    由几何显著性决定，与网格原点、bin 尺寸无关：8cm 级真实退台稳定切开
+    （修复异面粘连），而同一面上的 cm 级噪声不会被切碎（保住孔洞闭合）。
+
+    参数：
+        depths:     (N,) 沿平面法向的有符号距离
+        tolerance:  (N,) 或标量，逐点测量容差（噪声尺度），None 视作 5cm
+        min_gap:    最小显著台差（米），None 时取 ``max(2*median(tol), 0.03)``
+        min_points: 层最小点数；不足的层并入相邻层，避免噪声碎片成层
+
+    返回 ``(labels, medians)``：
+        labels  (N,) int32，-1 表示非法深度，其余自 0 起按深度升序编号
+        medians (K,) float64，每层深度中位数（升序）
+    """
+    dep = np.asarray(depths, dtype=np.float64).reshape(-1)
+    n = len(dep)
+    labels = np.full(n, -1, dtype=np.int32)
+    if n == 0:
+        return labels, np.zeros(0, dtype=np.float64)
+    finite = np.isfinite(dep)
+    idx = np.flatnonzero(finite)
+    if len(idx) == 0:
+        return labels, np.zeros(0, dtype=np.float64)
+
+    tol_full = np.full(n, np.nan, dtype=np.float64)
+    if tolerance is None:
+        tol_full[finite] = 0.05
+    else:
+        t = np.asarray(tolerance, dtype=np.float64).reshape(-1)
+        tol_full[finite] = float(t[0]) if t.size == 1 else t[finite]
+    tol_full = np.maximum(np.nan_to_num(tol_full, nan=0.05), 1e-4)
+
+    order = idx[np.argsort(dep[idx], kind='stable')]
+    d_sorted = dep[order]
+    t_sorted = tol_full[order]
+    if min_gap is None:
+        min_gap = max(2.0 * float(np.median(t_sorted)), 0.03)
+    # 相邻两点的噪声尺度取较大者：间隙必须同时超过噪声与最小台差才切层
+    thr = np.maximum(2.0 * np.maximum(t_sorted[:-1], t_sorted[1:]), float(min_gap))
+    cut = np.flatnonzero(np.diff(d_sorted) > thr) + 1
+    seg_sorted = np.searchsorted(cut, np.arange(len(order)), side='right').astype(np.int32)
+
+    n_seg = int(seg_sorted[-1]) + 1
+    counts = np.bincount(seg_sorted, minlength=n_seg)
+    remap = np.zeros(n_seg, dtype=np.int32)
+    next_label = 0
+    limit = max(1, int(min_points))
+    for s in range(n_seg):
+        if counts[s] >= limit:
+            remap[s] = next_label
+            next_label += 1
+        else:
+            # 过小的段并入前一层；首段无前层可并，稍后并入后一层
+            remap[s] = remap[s - 1] if s > 0 else 0
+    if n_seg > 1 and counts[0] < limit:
+        remap[0] = remap[1]
+
+    seg_final = remap[seg_sorted]
+    labels[order] = seg_final
+    k = int(seg_final[-1]) + 1
+    medians = np.zeros(k, dtype=np.float64)
+    for s in range(k):
+        sel = seg_final == s
+        if np.any(sel):
+            medians[s] = float(np.median(d_sorted[sel]))
+    return labels, medians
+
+
 def connected_components_uv_depth_grid(uv_points, depths, grid_size,
                                        depth_bin=None, min_cells=3,
                                        close_radius_cells=0,
-                                       depth_gap=None, connectivity=8):
+                                       depth_gap=None, connectivity=8,
+                                       tolerances=None):
     """UV + 深度层稀疏连通域。
 
     与旧二维实现保持相同的返回契约，但连通图的节点是
     ``(u_cell, v_cell, depth_layer)``。孔洞闭合只在同一深度层内进行，
     因此不会把 UV 重叠的前后墙面桥接到一起。
+
+    ``tolerances`` 给出逐点测量容差；传入时深度分层改用
+    :func:`cluster_depth_significant` 的显著台阶切层，8~12cm 级真实退台
+    可被稳定分离（不再依赖 bin 边界落点）。不传时保留原量化语义。
     """
     uv = np.asarray(uv_points, dtype=float).reshape(-1, 2)
     dep = np.asarray(depths, dtype=float).reshape(-1)
@@ -1014,8 +1116,15 @@ def connected_components_uv_depth_grid(uv_points, depths, grid_size,
     finite = np.isfinite(dep)
     if not np.any(finite):
         return []
-    scale = float(depth_bin or gs)
-    layer = np.rint(dep / scale).astype(np.int64)
+    if tolerances is None:
+        scale = float(depth_bin or gs)
+        layer = np.rint(dep / scale).astype(np.int64)
+    else:
+        tol_arr = np.asarray(tolerances, dtype=np.float64).reshape(-1)
+        if tol_arr.size != dep.size:
+            tol_arr = np.full(dep.size, float(tol_arr[0]) if tol_arr.size else 0.03)
+        layer, _ = cluster_depth_significant(dep, tol_arr, min_gap=depth_gap)
+        scale = float(depth_gap or depth_bin or gs)
     # A UV cell may contain several depth layers. Preserve each layer's points.
     cells = {}
     for i, (u, v, z) in enumerate(zip(uv[:, 0], uv[:, 1], layer)):

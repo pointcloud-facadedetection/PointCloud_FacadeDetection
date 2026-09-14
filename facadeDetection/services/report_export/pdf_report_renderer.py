@@ -20,7 +20,7 @@ _COLORBAR_GAP_PX = 12
 # A4 版心宽度
 _A4_CONTENT_W_PX = 688
 # 2 组图/页 的硬约束下，单组图片可用高度。
-_TRIPLET_ROW_MAX_H = 300
+_TRIPLET_ROW_MAX_H = 280
 # 表格边框与单元格内边距在三列上占用的横向像素。
 _TRIPLET_BORDER_PX = 24
 

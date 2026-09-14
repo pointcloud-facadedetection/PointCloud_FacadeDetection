@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from algorithms.geometry import cluster_depth_significant
 
 
 def _unit(value):
@@ -93,10 +94,23 @@ def _window_centers(lo, hi, length, step):
 
 
 def fit_global_plane(points, *, reference_plane, seed=42,
-                     huber_delta_m=.010, max_iterations=500,
-                     convergence_tol=1e-7, angle_limit_deg=2.,
-                     outlier_sigma=3.0, final_gate_sigma=2.0):
-    """Huber M-estimator IRLS with prior-normal initialization."""
+                     huber_delta_m=.015, max_iterations=500,
+                     convergence_tol=1e-7, angle_limit_deg=3.,
+                     outlier_sigma=3.0, final_gate_sigma=2.5,
+                     min_inlier_ratio=0.30, max_p95_mm=100.0,
+                     enable_partition_fallback=True,
+                     partition_depth_gap_m=0.08,
+                     partition_min_points_ratio=0.10,
+                     partition_angle_limit_deg=5.0):
+    """Huber M-estimator IRLS with prior-normal initialization.
+
+    Robust partition fallback: when the global single-plane fit fails
+    acceptance criteria, the point cloud is sliced along the reference
+    normal into significant depth layers. The largest consistent layer
+    (normal within ``partition_angle_limit_deg`` of reference) is
+    promoted as the facade master plane, enabling reliable quality
+    assessment on facades with balconies, openings, or decorations.
+    """
     raw = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     finite_mask = np.all(np.isfinite(raw), axis=1)
     finite_ids = np.flatnonzero(finite_mask)
@@ -185,10 +199,125 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
     p95_mm = float(np.percentile(abs_r[inliers], 95) * 1000) if inliers.any() else np.inf
     fit_accepted = bool(
-        inlier_ratio >= 0.50
-        and p95_mm <= 50.0
+        inlier_ratio >= float(min_inlier_ratio)
+        and p95_mm <= float(max_p95_mm)
         and angle_to_ref <= float(angle_limit_deg)
     )
+
+    # ===== Partition Fallback =====
+    if not fit_accepted and enable_partition_fallback:
+        signed_all = pts @ n0 + d0
+        min_points_partition = max(3, int(len(pts) * float(partition_min_points_ratio)))
+
+        labels, medians = cluster_depth_significant(
+            signed_all,
+            tolerance=None,
+            min_gap=float(partition_depth_gap_m),
+            min_points=min_points_partition,
+        )
+
+        best_partition = None
+        best_score = -1.0
+        cos_part_limit = np.cos(np.deg2rad(float(partition_angle_limit_deg)))
+
+        for seg_idx in range(len(medians)):
+            seg_mask = labels == seg_idx
+            seg_count = int(seg_mask.sum())
+            if seg_count < min_points_partition:
+                continue
+
+            seg_pts = pts[seg_mask]
+            part_plane = _plane_from_points(seg_pts)
+            part_n = part_plane[:3]
+
+            if abs(float(part_n @ n0)) < cos_part_limit:
+                continue
+
+            seg_residuals = seg_pts @ part_n + part_plane[3]
+            seg_med_r = float(np.median(seg_residuals))
+            seg_mad_r = max(float(np.median(np.abs(seg_residuals - seg_med_r))) * 1.4826, 1e-6)
+            seg_gate = float(np.clip(final_gate_sigma * seg_mad_r, 0.0025, 0.008))
+            seg_inliers = np.abs(seg_residuals - seg_med_r) <= seg_gate
+            seg_inlier_ratio = float(seg_inliers.mean())
+
+            if seg_inliers.sum() >= 3:
+                part_plane = _plane_from_points(seg_pts[seg_inliers])
+                part_n = part_plane[:3]
+                seg_residuals = seg_pts @ part_n + part_plane[3]
+                seg_med_r = float(np.median(seg_residuals[seg_inliers]))
+
+            seg_abs_r = np.abs(seg_residuals)
+            seg_p95_mm = float(np.percentile(seg_abs_r[seg_inliers], 95) * 1000) if seg_inliers.any() else np.inf
+            seg_angle_to_ref = float(np.degrees(np.arccos(np.clip(abs(part_n @ n0), 0, 1))))
+
+            relaxed_inlier_ratio = float(min_inlier_ratio) * 0.85
+            relaxed_p95 = float(max_p95_mm) * 1.25
+
+            if (seg_inlier_ratio >= relaxed_inlier_ratio and
+                    seg_p95_mm <= relaxed_p95 and
+                    seg_angle_to_ref <= float(angle_limit_deg)):
+                score = seg_count * seg_inlier_ratio
+                if score > best_score:
+                    best_score = score
+                    best_partition = {
+                        'plane': part_plane,
+                        'inliers': seg_inliers,
+                        'seg_mask': seg_mask,
+                        'inlier_ratio': seg_inlier_ratio,
+                        'p95_mm': seg_p95_mm,
+                        'angle_to_ref': seg_angle_to_ref,
+                        'med_r': seg_med_r,
+                        'mad_r': seg_mad_r,
+                        'gate': seg_gate,
+                    }
+
+        if best_partition is not None:
+            bp = best_partition
+            plane = bp['plane']
+            n = plane[:3]
+            d = plane[3]
+
+            residuals = pts @ n + d
+            med_r = bp['med_r']
+            mad_r = bp['mad_r']
+            gate = bp['gate']
+            inliers = np.zeros(len(pts), dtype=bool)
+            inliers[bp['seg_mask']] = bp['inliers']
+
+            if inliers.sum() >= 3:
+                plane = _plane_from_points(pts[inliers])
+                if plane[:3] @ n0 < 0:
+                    plane = -plane
+                residuals = pts @ plane[:3] + plane[3]
+                med_r = float(np.median(residuals[inliers]))
+                mad_r = max(float(np.median(np.abs(residuals[inliers] - med_r))) * 1.4826, 1e-6)
+                gate = float(np.clip(final_gate_sigma * mad_r, 0.0025, 0.008))
+                inliers = np.abs(residuals - med_r) <= gate
+
+            support_mask = np.zeros(len(raw), dtype=bool)
+            support_mask[finite_ids] = inliers
+
+            abs_r = np.abs(residuals)
+            inlier_ratio = float(inliers.mean())
+            angle_to_ref = float(np.degrees(np.arccos(np.clip(abs(plane[:3] @ n0), 0, 1))))
+            p95_mm = float(np.percentile(abs_r[inliers], 95) * 1000) if inliers.any() else np.inf
+
+            return {
+                'plane_model': plane.astype(float),
+                'fit_accepted': True,
+                'inlier_count': int(inliers.sum()),
+                'point_count': int(len(pts)),
+                'inlier_ratio': inlier_ratio,
+                'residual_mad_mm': float(mad_r * 1000),
+                'p50_abs_residual_mm': float(np.percentile(abs_r, 50) * 1000),
+                'p95_abs_residual_mm': float(np.percentile(abs_r, 95) * 1000),
+                'max_abs_residual_mm': float(abs_r.max() * 1000),
+                'normal_angle_to_reference_deg': angle_to_ref,
+                'support_limit_m': gate,
+                'support_mask': support_mask,
+                'iterations': it + 1,
+                'partition_fallback': True,
+            }
 
     return {
         'plane_model': plane.astype(float),
@@ -204,6 +333,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
         'support_limit_m': gate,
         'support_mask': support_mask,
         'iterations': it + 1,
+        'partition_fallback': False,
     }
 
 

@@ -37,6 +37,18 @@ class InspectionProfile:
     parallel_mode: str = "process"
     n_jobs: int = 4
 
+    # --- Robust global plane fitting parameters (added for complex facades) ---
+    global_plane_huber_delta_m: float = 0.015
+    global_plane_max_iterations: int = 500
+    global_plane_angle_limit_deg: float = 3.0
+    global_plane_min_inlier_ratio: float = 0.30
+    global_plane_max_p95_mm: float = 100.0
+    global_plane_enable_partition_fallback: bool = True
+    global_plane_partition_depth_gap_m: float = 0.08
+    global_plane_partition_min_points_ratio: float = 0.10
+    global_plane_outlier_sigma: float = 3.0
+    global_plane_final_gate_sigma: float = 2.5
+
     def snapshot(self) -> dict:
         return asdict(self)
 
