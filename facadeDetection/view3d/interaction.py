@@ -460,6 +460,10 @@ class ViewportInteractor:
             try:
                 if hasattr(ctr, "scale"):
                     ctr.scale(factor)
+                    # ViewControl 没有 get_zoom()，缩放值无法回读，
+                    # 必须在此同步告知相机控制器，否则 world_per_pixel
+                    # 会停在旧值，框选判定随用户缩放而失准。
+                    self.camera.set_tracked_zoom(self.camera._current_zoom() * factor)
                 else:
                     raise AttributeError()
             except Exception:
@@ -467,6 +471,7 @@ class ViewportInteractor:
                     z = ctr.get_zoom()
                     new_z = max(min(z / factor, 2.5), 0.02)
                     ctr.set_zoom(new_z)
+                    self.camera.set_tracked_zoom(new_z)
                 except Exception:
                     try:
                         sign = -1.0 if steps > 0 else 1.0
@@ -503,8 +508,9 @@ class ViewportInteractor:
 
     def _compute_pan_scale(self, ctr):
         _, _, dpr = self._viewport_metrics()
+        # 缩放值以相机控制器记录为准（ViewControl 没有 get_zoom()）
         try:
-            z = float(ctr.get_zoom())
+            z = float(self.camera._current_zoom())
         except Exception:
             z = 0.6
 

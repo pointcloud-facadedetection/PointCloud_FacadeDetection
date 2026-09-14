@@ -372,6 +372,11 @@ class Open3DViewport(BaseViewport):
             ctr.set_up(up / (np.linalg.norm(up) + 1e-12))
             # 合理的初始缩放比例
             ctr.set_zoom(0.6)
+            try:
+                # 同步相机控制器的缩放记录，保证 world_per_pixel 与真实视图一致
+                self._camera.set_tracked_zoom(0.6)
+            except Exception:
+                pass
             self._scene_view_initialized = True
         except Exception:
             pass
@@ -903,8 +908,9 @@ class Open3DViewport(BaseViewport):
                     dpr = 1.0
             except Exception:
                 dpr = 1.0
+            # ViewControl 没有 get_zoom()，改用相机控制器记录的缩放值
             try:
-                zoom = float(ctr.get_zoom())
+                zoom = float(self._camera._current_zoom())
             except Exception:
                 zoom = 0.6
             scene_scale = self._fallback_scene_scale()
