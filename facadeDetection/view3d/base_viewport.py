@@ -11,7 +11,7 @@ class BaseViewport(ABC):
         ...
 
     @abstractmethod
-    def add_cloud(self, name: str, positions, colors=None, point_size=0.3):
+    def add_cloud(self, name: str, positions, colors=None, point_size=0.5):
         ...
 
     @abstractmethod

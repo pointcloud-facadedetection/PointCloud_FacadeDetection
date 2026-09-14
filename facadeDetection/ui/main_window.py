@@ -225,12 +225,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         self._registration_pool = self._runtime.pool('registration')
         self._load_pool = self._runtime.pool('load')
         self._load_cancel_button = None
-        # 加载/项目代际状态（_active_load_worker、_load_in_progress、
-        # _project_generation）由 ProjectLifecycleController 持有，
-        # _project_generation 经下方同名 property 委托访问。
-        # 全局唯一的模态进度控制器：所有重要耗时操作（点云加载/去噪、区域
-        # 选取、立面提取、质量评估、批量评估、模型导出）共享同一套
-        # "模态弹窗 + 每 5 秒刷新一次进度 + 终态强制收尾"的进度体验。
+        # 加载/项目代际状态全局唯一的模态进度控制器：所有重要耗时操作共享
+        # 同一套"模态弹窗 + 每 5 秒刷新一次进度 + 终态强制收尾"的进度体验。
         self.task_progress = TaskProgressController(self)
         # 【导出模型】编排控制器：站点选择、后台 voxel=0.2 下采样导出 PLY、
         # 进度弹窗与结果提示都收拢在控制器内；报告页只保留一次点击的入口。

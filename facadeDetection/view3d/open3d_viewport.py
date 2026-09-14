@@ -579,7 +579,7 @@ class Open3DViewport(BaseViewport):
             except Exception:
                 pass
 
-    def add_cloud(self, name, positions, colors=None, point_size=0.3):
+    def add_cloud(self, name, positions, colors=None, point_size=0.5):
         had_clouds = bool(self._scene.point_data)
         self._scene.add_cloud(name, positions, colors, point_size=point_size, reset_view=not had_clouds)
         if not had_clouds and not self._scene_view_initialized:
