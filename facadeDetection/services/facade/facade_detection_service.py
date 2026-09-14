@@ -239,7 +239,11 @@ class FacadeDetectionService:
             dataset, proxy_pts, vsize)
 
         seed_mask = np.ones(n_proxy, dtype=bool)
-        if roi_box is not None:
+        if roi_indices is not None and len(roi_indices):
+            seed_mask = np.zeros(n_proxy, dtype=bool)
+            valid = np.asarray(roi_indices, dtype=int)
+            seed_mask[valid[(valid >= 0) & (valid < n_proxy)]] = True
+        elif roi_box is not None:
             center = np.asarray(roi_box['center'], dtype=float)
             axes = np.asarray(roi_box['axes'], dtype=float).reshape(3, 3)
             half = np.asarray(roi_box['half_extent'], dtype=float)
@@ -249,13 +253,9 @@ class FacadeDetectionService:
             bmin = np.asarray(roi_bounds[0], dtype=float)
             bmax = np.asarray(roi_bounds[1], dtype=float)
             seed_mask = np.all((proxy_pts >= bmin) & (proxy_pts <= bmax), axis=1)
-        elif roi_indices is not None and len(roi_indices):
-            seed_mask = np.zeros(n_proxy, dtype=bool)
-            valid = np.asarray(roi_indices, dtype=int)
-            seed_mask[valid[(valid >= 0) & (valid < n_proxy)]] = True
 
-        # clip 模式：只取 ROI 内点；seed 模式：全点检测，后过滤
-        crop_mask = seed_mask if roi_scope == 'clip' else np.ones(n_proxy, dtype=bool)
+        # ROI 检测始终裁剪到 ROI 子集，避免 seed 模式退化为全局检测
+        crop_mask = seed_mask
         global_indices = np.flatnonzero(crop_mask).astype(np.int64)
         seed_indices_local = np.flatnonzero(seed_mask).astype(np.int64)
 
@@ -283,8 +283,7 @@ class FacadeDetectionService:
             dataset=dataset,
             voxel_size=vsize,
             min_facade_area=float(getattr(Config, 'MIN_FACADE_AREA', min_facade_area or 10.0)),
-            roi_indices=(np.arange(len(roi_pos), dtype=np.int64)
-                         if roi_scope == 'clip' else None),
+            roi_indices=np.arange(len(roi_pos), dtype=np.int64),
             roi_bounds=None,
             enable_grow=False,
             metadata=detect_kwargs,
@@ -292,13 +291,6 @@ class FacadeDetectionService:
             normals=roi_normals,
         )
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
-
-        # seed 模式：只保留与 ROI 相交的 facade
-        if roi_scope == 'seed' and len(seed_indices_local):
-            seed_set = set(seed_indices_local.tolist())
-            facades = [f for f in facades if seed_set.intersection(
-                np.asarray(f.get('inlier_indices', []), dtype=np.int64).tolist()
-            )]
 
         detected_count = len(facades)
         facades = self._select_top_facades(facades)
