@@ -8,7 +8,7 @@ remain format agnostic.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 import json
 import time
 
@@ -79,6 +79,63 @@ def _normalise_colour(values, count: int) -> Optional[np.ndarray]:
     if np.nanmax(arr) > 1.0:
         arr /= 255.0
     return np.ascontiguousarray(np.clip(arr, 0.0, 1.0), dtype=np.float32)
+
+
+def _extract_scan_poses(reader):
+    """Extract scan poses (rotation_matrix + scan_position) from E57 headers.
+
+    Returns a list of dicts conforming to the unified pose schema shared
+    with the FLS converter.  rotation_matrix is 3x3 double; scan_position
+    is [x, y, z] double.  Both are in the global frame (same as the
+    transformed point coordinates returned by read_e57).
+
+    If a scan has no pose, has_pose is False and rotation_matrix /
+    scan_position are identity / zero so downstream never receives None.
+    """
+    if reader is None:
+        return []
+    poses = []
+    scan_count = _scan_count(reader)
+    for i in range(scan_count):
+        header = reader.get_header(i)
+        has_pose = bool(getattr(header, 'has_pose', lambda: False)())
+        name = str(getattr(header, 'name', f'scan_{i}'))
+        if has_pose:
+            try:
+                from pyquaternion import Quaternion
+                rotation = getattr(header, 'rotation', None)
+                translation = getattr(header, 'translation', None)
+                if rotation is not None and translation is not None:
+                    rot_mat = Quaternion(rotation).rotation_matrix
+                    scan_pos = np.asarray(translation, dtype=float).flatten()[:3]
+                    # Build full 4x4 transform_to_global
+                    transform = np.eye(4, dtype=float)
+                    transform[:3, :3] = rot_mat
+                    transform[:3, 3] = scan_pos
+                    poses.append({
+                        'scan_index': i,
+                        'scan_name': name,
+                        'has_pose': True,
+                        'rotation_matrix': rot_mat.tolist(),
+                        'scan_position': scan_pos.tolist(),
+                        'transform_to_global': transform.tolist(),
+                    })
+                    continue
+            except Exception:
+                pass
+        # Fallback: no pose or extraction failed
+        poses.append({
+            'scan_index': i,
+            'scan_name': name,
+            'has_pose': False,
+            'rotation_matrix': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            'scan_position': [0.0, 0.0, 0.0],
+            'transform_to_global': [[1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 0.0, 1.0]],
+        })
+    return poses
 
 
 def read_e57(path: str):
@@ -157,27 +214,46 @@ def read_e57(path: str):
 
 
 def convert_e57_to_ply(source_path, cache_path, project_uuid=None, metadata=None):
-    """一次性将 E57 标准化为 PLY；业务处理从此只接收 PLY。"""
+    """一次性将 E57 标准化为 PLY；业务处理从此只接收 PLY。
+
+    Sidecar JSON (cache_path.json) 现在额外包含 scan_poses 和
+    scan_origins，与 FLS 转换器的元数据 schema 统一，供下游配准流程使用。
+    """
     started = time.perf_counter()
     source_path, cache_path = Path(source_path).resolve(), Path(cache_path).resolve()
     log_event(project_uuid, 'e57.convert.begin', source_path=str(source_path),
               cache_path=str(cache_path))
+
+    # 尝试创建 reader 提取位姿；失败时降级（兼容测试打桩或损坏文件）
+    reader = None
+    try:
+        import pye57
+        reader = pye57.E57(str(source_path))
+    except Exception:
+        pass
+
     try:
         points, colors = read_e57(str(source_path))
+        scan_poses = _extract_scan_poses(reader)
+        scan_origins = [p['scan_position'] for p in scan_poses if p['has_pose']]
         elapsed = time.perf_counter() - started
         log_event(project_uuid, 'e57.convert.read_done', source_path=str(source_path),
                   cache_path=str(cache_path), point_count=int(len(points)),
                   has_colors=bool(colors is not None), elapsed_seconds=elapsed)
         write_point_cloud_ply_atomic(cache_path, points, colors)
-        info = dict(metadata or {}, cache_version=1, source_format='e57',
+        info = dict(metadata or {}, cache_version=2, source_format='e57',
                     cache_format='ply', source_path=str(source_path),
                     cache_path=str(cache_path), point_count=int(len(points)),
                     has_colors=bool(colors is not None), pose_applied=True,
+                    scan_count=len(scan_poses),
+                    scan_poses=scan_poses,
+                    scan_origins=scan_origins if scan_origins else None,
                     conversion_seconds=time.perf_counter() - started)
-        cache_path.with_suffix('.ply.json').write_text(
+        cache_path.with_suffix('.json').write_text(
             json.dumps(info, ensure_ascii=False, indent=2), encoding='utf-8')
         log_event(project_uuid, 'e57.convert.write_done', source_path=str(source_path),
                   cache_path=str(cache_path), point_count=int(len(points)),
+                  scan_count=len(scan_poses),
                   elapsed_seconds=info['conversion_seconds'])
         return info
     except Exception as exc:

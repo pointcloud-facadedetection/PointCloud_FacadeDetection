@@ -18,7 +18,7 @@ from models.enums import FileKind
 from services.dal.file_repo import FileRepo
 from config.storage import Storage
 
-from utils.convert_fls2ply import convert_fls_to_ply
+from utils.convert_fls2ply import convert_fls_single, convert_fls_to_ply
 from utils.dist_reader import read_dist
 from utils.ply_fast_reader import read_ply_fast
 from services.e57_cache_service import ensure_e57_cache
@@ -115,6 +115,22 @@ class FileService:
             if not project_uuid or asset is None:
                 raise ValueError('E57 导入必须绑定项目，才能生成可恢复的 cache PLY')
             load_path = ensure_e57_cache(project_uuid, asset)
+            # 读取 E57 cache sidecar，将统一 pose schema 注入 dataset metadata
+            sidecar = load_path.with_suffix('.json')
+            if sidecar.exists():
+                try:
+                    sidecar_data = json.loads(sidecar.read_text(encoding='utf-8'))
+                    pose_meta = {
+                        'scan_poses': sidecar_data.get('scan_poses'),
+                        'scan_origins': sidecar_data.get('scan_origins'),
+                    }
+                    if dataset_metadata is None:
+                        dataset_metadata = {}
+                    for key, value in pose_meta.items():
+                        if value is not None and key not in dataset_metadata:
+                            dataset_metadata[key] = value
+                except Exception:
+                    pass
         if kind == FileKind.raw_pointcloud:
             started = time.perf_counter()
             print(f"[PCFD] load.begin path={load_path}", flush=True)
@@ -301,9 +317,8 @@ class FileService:
 
         # 调用转换器(pybind)将 FLS 转为 PLY
         try:
-            result = convert_fls_to_ply(
-                fls_folder=str(src), output_dir=str(out_dir),
-                project_name=project_name
+            result = convert_fls_single(
+                fls_path=str(src), output_dir=str(out_dir)
             )
         except Exception as e:
             msg = f"FLS 转换器调用失败: {e}"

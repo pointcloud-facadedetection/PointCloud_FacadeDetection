@@ -46,9 +46,27 @@ class DistData:
 
 
 def _origins(metadata) -> np.ndarray:
-    """从元数据中提取真实测站坐标；提取不到时返回空数组。 """
+    """从元数据中提取真实测站坐标；提取不到时返回空数组。
+
+    优先级：scan_poses[0].scan_position > scan_origins > scan_origin > transform_to_global
+    """
     if metadata is None:
         return np.empty((0, 3), dtype=np.float64)
+
+    # 1) 统一 pose schema（E57 / FLS 新接口）
+    scan_poses = getattr(metadata, "scan_poses", None)
+    if scan_poses is None and isinstance(metadata, dict):
+        scan_poses = metadata.get("scan_poses")
+    if scan_poses is not None:
+        try:
+            origins = [p["scan_position"] for p in scan_poses if p.get("has_pose")]
+            if origins:
+                arr = np.asarray(origins, dtype=float).reshape(-1, 3)
+                if np.all(np.isfinite(arr)):
+                    return arr
+        except Exception:
+            pass
+
     value = getattr(metadata, "scan_origin", None)
     if value is None:
         value = getattr(metadata, "scan_origins", None)

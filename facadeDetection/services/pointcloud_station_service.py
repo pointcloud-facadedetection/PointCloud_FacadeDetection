@@ -169,16 +169,39 @@ class PointCloudStationService:
     def _global_coordinate_metadata(path):
         """Audit the export matrix without transforming runtime point data."""
         ply = Path(path)
-        candidates = (ply.with_suffix('.json'),
-                      ply.parent / 'pointclouds' / f'{ply.stem}.json')
+        # FLS 输出：.json sidecar；E57 cache：.json sidecar
+        candidates = (
+            ply.with_suffix('.json'),
+            ply.parent / 'pointclouds' / f'{ply.stem}.json',
+            ply.with_suffix('.json'),
+        )
         json_path = next((item for item in candidates if item.exists()), None)
         metadata = {'coordinate_frame': 'global',
                     'transform_applied': True,
                     'transform_applied_at': 'fls_export'}
         if json_path is not None:
             audit = audit_exported_global_transform(json_path)
-            metadata['transform_json_path'] = audit.json_path
+            metadata['transform_json_path'] = str(audit.json_path)
             metadata['transform_to_global'] = audit.matrix.tolist()
+            # 读取统一 pose schema（E57 / FLS 新接口兼容）
+            try:
+                import json
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    sidecar = json.load(f)
+                # E57 cache sidecar: scan_poses / scan_origins
+                if 'scan_poses' in sidecar:
+                    metadata['scan_poses'] = sidecar['scan_poses']
+                if 'scan_origins' in sidecar:
+                    metadata['scan_origins'] = sidecar['scan_origins']
+                # FLS JSON sidecar: rotationMatrix / scanPosition
+                if 'rotationMatrix' in sidecar:
+                    metadata['rotation_matrix'] = sidecar['rotationMatrix']
+                if 'scanPosition' in sidecar:
+                    metadata['scan_position'] = sidecar['scanPosition']
+                    if 'scan_origins' not in metadata:
+                        metadata['scan_origins'] = [sidecar['scanPosition']]
+            except Exception:
+                pass
         return metadata
 
     def _load_proxy_domain(self, station):

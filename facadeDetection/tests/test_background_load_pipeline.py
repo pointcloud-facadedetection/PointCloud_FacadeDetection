@@ -189,8 +189,8 @@ class TestFlsImportBackgroundable:
         station_sizes = (80_000, 60_000)
         convert_calls = []
 
-        def fake_convert(fls_folder, output_dir, project_name):
-            convert_calls.append((fls_folder, output_dir, project_name))
+        def fake_convert_single(fls_path, output_dir, **kwargs):
+            convert_calls.append((fls_path, output_dir))
             out = Path(output_dir)
             out.mkdir(parents=True, exist_ok=True)
             scans = []
@@ -198,10 +198,22 @@ class TestFlsImportBackgroundable:
                 pts = (rng.normal(size=(size, 3)) * 15).astype(np.float32)
                 cols = rng.random((size, 3), dtype=np.float32)
                 ply = _write_ply(out / f'st{index}.ply', pts, cols)
-                scans.append(SimpleNamespace(ply_path=str(ply.resolve())))
-            return SimpleNamespace(output_dir=str(out), scans=scans, message='ok')
+                scans.append(SimpleNamespace(
+                    ply_path=str(ply.resolve()),
+                    scan_name=f'st{index}',
+                    point_count=size,
+                    has_color=True,
+                    has_intensity=False,
+                    has_distance=True,
+                    json_path='',
+                    rotation_matrix=[[1,0,0],[0,1,0],[0,0,1]],
+                    scan_position=[0.0, 0.0, 0.0],
+                ))
+            return SimpleNamespace(
+                output_dir=str(out), scans=scans, message='ok',
+                success=True, scan_count=len(scans), exported_count=len(scans))
 
-        monkeypatch.setattr(file_service_mod, 'convert_fls_to_ply', fake_convert)
+        monkeypatch.setattr(file_service_mod, 'convert_fls_single', fake_convert_single)
 
         svc, pointcloud, viewport, render = _make_service()
         load_threads = []

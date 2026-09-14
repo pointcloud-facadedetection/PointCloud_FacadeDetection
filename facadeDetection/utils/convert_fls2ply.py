@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,10 @@ class ScanMeta:
     transform_to_global: List[List[float]] = field(default_factory=lambda: [
         [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]
     ])
+    rotation_matrix: List[List[float]] = field(default_factory=lambda: [
+        [1, 0, 0], [0, 1, 0], [0, 0, 1]
+    ])
+    scan_position: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     gps: Dict = field(default_factory=dict)
     compass: Dict = field(default_factory=dict)
     sensor_usage: Dict = field(default_factory=dict)
@@ -142,21 +147,43 @@ def _load_scan_meta(json_path: Path, ply_path: Path, point_count: int) -> ScanMe
         meta.scan_axis = data.get("scanAxis", meta.scan_axis)
         meta.scan_angle_rad = data.get("scanAngle_rad", 0.0)
         meta.transform_to_global = data.get("transformToGlobal", data.get("transform_to_global", meta.transform_to_global))
+
+        # 统一字段：优先 rotationMatrix / scanPosition，降级从 transformToGlobal 派生
+        rot_mat = data.get("rotationMatrix")
+        if rot_mat is not None:
+            meta.rotation_matrix = rot_mat
+        else:
+            try:
+                t = meta.transform_to_global
+                meta.rotation_matrix = [
+                    [float(t[0][0]), float(t[0][1]), float(t[0][2])],
+                    [float(t[1][0]), float(t[1][1]), float(t[1][2])],
+                    [float(t[2][0]), float(t[2][1]), float(t[2][2])],
+                ]
+            except Exception:
+                pass
+
+        scan_pos = data.get("scanPosition")
+        if scan_pos is not None:
+            meta.scan_position = [float(v) for v in scan_pos]
+        else:
+            try:
+                t = meta.transform_to_global
+                meta.scan_position = [float(t[0][3]), float(t[1][3]), float(t[2][3])]
+            except Exception:
+                pass
+
         meta.gps = data.get("gps", {})
         meta.compass = data.get("compass", {})
         meta.sensor_usage = data.get("sensorUsage", {})
+
+        # scan_origin / scan_origins 用于下游 dist_reader 兼容
         origin = data.get("scan_origin", data.get("scanOrigin"))
-        if origin is None and meta.transform_to_global:
-            try:
-                origin = [
-                    float(meta.transform_to_global[0][3]),
-                    float(meta.transform_to_global[1][3]),
-                    float(meta.transform_to_global[2][3]),
-                ]
-            except Exception:
-                origin = None
+        if origin is None and meta.scan_position:
+            origin = meta.scan_position
         if origin is not None:
             meta.scan_origin = list(origin)
+            meta.scan_origins = [list(origin)]
         origins = data.get("scan_origins", data.get("scanOrigins"))
         if origins is not None:
             meta.scan_origins = origins
@@ -174,6 +201,17 @@ def _meta_from_pybind_scan(scan, meta_dir: Path) -> ScanMeta:
     meta.has_color = bool(getattr(scan, "has_color", False))
     meta.has_intensity = bool(getattr(scan, "has_intensity", False))
     meta.has_distance = bool(getattr(scan, "has_distance", False))
+
+    # pyd 层透传的统一字段
+    rot_mat = getattr(scan, "rotation_matrix", None)
+    if rot_mat is not None:
+        meta.rotation_matrix = [list(row) for row in rot_mat]
+    scan_pos = getattr(scan, "scan_position", None)
+    if scan_pos is not None:
+        meta.scan_position = list(scan_pos)
+        meta.scan_origin = list(scan_pos)
+        meta.scan_origins = [list(scan_pos)]
+
     if json_path.exists():
         dest_json = meta_dir / json_path.name
         if json_path.resolve() != dest_json.resolve():
@@ -208,6 +246,8 @@ def _write_project_index(project_dir: Path, result: ConversionResult) -> None:
                 "has_intensity": s.has_intensity,
                 "has_distance": s.has_distance,
                 "transform_to_global": s.transform_to_global,
+                "rotation_matrix": s.rotation_matrix,
+                "scan_position": s.scan_position,
             }
             for s in result.scans
         ],
@@ -217,40 +257,36 @@ def _write_project_index(project_dir: Path, result: ConversionResult) -> None:
     trace("fls.convert.index_written", path=index_path)
 
 
-def convert_fls_to_ply(
-    *,
-    fls_folder: str,
+# ============================================================================
+# 新接口：单站 FLS 转换
+# ============================================================================
+def convert_fls_single(
+    fls_path: str,
     output_dir: str,
-    project_name: Optional[str] = None,
-    on_stdout: Optional[Callable[[str], None]] = None,
-    merge_scans: bool = False,
-    use_gps: bool = True,
+    *,
+    export_dist: bool = True,
+    export_json: bool = True,
     dll_dir: Optional[str] = None,
 ) -> ConversionResult:
-    """
-    使用 pybind11 封装的 FlsConverter 执行 FLS -> PLY/JSON 转换。
+    """使用 pybind11 封装的 FlsConverter 执行单站 FLS -> PLY/JSON 转换。
 
     参数：
-        fls_folder: FLS 文件夹或文件的路径
+        fls_path: FLS 文件或文件夹的路径
         output_dir: 输出根目录
-        project_name: 项目名称（可选，默认为 fls_folder 的名称）
-        on_stdout: 标准输出回调函数（每行日志回调）
-        merge_scans: 是否合并所有扫描为单个 PLY/DIST 文件
-        use_gps: 是否使用 GPS 信息对齐扫描
-        dll_dir: 指向包含 FlsConverter.pyd 及依赖 DLL 的目录（可选，默认使用 DEFAULT_DLL_DIR）
+        export_dist: 是否导出距离文件
+        export_json: 是否导出 JSON 元数据
+        dll_dir: 指向包含 FlsConverter.pyd 及依赖 DLL 的目录
 
     返回：
         ConversionResult 对象
     """
-    result = ConversionResult(fls_path=str(Path(fls_folder).resolve()))
-    fls_path = Path(fls_folder).resolve()
-    if not fls_path.exists():
-        result.message = f"FLS 路径不存在: {fls_path}"
+    result = ConversionResult(fls_path=str(Path(fls_path).resolve()))
+    fls_path_obj = Path(fls_path).resolve()
+    if not fls_path_obj.exists():
+        result.message = f"FLS 路径不存在: {fls_path_obj}"
         return result
 
-    if project_name is None:
-        project_name = fls_path.stem if fls_path.is_file() else fls_path.name
-
+    project_name = fls_path_obj.stem if fls_path_obj.is_file() else fls_path_obj.name
     project_dir = Path(output_dir).resolve() / project_name
     ply_dir = project_dir / "pointclouds"
     meta_dir = project_dir / "metadata"
@@ -258,24 +294,24 @@ def convert_fls_to_ply(
     meta_dir.mkdir(parents=True, exist_ok=True)
     result.output_dir = str(project_dir)
 
-    trace("fls.convert.begin", source=fls_path, output=ply_dir, merge_scans=merge_scans, use_gps=use_gps)
-    _emit(result.stdout_log, f"[PCFD] fls.convert.begin source={fls_path} output={ply_dir}", on_stdout)
+    trace("fls.convert_single.begin", source=fls_path_obj, output=ply_dir)
+    _emit(result.stdout_log, f"[PCFD] fls.convert_single.begin source={fls_path_obj} output={ply_dir}")
     start = time.perf_counter()
 
     try:
         with _pybind_dll_context(dll_dir):
             fls = importlib.import_module("FlsConverter")
-            py_result = fls.convert(
-                fls_folder=str(fls_path),
+            py_result = fls.convert_single(
+                fls_path=str(fls_path_obj),
                 output_dir=str(ply_dir),
-                merge_scans=merge_scans,
-                use_gps=use_gps,
+                export_dist=export_dist,
+                export_json=export_json,
             )
     except Exception as exc:
         result.elapsed_sec = time.perf_counter() - start
         result.success = False
         result.message = f"FlsConverter 调用失败: {exc}"
-        trace("fls.convert.failed", error=exc, seconds=f"{result.elapsed_sec:.2f}")
+        trace("fls.convert_single.failed", error=exc, seconds=f"{result.elapsed_sec:.2f}")
         return result
 
     result.elapsed_sec = float(getattr(py_result, "elapsed_sec", time.perf_counter() - start) or 0.0)
@@ -284,16 +320,15 @@ def convert_fls_to_ply(
     result.exported_count = int(getattr(py_result, "exported_count", 0) or 0)
     result.scans = [_meta_from_pybind_scan(scan, meta_dir) for scan in list(getattr(py_result, "scans", []) or [])]
 
-    # 补偿可能缺失的计数
     if not result.exported_count:
         result.exported_count = len(result.scans)
     if not result.scan_count:
         result.scan_count = len(result.scans)
 
     for scan in result.scans:
-        line = f"[PCFD] fls.convert.scan name={scan.scan_name} points={scan.point_count} ply={scan.ply_path}"
-        _emit(result.stdout_log, line, on_stdout)
-        trace("fls.convert.scan", name=scan.scan_name, points=scan.point_count, ply=scan.ply_path)
+        line = f"[PCFD] fls.convert_single.scan name={scan.scan_name} points={scan.point_count} ply={scan.ply_path}"
+        _emit(result.stdout_log, line)
+        trace("fls.convert_single.scan", name=scan.scan_name, points=scan.point_count, ply=scan.ply_path)
 
     if result.success and result.exported_count > 0:
         result.message = (
@@ -305,12 +340,166 @@ def convert_fls_to_ply(
         result.success = False
         result.message = "未生成 PLY，请检查 FLS 路径或 FlsConverter 输出"
 
-    trace(
-        "fls.convert.done",
-        success=result.success,
-        scan_count=result.scan_count,
-        exported_count=result.exported_count,
-        seconds=f"{result.elapsed_sec:.2f}",
+    trace("fls.convert_single.done", success=result.success, scan_count=result.scan_count,
+          exported_count=result.exported_count, seconds=f"{result.elapsed_sec:.2f}")
+    _emit(result.stdout_log, f"[PCFD] fls.convert_single.done success={result.success} exported={result.exported_count}")
+    return result
+
+
+# ============================================================================
+# 新接口：多站批量 FLS 转换
+# ============================================================================
+def convert_fls_batch(
+    site_dir: str,
+    output_dir: str,
+    *,
+    site_name: Optional[str] = None,
+    merge_scans: bool = True,
+    dll_dir: Optional[str] = None,
+) -> ConversionResult:
+    """使用 pybind11 封装的 FlsConverter 执行多站批量 FLS -> PLY/JSON 转换。
+
+    参数：
+        site_dir: 包含多个 FLS 子文件夹的站点目录
+        output_dir: 输出根目录
+        site_name: 站点名称（可选，默认为 site_dir 的目录名）
+        merge_scans: 是否合并所有扫描为单个 PLY/DIST 文件
+        dll_dir: 指向包含 FlsConverter.pyd 及依赖 DLL 的目录
+
+    返回：
+        ConversionResult 对象
+    """
+    result = ConversionResult(fls_path=str(Path(site_dir).resolve()))
+    site_dir_obj = Path(site_dir).resolve()
+    if not site_dir_obj.exists() or not site_dir_obj.is_dir():
+        result.message = f"站点目录不存在: {site_dir_obj}"
+        return result
+
+    w_site_name = site_name or site_dir_obj.name
+    project_dir = Path(output_dir).resolve() / w_site_name
+    ply_dir = project_dir / "pointclouds"
+    meta_dir = project_dir / "metadata"
+    ply_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    result.output_dir = str(project_dir)
+
+    trace("fls.convert_batch.begin", source=site_dir_obj, output=ply_dir, site_name=w_site_name, merge_scans=merge_scans)
+    _emit(result.stdout_log, f"[PCFD] fls.convert_batch.begin source={site_dir_obj} output={ply_dir}")
+    start = time.perf_counter()
+
+    try:
+        with _pybind_dll_context(dll_dir):
+            fls = importlib.import_module("FlsConverter")
+            py_result = fls.convert_batch(
+                site_dir=str(site_dir_obj),
+                output_dir=str(ply_dir),
+                site_name=w_site_name,
+                merge_scans=merge_scans,
+            )
+    except Exception as exc:
+        result.elapsed_sec = time.perf_counter() - start
+        result.success = False
+        result.message = f"FlsConverter 调用失败: {exc}"
+        trace("fls.convert_batch.failed", error=exc, seconds=f"{result.elapsed_sec:.2f}")
+        return result
+
+    result.elapsed_sec = float(getattr(py_result, "elapsed_sec", time.perf_counter() - start) or 0.0)
+    result.success = bool(getattr(py_result, "success", False))
+    result.scan_count = int(getattr(py_result, "scan_count", 0) or 0)
+    result.exported_count = int(getattr(py_result, "exported_count", 0) or 0)
+    result.scans = [_meta_from_pybind_scan(scan, meta_dir) for scan in list(getattr(py_result, "scans", []) or [])]
+
+    if not result.exported_count:
+        result.exported_count = len(result.scans)
+    if not result.scan_count:
+        result.scan_count = len(result.scans)
+
+    for scan in result.scans:
+        line = f"[PCFD] fls.convert_batch.scan name={scan.scan_name} points={scan.point_count} ply={scan.ply_path}"
+        _emit(result.stdout_log, line)
+        trace("fls.convert_batch.scan", name=scan.scan_name, points=scan.point_count, ply=scan.ply_path)
+
+    if result.success and result.exported_count > 0:
+        result.message = (
+            f"成功导出 {result.exported_count}/{result.scan_count} 个扫描，"
+            f"总点数 {sum(s.point_count for s in result.scans):,}，耗时 {result.elapsed_sec:.1f} 秒"
+        )
+        _write_project_index(project_dir, result)
+    elif not result.message:
+        result.success = False
+        result.message = "未生成 PLY，请检查 FLS 路径或 FlsConverter 输出"
+
+    trace("fls.convert_batch.done", success=result.success, scan_count=result.scan_count,
+          exported_count=result.exported_count, seconds=f"{result.elapsed_sec:.2f}")
+    _emit(result.stdout_log, f"[PCFD] fls.convert_batch.done success={result.success} exported={result.exported_count}")
+    return result
+
+
+# ============================================================================
+# 兼容接口（deprecated）
+# ============================================================================
+def convert_fls_to_ply(
+    *,
+    fls_folder: str,
+    output_dir: str,
+    project_name: Optional[str] = None,
+    on_stdout: Optional[Callable[[str], None]] = None,
+    merge_scans: bool = False,
+    use_gps: bool = True,
+    dll_dir: Optional[str] = None,
+) -> ConversionResult:
+    """兼容旧接口：根据输入路径自动路由到单站或批量转换。
+
+    参数：
+        fls_folder: FLS 文件夹或文件的路径
+        output_dir: 输出根目录
+        project_name: 项目名称（可选）
+        on_stdout: 标准输出回调
+        merge_scans: 是否合并扫描
+        use_gps: 是否使用 GPS（deprecated，保留参数兼容性）
+        dll_dir: 指向包含 FlsConverter.pyd 的目录
+
+    返回：
+        ConversionResult 对象
+    """
+    warnings.warn(
+        "convert_fls_to_ply is deprecated; use convert_fls_single or convert_fls_batch",
+        DeprecationWarning,
+        stacklevel=2,
     )
-    _emit(result.stdout_log, f"[PCFD] fls.convert.done success={result.success} exported={result.exported_count}", on_stdout)
+    fls_path = Path(fls_folder).resolve()
+    if not fls_path.exists():
+        result = ConversionResult(fls_path=str(fls_path))
+        result.message = f"FLS 路径不存在: {fls_path}"
+        return result
+
+    # 自动路由：包含多个子目录且子目录含 Scans/Main 则走 batch
+    looks_like_site = False
+    if fls_path.is_dir():
+        subdirs = [d for d in fls_path.iterdir() if d.is_dir()]
+        if len(subdirs) > 1:
+            looks_like_site = True
+        for d in subdirs:
+            if (d / "Scans").exists() or (d / "Main").exists():
+                looks_like_site = True
+                break
+
+    if looks_like_site:
+        result = convert_fls_batch(
+            site_dir=str(fls_path),
+            output_dir=output_dir,
+            site_name=project_name or fls_path.name,
+            merge_scans=merge_scans,
+            dll_dir=dll_dir,
+        )
+    else:
+        result = convert_fls_single(
+            fls_path=str(fls_path),
+            output_dir=output_dir,
+            dll_dir=dll_dir,
+        )
+
+    if on_stdout:
+        for line in result.stdout_log:
+            on_stdout(line)
     return result
