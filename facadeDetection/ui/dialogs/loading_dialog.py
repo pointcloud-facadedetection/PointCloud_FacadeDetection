@@ -19,12 +19,10 @@ class LoadingDialog(TaskProgressDialog):
     DEFAULT_MESSAGE = '正在加载点云，请稍候...'
     FINISH_MESSAGE = '点云加载完成'
 
-    def __init__(self, parent=None, *, cancellable: bool = False,
-                 auto_close: bool = True, interval_ms: int = 5000,
-                 title: str | None = None):
+    def __init__(self, parent=None, *, auto_close: bool = True,
+                 interval_ms: int = 5000, title: str | None = None):
         super().__init__(
             parent,
-            cancellable=cancellable,
             auto_close=auto_close,
             interval_ms=interval_ms,
             title=title or self.DEFAULT_TITLE,

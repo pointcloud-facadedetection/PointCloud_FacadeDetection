@@ -79,9 +79,7 @@ class FacadeQualityController(QObject):
         """
         if self.progress is None:
             return
-        self.progress.begin(
-            task_key, '质量评估', '任务处理中',
-            determinate=False, cancellable=True)
+        self.progress.begin(task_key, '质量评估', '任务处理中')
 
     def _report_quality_progress(self, task_key: str, percent: int,
                                  text: str = '') -> None:

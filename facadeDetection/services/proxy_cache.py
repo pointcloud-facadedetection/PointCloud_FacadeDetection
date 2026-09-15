@@ -43,6 +43,12 @@ def proxy_cache_path(project_uuid, station_id) -> Path:
             / 'proxy' / f'{station_id}.npz')
 
 
+def denoise_sidecar_path(project_uuid, station_id) -> Path:
+    """去噪状态大数组的二进制 sidecar（DB JSON 只存标量元数据）。"""
+    return (Storage.project_root(project_uuid) / Storage.CACHE_DIRNAME
+            / 'denoise' / f'{station_id}.npz')
+
+
 def _fingerprint_fields(fingerprint_key):
     fp_path, fp_sha, fp_size = fingerprint_key
     return (str(fp_path), '' if fp_sha is None else str(fp_sha),
@@ -316,7 +322,8 @@ def delete_station_cache(project_uuid, station_id) -> None:
         project_uuid, station_id)
     for path in (points_path, colors_path, meta_path,
                  _legacy_raw_cache_path(project_uuid, station_id),
-                 proxy_cache_path(project_uuid, station_id)):
+                 proxy_cache_path(project_uuid, station_id),
+                 denoise_sidecar_path(project_uuid, station_id)):
         try:
             path.unlink(missing_ok=True)
             parent = path.parent

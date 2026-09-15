@@ -61,14 +61,14 @@ class PointCloudLoadWorker(QRunnable):
     def run(self):
         try:
             if self._cancelled:
-                # 被中止时不发 finished/failed：GUI 侧 cancel_active_load 已把
+                # 被中止时不发 finished/failed：GUI 侧 dispose 已把
                 # 进度窗落到"已中止"，再发终态会造成二次收尾。
                 return
             result = self.operation(self)
             if self._cancelled:
                 return
-            # 终态由 load_finished → task_progress.finish()
-            # 统一刷到 100% 并关闭，避免与 finish 路径重复写值。
+            # 终态由 load_finished → task_progress.finish() 统一关闭，
+            # 避免与 finish 路径重复收尾。
             self.signals.finished.emit(result)
         except Exception as exc:
             if self._cancelled:

@@ -36,13 +36,11 @@ class TestLoadingDialogBehavior:
 
     def test_progress_updates_are_real(self, qapp):
         dlg = LoadingDialog()
-        dlg.update_progress(45, '正在解析 bllygg01.ply')
-        assert dlg._bar.value() == 45
+        dlg.update_progress('正在解析 bllygg01.ply')
         assert 'bllygg01.ply' in dlg._label.text()
-        dlg.update_progress(100, '点云加载完成')
-        assert dlg._bar.value() == 100
-        dlg.update_progress(150, '超出上限应截断')
-        assert dlg._bar.value() == 100
+        dlg.update_progress('点云加载完成')
+        assert '点云加载完成' in dlg._label.text()
+        assert dlg._bar.maximum() == 0  # 恒为忙碌条
 
 
 # ---------------------------------------------------------------------------

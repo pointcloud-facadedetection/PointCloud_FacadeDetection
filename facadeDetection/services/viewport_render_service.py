@@ -905,7 +905,11 @@ class ViewportRenderService:
                 report = facade.get('quality_report')
                 if facade.get('quality_status') != 'complete' or not isinstance(report, dict):
                     continue
-                if report.get('__global_indices') is None or not isinstance(report.get('windows'), list):
+                if not isinstance(report.get('windows'), list):
+                    continue
+                # 质量域索引按需从 artifact npz 载入（历史恢复时已延迟）
+                from services.dal.results_repo import ResultsRepo
+                if ResultsRepo.ensure_global_indices(report) is None:
                     continue
                 result_revision = facade.get('dataset_revision') or report.get('dataset_revision')
                 if revision is not None and result_revision is not None and str(result_revision) != str(revision):

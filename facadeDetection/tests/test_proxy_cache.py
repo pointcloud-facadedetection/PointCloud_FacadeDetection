@@ -27,7 +27,7 @@ import open3d as o3d
 import pytest
 
 import services.pointcloud_station_service as pss_mod
-from algorithms.geometry import stratified_proxy_build as real_proxy_build
+from algorithms.geometry import build_proxy_domain as real_domain_build
 from config.storage import Storage
 from services import proxy_cache
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
@@ -104,8 +104,8 @@ class _Harness:
         self.build_calls = []
         def counting_build(*args, **kwargs):
             self.build_calls.append(time.perf_counter())
-            return real_proxy_build(*args, **kwargs)
-        monkeypatch.setattr(pss_mod, 'stratified_proxy_build', counting_build)
+            return real_domain_build(*args, **kwargs)
+        monkeypatch.setattr(pss_mod, 'build_proxy_domain', counting_build)
 
         self.ply_load_calls = []
         real_load = PointCloudStationService._load
@@ -502,25 +502,26 @@ class TestCsrNdarrayMetadata:
             assert ds.index.source_raw_offsets.dtype == np.int64
             assert ds.index.source_raw_indices.dtype == np.int32
 
-    def test_json_boundary_produces_serializable_lists(self):
-        # save_denoise_state 写入 denoise_state_json 前的统一转换边界
+    def test_state_boundary_produces_ndarrays(self):
+        # save_denoise_state 的持久化边界：大数组以 ndarray 交给 sidecar，
+        # 运行期零 list 转换。
         from services.project_operation.project_operation_service import (
-            _json_boundary_list)
+            _as_state_array)
         offsets = np.array([0, 3, 7], dtype=np.int64)
         indices = np.array([1, 2, 3, 4, 5, 6, 7], dtype=np.int32)
         ranges = np.array([0.5, 1.5], dtype=np.float32)
         state = {
-            'proxy_source_offsets': _json_boundary_list(offsets),
-            'proxy_source_indices': _json_boundary_list(indices),
-            'ranges': _json_boundary_list(ranges),
+            'proxy_source_offsets': _as_state_array(offsets, np.int64),
+            'proxy_source_indices': _as_state_array(indices, np.int64),
+            'ranges': _as_state_array(ranges, np.float32),
         }
         for value in state.values():
-            assert isinstance(value, list)
-        # 数据：JSON 可序列化且往返后数值一致
-        restored = json.loads(json.dumps(state))
-        assert restored['proxy_source_offsets'] == [0, 3, 7]
-        assert restored['proxy_source_indices'] == [1, 2, 3, 4, 5, 6, 7]
-        assert _json_boundary_list(None) is None
+            assert isinstance(value, np.ndarray)
+        assert state['proxy_source_offsets'].tolist() == [0, 3, 7]
+        assert state['proxy_source_indices'].tolist() == [1, 2, 3, 4, 5, 6, 7]
+        # None 归一为空数组
+        empty = _as_state_array(None, np.int64)
+        assert isinstance(empty, np.ndarray) and len(empty) == 0
 
     def test_ndarray_metadata_avoids_python_int_roundtrip(self):
         # 内存证明：大 CSR 的 .tolist() 产生海量 Python int 临时对象

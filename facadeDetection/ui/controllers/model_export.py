@@ -92,7 +92,6 @@ class ModelExportController(QObject):
         self.service = ModelExportService()
         self._workers = set()
         #: 正在执行的导出 worker（同一时刻只允许一个）。
-        #: 进度窗"关闭"→ TaskProgressController → cancel_active_export。
         self._active_worker = None
 
     # ------------------------------------------------------------------
@@ -149,8 +148,6 @@ class ModelExportController(QObject):
             TASK_MODEL_EXPORT,
             '正在导出模型',
             f'准备导出「{station_name}」的点云模型',
-            determinate=False,
-            cancellable=True,
         )
 
         # 参数严格对齐 ModelExportWorker.__init__：
@@ -186,22 +183,6 @@ class ModelExportController(QObject):
             self.pool.start(worker)
             return
         worker.run()
-
-    def cancel_active_export(self):
-        """请求中止当前导出（进度窗"关闭"/"取消"的落点）。
-
-        只置位 worker 的中止标志并立即放弃本地引用：真正的线程退出由
-        worker 在下一个检查点完成，因此这里绝不 join、不阻塞 GUI。
-        """
-        worker = self._active_worker
-        self._active_worker = None
-        if worker is None:
-            return
-        try:
-            worker.cancel()
-        except Exception:
-            pass
-        self._workers.discard(worker)
 
     def _on_finished(self, worker, payload):
         self._workers.discard(worker)
