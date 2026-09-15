@@ -222,10 +222,30 @@ class ProjectOperationService:
                         'proxy_source_indices': stats.get('proxy_source_indices'),
                         'ranges': stats.get('ranges'),
                         'proxy_count': int(len(points)),
+                        'revision': stats.get('dataset_revision'),
                         'enabled': True,
                     }
                     PointCloudStationRepo.save_denoise_state(
                         self._project_uuid, stats['station_id'], state)
+                    # proxy 行已发生变化；数据库中的旧立面索引和质量报告
+                    # 不能在下次打开项目时再次恢复。
+                    try:
+                        from services.dal.results_repo import ResultsRepo
+                        invalidated = ResultsRepo.invalidate_facades_for_station(
+                            self._project_uuid,
+                            int(stats['station_id']),
+                        )
+                        if invalidated:
+                            print(
+                                f'[PCFD] facade.invalidated station='
+                                f'{int(stats["station_id"])} count={invalidated}',
+                                flush=True,
+                            )
+                    except Exception as exc:
+                        print(
+                            f'[PCFD] facade.invalidate_failed error={exc!r}',
+                            flush=True,
+                        )
                 # A denoise result replaces the processing cloud, never layers on
                 # top of the old station/result geometry.
                 if render is not None:
@@ -268,7 +288,10 @@ class ProjectOperationService:
                           f'proxy={actual_count}', flush=True)
                     # 替换操作会使基于代理索引的立面处理数据失效。
                     # 下次检测时必须根据新的代理行和新的 VoxelCascadeIndex 版本重新着色。
-                    self._last_facade_results = None
+                    self._last_facade_results = []
+                    facade_callback = self.on_facade_results
+                    if callable(facade_callback):
+                        facade_callback([])
                     if render is not None:
                         render.invalidate_facade_cache(stats['name'])
                     if len(points) == 0:

@@ -2222,6 +2222,25 @@ class MainWindow(QMainWindow):
             return
         if self._match_preprocessed_cloud == cloud_name:
             return
+        # 已恢复或已生成的立面结果都绑定当前 proxy 行号。进入 2D-3D
+        # 工作区时若再次自动去噪，会重排 proxy 并让历史立面索引错位。
+        facade_results = getattr(
+            self.project_operation_service,
+            '_last_facade_results',
+            None,
+        )
+        cloud_data = self.viewport.get_cloud_data(cloud_name) or {}
+        dataset = self.pointcloud_service.get_dataset(
+            cloud_data.get('dataset_id')
+        )
+        metadata = (dataset.metadata or {}) if dataset is not None else {}
+        already_denoised = bool(
+            metadata.get('denoise_restored')
+            or metadata.get('denoise_history')
+        )
+        if facade_results or already_denoised:
+            self._match_preprocessed_cloud = cloud_name
+            return
         self._remove_match_cloud_outliers(silent=True)
 
     def _remove_match_cloud_outliers(self, silent=False):
@@ -2819,6 +2838,54 @@ class MainWindow(QMainWindow):
             f"热力图已重新显示（{int(width)}×{int(height)}）",
             8000,
         )
+        self._refresh_photo_match_controls()
+
+    def _save_photo_heatmap(self):
+        """保存当前照片窗口中已完成融合的热力图图片。"""
+        image = self._photo_heatmap_image
+        if image is None or image.isNull():
+            QMessageBox.information(
+                self,
+                '保存热力图',
+                '请先执行“热力图映射”或“调整照片角度”。',
+            )
+            return
+
+        selected = self.photo_match_facade_list.currentItem()
+        facade = (
+            selected.data(Qt.ItemDataRole.UserRole)
+            if selected is not None
+            else {}
+        ) or {}
+        facade_no = int(facade.get('display_no', 1))
+        filename = (
+            f'立面{facade_no}_照片热力图_'
+            f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
+        )
+        default_dir = Path(self._last_upload_directory)
+        if self.current_project is not None:
+            default_dir = Path(self.current_project.directory_path) / 'results'
+            default_dir.mkdir(parents=True, exist_ok=True)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            '保存照片热力图',
+            str(default_dir / filename),
+            'PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg)',
+        )
+        if not file_path:
+            return
+        output = Path(file_path)
+        if not output.suffix:
+            output = output.with_suffix('.png')
+        if not image.save(str(output)):
+            QMessageBox.warning(
+                self,
+                '保存热力图',
+                f'无法保存图片：\n{output}',
+            )
+            return
+        self._last_upload_directory = str(output.parent)
+        self.statusBar().showMessage(f'照片热力图已保存：{output}', 8000)
 
     @staticmethod
     def _qimage_to_bgr(image):
@@ -2944,6 +3011,7 @@ class MainWindow(QMainWindow):
             f"色标 ±{float(result.get('deviation_limit_mm', 0.0)):.1f} mm）",
             8000,
         )
+        self._refresh_photo_match_controls()
 
     def _remap_manual_match_points(self):
         try:
@@ -3247,6 +3315,11 @@ class MainWindow(QMainWindow):
                 and self._projection_enabled
                 and self._live_projection_view is not None
                 and not state.annotating
+            )
+        if hasattr(self, 'btn_save_photo_heatmap'):
+            heatmap_image = self._photo_heatmap_image
+            self.btn_save_photo_heatmap.setEnabled(
+                heatmap_image is not None and not heatmap_image.isNull()
             )
         if not has_photo:
             status = '尚未上传照片'
@@ -4002,6 +4075,10 @@ class MainWindow(QMainWindow):
         self.btn_adjust_photo_angle.setToolTip(
             '按选中立面的法向量，将照片和点云映射图调整为正视角度'
         )
+        self.btn_save_photo_heatmap = QPushButton('保存热力图')
+        self.btn_save_photo_heatmap.setToolTip(
+            '保存照片窗口中当前显示的热力图融合图片'
+        )
         # 生成 / 映射回照片功能保留，由“热力图映射”一并执行。
         self.btn_generate_facade_heatmap = QPushButton('生成热力图')
         self.btn_generate_facade_heatmap.hide()
@@ -4020,6 +4097,7 @@ class MainWindow(QMainWindow):
             self.btn_remap_match_points,
             self.btn_heatmap_map,
             self.btn_adjust_photo_angle,
+            self.btn_save_photo_heatmap,
         ):
             button.setMinimumHeight(32)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4065,6 +4143,9 @@ class MainWindow(QMainWindow):
         )
         self.btn_adjust_photo_angle.clicked.connect(
             self._adjust_photo_to_facade_angle
+        )
+        self.btn_save_photo_heatmap.clicked.connect(
+            self._save_photo_heatmap
         )
         self.btn_generate_facade_heatmap.clicked.connect(
             self._generate_selected_facade_heatmap

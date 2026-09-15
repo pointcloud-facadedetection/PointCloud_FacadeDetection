@@ -174,6 +174,36 @@ def _cached_heatmap_grid(heatmap_data, points, values, plane, threshold, vmin, v
     return built['patch_bgr'], built['patch_mask'], built['corners_3d']
 
 
+def _projected_facade_crop_box(
+    corners_3d,
+    rotation,
+    translation,
+    camera_matrix,
+    image_shape,
+    padding=2,
+):
+    """计算热力图三维四角在正视图中的紧致像素外接框。"""
+    corners = np.asarray(corners_3d, dtype=np.float64).reshape(4, 3)
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    translation = np.asarray(translation, dtype=np.float64).reshape(3)
+    camera = corners @ rotation.T + translation
+    if np.any(~np.isfinite(camera)) or np.any(camera[:, 2] <= 1e-6):
+        raise ValueError('选中立面不在正视相机前方，无法截取')
+    homogeneous = camera @ np.asarray(
+        camera_matrix, dtype=np.float64
+    ).reshape(3, 3).T
+    pixels = homogeneous[:, :2] / homogeneous[:, 2:3]
+    height, width = image_shape[:2]
+    pad = max(0, int(padding))
+    x0 = max(0, int(np.floor(np.min(pixels[:, 0]))) - pad)
+    y0 = max(0, int(np.floor(np.min(pixels[:, 1]))) - pad)
+    x1 = min(width, int(np.ceil(np.max(pixels[:, 0]))) + pad + 1)
+    y1 = min(height, int(np.ceil(np.max(pixels[:, 1]))) + pad + 1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        raise ValueError('选中立面在正视图中的有效区域过小，无法截取')
+    return x0, y0, x1, y1
+
+
 @dataclass
 class MatchPair:
     photo: Optional[tuple[float, float]] = None
@@ -418,7 +448,7 @@ class PhotoMatchService:
         cloud_projection=None,
         alpha: float = 0.72,
         point_radius: int = 6,
-        blur_size: int = 7,
+        blur_size: int = 0,
         heatmap_data=None,
         neutral_mm: float | None = None,
         limit_mm: float | None = None,
@@ -537,20 +567,12 @@ class PhotoMatchService:
             point_radius=point_radius,
             blur_size=blur_size,
         )
-        grid_bgr, grid_mask, grid_corners = _cached_heatmap_grid(
-            heatmap_data,
+        # 使用与 3D 点云相同的逐点偏差值和色标直接投影，不使用带网格线
+        # 的二维 patch，保证照片、映射图与三维视口的热力颜色一致。
+        blended, heatmap, meta = overlay.overlay(
+            photo_bgr,
             facade_points,
             scalars_mm,
-            oriented_plane,
-            scale_threshold,
-            scale_vmin,
-            scale_vmax,
-        )
-        blended, heatmap, meta = overlay.overlay_grid(
-            photo_bgr,
-            grid_bgr,
-            grid_mask,
-            grid_corners,
             rotation,
             translation.reshape(3, 1),
             camera_matrix,
@@ -558,6 +580,8 @@ class PhotoMatchService:
             val_range=(scale_vmin, scale_vmax),
             threshold=scale_threshold,
             draw_colorbar=False,
+            boundary_points_3d=boundary_points,
+            draw_boundary=False,
         )
         result = {
             'image_bgr': blended,
@@ -581,17 +605,18 @@ class PhotoMatchService:
             projection_intrinsic = np.asarray(
                 cloud_projection.get('camera_matrix'), dtype=np.float64
             ).reshape(3, 3)
-            cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay_grid(
+            cloud_blended, cloud_heatmap, cloud_meta = overlay.overlay(
                 projection_image,
-                grid_bgr,
-                grid_mask,
-                grid_corners,
+                facade_points,
+                scalars_mm,
                 projection_extrinsic[:3, :3],
                 projection_extrinsic[:3, 3].reshape(3, 1),
                 projection_intrinsic,
                 val_range=(scale_vmin, scale_vmax),
                 threshold=scale_threshold,
                 draw_colorbar=False,
+                boundary_points_3d=boundary_points,
+                draw_boundary=False,
             )
             result.update({
                 'cloud_image_bgr': cloud_blended,
@@ -609,15 +634,16 @@ class PhotoMatchService:
         cloud_projection,
         alpha: float = 0.72,
         point_radius: int = 6,
-        blur_size: int = 7,
+        blur_size: int = 0,
         heatmap_data=None,
         neutral_mm: float | None = None,
         limit_mm: float | None = None,
         vmin_mm: float | None = None,
         vmax_mm: float | None = None,
         target_max_dim: int = 1600,
+        margin_ratio: float = 0.0,
     ) -> dict:
-        """将照片和点云映射图校正为选中立面的正视热力图。"""
+        """将照片和点云映射图裁到选中立面，校正为正视热力图。"""
         if self.state.annotating:
             raise ValueError('请先退出标注模式')
         if self.state.pose is None:
@@ -682,6 +708,7 @@ class PhotoMatchService:
             cloud_translation=cloud_extrinsic[:3, 3],
             cloud_camera_matrix=cloud_camera,
             target_max_dim=target_max_dim,
+            margin_ratio=margin_ratio,
         )
 
         from algorithms.facade.heatmap_colors import compute_heatmap_scale
@@ -718,7 +745,7 @@ class PhotoMatchService:
             point_radius=point_radius,
             blur_size=blur_size,
         )
-        grid_bgr, grid_mask, grid_corners = _cached_heatmap_grid(
+        _, _, grid_corners = _cached_heatmap_grid(
             heatmap_data,
             facade_points,
             scalars_mm,
@@ -731,27 +758,48 @@ class PhotoMatchService:
             'val_range': (scale_vmin, scale_vmax),
             'threshold': threshold,
             'draw_colorbar': False,
+            'boundary_points_3d': aligned['boundary_points_3d'],
+            'draw_boundary': False,
         }
-        photo_image, photo_heatmap, photo_meta = overlay.overlay_grid(
+        photo_image, photo_heatmap, photo_meta = overlay.overlay(
             aligned['photo_bgr'],
-            grid_bgr,
-            grid_mask,
-            grid_corners,
+            facade_points,
+            scalars_mm,
             aligned['rotation_matrix'],
             aligned['translation_vector'].reshape(3, 1),
             aligned['camera_matrix'],
             **overlay_options,
         )
-        cloud_image, cloud_heatmap, cloud_meta = overlay.overlay_grid(
+        cloud_image, cloud_heatmap, cloud_meta = overlay.overlay(
             aligned['cloud_bgr'],
-            grid_bgr,
-            grid_mask,
-            grid_corners,
+            facade_points,
+            scalars_mm,
             aligned['rotation_matrix'],
             aligned['translation_vector'].reshape(3, 1),
             aligned['camera_matrix'],
             **overlay_options,
         )
+        # 最终展示范围以热力图的三维四角为准，裁掉同一正视画布内
+        # 属于相邻建筑、天空和地面的区域。
+        x0, y0, x1, y1 = _projected_facade_crop_box(
+            grid_corners,
+            aligned['rotation_matrix'],
+            aligned['translation_vector'],
+            aligned['camera_matrix'],
+            photo_image.shape,
+        )
+        crop = np.s_[y0:y1, x0:x1]
+        photo_image = np.ascontiguousarray(photo_image[crop])
+        photo_heatmap = np.ascontiguousarray(photo_heatmap[crop])
+        cloud_image = np.ascontiguousarray(cloud_image[crop])
+        cloud_heatmap = np.ascontiguousarray(cloud_heatmap[crop])
+        crop_shift = np.asarray(
+            ((1.0, 0.0, -x0), (0.0, 1.0, -y0), (0.0, 0.0, 1.0)),
+            dtype=np.float64,
+        )
+        output_size = (x1 - x0, y1 - y0)
+        photo_meta['facade_crop_box'] = (x0, y0, x1, y1)
+        cloud_meta['facade_crop_box'] = (x0, y0, x1, y1)
         return {
             'image_bgr': photo_image,
             'heatmap_bgr': photo_heatmap,
@@ -767,9 +815,9 @@ class PhotoMatchService:
             'deviation_threshold_mm': float(threshold),
             'deviation_vmin_mm': float(scale_vmin),
             'deviation_vmax_mm': float(scale_vmax),
-            'output_size': tuple(aligned['output_size']),
-            'photo_homography': aligned['photo_homography'],
-            'cloud_homography': aligned['cloud_homography'],
+            'output_size': output_size,
+            'photo_homography': crop_shift @ aligned['photo_homography'],
+            'cloud_homography': crop_shift @ aligned['cloud_homography'],
         }
 
     def complete_pair_count(self) -> int:

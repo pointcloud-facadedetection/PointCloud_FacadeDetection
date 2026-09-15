@@ -140,6 +140,8 @@ class PointCloudStationService:
                     'source_ply_path': str(Path(station.source_path).resolve()),
                     'asset_fingerprint': list(fingerprint_key),
                     'source_raw_count': int(len(points))}
+        if state and state.get('revision'):
+            metadata['revision'] = str(state['revision'])
         metadata.update(self._global_coordinate_metadata(station.source_path))
         state_offsets = np.asarray((state or {}).get('proxy_source_offsets', []),
                                    dtype=np.int64)

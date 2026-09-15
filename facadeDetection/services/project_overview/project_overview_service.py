@@ -175,7 +175,6 @@ class ProjectOverviewService:
         log_event(project_id, 'stations.synced', **stats)
 
     def load_historical_facades(self, project_id: str, station_id: int | None = None) -> list[dict]:
-        from config.storage import Storage
         with project_session(project_id) as s:
             query = select(Facade).where(Facade.is_deleted == 0)
             # 旧数据行的 station_id 为 NULL，绝不能将其推测为当前活动站；
@@ -200,12 +199,19 @@ class ProjectOverviewService:
                                'point_count': point_count, 'raw_point_count': raw_point_count,
                                'type': row.label, 'type_label': row.label,
                                'area': row.area or 0.0, 'plane': row.plane_json,
-                               'bbox': row.bbox_json,
+                               'bbox_2d': row.bbox_json,
                                **{key: geometry[key] for key in (
                                    'plane_model', 'normal', 'center', 'inlier_indices',
                                     'proxy_indices', 'measurement_indices', 'voxel_ids',
                                     'cloud_name', '__index_space', 'review_status')
                                    if key in geometry},
+                               'index_space': (
+                                   geometry.get('index_space')
+                                   or geometry.get('__index_space')
+                               ),
+                               'station_id': row.station_id,
+                               'dataset_id': row.dataset_id,
+                               'dataset_fingerprint': row.dataset_fingerprint,
                                 'quality_metrics': [{'name': m.metric_name, 'value': m.value,
                                                     'unit': m.unit, 'pass': m.pass_flag}
                                                     for m in metrics],

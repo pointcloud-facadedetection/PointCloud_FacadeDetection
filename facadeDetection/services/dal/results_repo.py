@@ -192,6 +192,30 @@ class ResultsRepo:
             s.flush()
 
     @staticmethod
+    def invalidate_facades_for_station(
+        project_uuid: str,
+        station_id: int,
+    ) -> int:
+        """点云代理行改变后，使该站点的旧立面及质量结果停止参与恢复。"""
+        with project_session(project_uuid) as s:
+            project_id = select(Project.id).where(
+                Project.uuid == project_uuid
+            ).scalar_subquery()
+            rows = s.execute(
+                select(Facade).where(
+                    Facade.project_id == project_id,
+                    Facade.station_id == int(station_id),
+                    Facade.is_deleted == 0,
+                )
+            ).scalars().all()
+            deleted_at = datetime.now()
+            for facade in rows:
+                facade.is_deleted = 1
+                facade.deleted_at = deleted_at
+            s.flush()
+            return len(rows)
+
+    @staticmethod
     def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> list[Facade]:
         """Persist a detection batch and its basic metrics in the active scene.
 
@@ -251,7 +275,7 @@ class ResultsRepo:
                         "plane_model", "normal", "center", "inlier_indices",
                         "proxy_indices", "measurement_indices", "voxel_ids",
                         "review_status",
-                        "cloud_name", "__index_space",
+                        "cloud_name", "index_space", "__index_space",
                     ) if item.get(key) is not None} | {
                         'point_count': point_count,
                         'raw_point_count': raw_point_count,
@@ -262,6 +286,9 @@ class ResultsRepo:
                     station_id=station_id,
                     dataset_id=_sqlite_scalar_text(item.get('dataset_id') or dataset_id),
                     dataset_fingerprint=_sqlite_scalar_text(item.get('dataset_fingerprint')),
+                    dataset_revision=_sqlite_scalar_text(
+                        item.get('dataset_revision')
+                    ),
                 )
                 s.add(facade)
                 s.flush()

@@ -57,9 +57,17 @@ class ProjectRestoreService:
                         "point_count": point_count, "raw_point_count": raw_point_count,
                         "type": row.label, "type_label": row.label,
                         "area": row.area or 0.0, "plane": row.plane_json,
-                         "bbox": row.bbox_json, "quality_status": row.quality_status,
+                         "bbox_2d": row.bbox_json,
+                         "quality_status": row.quality_status,
                          "quality_report": row.quality_report_json,
                          "color": row.color_json, "dataset_revision": row.dataset_revision,
+                         "station_id": row.station_id,
+                         "dataset_id": row.dataset_id,
+                         "dataset_fingerprint": row.dataset_fingerprint,
+                         "index_space": (
+                             geometry.get("index_space")
+                             or geometry.get("__index_space")
+                         ),
                          "quality_metrics": [
                             {"name": m.metric_name, "value": m.value, "unit": m.unit, "pass": m.pass_flag}
                             for m in metrics],

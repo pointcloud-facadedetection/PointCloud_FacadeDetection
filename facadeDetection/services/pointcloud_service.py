@@ -413,6 +413,7 @@ class PointCloudService:
         n_after = len(keep_proxy)
         new_pts = pts[keep_proxy] if n_after > 0 else np.empty((0, 3), dtype=np.float32)
         new_cols = cols[keep_proxy] if (cols is not None and n_after > 0) else None
+        next_revision = uuid.uuid4().hex
 
         raw_ids = None
         raw_count = 0
@@ -434,6 +435,7 @@ class PointCloudService:
                 # 重建 metadata
                 new_meta = dict(meta)
                 new_meta.update({
+                    'revision': next_revision,
                     'ranges': new_ranges.tolist(),
                     'proxy_source_offsets': new_offsets.tolist(),
                     'proxy_source_indices': new_indices.tolist(),
@@ -467,6 +469,7 @@ class PointCloudService:
                 raw_count = dataset.index.raw_count_for_proxy(keep_proxy)
 
                 standard_meta = dict(dataset.metadata or {})
+                standard_meta['revision'] = next_revision
                 standard_meta['denoise_history'] = standard_meta.get('denoise_history', []) + [{
                     'before': n_before, 'after': n_after, 'method': method,
                 }]
@@ -479,6 +482,9 @@ class PointCloudService:
                 "name": name, "method": method, "voxel_size": float(voxel_size),
                 "points_before": n_before, "points_after": n_after,
                 "dataset_id": dataset_id, "raw_ids": raw_ids,
+                "dataset_revision": (
+                    dataset.revision if dataset is not None else None
+                ),
                 "raw_count": int(raw_count),
                 "station_id": (data.get("station_id") or
                                 (dataset.metadata or {}).get("station_id")),
