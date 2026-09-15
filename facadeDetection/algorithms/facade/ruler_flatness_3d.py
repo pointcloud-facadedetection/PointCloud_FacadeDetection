@@ -336,10 +336,12 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
         u[tops], w[tops], ids[tops], holes, (a, c), stats)
 
 
-def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0.2):
+def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0.2,
+             threshold_mm=None):
     """Compute ruler flatness at given u_center position.
     
     Returns cleaned dict with only essential fields for quality aggregation.
+    Includes ruler_defect_grid when threshold_mm is provided.
     """
     if u_center is None:
         u_center = float(0.5 * (surface.u_span[0] + surface.u_span[1]))
@@ -370,6 +372,46 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
     gap = (slope * tu + intercept - tw) / np.hypot(1, slope)
     gi = int(np.argmax(gap))
     
+    # ---- 靠尺网格缺陷统计（5cm x 5.5cm 网格，40 格）----
+    ruler_defect_grid = None
+    defect_point_indices = []
+    defect_values_mm = []
+    if threshold_mm is not None and len(tu) > 0:
+        gap_mm = gap * 1000.0  # signed
+        n_grid = 40
+        grid_length = ruler_length / n_grid  # 0.05 m = 5 cm
+        u_lo_ruler = u_center - ruler_length / 2.0
+        grid_bins = np.floor((tu - u_lo_ruler) / grid_length).astype(np.int64)
+        grid_bins = np.clip(grid_bins, 0, n_grid - 1)
+        
+        grids = []
+        for grid_idx in range(n_grid):
+            mask = grid_bins == grid_idx
+            if not np.any(mask):
+                continue
+            grid_gaps = gap_mm[mask]
+            grid_source_ids = ts[mask]
+            max_local_idx = int(np.argmax(np.abs(grid_gaps)))
+            grids.append({
+                'index': grid_idx,
+                'u_start_m': float(u_lo_ruler + grid_idx * grid_length),
+                'u_end_m': float(u_lo_ruler + (grid_idx + 1) * grid_length),
+                'max_defect_mm': float(grid_gaps[max_local_idx]),
+                'max_defect_source_id': int(grid_source_ids[max_local_idx]),
+                'point_count': int(np.sum(mask)),
+            })
+        
+        exceed_mask = np.abs(gap_mm) > float(threshold_mm)
+        defect_point_indices = np.flatnonzero(exceed_mask).tolist()
+        defect_values_mm = gap_mm[exceed_mask].tolist()
+        
+        ruler_defect_grid = {
+            'threshold_mm': float(threshold_mm),
+            'grid_count': n_grid,
+            'grid_width_mm': float(ruler_length / n_grid * 1000.0),
+            'grids': grids,
+        }
+    
     # Hole coverage
     overlap = (np.clip(np.minimum(surface.holes[:, 1], u_center+ruler_length/2) -
                        np.maximum(surface.holes[:, 0], u_center-ruler_length/2), 0, None)
@@ -381,7 +423,7 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
     signed_gap = float(gap[gi])
     
     # Return minimal essential fields only
-    return {
+    result = {
         "ok": True,
         "u_center": float(u_center),
         "gap_mm": float(max(signed_gap, 0.0)) * 1000.0,  # defect value in mm (always >= 0)
@@ -401,6 +443,11 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
         "coverage_valid": coverage_valid,
         "covered_source_ids": ts.copy()
     }
+    if ruler_defect_grid is not None:
+        result["ruler_defect_grid"] = ruler_defect_grid
+        result["defect_point_indices"] = defect_point_indices
+        result["defect_values_mm"] = defect_values_mm
+    return result
 
 
 def ruler_flatness(points, source_ids=None, center=None, **kwargs):

@@ -411,6 +411,17 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
             protrusion = max(0.0, float(win_dist.max()))
             gap = max(depression, protrusion)
 
+            # 逐点缺陷索引与凹凸分类（模拟墙面平整度专用）
+            defect_mask = np.abs(win_dist) > flatness_limit_mm
+            defect_point_indices = ids[ix][defect_mask].tolist() if np.any(defect_mask) else []
+            defect_values_mm = win_dist[defect_mask].tolist() if np.any(defect_mask) else []
+            defect_types = []
+            for val in defect_values_mm:
+                if val < 0:
+                    defect_types.append('depression')
+                else:
+                    defect_types.append('protrusion')
+
             # --- verticality: LOCAL trend of deviation vs height ---
             v_pts = v[ix]
             verticality_mm = np.nan
@@ -447,6 +458,9 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 'flatness_pass': bool(gap <= flatness_limit_mm),
                 'verticality_pass': bool(vp),
                 'center_xyz': center_xyz,
+                'defect_point_indices': defect_point_indices,
+                'defect_values_mm': defect_values_mm,
+                'defect_types': defect_types,
             })
 
     # ------------------------------------------------------------------

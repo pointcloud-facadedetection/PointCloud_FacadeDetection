@@ -274,7 +274,9 @@ def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted,
 
 def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
     local_center = float(centre_uv[0])
-    result = ruler_at(surface, local_center, params.ruler_length_m)
+    result = ruler_at(
+        surface, local_center, params.ruler_length_m,
+        threshold_mm=params.flatness_limit_mm)
     ruler_half = params.ruler_length_m / 2.0
     u_center = local_center
     u_mask = ((surface.u >= u_center - ruler_half) &
@@ -282,7 +284,7 @@ def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
     along_c = centre_uv[0]
     across_c = centre_uv[1]
     center_xyz = origin + along_c * d3 + across_c * q3
-    return {
+    row = {
         'ok': result.get('ok', False),
         'gap_mm': result.get('gap_mm', np.nan),
         'signed_gap_mm': result.get('signed_gap_mm', np.nan),
@@ -300,6 +302,12 @@ def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
         'pivot_source_ids': list(result.get('pivot_source_ids', [-1, -1])),
         'covered_source_ids': result.get('covered_source_ids', _EMPTY_SOURCE_IDS),
     }
+    # 透传靠尺网格缺陷统计（若存在）
+    if 'ruler_defect_grid' in result:
+        row['ruler_defect_grid'] = result['ruler_defect_grid']
+        row['defect_point_indices'] = result.get('defect_point_indices', [])
+        row['defect_values_mm'] = result.get('defect_values_mm', [])
+    return row
 
 def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0,
                               u_step=None, v_step=None):
@@ -357,6 +365,10 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 'depression_source_id': int(w.get('depression_source_id', -1)),
                 'pivot_source_ids': list(w.get('pivot_source_ids', [-1, -1])),
                 'covered_source_ids': np.asarray(w.get('covered_source_ids', _EMPTY_SOURCE_IDS), dtype=np.int64),
+                'ruler_defect_grid': w.get('ruler_defect_grid'),
+                'u_center': float(w.get('u_center', np.nan)),
+                'defect_point_indices': w.get('defect_point_indices', []),
+                'defect_values_mm': w.get('defect_values_mm', []),
             })
 
     if not all_windows:
@@ -453,6 +465,7 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
             'angle_deg': float(dominant['angle_deg']) if dominant else np.nan,
             'source_direction': float(dominant['direction_deg']) if dominant else np.nan,
             'snap_distance_m': 0.0,
+            'u_center': float(dominant.get('u_center', np.nan)) if dominant else np.nan,
             'directional_measurements': [
                 {
                     'direction_deg': float(d['direction_deg']),
@@ -463,6 +476,28 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 for d in sorted(directional, key=lambda x: x['direction_deg'])
             ],
         }
+        # 透传主导方向的 ruler_defect_grid（若存在）
+        if dominant and dominant.get('ruler_defect_grid') is not None:
+            row['ruler_defect_grid'] = dominant['ruler_defect_grid']
+            row['defect_point_indices'] = dominant.get('defect_point_indices', [])
+            row['defect_values_mm'] = dominant.get('defect_values_mm', [])
+        # 合并所有方向的缺陷点索引（去重）—— 供 point-level 热力图回退
+        all_defect_ids = []
+        for d in directional:
+            ids_local = d.get('defect_point_indices', [])
+            vals_local = d.get('defect_values_mm', [])
+            if ids_local:
+                all_defect_ids.extend(zip(ids_local, vals_local))
+        if all_defect_ids:
+            seen = set()
+            merged_ids, merged_vals = [], []
+            for sid, val in all_defect_ids:
+                if sid not in seen:
+                    seen.add(sid)
+                    merged_ids.append(sid)
+                    merged_vals.append(val)
+            row['all_defect_source_ids'] = merged_ids
+            row['all_defect_values_mm'] = merged_vals
         # This is intentionally opt-in: the normal algorithm contract remains
         # compact, while report export can request the original point domain
         # needed for point-level heatmap painting.
