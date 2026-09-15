@@ -174,7 +174,7 @@ class PdfReportRenderer:
         conclusion = (
             "本项目共检测外立面 "
             f"{escape(str(total_facades))} 面，"
-            f"累计检测面积 {escape(str(total_area))}，"
+            f"累计检测面积 {escape(str(total_area))}平方米，"
             f"累计检测点数 {escape(str(total_points))}，"
             f"双指标面积参考合格率 {escape(str(avg_pass_rate))}。"
             "平整度与垂直度按现行标准分别判定，"
@@ -384,7 +384,7 @@ class PdfReportRenderer:
             # 顶部机构抬头带：标准化报告的固定视觉锚点。
             "<div class='cover-org-band'>"
             f"<div class='cover-org'>{escape(str(org))}</div>"
-            "<div class='cover-org-en'>FACADE LASER SCANNING INSPECTION</div>"
+            "<div class='cover-org-en'>RUIJIE FACADE LASER SCANNING INSPECTION</div>"
             "</div>"
             "<div class='cover-title'>外立面激光测量检测报告</div>"
             f"<div class='cover-doc-code'>报告编号：{_text(report_no)}</div>"
@@ -396,7 +396,7 @@ class PdfReportRenderer:
             "<div class='sc-label'>检测立面</div></td>"
             "<td class='summary-card sc-green'>"
             f"<div class='sc-number'>{avg_pass_rate}</div>"
-            "<div class='sc-label'>双指标面积参考率</div></td>"
+            "<div class='sc-label'>双指标面积参考合格率</div></td>"
             "</tr><tr>"
             "<td class='summary-card sc-orange'>"
             f"<div class='sc-number'>{total_area}</div>"

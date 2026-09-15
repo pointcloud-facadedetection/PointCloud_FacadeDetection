@@ -560,6 +560,15 @@ class PointCloudStationService:
             return
         self.commit_show_single(station, self.prepare_show_single(station))
 
+    def reload_single(self, station):
+        """重新提交单个站点视图，即使它当前已被标记为活动站点。
+
+        用于导入流程完成后刷新刚生成的 PLY；准备和提交仍由调用方分别
+        放在后台线程和 GUI 线程执行。
+        """
+        self._active_station_id = None
+        return self.prepare_show_single(station)
+
     def merge_selected(self):
         rows = [x for x in self.list_stations() if x.is_selected and not x.last_error]
         if not rows: raise ValueError('请至少选择一个 PLY 站点')

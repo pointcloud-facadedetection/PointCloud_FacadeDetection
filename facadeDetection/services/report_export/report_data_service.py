@@ -299,7 +299,7 @@ class ReportDataService:
             for mode in ReportDataService._DISPLAY_MODES:
                 artifact = artifacts.get(mode) if isinstance(artifacts, dict) else None
                 if isinstance(artifact, dict):
-                    for key in ("overlay", "heatmap_grid", "photo", "report"):
+                    for key in ("overlay", "heatmap_grid", "photo"):
                         value = artifact.get(key)
                         if value and Path(value).is_file():
                             paths.append({
@@ -335,13 +335,26 @@ class ReportDataService:
                         metric = "平整度" if "flatness" in mode else "垂直度"
                         algo = "靠尺法" if mode.startswith("ruler") else "全局平面法"
                         paths.append({
-                            "mode": mode,
-                            "key": key,
-                            "title": f"{algo}{metric}",
-                            "path": str(path),
+                            "mode": mode, "key": key,
+                            "title": f"{algo}{metric}", "path": str(path),
                         })
 
-        return paths[:12]
+            # 宽容回退：尝试通配匹配（应对 number 与导出侧 facade_no 不一致）
+            for mode in ReportDataService._DISPLAY_MODES:
+                for png in folder.glob(f"facade_*_{mode}_overlay.png"):
+                    if not any(
+                        (item.get("path") if isinstance(item, dict) else item) == str(png)
+                        for item in paths
+                    ):
+                        metric = "平整度" if "flatness" in mode else "垂直度"
+                        algo = "靠尺法" if mode.startswith("ruler") else "全局平面法"
+                        paths.append({
+                            "mode": mode, "key": "overlay",
+                            "title": f"{algo}{metric}", "path": str(png),
+                        })
+                        break
+
+        return paths
 
     @staticmethod
     def _has_written_quality(facade, quality):

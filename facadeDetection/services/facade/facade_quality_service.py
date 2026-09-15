@@ -361,6 +361,7 @@ class FacadeQualityService:
 
             result['__global_indices'] = np.asarray(quality_indices, dtype=np.int64)
             result['__index_space'] = 'facade_local_to_raw_global'
+            result['__defect_index_space'] = 'raw_global_rows'
             result['quality_domain'] = dict(domain_stats)
             result['quality_domain'].update({
                 'raw_point_count': int(n_valid),
@@ -379,6 +380,10 @@ class FacadeQualityService:
                 uv_bounds=(float(q_u0), float(q_u1), float(q_v0), float(q_v1)),
                 raw_ids=quality_indices,
             )
+            # Keep one authoritative point-level payload for the global-plane
+            # renderer.  The legacy per-window arrays remain for report/UI
+            # compatibility, but are no longer the preferred export source.
+            global_samples = global_result.get('defect_samples') or {}
             ruler_overall = result.get('overall') or {}
             valid_windows = [w for w in result.get('windows', [])
                              if w.get('coverage_valid', True)]
@@ -665,6 +670,7 @@ class FacadeQualityService:
                         'rates': global_vert_rates,
                     },
                     'parameters': global_result.get('parameters') or {},
+                    'defect_samples': global_samples,
                     'overall': global_overall,
                     'intervals': global_intervals,
                 },

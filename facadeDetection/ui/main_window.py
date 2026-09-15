@@ -701,8 +701,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
     }
 
     STEP_TASK_TITLES = {
-        TASK_DENOISE: '点云去噪',
-        TASK_DETECTION: '立面提取',
+        TASK_DENOISE: '数据处理',
+        TASK_DETECTION: '框选检测',
         TASK_QUALITY: '质量评估',
         TASK_QUALITY_BATCH: '质量评估',
         TASK_MODEL_EXPORT: '导出模型',

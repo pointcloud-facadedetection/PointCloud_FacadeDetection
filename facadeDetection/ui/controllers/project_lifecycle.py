@@ -256,7 +256,13 @@ class ProjectLifecycleController(QObject):
                     self.station_service.refresh()
                     new_station = self._find_new_station(before_ids)
                     if new_station is not None:
-                        self.station_service.show_single(new_station)
+                        # FLS 转换/代理构建发生在后台 worker 中；完成回调是
+                        # 唯一可以提交 Open3D 场景的 GUI 线程。不要走
+                        # show_single() 的快捷入口：它会在活动站点 id 相同
+                        # 时直接返回，导致新生成的 PLY 只注册到数据域而不
+                        # 出现在视口中。
+                        prepared = self.station_service.reload_single(new_station)
+                        self.station_service.commit_show_single(new_station, prepared)
                         self.station_panel_refresh_requested.emit(new_station.id)
                 else:
                     self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))

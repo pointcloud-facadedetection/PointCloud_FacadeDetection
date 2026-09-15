@@ -413,6 +413,10 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
 
             # 逐点缺陷索引与凹凸分类（模拟墙面平整度专用）
             defect_mask = np.abs(win_dist) > flatness_limit_mm
+            # Keep the render domain explicit.  ``ids`` may be raw database IDs,
+            # while the renderer receives ``source``.  The old contract exposed
+            # only ids and forced the renderer to guess the index space.
+            defect_rows = ix[defect_mask].astype(np.int64).tolist() if np.any(defect_mask) else []
             defect_point_indices = ids[ix][defect_mask].tolist() if np.any(defect_mask) else []
             defect_values_mm = win_dist[defect_mask].tolist() if np.any(defect_mask) else []
             defect_types = []
@@ -459,6 +463,7 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 'verticality_pass': bool(vp),
                 'center_xyz': center_xyz,
                 'defect_point_indices': defect_point_indices,
+                'defect_point_rows': defect_rows,
                 'defect_values_mm': defect_values_mm,
                 'defect_types': defect_types,
             })
@@ -486,6 +491,16 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
 
     flat_rates = _metric_rates(windows, 'flatness_pass')
     vert_rates = _metric_rates(windows, 'verticality_pass')
+
+    # Canonical point-level contract.  IDs are always the raw IDs supplied to
+    # this function; values remain signed so consumers can distinguish
+    # depression (negative) from protrusion (positive).
+    sample_ids, sample_rows, sample_values, sample_types = [], [], [], []
+    for window in windows:
+        sample_ids.extend(window.get('defect_point_indices', []))
+        sample_rows.extend(window.get('defect_point_rows', []))
+        sample_values.extend(window.get('defect_values_mm', []))
+        sample_types.extend(window.get('defect_types', []))
 
     # A standalone caller must receive the same physical-domain area contract
     # as the orchestration service: occupied projected cells only.  Never use
@@ -515,5 +530,12 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
             'window_width_m': width_m,
             'step_u_m': width_m,
             'step_v_m': length_m,
+        },
+        'defect_samples': {
+            'raw_ids': np.asarray(sample_ids, dtype=np.int64),
+            'source_rows': np.asarray(sample_rows, dtype=np.int64),
+            'values_mm': np.asarray(sample_values, dtype=np.float64),
+            'types': list(sample_types),
+            'index_space': 'source_row',
         },
     }

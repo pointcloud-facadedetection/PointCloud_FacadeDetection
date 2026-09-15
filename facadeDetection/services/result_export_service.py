@@ -14,14 +14,7 @@ class ResultExportService:
     重构后输出 4 组 triplet（2 套算法 × 2 指标），每组 3 张子图。
     """
 
-    _QUALITY_MODES = [
-        'ruler_flatness_area', 'ruler_flatness_point',
-        'ruler_verticality_area', 'ruler_verticality_point',
-        'global_plane_flatness_area', 'global_plane_flatness_point',
-        'global_plane_verticality_area', 'global_plane_verticality_point',
-    ]
-
-    # 4 组展示模式（area 视图用于报告图片；point 视图仅保留数据）
+    # 仅导出报告实际使用的四类热力图；point/area 双轨已废弃。
     _DISPLAY_MODES = [
         'ruler_flatness_area',
         'ruler_verticality_area',
@@ -32,10 +25,29 @@ class ResultExportService:
     def __init__(self):
         self._renderer = FacadeHeatmapTripletRenderer()
 
+    @staticmethod
+    def _safe_imwrite(path: Path, img: np.ndarray) -> bool:
+        """cv2.imwrite 在 Windows 上对非 ASCII / Unicode 路径会静默失败，
+        使用 imencode + write_bytes 绕过 OpenCV 的窄字符文件路径限制。
+        """
+        if img is None or img.size == 0:
+            return False
+        suffix = path.suffix.lower()
+        ext = '.png' if suffix == '.png' else '.jpg'
+        success, encoded = cv2.imencode(ext, img)
+        if not success:
+            return False
+        path.write_bytes(encoded.tobytes())
+        return True
+
     def export_all_heatmaps(self, results_dir, facade_no, points, colors, quality):
         """
         导出全部 4 组展示模式的热力图 triplet PNG。
         返回字典，键为模式名，值为包含 overlay/heatmap_grid/photo 路径的字典。
+
+        数据源契约（唯一）：
+            quality['quality_comparison']['methods'][method][metric]['windows']
+        上游未构造 quality_comparison 时直接返回空，不在此层做兼容。
         """
         root = None
         try:
@@ -53,11 +65,28 @@ class ResultExportService:
             overall = quality.get('overall', {})
             plane_model = overall.get('plane_model')
             if plane_model is None or len(plane_model) != 4:
+                plane_model = quality.get('plane_model')
+            if plane_model is None or len(plane_model) != 4:
                 print('[PCFD] export_all_heatmaps: plane_model missing, skip', flush=True)
                 return {}
 
-            comparison = quality.get('quality_comparison', {})
-            methods_data = comparison.get('methods', {})
+            # ============================================================
+            # 唯一数据源：quality_comparison.methods
+            # ============================================================
+            comparison = quality.get('quality_comparison', {}) or {}
+            methods_data = comparison.get('methods', {}) or {}
+
+            if not methods_data:
+                print(
+                    '[PCFD] export_all_heatmaps: quality_comparison.methods missing, '
+                    'skip all heatmap export. '
+                    'Ensure upstream builds quality_comparison before export.',
+                    flush=True,
+                )
+                return {}
+
+            print(f'[PCFD] export_all_heatmaps: methods={list(methods_data.keys())}',
+                  flush=True)
 
             exported = {}
             for mode in self._DISPLAY_MODES:
@@ -66,16 +95,19 @@ class ResultExportService:
                 metric = spec.get('metric', 'flatness')
 
                 method_dict = methods_data.get(method, {})
-                metric_data = method_dict.get(metric, {})
-                windows = metric_data.get('windows', [])
-
-                if not windows:
-                    print(f'[PCFD] export_all_heatmaps: skip {mode}, no windows', flush=True)
+                if not method_dict:
+                    print(f'[PCFD] export_all_heatmaps: method {method} missing, '
+                          f'skip {mode}', flush=True)
                     continue
 
-                # 构造临时 quality dict 供渲染器使用
-                # 这是一个严格按 method/metric 隔离的渲染快照；不要把公共
-                # quality 的 parameters/overall 当作另一套算法的回退来源。
+                metric_data = method_dict.get(metric, {})
+                windows = metric_data.get('windows', []) or []
+                if not windows:
+                    print(f'[PCFD] export_all_heatmaps: skip {mode}, no windows',
+                          flush=True)
+                    continue
+
+                # ---- 构造 method/metric 隔离的渲染快照 ----
                 method_parameters = method_dict.get('parameters')
                 if not isinstance(method_parameters, dict):
                     method_parameters = {}
@@ -90,15 +122,23 @@ class ResultExportService:
                 temp_quality = {
                     'windows': windows,
                     'heatmap_mode': mode,
-                    'overall': method_dict.get('overall', {}) if isinstance(method_dict.get('overall', {}), dict) else {},
+                    'overall': method_dict.get('overall', {}) if isinstance(
+                        method_dict.get('overall', {}), dict) else {},
                     'thresholds': method_thresholds,
                     'parameters': method_parameters,
                     'rates': metric_rates,
                     'profile_snapshot': quality.get('profile_snapshot', {}),
+                    'defect_samples': method_dict.get('defect_samples', {}),
                     '__global_indices': quality.get('__global_indices', []),
-                    'projection_origin': quality.get('projection_origin'),
-                    'projection_u_axis': quality.get('projection_u_axis'),
-                    'projection_v_axis': quality.get('projection_v_axis'),
+                    '__defect_index_space': quality.get(
+                        '__defect_index_space', 'raw_global_rows'),
+                    # method 优先，缺失才回退顶层（方法级隔离，与数据源回退无关）
+                    'projection_origin': method_dict.get(
+                        'projection_origin', quality.get('projection_origin')),
+                    'projection_u_axis': method_dict.get(
+                        'projection_u_axis', quality.get('projection_u_axis')),
+                    'projection_v_axis': method_dict.get(
+                        'projection_v_axis', quality.get('projection_v_axis')),
                 }
 
                 try:
@@ -110,13 +150,14 @@ class ResultExportService:
                         plane_model=plane_model,
                         quality=temp_quality,
                         pixel_size=0.01,
-                        photo_path=None,  # 预留接口
+                        photo_path=None,   # 预留接口
                     )
                 except Exception as e:
-                    print(f'[PCFD] export_all_heatmaps: render failed for {mode}: {e}', flush=True)
+                    print(f'[PCFD] export_all_heatmaps: render failed for {mode}: '
+                          f'{e}', flush=True)
                     continue
 
-                # 写入文件
+                # ---- 写入 triplet（overlay / heatmap_grid / photo） ----
                 prefix = f'facade_{int(facade_no):03d}_{mode}'
                 paths = {}
                 for key, img in triplet.items():
@@ -129,19 +170,47 @@ class ResultExportService:
                         'photo': '_photo_overlay.png',
                     }.get(key, f'_{key}.png')
                     path = root / (prefix + suffix)
-                    if cv2.imwrite(str(path), img):
+                    if self._safe_imwrite(path, img):
                         paths[key] = str(path)
                     else:
                         paths[key] = None
 
-                # 同时生成 report 缩放图（overlay 的缩小版）
+                # report 缩放图
                 report_path = root / f'{prefix}_report.png'
                 try:
                     report_img = self._renderer.fit_report_image(triplet['overlay'])
-                    cv2.imwrite(str(report_path), report_img)
+                    self._safe_imwrite(report_path, report_img)
                     paths['report'] = str(report_path)
                 except Exception:
                     paths['report'] = None
+
+                # ---- 透明热力图（仅热力层，用于照片叠加） ----
+                transparent_path = root / f'{prefix}_transparent.png'
+                try:
+                    transparent = self._renderer.render_transparent_heatmap(
+                        mode=mode,
+                        points=points,
+                        colors=colors,
+                        windows=windows,
+                        plane_model=plane_model,
+                        quality=temp_quality,
+                        pixel_size=0.01,
+                    )
+                    if transparent is not None:
+                        self._safe_imwrite(transparent_path, transparent)
+                        paths['transparent'] = str(transparent_path)
+
+                        # 若 triplet 未提供 photo，用透明热力作为 2D 现场热力映射图占位
+                        if not paths.get('photo'):
+                            photo_placeholder = root / f'{prefix}_photo_overlay.png'
+                            if self._safe_imwrite(photo_placeholder, transparent):
+                                paths['photo'] = str(photo_placeholder)
+                    else:
+                        paths['transparent'] = None
+                except Exception as e:
+                    print(f'[PCFD] export_all_heatmaps: transparent render '
+                          f'failed for {mode}: {e}', flush=True)
+                    paths['transparent'] = None
 
                 exported[mode] = {
                     'title': spec['title'],
@@ -212,16 +281,16 @@ class ResultExportService:
 
             prefix = f'facade_{int(facade_no):03d}_{heatmap_mode}'
             overlay_path = root / f'{prefix}_overlay.png'
-            cv2.imwrite(str(overlay_path), triplet['overlay'])
+            self._safe_imwrite(overlay_path, triplet['overlay'])
 
             # report 缩放图
             report_path = root / f'{prefix}_report.png'
             report_img = self._renderer.fit_report_image(triplet['overlay'])
-            cv2.imwrite(str(report_path), report_img)
+            self._safe_imwrite(report_path, report_img)
 
             # heatmap_grid
             grid_path = root / f'{prefix}_heatmap_grid.png'
-            cv2.imwrite(str(grid_path), triplet['heatmap_grid'])
+            self._safe_imwrite(grid_path, triplet['heatmap_grid'])
 
             print(f'[PCFD] export_heatmap: done facade={facade_no} '
                   f'overlay={overlay_path.name}', flush=True)
@@ -309,7 +378,7 @@ class ResultExportService:
         cv2.putText(legend, "严重", (w - 70, bar_y + bar_h + 20), font, font_scale, color, thickness)
         cv2.putText(legend, f"{max_mm:.1f}mm", (w - 80, bar_y + bar_h + 38), font, 0.35, (100, 100, 100), 1)
 
-        cv2.imwrite(str(legend_path), legend)
+        self._safe_imwrite(legend_path, legend)
         return legend_path
 
     def _create_heatmap_legend(self, root, limit_mm, max_mm, mode='flatness'):
