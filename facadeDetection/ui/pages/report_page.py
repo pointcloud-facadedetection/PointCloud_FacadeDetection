@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -39,6 +39,9 @@ class ReportPageMixin:
         if not path:
             return
         try:
+            # 预览刷新是按节拍合并的，导出前确保拿到最新快照
+            if getattr(self, '_report_preview_pending', False):
+                self._rebuild_report_preview()
             PdfReportRenderer.write_pdf(self._report_html, path)
             self.report_export_service.register_pdf(
                 getattr(self.current_project, 'project_id', None),
@@ -52,6 +55,17 @@ class ReportPageMixin:
             QMessageBox.warning(self, '导出报告', f'报告导出失败：{exc}')
 
     def _refresh_report_preview(self):
+        if not hasattr(self, 'report_preview_browser'):
+            return
+        # 一次项目激活会沿多条信号连锁触发刷新（项目切换 / 立面恢复 /
+        # 预览请求），合并到同一事件循环节拍内只真正构建一次。
+        if getattr(self, '_report_preview_pending', False):
+            return
+        self._report_preview_pending = True
+        QTimer.singleShot(0, self._rebuild_report_preview)
+
+    def _rebuild_report_preview(self):
+        self._report_preview_pending = False
         if not hasattr(self, 'report_preview_browser'):
             return
         # 使用全量聚合数据生成报告，支持多站点增量拓展

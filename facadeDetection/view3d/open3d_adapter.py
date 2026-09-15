@@ -24,6 +24,8 @@ class Open3DAdapter:
         self._event_poll_interval = 1.0 / 30.0
         self._idle_render_interval = 0.20
         self._interaction_render_interval = 1.0 / 30.0
+        #: 实际提交过的帧数：供 UI 判断"首帧已上屏"，忙碌条据此收尾
+        self._frames_rendered = 0
 
     def _assert_owner(self):
         """Visualizer/GLFW is single-threaded; fail early instead of racing WGL."""
@@ -166,6 +168,7 @@ class Open3DAdapter:
         self.vis.update_renderer()
         self._last_render_time = now
         self._render_pending = False
+        self._frames_rendered += 1
         return True
 
     def get_view_control(self):

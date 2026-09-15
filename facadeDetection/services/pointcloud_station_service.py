@@ -29,9 +29,10 @@ def _safe_int(value, default: int = 0) -> int:
 
 def _normalize_denoise_state(state):
     """将持久化的去噪状态安全归一化，兼容旧字段与 None 污染。
-    
-    返回的新 dict 中所有数值字段均为安全 Python int；数组字段均为
-    list（可能为空），绝不包含 None。
+
+    返回的新 dict 中所有数值字段均为安全 Python int；数组字段保持
+    ndarray（sidecar 直读零转换），旧 JSON list 仅在调用方需要时
+    就地 np.asarray，绝不在这里做全量 Python 级过滤。
     """
     if not state:
         return {}
@@ -43,16 +44,16 @@ def _normalize_denoise_state(state):
             out[key] = bool(raw) if raw is not None else False
         else:
             out[key] = _safe_int(raw, 0)
-    # 数组字段：过滤 None 并展平
+    # 数组字段：ndarray 直通；旧 JSON list 原样保留（调用方 asarray）
     for key in ('proxy_source_offsets', 'proxy_source_indices', 'ranges',
                 'keep_proxy_indices', 'source_offsets', 'source_indices',
                 'proxy_keep_indices'):
         raw = state.get(key)
-        if isinstance(raw, list):
+        if isinstance(raw, np.ndarray):
+            out[key] = raw
+        elif isinstance(raw, list):
             cleaned = [x for x in raw if x is not None]
             out[key] = cleaned
-        elif isinstance(raw, np.ndarray):
-            out[key] = raw.tolist()
         else:
             out[key] = []
     return out
@@ -266,16 +267,21 @@ class PointCloudStationService:
                     'source_raw_count': int(len(points))}
         metadata.update(self._global_coordinate_metadata(station.source_path))
         # 兼容旧项目：source_offsets / source_indices 别名
+        # （sidecar 读出即为 ndarray，不能用 or 链做真值判断）
         state_payload = state or {}
+
+        def _pick_array(*keys):
+            for key in keys:
+                value = state_payload.get(key)
+                if value is not None and len(value):
+                    return value
+            return []
+
         state_offsets = np.asarray(
-            state_payload.get('proxy_source_offsets')
-            or state_payload.get('source_offsets')
-            or [],
+            _pick_array('proxy_source_offsets', 'source_offsets'),
             dtype=np.int64)
         state_indices = np.asarray(
-            state_payload.get('proxy_source_indices')
-            or state_payload.get('source_indices')
-            or [],
+            _pick_array('proxy_source_indices', 'source_indices'),
             dtype=np.int64)
         restored_direct = bool(
             (state or {}).get('enabled') and len(state_offsets) >= 2 and
@@ -299,13 +305,15 @@ class PointCloudStationService:
             proxy_colors = colors[representative_ids] if colors is not None else None
             # 运行期 metadata 的 CSR/ranges 一律以 ndarray 传递：
             # 千万级 indices 的 .tolist() 会产生 GB 级 Python int 临时对象，
-            # pymalloc 不会把这些内存还给 OS。list 转换只在 JSON 持久化边界发生。
+            # pymalloc 不会把这些内存还给 OS。sidecar 读出即为 ndarray。
             state_ranges = (state or {}).get('ranges')
+            has_ranges = (state_ranges is not None
+                          and len(state_ranges) > 0)
             metadata.update({
                 'proxy_source_offsets': state_offsets,
                 'proxy_source_indices': state_indices.astype(np.int32, copy=False),
                 'ranges': (np.asarray(state_ranges, dtype=np.float32)
-                           if state_ranges else
+                           if has_ranges else
                            np.zeros(len(proxy), dtype=np.float32)),
                 'denoise_restored': True,
             })

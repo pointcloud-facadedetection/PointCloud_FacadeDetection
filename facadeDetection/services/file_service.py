@@ -174,7 +174,7 @@ class FileService:
                     'source_id': source_id,
                     'source_raw_count': int(len(pts)),
                     # CSR/ranges 以 ndarray 传递，避免大数组的 list 往返；
-                    # JSON 持久化边界（save_denoise_state）才统一转 list
+                    # 持久化边界（save_denoise_state）直接写二进制 sidecar
                     'proxy_source_offsets': proxy_offsets,
                     'proxy_source_indices': proxy_indices,
                     'ranges': proc_ranges,
@@ -397,7 +397,7 @@ class FileService:
                     'source_id': source_id,
                     'source_raw_count': int(len(source_pts)),
                     # CSR/ranges 以 ndarray 传递，避免大数组的 list 往返；
-                    # JSON 持久化边界（save_denoise_state）才统一转 list
+                    # 持久化边界（save_denoise_state）直接写二进制 sidecar
                     'proxy_source_offsets': proxy_offsets,
                     'proxy_source_indices': proxy_indices,
                     'ranges': proc_ranges,

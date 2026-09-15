@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -47,6 +48,7 @@ from .controllers.task_progress import (
     TASK_DETECTION,
     TASK_LOAD,
     TASK_MODEL_EXPORT,
+    TASK_PAGE_SWITCH,
     TASK_QUALITY,
     TASK_QUALITY_BATCH,
     TASK_REGION,
@@ -294,15 +296,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             parent=self,
         )
         self._connect_lifecycle_controller()
-        # "关闭即中止"绑定：加载/导入/激活与模型导出两条链路的 worker
-        # 都挂到统一的取消处理器上，关闭进度窗即取消对应后台进程。
-        self.task_progress.set_cancel_handler(
-            TASK_LOAD, self.lifecycle_controller.cancel_active_load)
-        self.task_progress.set_cancel_handler(
-            TASK_MODEL_EXPORT, self.model_export_controller.cancel_active_export)
-        # 其余任务的"右上角关闭即中止"落点：一次耗时常同时挂着后台 worker、
-        # 调度器排队任务等多处，故用 add_cancel_handler 逐个登记，取消时全跑一遍。
-        self._register_task_cancel_handlers()
         # service 层的信息弹窗与取色交互上移到本窗口（时机与文案不变）。
         self.project_operation_service.info_requested.connect(
             self._show_operation_info)
@@ -715,64 +708,19 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         TASK_MODEL_EXPORT: '导出模型',
     }
 
-    def _register_task_cancel_handlers(self):
-        """把每个任务的"全部相关进程"中止落点登记到统一进度控制器。
-
-        回调只做置取消标志这类轻量操作（worker.cancel / 调度器 cancel_all），
-        绝不在 GUI 线程 join 或阻塞等待，避免关窗时反而卡住界面。
-        """
-        # 去噪/立面提取/质量评估都跑在项目级调度器与质量 worker 上，
-        # 任一任务被中止都要把这两条链路一并停掉，避免"窗口关了线程还在跑"。
-        for key in (TASK_DENOISE, TASK_DETECTION, TASK_QUALITY,
-                    TASK_QUALITY_BATCH):
-            self.task_progress.add_cancel_handler(
-                key, self._cancel_project_computation)
-        region = getattr(self.project_operation_service,
-                         'cancel_region_selection', None)
-        if callable(region):
-            self.task_progress.add_cancel_handler(TASK_REGION, region)
-        report = getattr(self.report_export_service, 'cancel_export', None)
-        if callable(report):
-            self.task_progress.add_cancel_handler(TASK_REPORT, report)
-
-    def _cancel_project_computation(self):
-        """中止当前项目全部后台计算：质量 worker + 调度器排队任务。"""
-        worker = getattr(self.facade_quality_controller,
-                         'active_quality_worker', None)
-        if worker is not None:
-            try:
-                worker.cancel()
-            except Exception:
-                pass
-            self.facade_quality_controller.active_quality_worker = None
-        try:
-            self.project_operation_service.invalidate_async_jobs()
-        except Exception:
-            pass
-
     def _begin_step_task(self, index):
-        """为某个耗时步骤立起模态进度窗；无对应任务的步骤（②区域选取）跳过。"""
+        """为某个耗时步骤立起模态进度窗；无对应任务的步骤跳过。"""
         task_key = self.STEP_TASK_KEYS.get(index)
         if task_key is not None:
             self._begin_task_progress(task_key)
 
     def _begin_task_progress(self, task_key):
-        """立起模态进度窗：可取消、5 秒节流、文案极简。
-
-        起始为不定量模式（算法未回报百分比前不假装知道进度），一旦后台
-        回报真实百分比，update_progress 会自动切回定量显示。
-        """
+        """立起模态进度窗：不定量忙碌条，文案极简。"""
         title = self.STEP_TASK_TITLES.get(task_key, '任务进行中')
-        self.task_progress.begin(
-            task_key, title, '任务处理中',
-            determinate=False, cancellable=True)
+        self.task_progress.begin(task_key, title, '任务处理中')
 
     def _on_step_task_finished(self, index, task_key, success):
-        """耗时步骤的统一收尾：先给进度窗定终态，再回填步骤徽标。
-
-        顺序很关键——先 finish 让进度条落到 100%（成功）/保留当前值（失败），
-        再改徽标，避免用户看到"进度条还停在 60% 但步骤已打勾"的割裂感。
-        """
+        """耗时步骤的统一收尾：先给进度窗定终态，再回填步骤徽标。"""
         self.task_progress.finish(task_key, success)
         if success:
             self._mark_step_done(index)
@@ -871,11 +819,11 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
                 lambda *_args: self._mark_step_failed(self.STEP_QUALITY))
 
     def _on_quality_batch_progress(self, current, total):
-        """把批量评估的 (已完成, 总数) 换算成真实百分比喂给进度窗。"""
+        """批量评估进度：忙碌条只刷新阶段文案。"""
         total = max(int(total or 0), 1)
         current = max(0, min(int(current or 0), total))
-        percent = int(round(100.0 * current / total))
-        self.task_progress.report(TASK_QUALITY_BATCH, percent, '任务处理中')
+        self.task_progress.report(
+            TASK_QUALITY_BATCH, text=f'任务处理中（{current}/{total}）')
 
     def _create_page_header(self, page_key):
         panel = QWidget()
@@ -1051,6 +999,15 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if button is not None and not button.isEnabled():
             return
 
+        # 切换期间弹忙碌条阻挡操作，防止视口迁移/首帧渲染等开销被并发点击
+        # 放大。仅覆盖带 Open3D 视口的两个页面；加载忙碌条已在时由它覆盖
+        # 本次切换，不再叠第二个弹窗；启动期（窗口尚未显示）不弹。
+        load_active = self.task_progress.is_active(TASK_LOAD)
+        show_busy = (not load_active and self.isVisible()
+                     and page_key in ('project_operation', 'inspection_review'))
+        if show_busy:
+            self.task_progress.begin(TASK_PAGE_SWITCH, '页面切换', '正在切换页面...')
+
         # ===== 视口迁移：检测复核页 ↔ 项目操作页 =====
         if page_key == 'inspection_review':
             self._migrate_workspace_to_review()
@@ -1066,6 +1023,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if viewport is not None and hasattr(viewport, 'set_render_enabled'):
             viewport.set_render_enabled(page_key in ('project_operation', 'inspection_review'))
         self._update_window_title(page_key)
+
+        if show_busy:
+            self._finish_task_after_first_frame(TASK_PAGE_SWITCH)
 
     def _connect_buttons(self):
         overview_actions = {
@@ -1606,19 +1566,42 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
 
     # 点云加载/导入/激活：统一走 TaskProgressController 的 TASK_LOAD 任务
     def _show_loading_dialog(self):
-        self.task_progress.begin(
-            TASK_LOAD, '点云加载', '任务处理中',
-            determinate=False, cancellable=True)
+        self.task_progress.begin(TASK_LOAD, '点云加载', '任务处理中')
         # 兼容旧属性：历史代码/测试通过 _loading_dialog 探测控件。
         self._loading_dialog = self.task_progress.dialog(TASK_LOAD)
 
     def _update_loading_dialog(self, percent, text):
-        # 真实进度直写节流器：后台回报多少就是多少，终态时强制刷到 100%。
-        self.task_progress.report(TASK_LOAD, percent, '任务处理中')
+        # 忙碌条只透传阶段文案，百分比忽略。
+        self.task_progress.report(TASK_LOAD, percent, text or '任务处理中')
 
     def _hide_loading_dialog(self, success=True, message='处理完成'):
-        # load_finished 现在携带终态：成功刷到 100% 并短暂停留后关闭
-        self.task_progress.finish(TASK_LOAD, bool(success), message)
+        viewport = getattr(self, 'viewport', None)
+        if (success and viewport is not None
+                and hasattr(viewport, 'has_clouds') and viewport.has_clouds()):
+            # 有点云时等首帧真正上屏再收弹窗，避免"弹窗消失到模型出现"卡顿
+            self._finish_task_after_first_frame(TASK_LOAD, True, message)
+        else:
+            self.task_progress.finish(TASK_LOAD, bool(success), message)
+
+    def _finish_task_after_first_frame(self, task_key, success=True,
+                                       message='处理完成', timeout_ms=2500):
+        """等视口首帧渲染完成后收尾任务弹窗；超时兜底防挂死。"""
+        viewport = getattr(self, 'viewport', None)
+        adapter = getattr(viewport, '_adapter', None)
+        if adapter is None:
+            self.task_progress.finish(task_key, success, message)
+            return
+        start_frames = getattr(adapter, '_frames_rendered', 0)
+        started_at = time.monotonic()
+
+        def _check():
+            if (getattr(adapter, '_frames_rendered', 0) > start_frames
+                    or (time.monotonic() - started_at) * 1000 >= timeout_ms):
+                self.task_progress.finish(task_key, success, message)
+                return
+            QTimer.singleShot(50, _check)
+
+        QTimer.singleShot(50, _check)
 
 
     def _reset_facade_list(self):
@@ -1900,14 +1883,20 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
     # 视口迁移：检测复核页 ↔ 项目操作页
     # ------------------------------------------------------------------
     def _migrate_workspace_to_review(self):
-        """将 viewport_panel + right_dock 迁到检测复核页。"""
+        """将 viewport_panel + right_dock 迁到检测复核页。
+
+        占位 widget 常驻不销毁：迁入时把占位摘出、面板插入；迁出时反向。
+        绝不用 QSplitter.replaceWidget——它会消费占位 widget，迁出后
+        splitter 计数归零，二次进入时按索引替换必然越界。
+        """
         if getattr(self, '_workspace_in_review', False):
             return
         self._operation_splitter_sizes = self.operation_splitter.sizes()
-        self.viewport_panel.setParent(None)
-        self.right_dock.setParent(None)
-        self.review_splitter.replaceWidget(0, self.viewport_panel)
-        self.review_splitter.replaceWidget(1, self.right_dock)
+        self.review_viewport_placeholder.setParent(None)
+        self.review_right_placeholder.setParent(None)
+        # insertWidget 自动把面板从 operation_splitter 摘除并挂入本页
+        self.review_splitter.insertWidget(0, self.viewport_panel)
+        self.review_splitter.insertWidget(1, self.right_dock)
         self.review_splitter.setSizes([1040, 300])
         self._show_operation_placeholder()
         results = self.project_operation_service.last_facade_results or []
@@ -1918,10 +1907,12 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         """将 viewport_panel + right_dock 迁回项目操作页。"""
         if not getattr(self, '_workspace_in_review', False):
             return
-        self.viewport_panel.setParent(None)
-        self.right_dock.setParent(None)
         self.operation_splitter.insertWidget(1, self.viewport_panel)
         self.operation_splitter.insertWidget(2, self.right_dock)
+        # 占位 widget 挂回复核页，保持其默认引导界面可用
+        self.review_splitter.insertWidget(0, self.review_viewport_placeholder)
+        self.review_splitter.insertWidget(1, self.review_right_placeholder)
+        self.review_splitter.setSizes([1040, 300])
         self.operation_splitter.setSizes(self._operation_splitter_sizes)
         self._hide_operation_placeholder()
         results = self.project_operation_service.last_facade_results or []

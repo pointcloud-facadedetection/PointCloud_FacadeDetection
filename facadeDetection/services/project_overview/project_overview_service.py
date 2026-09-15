@@ -339,12 +339,10 @@ class ProjectOverviewService:
                     path = Path(artifact)
                     if not path.is_absolute():
                         path = Path(Storage.ensure_project_dirs(project_id)['results']) / path
-                    from services.dal.results_repo import ResultsRepo
-                    ids = ResultsRepo.load_quality_artifact(path)
-                    if len(ids):
-                        item['quality_report'] = dict(item.get('quality_report') or {})
-                        item['quality_report']['__global_indices'] = ids
-                        item['quality_report']['__index_space'] = 'facade_local_to_raw_global'
+                    # 大索引 npz 延迟到真正使用时解压
+                    # （见 ResultsRepo.ensure_global_indices），这里只落绝对路径
+                    item['quality_report'] = dict(item.get('quality_report') or {})
+                    item['quality_report']['quality_artifact_path'] = str(path)
                 result.append(item)
             log_event(project_id, 'results.loaded', facades=len(result))
             return result

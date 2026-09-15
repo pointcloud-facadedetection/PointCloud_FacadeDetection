@@ -192,6 +192,14 @@ class Open3DViewport(BaseViewport):
         return self._scene.clouds
 
     @property
+    def frames_rendered(self):
+        """实际已提交的帧数（首帧上屏检测用）。"""
+        return getattr(self._adapter, '_frames_rendered', 0)
+
+    def has_clouds(self) -> bool:
+        return bool(self._scene.clouds)
+
+    @property
     def _point_data(self):
         return self._scene.point_data
 

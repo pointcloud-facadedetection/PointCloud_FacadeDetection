@@ -85,6 +85,8 @@ class ResultExportService:
                     for key in ('flatness_limit_mm', 'verticality_limit_mm')
                     if quality.get('thresholds', {}).get(key) is not None
                 }
+                from services.dal.results_repo import ResultsRepo
+                ResultsRepo.ensure_global_indices(quality)
                 temp_quality = {
                     'windows': windows,
                     'heatmap_mode': mode,

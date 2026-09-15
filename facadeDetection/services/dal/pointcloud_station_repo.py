@@ -1,10 +1,16 @@
 from pathlib import Path
+
+import numpy as np
 from sqlalchemy import select
+
+from config.storage import Storage
 from db.connection import project_session
 from models import Project, FileAsset, PointCloudStation, PointCloudViewState
 from models.enums import FileKind
+from services import proxy_cache
 from services.dal.file_repo import FileRepo
 from utils.logging_utils import log_event
+
 
 class PointCloudStationRepo:
     @staticmethod
@@ -60,20 +66,128 @@ class PointCloudStationRepo:
                 PointCloudStation.file_asset_id == int(asset_id),
                 PointCloudStation.is_deleted == False,
             )).scalar_one_or_none()
+    # 去噪状态中的大数组字段：统一存二进制 sidecar，DB JSON 只留标量。
+    _DENOISE_ARRAY_FIELDS = (
+        'proxy_source_offsets', 'proxy_source_indices',
+        'source_offsets', 'source_indices',
+        'keep_proxy_indices', 'proxy_keep_indices', 'ranges')
+
+    @staticmethod
+    def _denoise_arrays_relpath(station_id) -> str:
+        return f'{Storage.CACHE_DIRNAME}/denoise/{station_id}.npz'
+
+    @staticmethod
+    def _save_denoise_arrays(project_uuid, station_id, arrays) -> bool:
+        """原子写入去噪 sidecar（tmp + 替换）；失败仅告警返回 False。"""
+        try:
+            path = proxy_cache.denoise_sidecar_path(project_uuid, station_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f'{path.stem}.tmp')
+            np.savez(tmp, **arrays)  # 实际写入 <stem>.tmp.npz
+            Path(f'{tmp}.npz').replace(path)
+            return True
+        except Exception as exc:
+            print(f'[PCFD] denoise_sidecar.save_failed station={station_id} '
+                  f'reason={exc}', flush=True)
+            return False
+
+    @staticmethod
+    def _load_denoise_arrays(project_uuid, station_id):
+        """读取 sidecar；缺失/损坏返回 None。"""
+        path = proxy_cache.denoise_sidecar_path(project_uuid, station_id)
+        if not path.is_file():
+            return None
+        try:
+            with np.load(path) as data:
+                return {key: data[key] for key in data.files}
+        except Exception as exc:
+            print(f'[PCFD] denoise_sidecar.load_failed station={station_id} '
+                  f'reason={exc}', flush=True)
+            return None
+
     @staticmethod
     def get_denoise_state(project_uuid, station_id):
+        """读取去噪状态：标量来自 DB JSON，大数组来自二进制 sidecar。
+
+        旧格式（大数组直接以 JSON list 存库，可达数百 MB）在首次读取时
+        一次性迁移到 sidecar 并压缩 DB 行。
+        """
+        array_fields = PointCloudStationRepo._DENOISE_ARRAY_FIELDS
         with project_session(project_uuid) as s:
             row = s.get(PointCloudStation, int(station_id))
-            return dict(row.denoise_state_json or {}) if row else None
+            if row is None or not row.denoise_state_json:
+                return None
+            state = dict(row.denoise_state_json)
+            if state.get('arrays_path'):
+                arrays = PointCloudStationRepo._load_denoise_arrays(
+                    project_uuid, station_id)
+                if arrays is None:
+                    # sidecar 丢失：索引数组不可信，整体视为无去噪状态
+                    return None
+                state.update(arrays)
+                return state
+            legacy = {key: state[key] for key in array_fields
+                      if isinstance(state.get(key), list) and state[key]}
+            if legacy:
+                arrays = {key: np.asarray(value)
+                          for key, value in legacy.items()}
+                if PointCloudStationRepo._save_denoise_arrays(
+                        project_uuid, station_id, arrays):
+                    for key in legacy:
+                        state.pop(key, None)
+                    state['arrays_path'] = \
+                        PointCloudStationRepo._denoise_arrays_relpath(station_id)
+                    state['arrays_format'] = 1
+                    row.denoise_state_json = dict(state)
+                    state.update(arrays)
+            return state
 
     @staticmethod
     def save_denoise_state(project_uuid, station_id, state):
-        """Atomically persist the final proxy index mapping for one station."""
+        """持久化站点去噪状态：大数组落 sidecar，DB 只存标量元数据。"""
+        array_fields = PointCloudStationRepo._DENOISE_ARRAY_FIELDS
         with project_session(project_uuid) as s:
             row = s.get(PointCloudStation, int(station_id))
             if row is None or row.is_deleted:
                 raise ValueError(f'去噪站点不存在: {station_id}')
-            row.denoise_state_json = dict(state or {})
+            state = dict(state or {})
+            arrays = {}
+            originals = {}
+            for key in array_fields:
+                value = state.get(key)
+                if value is None:
+                    state.pop(key, None)
+                    continue
+                if isinstance(value, np.ndarray):
+                    originals[key] = value
+                    if value.size:
+                        arrays[key] = value
+                    state.pop(key, None)
+                elif isinstance(value, list):
+                    originals[key] = list(value)
+                    if value:
+                        arrays[key] = np.asarray(value)
+                    state.pop(key, None)
+            if arrays:
+                if PointCloudStationRepo._save_denoise_arrays(
+                        project_uuid, station_id, arrays):
+                    state['arrays_path'] = \
+                        PointCloudStationRepo._denoise_arrays_relpath(station_id)
+                    state['arrays_format'] = 1
+                else:
+                    # sidecar 写失败：回退旧格式，数组随 JSON 落库，绝不丢数据
+                    for key, value in originals.items():
+                        state[key] = (value.tolist()
+                                      if isinstance(value, np.ndarray) else value)
+            else:
+                state.pop('arrays_path', None)
+                state.pop('arrays_format', None)
+                try:
+                    proxy_cache.denoise_sidecar_path(
+                        project_uuid, station_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            row.denoise_state_json = state
 
     @staticmethod
     def clear_denoise_state(project_uuid, station_id):
@@ -81,6 +195,11 @@ class PointCloudStationRepo:
             row = s.get(PointCloudStation, int(station_id))
             if row is not None:
                 row.denoise_state_json = None
+        try:
+            proxy_cache.denoise_sidecar_path(
+                project_uuid, station_id).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     @staticmethod
     def list(project_uuid):

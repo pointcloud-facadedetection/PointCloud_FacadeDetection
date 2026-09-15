@@ -224,13 +224,15 @@ class ProjectLifecycleController(QObject):
 
     def on_load_finished(self, generation, operation, project_id, result,
                          before_ids=None):
-        """GUI 线程完成回调：提交段 + 站点展示。代际不符的迟到结果直接丢弃。"""
+        """GUI 线程完成回调：提交段 + 站点展示。代际不符的迟到结果直接丢弃。
+
+        忙碌条在提交段（Open3D 提交/立面着色）完成后才关闭：先关窗再提交
+        会让"弹窗消失到模型出现"之间出现一段无遮挡的 GUI 卡顿。
+        """
         if generation != self.project_generation:
             return
         self._active_load_worker = None
         self._load_in_progress = False
-        self.load_finished.emit(True, '处理完成')
-        self.status_cleared.emit()
         try:
             result = result or {}
             if operation == 'upload':
@@ -263,6 +265,9 @@ class ProjectLifecycleController(QObject):
             self.project_list_refresh_requested.emit()
         except Exception as exc:
             self.on_load_failed(generation, str(exc))
+            return
+        self.load_finished.emit(True, '处理完成')
+        self.status_cleared.emit()
 
     def _find_new_station(self, before_ids):
         stations = self.station_service.list_stations()
@@ -292,27 +297,6 @@ class ProjectLifecycleController(QObject):
             self.dispose_project_runtime()
         self.project_generation += 1
 
-    def cancel_active_load(self):
-        """中止当前加载/导入/激活任务（进度窗"关闭"按钮的落点）。
-
-        与 :meth:`dispose_project_runtime` 的区别在于**不动项目运行时**：
-        这里只取消准备段 worker 并递增 project_generation 让迟到结果失效，
-        场景资源、质量缓存等都原样保留，用户可以立刻重试同一次导入。
-        """
-        worker = self._active_load_worker
-        if worker is None:
-            return
-        self._load_in_progress = False
-        try:
-            worker.cancel()
-        except Exception:
-            pass
-        self._active_load_worker = None
-        # 代际门控：被取消的 worker 即使稍后返回结果也会被 on_load_* 丢弃。
-        self.project_generation += 1
-        # 用户主动中止：终态为"已中止"，进度条保留中止时的真实百分比。
-        self.load_finished.emit(False, '已中止')
-
     def dispose_project_runtime(self):
         # TODO(内存/生命周期): _dispose_project_runtime：建立可验证的项目资源释放清单。
         """Single GUI-thread disposal gate for project switches and close."""
@@ -324,6 +308,10 @@ class ProjectLifecycleController(QObject):
             self._active_load_worker = None
             # 被取消的 worker 不会再走完成/失败回调，加载窗口须在此关闭
             self.load_finished.emit(False, '已中止')
+        if self.load_pool is not None:
+            # 清掉池里排队的任务，避免重开时被已取消的僵尸 worker 堵在
+            # maxThreadCount=1 的池子后面（运行中的任务由检查点自行退出）。
+            self.load_pool.clear()
         try:
             self.project_operation_service.invalidate_async_jobs()
         except Exception:

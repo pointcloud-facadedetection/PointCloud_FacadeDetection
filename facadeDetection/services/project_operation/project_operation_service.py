@@ -20,10 +20,12 @@ class _GuiDispatcher(QObject):
     color_pick_requested = Signal()      # 取色弹窗上移到 UI 层
 
 
-def _json_boundary_list(value):
-    """JSON 持久化边界的统一 list 转换：运行期 CSR/ranges 是 ndarray，
-    只在写入 denoise_state_json 前在这里付一次转换成本。"""
-    return None if value is None else np.asarray(value).tolist()
+def _as_state_array(value, dtype):
+    """去噪状态持久化边界的统一 ndarray 转换：大数组随二进制 sidecar
+    落盘（save_denoise_state），运行期 CSR/ranges 全程零 list 转换。"""
+    if value is None:
+        return np.empty(0, dtype=dtype)
+    return np.asarray(value, dtype=dtype)
 
 
 class ProjectOperationService:
@@ -264,14 +266,15 @@ class ProjectOperationService:
                         'source_sha256': None,
                         'method': stats.get('method', 'adaptive'),
                         'voxel_size': float(stats.get('voxel_size', 0.05)),
-                        'keep_proxy_indices': np.asarray(
-                            stats.get('proxy_keep_indices', []), dtype=np.int64).tolist(),
+                        'keep_proxy_indices': _as_state_array(
+                            stats.get('proxy_keep_indices'), np.int64),
                         'proxy_base_count': int(stats.get('proxy_base_count', 0)),
-                        'proxy_source_offsets': _json_boundary_list(
-                            stats.get('proxy_source_offsets')),
-                        'proxy_source_indices': _json_boundary_list(
-                            stats.get('proxy_source_indices')),
-                        'ranges': _json_boundary_list(stats.get('ranges')),
+                        'proxy_source_offsets': _as_state_array(
+                            stats.get('proxy_source_offsets'), np.int64),
+                        'proxy_source_indices': _as_state_array(
+                            stats.get('proxy_source_indices'), np.int64),
+                        'ranges': _as_state_array(
+                            stats.get('ranges'), np.float32),
                         'proxy_count': int(len(points)),
                         'enabled': True,
                     }

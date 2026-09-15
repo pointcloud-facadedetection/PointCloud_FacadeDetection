@@ -298,6 +298,8 @@ class FacadeHeatmapTripletRenderer:
         """保留为可选备选：把窗口值贴回原始点云（依赖 covered_source_ids）。
         """
         source = np.asarray(points, dtype=float).reshape(-1, 3)
+        from services.dal.results_repo import ResultsRepo
+        ResultsRepo.ensure_global_indices(quality)
         raw_ids = np.asarray(quality.get('__global_indices', []), dtype=np.int64)
         if len(raw_ids) != len(source):
             raw_ids = np.arange(len(source), dtype=np.int64)

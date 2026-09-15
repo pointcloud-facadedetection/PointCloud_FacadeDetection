@@ -49,6 +49,25 @@ class ResultsRepo:
             return np.empty(0, dtype=np.int64)
 
     @staticmethod
+    def ensure_global_indices(quality) -> np.ndarray | None:
+        """按需加载质量域索引：``__global_indices`` 缺失但报告带有
+        ``quality_artifact_path`` 时，从 npz 解压并回写 dict（本次运行内
+        复用，不重复读盘）。项目打开时的历史恢复不再预先解压该文件。
+        """
+        if not isinstance(quality, dict):
+            return None
+        ids = quality.get('__global_indices')
+        if ids is not None and len(ids):
+            return np.asarray(ids, dtype=np.int64)
+        loaded = ResultsRepo.load_quality_artifact(
+            quality.get('quality_artifact_path'))
+        if len(loaded):
+            quality['__global_indices'] = loaded
+            quality['__index_space'] = 'facade_local_to_raw_global'
+            return loaded
+        return None
+
+    @staticmethod
     def commit_quality_success(project_uuid: str, facade_id: int, quality: dict,
                                 *, display_no=None, facade_data=None, color=None,
                                 dataset_revision=None, quality_artifact_path=None) -> None:
