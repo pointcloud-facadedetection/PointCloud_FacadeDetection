@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -47,6 +48,7 @@ from .controllers.task_progress import (
     TASK_DETECTION,
     TASK_LOAD,
     TASK_MODEL_EXPORT,
+    TASK_PAGE_SWITCH,
     TASK_QUALITY,
     TASK_QUALITY_BATCH,
     TASK_REGION,
@@ -997,6 +999,15 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if button is not None and not button.isEnabled():
             return
 
+        # 切换期间弹忙碌条阻挡操作，防止视口迁移/首帧渲染等开销被并发点击
+        # 放大。仅覆盖带 Open3D 视口的两个页面；加载忙碌条已在时由它覆盖
+        # 本次切换，不再叠第二个弹窗；启动期（窗口尚未显示）不弹。
+        load_active = self.task_progress.is_active(TASK_LOAD)
+        show_busy = (not load_active and self.isVisible()
+                     and page_key in ('project_operation', 'inspection_review'))
+        if show_busy:
+            self.task_progress.begin(TASK_PAGE_SWITCH, '页面切换', '正在切换页面...')
+
         # ===== 视口迁移：检测复核页 ↔ 项目操作页 =====
         if page_key == 'inspection_review':
             self._migrate_workspace_to_review()
@@ -1012,6 +1023,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if viewport is not None and hasattr(viewport, 'set_render_enabled'):
             viewport.set_render_enabled(page_key in ('project_operation', 'inspection_review'))
         self._update_window_title(page_key)
+
+        if show_busy:
+            self._finish_task_after_first_frame(TASK_PAGE_SWITCH)
 
     def _connect_buttons(self):
         overview_actions = {
@@ -1561,7 +1575,33 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self.task_progress.report(TASK_LOAD, percent, text or '任务处理中')
 
     def _hide_loading_dialog(self, success=True, message='处理完成'):
-        self.task_progress.finish(TASK_LOAD, bool(success), message)
+        viewport = getattr(self, 'viewport', None)
+        if (success and viewport is not None
+                and hasattr(viewport, 'has_clouds') and viewport.has_clouds()):
+            # 有点云时等首帧真正上屏再收弹窗，避免"弹窗消失到模型出现"卡顿
+            self._finish_task_after_first_frame(TASK_LOAD, True, message)
+        else:
+            self.task_progress.finish(TASK_LOAD, bool(success), message)
+
+    def _finish_task_after_first_frame(self, task_key, success=True,
+                                       message='处理完成', timeout_ms=2500):
+        """等视口首帧渲染完成后收尾任务弹窗；超时兜底防挂死。"""
+        viewport = getattr(self, 'viewport', None)
+        adapter = getattr(viewport, '_adapter', None)
+        if adapter is None:
+            self.task_progress.finish(task_key, success, message)
+            return
+        start_frames = getattr(adapter, '_frames_rendered', 0)
+        started_at = time.monotonic()
+
+        def _check():
+            if (getattr(adapter, '_frames_rendered', 0) > start_frames
+                    or (time.monotonic() - started_at) * 1000 >= timeout_ms):
+                self.task_progress.finish(task_key, success, message)
+                return
+            QTimer.singleShot(50, _check)
+
+        QTimer.singleShot(50, _check)
 
 
     def _reset_facade_list(self):
@@ -1843,14 +1883,20 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
     # 视口迁移：检测复核页 ↔ 项目操作页
     # ------------------------------------------------------------------
     def _migrate_workspace_to_review(self):
-        """将 viewport_panel + right_dock 迁到检测复核页。"""
+        """将 viewport_panel + right_dock 迁到检测复核页。
+
+        占位 widget 常驻不销毁：迁入时把占位摘出、面板插入；迁出时反向。
+        绝不用 QSplitter.replaceWidget——它会消费占位 widget，迁出后
+        splitter 计数归零，二次进入时按索引替换必然越界。
+        """
         if getattr(self, '_workspace_in_review', False):
             return
         self._operation_splitter_sizes = self.operation_splitter.sizes()
-        self.viewport_panel.setParent(None)
-        self.right_dock.setParent(None)
-        self.review_splitter.replaceWidget(0, self.viewport_panel)
-        self.review_splitter.replaceWidget(1, self.right_dock)
+        self.review_viewport_placeholder.setParent(None)
+        self.review_right_placeholder.setParent(None)
+        # insertWidget 自动把面板从 operation_splitter 摘除并挂入本页
+        self.review_splitter.insertWidget(0, self.viewport_panel)
+        self.review_splitter.insertWidget(1, self.right_dock)
         self.review_splitter.setSizes([1040, 300])
         self._show_operation_placeholder()
         results = self.project_operation_service.last_facade_results or []
@@ -1861,10 +1907,12 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         """将 viewport_panel + right_dock 迁回项目操作页。"""
         if not getattr(self, '_workspace_in_review', False):
             return
-        self.viewport_panel.setParent(None)
-        self.right_dock.setParent(None)
         self.operation_splitter.insertWidget(1, self.viewport_panel)
         self.operation_splitter.insertWidget(2, self.right_dock)
+        # 占位 widget 挂回复核页，保持其默认引导界面可用
+        self.review_splitter.insertWidget(0, self.review_viewport_placeholder)
+        self.review_splitter.insertWidget(1, self.review_right_placeholder)
+        self.review_splitter.setSizes([1040, 300])
         self.operation_splitter.setSizes(self._operation_splitter_sizes)
         self._hide_operation_placeholder()
         results = self.project_operation_service.last_facade_results or []

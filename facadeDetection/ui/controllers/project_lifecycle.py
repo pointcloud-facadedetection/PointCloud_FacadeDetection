@@ -224,13 +224,15 @@ class ProjectLifecycleController(QObject):
 
     def on_load_finished(self, generation, operation, project_id, result,
                          before_ids=None):
-        """GUI 线程完成回调：提交段 + 站点展示。代际不符的迟到结果直接丢弃。"""
+        """GUI 线程完成回调：提交段 + 站点展示。代际不符的迟到结果直接丢弃。
+
+        忙碌条在提交段（Open3D 提交/立面着色）完成后才关闭：先关窗再提交
+        会让"弹窗消失到模型出现"之间出现一段无遮挡的 GUI 卡顿。
+        """
         if generation != self.project_generation:
             return
         self._active_load_worker = None
         self._load_in_progress = False
-        self.load_finished.emit(True, '处理完成')
-        self.status_cleared.emit()
         try:
             result = result or {}
             if operation == 'upload':
@@ -263,6 +265,9 @@ class ProjectLifecycleController(QObject):
             self.project_list_refresh_requested.emit()
         except Exception as exc:
             self.on_load_failed(generation, str(exc))
+            return
+        self.load_finished.emit(True, '处理完成')
+        self.status_cleared.emit()
 
     def _find_new_station(self, before_ids):
         stations = self.station_service.list_stations()

@@ -18,7 +18,7 @@ class InspectionReviewPageMixin:
         self.review_splitter.setChildrenCollapsible(False)
         self.review_splitter.setHandleWidth(1)
 
-        # 左侧占位：接收 viewport_panel
+        # 左侧占位：视口迁移到本页时被摘出隐藏，迁回操作页时重新挂回
         self.review_viewport_placeholder = QWidget()
         self.review_viewport_placeholder.setObjectName('reviewViewportPlaceholder')
         pl = QVBoxLayout(self.review_viewport_placeholder)
@@ -27,7 +27,7 @@ class InspectionReviewPageMixin:
         lbl.setStyleSheet('font-size:14px; color:#64748B;')
         pl.addWidget(lbl)
 
-        # 右侧占位：接收 right_dock
+        # 右侧占位：右侧面板迁移到本页时被摘出隐藏，迁回操作页时重新挂回
         self.review_right_placeholder = QWidget()
         self.review_right_placeholder.setObjectName('reviewRightPlaceholder')
         pl2 = QVBoxLayout(self.review_right_placeholder)

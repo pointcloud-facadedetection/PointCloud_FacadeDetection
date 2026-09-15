@@ -17,6 +17,7 @@ TASK_DETECTION = 'detection'
 TASK_QUALITY = 'quality'
 TASK_QUALITY_BATCH = 'quality_batch'
 TASK_MODEL_EXPORT = 'model_export'
+TASK_PAGE_SWITCH = 'page_switch'
 TASK_REPORT = 'report'
 
 
