@@ -23,6 +23,11 @@ def audit_exported_global_transform(json_path: str | Path) -> GlobalTransformAud
     path = Path(json_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     raw = data.get("transformToGlobal", data.get("transform_to_global"))
+    # 兼容 E57 缓存 sidecar：矩阵位于 scan_poses[n].transform_to_global
+    if raw is None:
+        scan_poses = data.get("scan_poses")
+        if isinstance(scan_poses, list) and scan_poses:
+            raw = scan_poses[0].get("transform_to_global") if isinstance(scan_poses[0], dict) else None
     if raw is None:
         raise ValueError(f"缺少 transformToGlobal: {path}")
     matrix = np.asarray(raw, dtype=np.float64)

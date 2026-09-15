@@ -92,6 +92,9 @@ class OperationPageMixin:
         # 步骤导航栏由命令栏（main_window._install_step_nav）统一装配，
         viewport_layout.addWidget(self.render_facade.widget(), 1)
 
+        # 保存视口面板引用，供【检测复核】页迁移使用
+        self.viewport_panel = viewport_panel
+
         self.operation_splitter.addWidget(self.left_dock)
         self.operation_splitter.addWidget(viewport_panel)
         self.operation_splitter.addWidget(self.right_dock)
@@ -685,3 +688,150 @@ class OperationPageMixin:
         button.setToolTip(f'{action}{label}')
         button.setAccessibleName(f'{action}{label}')
         button.setChecked(collapsed)
+
+    # ------------------------------------------------------------------
+    # 【框选检测】交互流程（步骤 ②：区域选取 + 立面提取合并）
+    # ------------------------------------------------------------------
+    def _enter_box_detection_mode(self):
+        """激活 ROI 框选模式；清理旧状态后进入视口绘制模式。"""
+        nav = getattr(self, 'step_nav', None)
+        if nav is not None:
+            nav.reset_to_running(self.STEP_BOX_DETECT)
+        cloud = self.project_operation_service._active_cloud_name()
+        if not cloud:
+            QMessageBox.information(
+                getattr(self, 'viewport_panel', self),
+                '框选检测', '请先加载点云数据。')
+            return
+        # 清除之前的 ROI 视觉与立面高亮
+        try:
+            if hasattr(self.viewport, 'clear_roi_visuals'):
+                self.viewport.clear_roi_visuals()
+        except Exception:
+            pass
+        try:
+            self.render_service.clear_selected_facade(cloud)
+        except Exception:
+            pass
+        # 进入 ROI 框选；完成回调交给确认卡片流程
+        self.viewport.enter_roi_selection(
+            cloud_name=cloud,
+            on_complete=self._on_roi_box_detection_selected,
+        )
+
+    def _on_roi_box_detection_selected(self, min_bound, max_bound, indices, p1=None, p2=None):
+        """ROI 框选绘制完成：保存数据、渲染预览 AABB、弹出确认卡片。"""
+        self._pending_roi_data = {
+            'min_bound': min_bound,
+            'max_bound': max_bound,
+            'indices': indices,
+            'p1': p1,
+            'p2': p2,
+        }
+        # 先渲染预览用的 3D AABB 框，让用户直观确认框选范围
+        cloud = self.project_operation_service._active_cloud_name()
+        if cloud and indices is not None and len(indices) > 0:
+            try:
+                self.project_operation_service._render_roi_bbox(cloud, indices)
+            except Exception:
+                pass
+        self._show_roi_confirm_card(p1, p2)
+
+    def _show_roi_confirm_card(self, p1, p2):
+        """在视口边缘弹出轻量级悬浮确认卡片，不遮挡中心、不抢焦点。
+
+        卡片以 ``self``（MainWindow）为父窗口并设置 ``Qt.Tool`` 标志，
+        确保在 Windows 原生 Open3D 子窗口之上可见、可交互。
+        使用 ``WindowStaysOnTopHint`` 保持置顶，同时不调用 ``activateWindow()``
+        避免抢走 Open3D 视口焦点导致渲染暂停。
+        """
+        from PySide6.QtCore import QPoint
+        card = QFrame(
+            self,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        card.setObjectName('roiConfirmCard')
+        card.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 固定尺寸避免被内容撑爆
+        card.setFixedSize(180, 90)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        msg = QLabel('是否检测当前框选区域？')
+        msg.setStyleSheet('font-size:13px; font-weight:600; color:#0F172A;')
+        layout.addWidget(msg)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        btn_no = QPushButton('否')
+        btn_no.setProperty('buttonRole', 'secondary')
+        btn_no.clicked.connect(lambda: self._on_roi_confirm_no(card))
+        btn_yes = QPushButton('是')
+        btn_yes.setProperty('buttonRole', 'primary')
+        btn_yes.clicked.connect(lambda: self._on_roi_confirm_yes(card))
+        row.addWidget(btn_no)
+        row.addWidget(btn_yes)
+        layout.addLayout(row)
+
+        # 弹窗固定在视口右下角边缘，避免遮挡中心点云和 3D AABB 框
+        vp = getattr(self, 'viewport_panel', None)
+        if vp is not None:
+            global_pos = vp.mapToGlobal(QPoint(0, 0))
+            # 右下角留 12px 边距
+            x = global_pos.x() + max(0, vp.width() - 180 - 12)
+            y = global_pos.y() + max(0, vp.height() - 90 - 12)
+            # 确保不超出屏幕
+            from PySide6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen().availableGeometry()
+            x = min(max(x, screen.left()), screen.right() - 180)
+            y = min(max(y, screen.top()), screen.bottom() - 90)
+            card.move(x, y)
+        else:
+            card.move(100, 100)
+
+        card.show()
+        card.raise_()
+        # 不调用 activateWindow()，避免抢走 Open3D 视口焦点导致渲染暂停
+        self._roi_confirm_card = card
+
+    def _on_roi_confirm_no(self, card):
+        """选项 A【否】：清除选框，回到闲置状态，可再次框选。"""
+        try:
+            card.close()
+            card.deleteLater()
+        except Exception:
+            pass
+        self._roi_confirm_card = None
+        self._pending_roi_data = None
+        try:
+            self.project_operation_service._clear_roi_visuals()
+        except Exception:
+            pass
+        nav = getattr(self, 'step_nav', None)
+        if nav is not None:
+            nav.mark_pending(self.STEP_BOX_DETECT)
+
+    def _on_roi_confirm_yes(self, card):
+        """选项 B【是】：复用原有 ROI 回调链路，再触发立面提取算法。"""
+        try:
+            card.close()
+            card.deleteLater()
+        except Exception:
+            pass
+        self._roi_confirm_card = None
+        data = getattr(self, '_pending_roi_data', None)
+        self._pending_roi_data = None
+        if data is None:
+            return
+        # 复用原有 ROI 处理：3D AABB 生成、视口框体渲染、set_detection_roi
+        self.project_operation_service._on_roi_selected(
+            data['min_bound'], data['max_bound'], data['indices'],
+            data['p1'], data['p2'],
+        )
+        # 启动立面提取进度弹窗并触发算法
+        self._begin_step_task(self.STEP_BOX_DETECT)
+        self.project_operation_service.facade_detection()

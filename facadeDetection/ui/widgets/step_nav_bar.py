@@ -42,8 +42,9 @@ _STATE_PRIORITY = {
     DONE: 3,
 }
 
-#: 四步业务漏斗的展示顺序，索引即步骤号（0-based）。
-STEP_TITLES = ('数据处理', '区域选取', '立面提取', '质量评估')
+#: 三步业务漏斗的展示顺序，索引即步骤号（0-based）。
+# 改造后：区域选取 + 立面提取合并为【框选检测】
+STEP_TITLES = ('数据处理', '框选检测', '质量评估')
 
 
 def _repolish(widget: QWidget) -> None:

@@ -851,9 +851,26 @@ QFrame#stepChip[stepState="failed"] QLabel#stepChipTitle {
     color: #9F1239;
 }
 
-/* 四步等宽均分：卡片最小宽度保证窄窗口下文字不被裁切。 */
+/* 三步等宽均分：卡片最小宽度保证窄窗口下文字不被裁切。 */
 QFrame#stepChip {
     min-width: 132px;
+}
+
+/* ------------------------------------------------------------------
+   ROI 确认悬浮卡片
+   ------------------------------------------------------------------ */
+QFrame#roiConfirmCard {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+/* 项目操作页占位提示 */
+QWidget#operationPlaceholder {
+    background-color: #F8FAFC;
+    border: 2px dashed #CBD5E1;
+    border-radius: 12px;
 }
 """
 

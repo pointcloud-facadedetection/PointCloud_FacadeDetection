@@ -36,6 +36,7 @@ from .widgets.technical_canvas import TechnicalCanvas
 from .widgets.step_nav_bar import StepNavBar
 from .pages.overview_page import OverviewPageMixin
 from .pages.operation_page import OperationPageMixin
+from .pages.inspection_review_page import InspectionReviewPageMixin
 from .pages.report_page import ReportPageMixin
 from .controllers.facade_quality import FacadeQualityController
 from .controllers.registration import RegistrationController
@@ -157,8 +158,9 @@ PAGE_HEADER_GROUPS = {
 }
 
 
-class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
-              QMainWindow):
+class MainWindow(OverviewPageMixin, OperationPageMixin,
+                 InspectionReviewPageMixin, ReportPageMixin,
+                 QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName('mainWindow')
@@ -574,6 +576,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                 page = self._create_project_overview_page(page_title, page_key)
             elif page_key == 'project_operation':
                 page = self._create_operation_page(page_title, page_key)
+            elif page_key == 'inspection_review':
+                page = self._create_inspection_review_page(page_title, page_key)
             elif page_key == 'report_export':
                 page = self._create_report_export_page(page_title, page_key)
             else:
@@ -636,26 +640,23 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         return page
 
     # ------------------------------------------------------------------
-    # 项目操作页：四步业务流程编排
+    # 项目操作页：三步业务流程编排
     # 步骤栏只做两件事——把点击转发给既有命令、在业务真正结束后回填 √。
     # 算法、数据模型与原有命令按钮全部保持原状。
+    # 改造后：区域选取 + 立面提取合并为【框选检测】
     # ------------------------------------------------------------------
-    STEP_DATA = 0        # ① 数据处理
-    STEP_REGION = 1      # ② 区域选取
-    STEP_FACADE = 2      # ③ 立面提取
-    STEP_QUALITY = 3     # ④ 质量评估
+    STEP_DATA = 0          # ① 数据处理
+    STEP_BOX_DETECT = 1    # ② 框选检测（合并原区域选取+立面提取）
+    STEP_QUALITY = 2       # ③ 质量评估
 
     #: 步骤序号 -> 承接该业务的既有命令按钮对象名
     STEP_BUTTONS = {
         STEP_DATA: 'btn_denoise',
-        STEP_REGION: 'btn_select_detection_area',
-        STEP_FACADE: 'btn_facade_detection',
     }
 
     STEP_TIPS = (
         '对已加载站点执行点云处理',
-        '框选或更新检测区域，可重复点击以重新选取',
-        '在选定区域内执行立面检测',
+        '框选检测区域并自动执行立面提取',
         '对已标记为“处理”的立面执行质量评估',
     )
 
@@ -676,8 +677,12 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
 
     def _on_step_nav_clicked(self, index):
         """步骤点击只触发既有命令按钮，行为与改造前完全一致。"""
+        if index == self.STEP_BOX_DETECT:
+            # ② 框选检测：进入 ROI 框选 + 确认卡片流程
+            self._enter_box_detection_mode()
+            return
         if index == self.STEP_QUALITY:
-            # ④ 复用原“评估选中立面”（按“处理”标记批量评估）。
+            # ③ 复用原“评估选中立面”（按“处理”标记批量评估）。
             nav = getattr(self, 'step_nav', None)
             if nav is not None:
                 nav.reset_to_running(index)
@@ -699,7 +704,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
     #: 步骤序号 -> 该步耗时计算对应的进度任务键
     STEP_TASK_KEYS = {
         STEP_DATA: TASK_DENOISE,
-        STEP_FACADE: TASK_DETECTION,
+        STEP_BOX_DETECT: TASK_DETECTION,
     }
 
     STEP_TASK_TITLES = {
@@ -817,10 +822,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                         _k, percent, text or '任务处理中'))
                 break
 
-        # ---- (2) 去噪 / 立面提取：完成 → 立改徽标 √ ----
+        # ---- (2) 去噪 / 框选检测（立面提取）：完成 → 立改徽标 √ ----
         for signal_name, index, task_key in (
             ('denoise_finished', self.STEP_DATA, TASK_DENOISE),
-            ('detection_finished', self.STEP_FACADE, TASK_DETECTION),
+            ('detection_finished', self.STEP_BOX_DETECT, TASK_DETECTION),
         ):
             signal = getattr(service, signal_name, None)
             if signal is not None:
@@ -828,10 +833,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                     lambda _payload=None, _i=index, _k=task_key:
                     self._on_step_task_finished(_i, _k, True))
 
-        # ---- (3) 去噪 / 立面提取：失败 → 保留当前进度 + 徽标 ✗ ----
+        # ---- (3) 去噪 / 框选检测（立面提取）：失败 → 保留当前进度 + 徽标 ✗ ----
         for signal_name, index, task_key in (
             ('denoise_failed', self.STEP_DATA, TASK_DENOISE),
-            ('detection_failed', self.STEP_FACADE, TASK_DETECTION),
+            ('detection_failed', self.STEP_BOX_DETECT, TASK_DETECTION),
         ):
             signal = getattr(service, signal_name, None)
             if signal is not None:
@@ -839,10 +844,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
                     lambda _payload=None, _i=index, _k=task_key:
                     self._on_step_task_finished(_i, _k, False))
 
-        # ---- (4) 区域选取：完成 / 失败（补齐步骤 ② 的终态收尾）----
+        # ---- (4) 区域选取（已并入框选检测）：完成 / 失败 ----
         for signal_name, index, task_key, ok in (
-            ('region_finished', self.STEP_REGION, TASK_REGION, True),
-            ('region_failed', self.STEP_REGION, TASK_REGION, False),
+            ('region_finished', self.STEP_BOX_DETECT, TASK_REGION, True),
+            ('region_failed', self.STEP_BOX_DETECT, TASK_REGION, False),
         ):
             signal = getattr(service, signal_name, None)
             if signal is not None:
@@ -1046,14 +1051,20 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
         if button is not None and not button.isEnabled():
             return
 
+        # ===== 视口迁移：检测复核页 ↔ 项目操作页 =====
+        if page_key == 'inspection_review':
+            self._migrate_workspace_to_review()
+        elif page_key == 'project_operation':
+            self._migrate_workspace_to_operation()
+
         self.page_stack.setCurrentIndex(page_index)
         self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
-        # 仅项目操作页持有三维视口，其余页面暂停其 GLFW 轮询与帧提交
+        # 项目操作页和检测复核页都需要渲染
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'set_render_enabled'):
-            viewport.set_render_enabled(page_key == 'project_operation')
+            viewport.set_render_enabled(page_key in ('project_operation', 'inspection_review'))
         self._update_window_title(page_key)
 
     def _connect_buttons(self):
@@ -1289,6 +1300,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             min_points=self.quality_min_points_spin.value())
 
     def _show_facade_results(self, results: list[dict]):
+        """项目操作页：显示全部立面，保留【标记处理】按钮（传统模式）。"""
         results = self.facade_quality_controller.process_facade_results(results)
         count = len(results)
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
@@ -1306,57 +1318,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
             item.setData(Qt.ItemDataRole.UserRole, f)
             item.setSizeHint(QSize(0, 40))
             self.list_facades.addItem(item)
-
-            row = QWidget()
-            row.setStyleSheet("""
-                QWidget { background: transparent; }
-                QLabel { font-size: 12px; color: #334155; }
-            """)
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 6, 8, 6)
-            row_layout.setSpacing(8)
-
-            info = QLabel(f"立面{display_no}　点数 {int(f.get('point_count') or 0):,}")
-            info.setToolTip(f"业务索引 facade_id={int(f.get('id', 0))}")
-            info.setStyleSheet('font-size: 12px; color: #334155;')
-            row_layout.addWidget(info, 1)
-
-            color = self.render_facade.facade_color(f, display_no)
-            swatch = QFrame()
-            swatch.setFixedSize(18, 18)
-            swatch.setStyleSheet(
-                'background-color: rgb(%d,%d,%d); border: 1px solid #94a3b8; border-radius: 3px;' %
-                tuple(int(max(0, min(1, x)) * 255) for x in color)
-            )
-            swatch.setToolTip('该立面在视口中的显示颜色')
-            row_layout.addWidget(swatch)
-
-            status = self._facade_review_status(f)
-            action_button = QPushButton(
-                '处理' if status == 'complete' else '标记处理')
-            action_button.setFixedWidth(84)
-            action_button.setMinimumHeight(32)
-            action_button.setStyleSheet("""
-                QPushButton {
-                    font-size: 11px;
-                    padding: 2px 8px;
-                    border-radius: 4px;
-                    border: 1px solid #cbd5e1;
-                    background: #ffffff;
-                    color: #475569;
-                }
-                QPushButton:hover {
-                    background: #f1f5f9;
-                    border-color: #94a3b8;
-                }
-            """)
-            action_button.setToolTip('点击确认立面状态；仅标记立面允许质量计算')
-            action_button.clicked.connect(
-                lambda _=False, obj=f, button=action_button:
-                self._toggle_facade_review_status(obj, button))
-            row_layout.addWidget(action_button)
-
-            row.setMaximumHeight(48)
+            row = self._create_facade_list_row(f, display_no, review_mode=False)
             self.list_facades.setItemWidget(item, row)
 
         self.facade_quality_controller.set_latest_results(results)
@@ -1933,3 +1895,140 @@ class MainWindow(OverviewPageMixin, OperationPageMixin, ReportPageMixin,
 
         panel.setMinimumHeight(target_height)
         panel.setMaximumHeight(target_height)
+
+    # ------------------------------------------------------------------
+    # 视口迁移：检测复核页 ↔ 项目操作页
+    # ------------------------------------------------------------------
+    def _migrate_workspace_to_review(self):
+        """将 viewport_panel + right_dock 迁到检测复核页。"""
+        if getattr(self, '_workspace_in_review', False):
+            return
+        self._operation_splitter_sizes = self.operation_splitter.sizes()
+        self.viewport_panel.setParent(None)
+        self.right_dock.setParent(None)
+        self.review_splitter.replaceWidget(0, self.viewport_panel)
+        self.review_splitter.replaceWidget(1, self.right_dock)
+        self.review_splitter.setSizes([1040, 300])
+        self._show_operation_placeholder()
+        results = self.project_operation_service.last_facade_results or []
+        self._show_facade_results_review(results)
+        self._workspace_in_review = True
+
+    def _migrate_workspace_to_operation(self):
+        """将 viewport_panel + right_dock 迁回项目操作页。"""
+        if not getattr(self, '_workspace_in_review', False):
+            return
+        self.viewport_panel.setParent(None)
+        self.right_dock.setParent(None)
+        self.operation_splitter.insertWidget(1, self.viewport_panel)
+        self.operation_splitter.insertWidget(2, self.right_dock)
+        self.operation_splitter.setSizes(self._operation_splitter_sizes)
+        self._hide_operation_placeholder()
+        results = self.project_operation_service.last_facade_results or []
+        self._show_facade_results(results)
+        self._workspace_in_review = False
+
+    def _show_operation_placeholder(self):
+        """视口迁走后，操作页工作区显示引导提示。"""
+        if not hasattr(self, '_operation_placeholder'):
+            ph = QWidget()
+            ph.setObjectName('operationPlaceholder')
+            lay = QVBoxLayout(ph)
+            lay.setAlignment(Qt.AlignCenter)
+            lbl = QLabel('🔧 3D检测工作台已移至【检测复核】页面')
+            lbl.setStyleSheet('font-size:16px; color:#64748B; font-weight:600;')
+            lay.addWidget(lbl)
+            btn = QPushButton('前往检测复核页')
+            btn.setProperty('buttonRole', 'primary')
+            btn.clicked.connect(lambda: self.set_current_page(2))
+            lay.addWidget(btn, alignment=Qt.AlignCenter)
+            self._operation_placeholder = ph
+        self.operation_splitter.insertWidget(1, self._operation_placeholder)
+        self.operation_splitter.setSizes([220, 1040, 0])
+
+    def _hide_operation_placeholder(self):
+        if hasattr(self, '_operation_placeholder'):
+            self._operation_placeholder.setParent(None)
+
+    # ------------------------------------------------------------------
+    # 立面列表双版本
+    # ------------------------------------------------------------------
+    def _show_facade_results_review(self, results: list[dict]):
+        """检测复核页：只显示 complete 立面，隐藏点数，【图片匹配】按钮。"""
+        results = self.facade_quality_controller.process_facade_results(results)
+        complete_results = [
+            f for f in results
+            if self._facade_review_status(f) == 'complete'
+        ]
+        count = len(complete_results)
+        self.lbl_facade_summary.setText(f'已检测复核立面：{count}' if count else '未检测')
+        if not complete_results:
+            self.list_facades.clear()
+            return
+        self.list_facades.clear()
+        for index, f in enumerate(complete_results, 1):
+            display_no = int(f.get('display_no') or index)
+            f['display_no'] = display_no
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, f)
+            item.setSizeHint(QSize(0, 40))
+            self.list_facades.addItem(item)
+            row = self._create_facade_list_row(f, display_no, review_mode=True)
+            self.list_facades.setItemWidget(item, row)
+
+    def _create_facade_list_row(self, f: dict, display_no: int, review_mode: bool):
+        """创建立面列表行 widget。review_mode=True 时为检测复核模式。"""
+        row = QWidget()
+        row.setStyleSheet("""
+            QWidget { background: transparent; }
+            QLabel { font-size: 12px; color: #334155; }
+        """)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(8)
+        if review_mode:
+            info = QLabel(f"立面{display_no}")
+        else:
+            info = QLabel(f"立面{display_no}")
+        info.setStyleSheet('font-size: 12px; color: #334155;')
+        row_layout.addWidget(info, 1)
+        color = self.render_facade.facade_color(f, display_no)
+        swatch = QFrame()
+        swatch.setFixedSize(18, 18)
+        swatch.setStyleSheet(
+            'background-color: rgb(%d,%d,%d); border: 1px solid #94a3b8; border-radius: 3px;' %
+            tuple(int(max(0, min(1, x)) * 255) for x in color)
+        )
+        row_layout.addWidget(swatch)
+        if review_mode:
+            action_button = QPushButton('图片匹配')
+            action_button.setFixedWidth(84)
+            action_button.setMinimumHeight(32)
+            action_button.clicked.connect(
+                lambda _=False, obj=f: self._on_facade_image_match(obj))
+        else:
+            status = self._facade_review_status(f)
+            action_button = QPushButton('处理' if status == 'complete' else '标记处理')
+            action_button.setFixedWidth(84)
+            action_button.setMinimumHeight(32)
+            action_button.setToolTip('点击确认立面状态；仅标记立面允许质量计算')
+            action_button.clicked.connect(
+                lambda _=False, obj=f, button=action_button:
+                self._toggle_facade_review_status(obj, button))
+        action_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 2px 8px; border-radius: 4px;
+                border: 1px solid #cbd5e1; background: #ffffff; color: #475569;
+            }
+            QPushButton:hover {
+                background: #f1f5f9; border-color: #94a3b8;
+            }
+        """)
+        row_layout.addWidget(action_button)
+        row.setMaximumHeight(48)
+        return row
+
+    def _on_facade_image_match(self, facade: dict):
+        """【图片匹配】按钮回调：调用预留桩接口。"""
+        from services.two_d_matching_service import TwoDMatchingService
+        TwoDMatchingService.match(facade)
