@@ -15,8 +15,7 @@ PAGE_BUTTON_NAMES = {
 
 PAGE_HEADER_ACTIONS = {
     'project_overview': (
-        ('打开项目', 'btn_open_project'),
-        ('选择项目', 'btn_select_project'),
+        ('打开项目文件夹', 'btn_open_project'),
         ('新建项目', 'btn_new_project'),
     ),
     'project_operation': (
@@ -56,7 +55,6 @@ PAGE_HEADER_GROUPS = {
             '项目管理',
             (
                 'btn_open_project',
-                'btn_select_project',
                 'btn_new_project',
             ),
         ),

@@ -219,7 +219,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
     def _connect_buttons(self):
         overview_actions = {
             'btn_open_project': self._open_project_directory,
-            'btn_select_project': self._select_project,
             'btn_new_project': self._create_project,
         }
         pointcloud_actions = {
