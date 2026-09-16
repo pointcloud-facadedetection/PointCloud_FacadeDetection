@@ -1,4 +1,4 @@
-"""2D-3D 对齐：点云映射、照片匹配、立面热力图正视贴图；主入口为 run_photo_facade_heatmap。
+"""2D-3D 对齐、立面正视变换与热力贴图；主入口返回照片正视单应矩阵。
 
 本文件只承担算法实现，不依赖 View_aligned_photo_pointcloud_matching。
 调用方负责读盘、缓存和 UI。
@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import urllib.error
 import urllib.request
@@ -31,6 +32,8 @@ class CloudMappingInput:
     colors: np.ndarray | None = None
     image_size: tuple[int, int] = (1024, 576)
     crop_subject: bool = True
+    project_path: Any = None
+    mapping_image_name: str = 'pointcloud_mapping.png'
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class CloudMappingResult:
     pixel_point_index: np.ndarray
     camera_matrix: np.ndarray
     extrinsic: np.ndarray
+    mapping_image_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,8 @@ def generate_cloud_mapping_image(
     colors=None,
     image_size=(1024, 576),
     crop_subject=True,
+    project_path=None,
+    mapping_image_name='pointcloud_mapping.png',
 ) -> CloudMappingResult:
     """根据扫描仪位姿自动调整观察角度，生成可与照片自动匹配的映射图。
 
@@ -89,13 +95,18 @@ def generate_cloud_mapping_image(
     point_cloud:
         原始三维点云，形状 ``(N, 3)`` 的世界坐标。
     scan_pose:
-        扫描仪位姿。可为 ``4x4`` ``transformToGlobal``，或含该字段的字典。
+        扫描仪位姿。可为 ``4x4`` ``transformToGlobal``、含该字段的字典、
+        JSON 文件路径、``scans`` 字典或扫描项列表。
     colors:
         可选强度或 RGB。``None`` 时按相机深度着色。
     image_size:
         映射图画幅 ``(width, height)``。
     crop_subject:
         是否裁到点云主体，便于与照片自动匹配。
+    project_path:
+        可选项目目录。传入后会将映射图保存到该目录。
+    mapping_image_name:
+        保存文件名，默认为 ``pointcloud_mapping.png``。
 
     Returns
     -------
@@ -121,12 +132,19 @@ def generate_cloud_mapping_image(
         image_size=(width, height),
         crop_subject=crop_subject,
     )
+    mapping_image = np.ascontiguousarray(rendered['view_bgr'])
+    mapping_image_path = save_mapping_image(
+        mapping_image,
+        project_path,
+        mapping_image_name,
+    )
     return CloudMappingResult(
-        mapping_image=np.ascontiguousarray(rendered['view_bgr']),
+        mapping_image=mapping_image,
         depth_image=np.ascontiguousarray(rendered['depth_image']),
         pixel_point_index=np.ascontiguousarray(rendered['pixel_point_index']),
         camera_matrix=np.asarray(rendered['camera_matrix'], dtype=np.float64),
         extrinsic=np.asarray(rendered['extrinsic'], dtype=np.float64),
+        mapping_image_path=mapping_image_path,
     )
 
 
@@ -140,6 +158,8 @@ def generate_cloud_mapping_image_from_input(
         colors=payload.colors,
         image_size=payload.image_size,
         crop_subject=payload.crop_subject,
+        project_path=payload.project_path,
+        mapping_image_name=payload.mapping_image_name,
     )
 
 
@@ -249,8 +269,9 @@ def overlay_facade_heatmap_on_photo(
     *,
     point_cloud=None,
     alpha=0.72,
+    point_radius=6,
     target_max_dim=1600,
-    margin_ratio=0.06,
+    margin_ratio=0.0,
     crop_padding=16,
     distortion=None,
 ) -> FacadeHeatmapOverlayResult:
@@ -262,8 +283,8 @@ def overlay_facade_heatmap_on_photo(
         选中立面。需含 ``plane_model``；三维范围可来自立面点、热力图采样，
         或 ``bbox_2d``。
     heatmap:
-        该立面热力图。优先使用 ``grid_layout`` 中的 ``patch_bgr`` /
-        ``patch_mask`` / ``corners_3d``；也可直接传入网格图。
+        该立面热力图。推荐包含 ``points_3d``、``values_mm``，并在
+        ``grid_layout`` 中提供 ``corners_3d`` 作为最终裁剪边界。
     photo:
         原始照片，BGR。
     match_matrix:
@@ -284,7 +305,12 @@ def overlay_facade_heatmap_on_photo(
     facade_points, plane_model = _resolve_facade_points_and_plane(
         facade, heatmap, point_cloud
     )
-    grid_bgr, grid_mask, grid_corners = _resolve_heatmap_grid(heatmap)
+    _, _, grid_corners = _resolve_heatmap_grid(heatmap)
+    heatmap_points, heatmap_values = _resolve_heatmap_samples(
+        heatmap,
+        facade_points,
+        plane_model,
+    )
 
     aligned = _rectify_photo_to_facade(
         photo_bgr,
@@ -298,42 +324,63 @@ def overlay_facade_heatmap_on_photo(
         margin_ratio=margin_ratio,
         crop_padding=crop_padding,
     )
-    blended, warped = _overlay_heatmap_on_rectified(
+    blended, warped = _overlay_points_on_rectified(
         aligned['photo_bgr'],
-        grid_bgr,
-        grid_mask,
-        grid_corners,
+        heatmap_points,
+        heatmap_values,
         aligned['rotation_matrix'],
         aligned['translation_vector'],
         aligned['camera_matrix'],
-        aligned['boundary_points_3d'],
         alpha=alpha,
+        point_radius=point_radius,
+        heatmap=heatmap,
+    )
+    crop_corners = (
+        grid_corners
+        if grid_corners is not None
+        else aligned['boundary_points_3d']
+    )
+    crop_box = _projected_crop_box(
+        crop_corners,
+        aligned['rotation_matrix'],
+        aligned['translation_vector'],
+        aligned['camera_matrix'],
+        blended.shape,
+    )
+    blended, rectified, warped, camera, homography = _crop_overlay_result(
+        blended,
+        aligned['photo_bgr'],
+        warped,
+        aligned['camera_matrix'],
+        aligned['photo_homography'],
+        crop_box,
     )
     return FacadeHeatmapOverlayResult(
         image_bgr=blended,
-        rectified_photo_bgr=aligned['photo_bgr'],
+        rectified_photo_bgr=rectified,
         heatmap_warped_bgr=warped,
-        camera_matrix=aligned['camera_matrix'],
+        camera_matrix=camera,
         rotation_matrix=aligned['rotation_matrix'],
         translation_vector=aligned['translation_vector'],
-        photo_homography=aligned['photo_homography'],
+        photo_homography=homography,
         boundary_points_3d=aligned['boundary_points_3d'],
-        output_size=aligned['output_size'],
+        output_size=(blended.shape[1], blended.shape[0]),
     )
 
 
 @dataclass(frozen=True)
-class PhotoFacadeHeatmapArgs:
-    """主函数可选参数。未给出的项使用默认值。"""
+class PhotoFacadeMatchArgs:
+    """照片与点云自动匹配参数，不包含立面热力图数据。"""
 
     colors: Any = None
     mapping_image_size: tuple[int, int] = (1024, 576)
     crop_subject: bool = True
-    alpha: float = 0.72
-    target_max_dim: int = 1600
-    margin_ratio: float = 0.06
-    crop_padding: int = 16
-    distortion: Any = None
+    project_path: Any = None
+    mapping_image_name: str = 'pointcloud_mapping.png'
+
+
+# 保留旧名称，避免已有调用方因参数类改名立即失效。
+PhotoFacadeHeatmapArgs = PhotoFacadeMatchArgs
 
 
 def run_photo_facade_heatmap(
@@ -343,7 +390,7 @@ def run_photo_facade_heatmap(
     facade,
     args=None,
 ) -> np.ndarray:
-    """由原始点云、照片、扫描仪位姿和选中立面，输出贴好热力图的正视图片。
+    """生成点云映射图并自动估计世界三维点到照片像素的投影矩阵。
 
     Parameters
     ----------
@@ -352,28 +399,34 @@ def run_photo_facade_heatmap(
     photo:
         原始照片，BGR。
     scan_pose:
-        扫描仪位姿。可为 ``4x4`` ``transformToGlobal``，或含该字段的字典。
+        扫描仪位姿。可为 ``4x4`` ``transformToGlobal``、含该字段的字典、
+        JSON 文件路径、``scans`` 字典或扫描项列表。
     facade:
-        选中立面信息。需含平面位置（如 ``plane_model``、立面点或
-        ``bbox_2d``）以及该立面热力图（``grid_layout`` / ``heatmap`` /
-        ``heatmap_data``）。也可写成
-        ``{'facade': 立面, 'heatmap': 热力图}``。
+        选中立面的几何信息，可包含顶点、内点索引或平面参数；不需要也不会
+        读取热力图。匹配矩阵由点云映射图与照片求得，可用于投影该立面。
     args:
-        其余参数。可为 ``PhotoFacadeHeatmapArgs``、字典或带同名属性的对象。
+        其余参数。可为 ``PhotoFacadeMatchArgs``、字典或带同名属性的对象。
+        传入 ``project_path`` 后，映射图保存为项目目录中的
+        ``mapping_image_name``（默认 ``pointcloud_mapping.png``）。
 
     Returns
     -------
     numpy.ndarray
-        贴了热力图的正视矩形图，BGR。
+        形状 ``(3,4)`` 的匹配投影矩阵 ``P = K[R|t]``，用于把世界坐标
+        三维点投影到照片像素坐标。立面裁剪与角度调正由服务层使用该矩阵
+        完成。
     """
-    options = _as_photo_facade_args(args)
+    options = _as_photo_facade_match_args(args)
     photo_bgr = _as_bgr_image(photo, '照片')
+    _ = facade
     mapping = generate_cloud_mapping_image(
         point_cloud,
         scan_pose,
         colors=options.colors,
         image_size=options.mapping_image_size,
         crop_subject=options.crop_subject,
+        project_path=options.project_path,
+        mapping_image_name=options.mapping_image_name,
     )
     match = estimate_photo_cloud_match(
         point_cloud,
@@ -382,26 +435,16 @@ def run_photo_facade_heatmap(
         None,
         None,
     )
-    facade_info, heatmap = _split_facade_and_heatmap(facade)
-    overlay = overlay_facade_heatmap_on_photo(
-        facade_info,
-        heatmap,
-        photo_bgr,
-        match,
-        point_cloud=point_cloud,
-        alpha=options.alpha,
-        target_max_dim=options.target_max_dim,
-        margin_ratio=options.margin_ratio,
-        crop_padding=options.crop_padding,
-        distortion=options.distortion,
+    return np.ascontiguousarray(
+        match.match_matrix,
+        dtype=np.float64,
     )
-    return overlay.image_bgr
 
 
-def _as_photo_facade_args(args) -> PhotoFacadeHeatmapArgs:
+def _as_photo_facade_match_args(args) -> PhotoFacadeMatchArgs:
     if args is None:
-        return PhotoFacadeHeatmapArgs()
-    if isinstance(args, PhotoFacadeHeatmapArgs):
+        return PhotoFacadeMatchArgs()
+    if isinstance(args, PhotoFacadeMatchArgs):
         return args
 
     def _get(key, default):
@@ -417,19 +460,22 @@ def _as_photo_facade_args(args) -> PhotoFacadeHeatmapArgs:
             return getattr(args, 'image_size')
         return default
 
-    defaults = PhotoFacadeHeatmapArgs()
-    return PhotoFacadeHeatmapArgs(
+    defaults = PhotoFacadeMatchArgs()
+    return PhotoFacadeMatchArgs(
         colors=_get('colors', defaults.colors),
         mapping_image_size=_get(
             'mapping_image_size', defaults.mapping_image_size
         ),
         crop_subject=bool(_get('crop_subject', defaults.crop_subject)),
-        alpha=float(_get('alpha', defaults.alpha)),
-        target_max_dim=int(_get('target_max_dim', defaults.target_max_dim)),
-        margin_ratio=float(_get('margin_ratio', defaults.margin_ratio)),
-        crop_padding=int(_get('crop_padding', defaults.crop_padding)),
-        distortion=_get('distortion', defaults.distortion),
+        project_path=_get('project_path', defaults.project_path),
+        mapping_image_name=str(
+            _get('mapping_image_name', defaults.mapping_image_name)
+        ),
     )
+
+
+# 兼容此前内部名称。
+_as_photo_facade_args = _as_photo_facade_match_args
 
 
 def _split_facade_and_heatmap(facade):
@@ -469,6 +515,35 @@ def _as_optional_colors(colors, point_count: int) -> np.ndarray | None:
     return np.ascontiguousarray(values)
 
 
+def save_mapping_image(
+    image,
+    project_path,
+    file_name='pointcloud_mapping.png',
+) -> str | None:
+    """将映射图以支持 Windows Unicode 路径的方式保存到项目目录。"""
+    if project_path is None:
+        return None
+
+    folder = Path(project_path).expanduser()
+    folder.mkdir(parents=True, exist_ok=True)
+    name = str(file_name or 'pointcloud_mapping.png').strip()
+    if not name or Path(name).name != name:
+        raise ValueError('mapping_image_name 必须是不含目录的文件名')
+    output_path = folder / name
+    extension = output_path.suffix.lower()
+    if extension not in ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'):
+        raise ValueError('映射图仅支持 PNG、JPG、BMP 或 TIFF 格式')
+
+    success, encoded = cv2.imencode(extension, np.asarray(image))
+    if not success:
+        raise OSError(f'映射图编码失败：{output_path}')
+    try:
+        encoded.tofile(str(output_path))
+    except OSError as exc:
+        raise OSError(f'无法保存映射图：{output_path}') from exc
+    return str(output_path.resolve())
+
+
 def _as_image_size(image_size: Sequence[int]) -> tuple[int, int]:
     if image_size is None or len(image_size) != 2:
         raise ValueError('image_size 应为 (width, height)')
@@ -479,23 +554,59 @@ def _as_image_size(image_size: Sequence[int]) -> tuple[int, int]:
 
 
 def _as_transform_to_global(scan_pose) -> np.ndarray:
-    """把扫描仪位姿规范为世界系 ``4x4 transformToGlobal``。"""
+    """从矩阵、字典、扫描列表或 JSON 路径解析 ``transformToGlobal``。"""
     if scan_pose is None:
         raise ValueError('扫描仪位姿不能为空')
 
-    if isinstance(scan_pose, Mapping):
-        transform = _first_present(scan_pose, _POSE_TRANSFORM_KEYS)
-        if transform is None:
-            nested = scan_pose.get('scan_pose_meta') or scan_pose.get('meta')
-            if isinstance(nested, Mapping):
-                transform = _first_present(nested, _POSE_TRANSFORM_KEYS)
-        if transform is None:
-            raise ValueError(
-                '扫描仪位姿缺少 transformToGlobal，无法自动调整点云角度'
-            )
+    source = scan_pose
+    if isinstance(source, (str, Path)):
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f'扫描仪位姿 JSON 不存在：{path}')
+        try:
+            source = json.loads(path.read_text(encoding='utf-8-sig'))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'扫描仪位姿 JSON 解析失败：{exc}') from exc
+        except OSError as exc:
+            raise OSError(f'无法读取扫描仪位姿 JSON：{path}') from exc
+
+    transform = _find_transform_to_global(source)
+    if transform is not None:
         return _as_matrix4(transform)
 
-    return _as_matrix4(scan_pose)
+    # JSON 根节点也允许直接写成 4×4 数字数组。
+    try:
+        return _as_matrix4(source)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            '扫描仪位姿缺少 transformToGlobal；'
+            '应传入 4x4 矩阵、含该字段的字典、scans 列表或 JSON 路径'
+        ) from exc
+
+
+def _find_transform_to_global(value):
+    """按文件顺序返回首个扫描项中的变换矩阵。"""
+    if isinstance(value, Mapping):
+        transform = _first_present(value, _POSE_TRANSFORM_KEYS)
+        if transform is not None:
+            return transform
+
+        for key in ('scan_pose_meta', 'meta', 'scans'):
+            if key in value and value[key] is not None:
+                transform = _find_transform_to_global(value[key])
+                if transform is not None:
+                    return transform
+        return None
+
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray, np.ndarray)
+    ):
+        for item in value:
+            if isinstance(item, (Mapping, list, tuple)):
+                transform = _find_transform_to_global(item)
+                if transform is not None:
+                    return transform
+    return None
 
 
 def _as_matrix4(value) -> np.ndarray:
@@ -2156,6 +2267,41 @@ def _resolve_heatmap_grid(heatmap):
     return patch, np.ascontiguousarray(mask), corners
 
 
+def _resolve_heatmap_samples(heatmap, facade_points, plane_model):
+    """读取与当前按钮一致的逐点热力值；缺少数值时由拟合平面计算。"""
+    source = heatmap if isinstance(heatmap, Mapping) else {}
+    points = None
+    for key in ('points_3d', 'points'):
+        points = _optional_points3(source.get(key))
+        if points is not None:
+            break
+    if points is None:
+        points = np.asarray(facade_points, dtype=np.float64).reshape(-1, 3)
+
+    values = None
+    for key in ('values_mm', 'scalars_mm', 'values'):
+        candidate = source.get(key)
+        if candidate is not None:
+            values = np.asarray(candidate, dtype=np.float32).reshape(-1)
+            break
+    if values is None or len(values) != len(points):
+        plane = np.asarray(plane_model, dtype=np.float64).reshape(4)
+        norm = float(np.linalg.norm(plane[:3]))
+        if norm < 1e-12:
+            raise ValueError('立面拟合平面法向量无效')
+        values = (
+            (points @ plane[:3] + plane[3]) / norm * 1000.0
+        ).astype(np.float32)
+
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(values)
+    if not np.any(finite):
+        raise ValueError('立面热力图没有有效的三维采样点')
+    return (
+        np.ascontiguousarray(points[finite], dtype=np.float64),
+        np.ascontiguousarray(values[finite], dtype=np.float32),
+    )
+
+
 def _plane_axes(normal, facade_type=None):
     normal = np.asarray(normal, dtype=np.float64).reshape(3)
     normal = normal / (np.linalg.norm(normal) + 1e-12)
@@ -2314,7 +2460,7 @@ def _crop_photo_around_facade(photo, photo_boundary, padding=16):
         raise ValueError('立面在照片中的投影区域过小，无法截取')
     cropped = np.ascontiguousarray(photo[y0:y1, x0:x1])
     crop_boundary = quad - np.asarray((x0, y0), dtype=np.float64)
-    return cropped, crop_boundary
+    return cropped, crop_boundary, (x0, y0)
 
 
 def _apply_homography(points, matrix):
@@ -2426,7 +2572,7 @@ def _rectify_photo_to_facade(
         photo_translation,
         photo_camera,
     )
-    cropped, crop_boundary = _crop_photo_around_facade(
+    cropped, crop_boundary, crop_origin = _crop_photo_around_facade(
         photo,
         photo_boundary,
         padding=crop_padding,
@@ -2446,96 +2592,183 @@ def _rectify_photo_to_facade(
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
     )
+    # ``photo_h`` 的输入坐标属于裁剪后的局部照片；对外返回时组合
+    # 原图到裁剪图的平移，使矩阵可直接作用于完整照片。
+    crop_x, crop_y = crop_origin
+    original_to_crop = np.asarray(
+        ((1.0, 0.0, -crop_x), (0.0, 1.0, -crop_y), (0.0, 0.0, 1.0)),
+        dtype=np.float64,
+    )
     return {
         'photo_bgr': rectified,
         'camera_matrix': target_camera,
         'rotation_matrix': target_rotation,
         'translation_vector': target_translation,
-        'photo_homography': photo_h,
+        'photo_homography': photo_h @ original_to_crop,
         'boundary_points_3d': boundary,
         'output_size': output_size,
         'plane_model': plane,
     }
 
 
-def _overlay_heatmap_on_rectified(
+def _overlay_points_on_rectified(
     rectified_bgr,
-    grid_bgr,
-    grid_mask,
-    corners_3d,
+    points_3d,
+    values_mm,
     rotation,
     translation,
     camera_matrix,
-    facade_boundary,
     *,
     alpha=0.72,
+    point_radius=6,
+    heatmap=None,
 ):
-    """把热力网格透视贴到正视矩形图的对应位置。"""
+    """按当前 UI 按钮效果逐点透明融合，不绘制网格和色标。"""
+    from algorithms.facade.heatmap_colors import (
+        GRAY_BGR,
+        compute_heatmap_scale,
+        signed_deviation_colors_bgr,
+    )
+
     photo = _as_bgr_image(rectified_bgr, '正视照片')
-    grid = _as_bgr_image(grid_bgr, '立面热力图')
-    mask = np.asarray(grid_mask, dtype=np.uint8)
-    if mask.shape[:2] != grid.shape[:2]:
-        raise ValueError('热力图与有效像素掩膜尺寸不一致')
+    points = np.asarray(points_3d, dtype=np.float64).reshape(-1, 3)
+    values = np.asarray(values_mm, dtype=np.float32).reshape(-1)
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    translation = np.asarray(translation, dtype=np.float64).reshape(3)
+    intrinsic = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    camera = points @ rotation.T + translation
+    homogeneous = camera @ intrinsic.T
+    pixels = homogeneous[:, :2] / homogeneous[:, 2:3]
+    height, width = photo.shape[:2]
+    radius = max(1, int(point_radius))
+    valid = (
+        np.isfinite(pixels).all(axis=1)
+        & np.isfinite(values)
+        & np.isfinite(camera[:, 2])
+        & (camera[:, 2] > 1e-6)
+        & (pixels[:, 0] >= -radius)
+        & (pixels[:, 0] < width + radius)
+        & (pixels[:, 1] >= -radius)
+        & (pixels[:, 1] < height + radius)
+    )
+    if not np.any(valid):
+        raise ValueError('所选立面不在正视照片范围内')
 
-    height, width = grid.shape[:2]
-    source = np.asarray(
-        (
-            (0.0, height - 1.0),
-            (width - 1.0, height - 1.0),
-            (width - 1.0, 0.0),
-            (0.0, 0.0),
-        ),
-        dtype=np.float32,
+    source = heatmap if isinstance(heatmap, Mapping) else {}
+    threshold, vmin, vmax = compute_heatmap_scale(values[valid])
+    configured_vmin = source.get('vmin_mm')
+    configured_vmax = source.get('vmax_mm')
+    if configured_vmin is not None and configured_vmax is not None:
+        threshold, vmin, vmax = compute_heatmap_scale(
+            (float(configured_vmin), float(configured_vmax))
+        )
+    if source.get('neutral_mm') is not None:
+        threshold = float(source['neutral_mm'])
+    elif source.get('deviation_threshold_mm') is not None:
+        threshold = float(source['deviation_threshold_mm'])
+    colors = signed_deviation_colors_bgr(
+        values,
+        threshold,
+        vmin,
+        vmax,
     )
-    if corners_3d is None:
-        destination = _project_points(
-            facade_boundary,
-            rotation,
-            translation,
-            camera_matrix,
-        ).astype(np.float32)
-    else:
-        corners = np.asarray(corners_3d, dtype=np.float64).reshape(4, 3)
-        depths = (rotation @ corners.T + translation.reshape(3, 1)).T[:, 2]
-        if np.any(~np.isfinite(depths)) or np.any(depths <= 1e-6):
-            raise ValueError('热力图不在正视相机前方，无法贴到立面矩形图上')
-        destination = _project_points(
-            corners,
-            rotation,
-            translation,
-            camera_matrix,
-        ).astype(np.float32)
-    if not np.isfinite(destination).all():
-        raise ValueError('热力图投影坐标无效')
 
-    matrix = cv2.getPerspectiveTransform(source, destination)
-    photo_h, photo_w = photo.shape[:2]
-    warped = cv2.warpPerspective(
-        grid,
-        matrix,
-        (photo_w, photo_h),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-    )
-    warped_mask = cv2.warpPerspective(
-        mask,
-        matrix,
-        (photo_w, photo_h),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-    )
+    rendered = np.full_like(photo, GRAY_BGR)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    visible = np.flatnonzero(valid)
+    if len(visible) > 200_000:
+        visible = visible[::int(np.ceil(len(visible) / 200_000))]
+    order = visible[np.argsort(camera[visible, 2])[::-1]]
+    for index in order:
+        center = tuple(np.rint(pixels[index]).astype(int))
+        color = tuple(int(channel) for channel in colors[index])
+        cv2.circle(
+            rendered,
+            center,
+            radius,
+            color,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.circle(
+            mask,
+            center,
+            radius,
+            255,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
     weight = (
-        warped_mask.astype(np.float32)[:, :, np.newaxis]
+        mask.astype(np.float32)[:, :, np.newaxis]
         / 255.0
         * float(np.clip(alpha, 0.0, 1.0))
     )
     blended = np.clip(
         photo.astype(np.float32) * (1.0 - weight)
-        + warped.astype(np.float32) * weight,
+        + rendered.astype(np.float32) * weight,
         0,
         255,
     ).astype(np.uint8)
-    return blended, warped
+    return blended, rendered
+
+
+def _projected_crop_box(
+    corners_3d,
+    rotation,
+    translation,
+    camera_matrix,
+    image_shape,
+    padding=2,
+):
+    """按热力图三维四角计算最终立面紧致裁剪框。"""
+    pixels = _project_points(
+        corners_3d,
+        rotation,
+        translation,
+        camera_matrix,
+    )
+    height, width = image_shape[:2]
+    pad = max(0, int(padding))
+    x0 = max(0, int(np.floor(np.min(pixels[:, 0]))) - pad)
+    y0 = max(0, int(np.floor(np.min(pixels[:, 1]))) - pad)
+    x1 = min(width, int(np.ceil(np.max(pixels[:, 0]))) + pad + 1)
+    y1 = min(height, int(np.ceil(np.max(pixels[:, 1]))) + pad + 1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        raise ValueError('选中立面在正视照片中的区域过小，无法截取')
+    return x0, y0, x1, y1
+
+
+def _crop_overlay_result(
+    blended,
+    rectified,
+    heatmap,
+    camera_matrix,
+    photo_homography,
+    crop_box,
+):
+    """同步裁剪输出，并更新正视相机主点及照片单应矩阵。"""
+    x0, y0, x1, y1 = crop_box
+    crop = np.s_[y0:y1, x0:x1]
+    cropped_blended = np.ascontiguousarray(blended[crop])
+    cropped_rectified = np.ascontiguousarray(rectified[crop])
+    cropped_heatmap = np.ascontiguousarray(heatmap[crop])
+    camera = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3).copy()
+    camera[0, 2] -= x0
+    camera[1, 2] -= y0
+    shift = np.asarray(
+        ((1.0, 0.0, -x0), (0.0, 1.0, -y0), (0.0, 0.0, 1.0)),
+        dtype=np.float64,
+    )
+    homography = shift @ np.asarray(
+        photo_homography, dtype=np.float64
+    ).reshape(3, 3)
+    return (
+        cropped_blended,
+        cropped_rectified,
+        cropped_heatmap,
+        camera,
+        homography,
+    )
 
 
 __all__ = [
@@ -2543,9 +2776,11 @@ __all__ = [
     'CloudMappingResult',
     'PhotoMatchResult',
     'FacadeHeatmapOverlayResult',
+    'PhotoFacadeMatchArgs',
     'PhotoFacadeHeatmapArgs',
     'generate_cloud_mapping_image',
     'generate_cloud_mapping_image_from_input',
+    'save_mapping_image',
     'estimate_photo_cloud_match',
     'overlay_facade_heatmap_on_photo',
     'run_photo_facade_heatmap',

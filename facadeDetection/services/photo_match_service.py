@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import open3d as o3d
 from PySide6.QtGui import QImage, QImageReader
@@ -23,6 +24,10 @@ from algorithms.View_aligned_photo_pointcloud_matching import (
     default_projection_params,
     projection_viewport_camera,
     render_projection,
+)
+from utils.photo_matching import (  # pylint: disable=import-error
+    run_photo_facade_heatmap,
+    save_mapping_image,
 )
 
 _INTENSITY_ATTRIBUTE_KEYS = (
@@ -204,6 +209,23 @@ def _projected_facade_crop_box(
     return x0, y0, x1, y1
 
 
+def _decompose_photo_projection(matrix):
+    """将 photo_matching 返回的 ``3x4 P`` 分解为 ``K、R、t``。"""
+    projection = np.asarray(matrix, dtype=np.float64).reshape(3, 4)
+    if not np.isfinite(projection).all():
+        raise ValueError('照片匹配矩阵包含无效数值')
+    camera, rotation, center_h, *_ = cv2.decomposeProjectionMatrix(
+        projection
+    )
+    scale = float(camera[2, 2])
+    if abs(scale) < 1e-12 or abs(float(center_h[3])) < 1e-12:
+        raise ValueError('照片匹配矩阵无法分解为有效相机位姿')
+    camera = camera / scale
+    center = center_h[:3, 0] / center_h[3, 0]
+    translation = -rotation @ center
+    return camera, rotation, translation
+
+
 @dataclass
 class MatchPair:
     photo: Optional[tuple[float, float]] = None
@@ -229,16 +251,28 @@ class PhotoMatchState:
     annotation_space: str = 'raw'
     remapped_photo_points: list[tuple[float, float]] = field(default_factory=list)
     projection_params: dict = field(default_factory=dict)
+    project_path: Optional[str] = None
+    mapping_image_path: Optional[str] = None
 
 
 class PhotoMatchService:
-    def __init__(self):
+    def __init__(self, project_path=None):
         self.state = PhotoMatchState()
         self._projection_cloud_cache = {}
+        if project_path is not None:
+            self.set_project_path(project_path)
 
     def reset(self):
         self.state = PhotoMatchState()
         self._projection_cloud_cache.clear()
+
+    def set_project_path(self, project_path) -> str:
+        """设置映射图保存目录，并返回规范化后的项目路径。"""
+        path = Path(project_path).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        self.state.project_path = str(path)
+        self.state.mapping_image_path = None
+        return self.state.project_path
 
     def load_photo(self, file_path: str) -> QImage:
         path = validate_photo_path(file_path)
@@ -420,8 +454,16 @@ class PhotoMatchService:
         *,
         crop_subject=False,
         image_size=(1024, 576),
+        project_path=None,
+        mapping_image_name='pointcloud_mapping.png',
+        save_mapping=True,
     ) -> dict:
-        """渲染右侧针孔投影预览或用于匹配的主体裁剪图。"""
+        """渲染针孔投影，并按需将映射图保存到项目目录。
+
+        ``project_path`` 优先于服务状态中的项目路径；两者都未设置时仅返回
+        内存结果。保存后的绝对路径同时写入返回值的
+        ``mapping_image_path`` 和 ``state.mapping_image_path``。
+        """
         meta = self.state.scan_pose_meta or {}
         transform = meta.get('transform_to_global')
         if transform is None:
@@ -430,7 +472,7 @@ class PhotoMatchService:
         if not values:
             values = self.initialize_projection(points, image_size=image_size)
         self.state.projection_params = dict(values)
-        return render_projection(
+        rendered = render_projection(
             points,
             colors,
             transform,
@@ -438,6 +480,21 @@ class PhotoMatchService:
             image_size=image_size,
             crop_subject=crop_subject,
         )
+        output_root = (
+            self.set_project_path(project_path)
+            if project_path is not None
+            else self.state.project_path
+        )
+        mapping_path = None
+        if save_mapping and output_root:
+            mapping_path = save_mapping_image(
+                rendered['view_bgr'],
+                output_root,
+                mapping_image_name,
+            )
+        rendered['mapping_image_path'] = mapping_path
+        self.state.mapping_image_path = mapping_path
+        return rendered
 
     def map_facade_heatmap_to_photo(
         self,
@@ -643,15 +700,20 @@ class PhotoMatchService:
         target_max_dim: int = 1600,
         margin_ratio: float = 0.0,
     ) -> dict:
-        """将照片和点云映射图裁到选中立面，校正为正视热力图。"""
+        """调用匹配算法取得矩阵，再由服务读取热力图并生成正视贴图。
+
+        ``run_photo_facade_heatmap`` 只接收立面几何信息并返回 ``3x4``
+        投影矩阵；``heatmap_data`` 仅在本服务中解析和贴图。
+        """
         if self.state.annotating:
             raise ValueError('请先退出标注模式')
-        if self.state.pose is None:
-            raise ValueError('请先完成自动匹配')
         if not facade:
             raise ValueError('请先从右侧列表选择一个立面')
         if not cloud_projection:
             raise ValueError('请先执行点云映射')
+        scan_pose = self.state.scan_pose_meta or self.state.scan_pose_path
+        if scan_pose is None:
+            raise ValueError('请先上传扫描仪位姿')
 
         cached = _cached_heatmap_samples(heatmap_data, facade)
         if cached is not None:
@@ -679,16 +741,34 @@ class PhotoMatchService:
                 )
             scalars_mm = None
 
-        pose = self.state.pose
-        photo_rotation = np.asarray(
-            pose.get('rotation_matrix'), dtype=np.float64
-        ).reshape(3, 3)
-        photo_translation = np.asarray(
-            pose.get('translation_vector'), dtype=np.float64
-        ).reshape(3)
-        photo_camera = np.asarray(
-            pose.get('camera_matrix'), dtype=np.float64
-        ).reshape(3, 3)
+        projection_image = np.asarray(cloud_projection.get('view_bgr'))
+        projection_size = (
+            int(projection_image.shape[1]),
+            int(projection_image.shape[0]),
+        )
+        photo_match_matrix = run_photo_facade_heatmap(
+            points,
+            photo_bgr,
+            scan_pose,
+            facade,
+            {
+                'mapping_image_size': projection_size,
+                'crop_subject': True,
+                'project_path': self.state.project_path,
+            },
+        )
+        photo_camera, photo_rotation, photo_translation = (
+            _decompose_photo_projection(photo_match_matrix)
+        )
+        pose = {
+            'match_matrix': photo_match_matrix,
+            'projection_matrix': photo_match_matrix,
+            'camera_matrix': photo_camera,
+            'rotation_matrix': photo_rotation,
+            'translation_vector': photo_translation,
+            'distortion_coefficients': np.zeros(5, dtype=np.float64),
+        }
+        self.state.pose = pose
         cloud_extrinsic = np.asarray(
             cloud_projection.get('extrinsic'), dtype=np.float64
         ).reshape(4, 4)
@@ -816,6 +896,7 @@ class PhotoMatchService:
             'deviation_vmin_mm': float(scale_vmin),
             'deviation_vmax_mm': float(scale_vmax),
             'output_size': output_size,
+            'photo_match_matrix': photo_match_matrix,
             'photo_homography': crop_shift @ aligned['photo_homography'],
             'cloud_homography': crop_shift @ aligned['cloud_homography'],
         }
