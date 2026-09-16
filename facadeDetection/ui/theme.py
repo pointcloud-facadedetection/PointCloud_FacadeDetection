@@ -59,16 +59,15 @@ QLabel#applicationBrandMark {
 QLabel#applicationPageTitle {
     color: #F8FAFC;
     background-color: transparent;
-    font-size: 22px;
+    font-size: 15px;
     font-weight: 700;
 }
 
 QLabel#currentProjectLabel {
-    color: #DCE6F5;
-    background-color: #111C2E;
-    border: 1px solid #2B3A52;
-    border-radius: 8px;
-    padding: 6px 12px;
+    color: #334155;
+    background-color: transparent;
+    border: none;
+    padding: 0;
     font-size: 13px;
     font-weight: 500;
 }
@@ -213,13 +212,9 @@ QToolButton[uiRole="sidebarToggle"]:checked {
 }
 
 QToolButton[uiRole="windowControl"] {
-    color: #E5EDF8;
     background-color: transparent;
     border: none;
     border-radius: 0;
-    font-family: "Segoe UI Symbol", "Microsoft YaHei UI";
-    font-size: 17px;
-    font-weight: 500;
 }
 
 QToolButton[uiRole="windowControl"]:hover {
@@ -289,36 +284,47 @@ QPushButton[buttonRole="danger"]:disabled {
     border-color: #E2E8F0;
 }
 
-/* Global navigation is a compact command dock instead of four full-screen tabs. */
-QPushButton[uiRole="navigationItem"][navigationLevel="main"] {
-    min-width: 96px;
-    min-height: 42px;
-    padding: 0 18px;
-    color: #475569;
+/* 页面导航位于深色标题栏正中：选中态维持蓝底白字，常态/hover 按深色底设计。 */
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"] {
+    min-width: 92px;
+    min-height: 28px;
+    padding: 0 16px;
+    color: #C7D2E8;
     background-color: transparent;
     border: 1px solid transparent;
-    border-radius: 7px;
-    font-size: 14px;
+    border-radius: 6px;
+    font-size: 13px;
     font-weight: 500;
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:hover {
-    color: #1E40AF;
-    background-color: #F2F6FF;
-    border-color: #D5E0FF;
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:hover {
+    color: #FFFFFF;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.12);
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked {
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:checked {
     color: #FFFFFF;
     background-color: #1E40AF;
     border-color: #1E40AF;
     font-weight: 600;
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:disabled {
-    color: #94A3B8;
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:disabled {
+    color: #64748B;
+    background-color: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+QWidget#titlebarNavigation {
     background-color: transparent;
-    border-color: transparent;
+    border: none;
+}
+
+QWidget#projectContextBar {
+    background-color: #F5F8FC;
+    border: none;
+    border-bottom: 1px solid #D2DBE7;
 }
 
 /* Report sub-pages use the same flat navigation language at a smaller scale. */
@@ -350,22 +356,6 @@ QPushButton[uiRole="navigationItem"][navigationLevel="internal"]:checked {
 
 QDockWidget#bottomDock {
     border: none;
-}
-
-QWidget#bottomDockPanel,
-QWidget#bottomNavigation {
-    border: none;
-}
-
-QWidget#bottomDockPanel {
-    background-color: #E9EEF5;
-    border-top: 1px solid #D2DBE7;
-}
-
-QWidget#bottomNavigation {
-    background-color: #FFFFFF;
-    border: 1px solid #D4DDE9;
-    border-radius: 11px;
 }
 
 QFrame[uiRole="workspaceSection"] {

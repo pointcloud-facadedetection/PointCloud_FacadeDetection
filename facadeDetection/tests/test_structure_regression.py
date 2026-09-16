@@ -35,12 +35,13 @@ def test_services_layer_has_no_dialog_classes():
 
 
 def test_main_window_mro_has_only_page_mixins(qapp):
-    """MainWindow 继承列表只剩三个 page mixin，controller 已全部对象化。"""
+    """MainWindow 继承列表只剩页面/外壳 mixin，controller 已全部对象化。"""
     from ui.main_window import MainWindow
     names = [c.__name__ for c in MainWindow.__mro__]
     mixins = [n for n in names if n.endswith('Mixin')]
     assert mixins == ['OverviewPageMixin', 'OperationPageMixin',
-                      'ReportPageMixin']
+                      'InspectionReviewPageMixin', 'ReportPageMixin',
+                      'ScaffoldPageMixin']
 
 
 def test_main_window_exposes_controllers(qapp):

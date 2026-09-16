@@ -1,4 +1,5 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF, QRectF, QSize
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 class ElidedLabel(QLabel):
@@ -49,6 +50,46 @@ class ElidedLabel(QLabel):
             available_width,
         )
         QLabel.setText(self, visible_text)
+
+def make_window_control_icon(kind: str, color: str = '#E5EDF8',
+                             logical_size: int = 16, dpr: float = 2.0) -> QIcon:
+    """QPainter 绘制 Windows 风格窗口控制图标。
+
+    1px 细线、10×10 视觉网格，四个形态（minimize/maximize/restore/close）
+    同一套笔画权重；不依赖系统字体字形，任何机器渲染一致。
+    """
+    size = int(logical_size * dpr)
+    pixmap = QPixmap(size, size)
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.0)
+    pen.setCosmetic(True)
+    painter.setPen(pen)
+    # 关闭抗锯齿保证 1px 线条锐利
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    c = logical_size / 2.0   # 中心
+    if kind == 'minimize':
+        y = c + 0.5
+        painter.drawLine(QPointF(c - 5, y), QPointF(c + 5, y))
+    elif kind == 'maximize':
+        painter.drawRect(QRectF(c - 4.5, c - 4.5, 9, 9))
+    elif kind == 'restore':
+        # 后窗（右上）：只画顶边和右边；前窗（左下）：完整方框
+        painter.drawLine(QPointF(c - 1.5, c - 4.5), QPointF(c + 4.5, c - 4.5))
+        painter.drawLine(QPointF(c + 4.5, c - 4.5), QPointF(c + 4.5, c + 2.5))
+        painter.drawRect(QRectF(c - 4.5, c - 1.5, 7, 7))
+    elif kind == 'close':
+        painter.drawLine(QPointF(c - 4.5, c - 4.5), QPointF(c + 4.5, c + 4.5))
+        painter.drawLine(QPointF(c - 4.5, c + 4.5), QPointF(c + 4.5, c - 4.5))
+    else:
+        raise ValueError(f'未知窗口控制图标: {kind}')
+    painter.end()
+    return QIcon(pixmap)
+
 
 class ApplicationTitleBar(QWidget):
     """无边框窗口的可拖动标题栏，保留系统标题栏的常用交互。"""
