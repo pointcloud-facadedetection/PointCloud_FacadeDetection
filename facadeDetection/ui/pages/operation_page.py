@@ -199,6 +199,9 @@ class OperationPageMixin:
         self.list_facades.setObjectName('lstFacades')
         self.list_facades.setSpacing(4)
         self.list_facades.setUniformItemSizes(False)
+        # 行内自带右侧按钮：水平滚动条会盖住最底行按钮，从根上关闭
+        self.list_facades.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # 单选保持原交互；按住 Ctrl/Shift 可复用同一评估按钮批量检测。
         self.list_facades.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         

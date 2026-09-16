@@ -150,7 +150,7 @@ class InspectionReviewPageMixin:
             QLabel { font-size: 12px; color: #334155; }
         """)
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setContentsMargins(8, 6, 14, 6)
         row_layout.setSpacing(8)
         info = QLabel(f"立面{display_no}")
         info.setStyleSheet('font-size: 12px; color: #334155;')
