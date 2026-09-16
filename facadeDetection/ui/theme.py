@@ -66,9 +66,10 @@ QLabel#applicationPageTitle {
 QLabel#currentProjectLabel {
     color: #DCE6F5;
     background-color: #111C2E;
-    border: 1px solid #2B3A52;
-    border-radius: 8px;
-    padding: 6px 12px;
+    border: none;
+    border-radius: 0;
+    margin: 0;
+    padding: 0;
     font-size: 13px;
     font-weight: 500;
 }
@@ -289,12 +290,12 @@ QPushButton[buttonRole="danger"]:disabled {
     border-color: #E2E8F0;
 }
 
-/* Global navigation is a compact command dock instead of four full-screen tabs. */
+/* 主导航默认融入顶栏；未选中项悬停后用白底黑字给出明确反馈。 */
 QPushButton[uiRole="navigationItem"][navigationLevel="main"] {
     min-width: 96px;
     min-height: 42px;
     padding: 0 18px;
-    color: #475569;
+    color: #FFFFFF;
     background-color: transparent;
     border: 1px solid transparent;
     border-radius: 7px;
@@ -303,20 +304,29 @@ QPushButton[uiRole="navigationItem"][navigationLevel="main"] {
 }
 
 QPushButton[uiRole="navigationItem"][navigationLevel="main"]:hover {
-    color: #1E40AF;
-    background-color: #F2F6FF;
-    border-color: #D5E0FF;
+    color: #111827;
+    background-color: #FFFFFF;
+    border-color: #FFFFFF;
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked {
+QPushButton[uiRole="navigationItem"][navigationLevel="main"]:pressed {
     color: #FFFFFF;
-    background-color: #1E40AF;
-    border-color: #1E40AF;
+    background-color: #2457D6;
+    border-color: #2457D6;
+}
+
+/* 组合状态显式放在 hover 之后，保证已选中页签不会再触发悬停换色。 */
+QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked,
+QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked:hover,
+QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked:pressed {
+    color: #FFFFFF;
+    background-color: #2457D6;
+    border-color: #2457D6;
     font-weight: 600;
 }
 
 QPushButton[uiRole="navigationItem"][navigationLevel="main"]:disabled {
-    color: #94A3B8;
+    color: #FFFFFF;
     background-color: transparent;
     border-color: transparent;
 }
@@ -363,9 +373,9 @@ QWidget#bottomDockPanel {
 }
 
 QWidget#bottomNavigation {
-    background-color: #FFFFFF;
-    border: 1px solid #D4DDE9;
-    border-radius: 11px;
+    background-color: #0B1220;
+    border: none;
+    border-radius: 0;
 }
 
 QFrame[uiRole="workspaceSection"] {

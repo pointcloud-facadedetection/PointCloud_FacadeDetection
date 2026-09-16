@@ -9,9 +9,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QColorDialog,
-    QDockWidget,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidgetItem,
@@ -48,7 +48,6 @@ from .controllers.task_progress import (
     TASK_DETECTION,
     TASK_LOAD,
     TASK_MODEL_EXPORT,
-    TASK_PAGE_SWITCH,
     TASK_QUALITY,
     TASK_QUALITY_BATCH,
     TASK_REGION,
@@ -315,7 +314,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self._set_current_project(None)
 
     def _setup_ui(self):
-        # 统一应用外壳让品牌栏、页面内容和底部导航形成稳定层级。
+        # 三行依次为顶栏导航、当前项目、页面命令栏，均固定在工作区上方。
         shell = QWidget()
         shell.setObjectName('applicationShell')
         shell.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -323,23 +322,13 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
         shell_layout.addWidget(self._create_application_header())
+        shell_layout.addWidget(self._create_current_project_row())
 
         self.page_stack = self._create_page_stack()
         shell_layout.addWidget(self.page_stack, 1)
         self.setCentralWidget(shell)
 
-        self.setDockNestingEnabled(False)
-        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
-
-        self.bottom_dock = self._create_bottom()
         self.set_current_page(0)
-
-        self.resizeDocks(
-            [self.bottom_dock],
-            [80],
-            Qt.Orientation.Vertical,
-        )
 
     def _create_application_header(self):
         """创建可拖动的自定义标题栏，并承载窗口控制按钮。"""
@@ -348,9 +337,14 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         header.setFixedHeight(68)
 
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 12, 0, 12)
+        # 两侧等宽，使四个模块始终相对整窗居中，而非仅在剩余空间内居中。
+        layout = QGridLayout(header)
+        layout.setContentsMargins(0, 8, 0, 8)
         layout.setSpacing(10)
+
+        brand_panel = QWidget()
+        brand_layout = QHBoxLayout(brand_panel)
+        brand_layout.setContentsMargins(24, 0, 0, 0)
 
         brand_mark = QLabel()
         brand_mark.setObjectName('applicationBrandMark')
@@ -367,36 +361,10 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             True,
         )
-        layout.addWidget(brand_mark)
-
-        # 顶栏只显示当前页面名称，避免和窗口标题重复展示平台名称。
-        self.application_page_title = QLabel(PAGE_DEFINITIONS[0][0])
-        self.application_page_title.setObjectName('applicationPageTitle')
-        self.application_page_title.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        layout.addWidget(self.application_page_title)
-
-        layout.addStretch(1)
-
-        self.current_project_label = ElidedLabel(
-            '当前项目：未选择',
-            maximum_hint_width=None,
-        )
-        self.current_project_label.setObjectName('currentProjectLabel')
-        self.current_project_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.current_project_label.setProperty('uiRole', 'supportingText')
-        self.current_project_label.setMinimumWidth(200)
-        self.current_project_label.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Preferred,
-        )
-        self.current_project_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        layout.addWidget(self.current_project_label)
+        brand_layout.addWidget(brand_mark)
+        brand_layout.addStretch(1)
+        layout.addWidget(brand_panel, 0, 0)
+        layout.addWidget(self._create_main_navigation(), 0, 1)
 
         window_controls = QWidget()
         window_controls.setObjectName('windowControls')
@@ -423,7 +391,13 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         controls_layout.addWidget(self.window_minimize_button)
         controls_layout.addWidget(self.window_maximize_button)
         controls_layout.addWidget(self.window_close_button)
-        layout.addWidget(window_controls)
+        layout.addWidget(window_controls, 0, 2, Qt.AlignmentFlag.AlignRight)
+        side_width = max(brand_panel.sizeHint().width(), window_controls.sizeHint().width())
+        layout.setColumnMinimumWidth(0, side_width)
+        layout.setColumnMinimumWidth(2, side_width)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 4)
+        layout.setColumnStretch(2, 1)
 
         self.window_minimize_button.clicked.connect(self.showMinimized)
         self.window_maximize_button.clicked.connect(
@@ -431,6 +405,18 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         )
         self.window_close_button.clicked.connect(self.close)
         return header
+
+    def _create_current_project_row(self):
+        """项目名独占一行；不随项目列表滚动，也不挤占导航及窗口按钮。"""
+        self.current_project_label = ElidedLabel(
+            '当前项目：未选择', maximum_hint_width=None,
+        )
+        self.current_project_label.setObjectName('currentProjectLabel')
+        self.current_project_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.current_project_label.setContentsMargins(0, 0, 0, 0)
+        self.current_project_label.setFixedHeight(28)
+        return self.current_project_label
 
     def _create_window_control_button(self, object_name, text, tooltip):
         """创建与深色标题栏一致的标准窗口控制按钮。"""
@@ -931,28 +917,12 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             QTimer.singleShot(0, lambda: self._resize_page_header(panel))
         return panel
 
-    def _create_bottom(self):
-        """在页面底部提供四个互斥页面页签。"""
-        dock = QDockWidget('Bottom', self)
-        dock.setObjectName('bottomDock')
-        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
-
-        title_bar = QWidget()
-        title_bar.setFixedHeight(0)
-        dock.setTitleBarWidget(title_bar)
-
-        panel = QWidget()
-        panel.setObjectName('bottomDockPanel')
-        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(24, 8, 24, 8)
-        layout.setSpacing(0)
-
+    def _create_main_navigation(self):
+        """将原四个页签移至标题栏，沿用按钮样式、对象名和切页连接。"""
         navigation_panel = QWidget()
+        # 沿用原样式选择器，仅改变控件位置，避免额外改动主题。
         navigation_panel.setObjectName('bottomNavigation')
         navigation_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        navigation_panel.setMinimumWidth(720)
         navigation_panel.setMaximumWidth(1040)
         navigation_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -981,15 +951,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             self.page_button_group.addButton(button, index)
             self.page_buttons[page_key] = button
             navigation_layout.addWidget(button, 1)
-        layout.addStretch(1)
-        layout.addWidget(navigation_panel, 4)
-        layout.addStretch(1)
-
-        dock.setWidget(panel)
-        dock.setMinimumHeight(68)
-        dock.setMaximumHeight(68)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        return dock
+        return navigation_panel
 
     def set_current_page(self, page_index):
         if not 0 <= page_index < len(PAGE_DEFINITIONS):
@@ -999,15 +961,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if button is not None and not button.isEnabled():
             return
 
-        # 切换期间弹忙碌条阻挡操作，防止视口迁移/首帧渲染等开销被并发点击
-        # 放大。仅覆盖带 Open3D 视口的两个页面；加载忙碌条已在时由它覆盖
-        # 本次切换，不再叠第二个弹窗；启动期（窗口尚未显示）不弹。
-        load_active = self.task_progress.is_active(TASK_LOAD)
-        show_busy = (not load_active and self.isVisible()
-                     and page_key in ('project_operation', 'inspection_review'))
-        if show_busy:
-            self.task_progress.begin(TASK_PAGE_SWITCH, '页面切换', '正在切换页面...')
-
+        # 导航切页直接更新工作区，不创建“页面切换”进度弹窗。
         # ===== 视口迁移：检测复核页 ↔ 项目操作页 =====
         if page_key == 'inspection_review':
             self._migrate_workspace_to_review()
@@ -1015,7 +969,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             self._migrate_workspace_to_operation()
 
         self.page_stack.setCurrentIndex(page_index)
-        self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
         # 项目操作页和检测复核页都需要渲染
@@ -1023,9 +976,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if viewport is not None and hasattr(viewport, 'set_render_enabled'):
             viewport.set_render_enabled(page_key in ('project_operation', 'inspection_review'))
         self._update_window_title(page_key)
-
-        if show_busy:
-            self._finish_task_after_first_frame(TASK_PAGE_SWITCH)
 
     def _connect_buttons(self):
         overview_actions = {
