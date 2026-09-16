@@ -907,7 +907,7 @@ def apply_application_theme(app: QApplication) -> None:
         for family in requested_families
         if family.casefold() in available_families
     ]
-    # 11pt 在老师演示用的 1920×1080 屏幕上更易读，Qt 仍会随系统缩放自适应。
+    # 默认字号为 11pt，随系统缩放调整。
     font = QFont(font_families[0] if font_families else "Sans Serif", 11)
     if font_families:
         font.setFamilies(font_families)

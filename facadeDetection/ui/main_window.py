@@ -848,7 +848,6 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         groups = PAGE_HEADER_GROUPS[page_key]
 
         if page_key == 'project_operation':
-            # 回放中老师指定：两个侧栏开关常驻在“视图”分组之前。
             sidebar_group = QFrame()
             sidebar_group.setProperty('uiRole', 'commandGroup')
             sidebar_group.setAttribute(
