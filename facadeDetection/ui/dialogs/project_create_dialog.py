@@ -398,6 +398,8 @@ class ProjectCreateDialog(QDialog):
             head.addWidget(counter, 0, Qt.AlignmentFlag.AlignRight)
             add = QPushButton('新增')
             clear = QPushButton('清空')
+            add.setProperty('buttonRole', 'primary')
+            clear.setProperty('buttonRole', 'danger')
             add.clicked.connect(lambda _=False, k=key, t=title, ty=kind: self._add_resource(k, t, ty))
             clear.clicked.connect(lambda _=False, k=key, t=title: self._clear_resources(k, t))
             head.addWidget(add)

@@ -607,6 +607,42 @@ QComboBox:on {
     border-color: #3B82F6;
 }
 
+/* 数字/日期框的上下箭头：与下拉箭头同一套 QPainter 细线资源 */
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit {
+    padding-right: 24px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    width: 18px;
+    border: none;
+    background: transparent;
+    image: url({{ICON_DIR}}/spin_arrow_up.png);
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    width: 18px;
+    border: none;
+    background: transparent;
+    image: url({{ICON_DIR}}/spin_arrow_down.png);
+}
+
+/* QDateEdit 日历弹层箭头与 QComboBox 同款 */
+QDateEdit::drop-down {
+    width: 24px;
+    border: none;
+    background: transparent;
+}
+
+QDateEdit::down-arrow {
+    image: url({{ICON_DIR}}/combo_arrow_down.png);
+    width: 12px;
+    height: 12px;
+}
+
 QListView,
 QTreeView,
 QTableView {

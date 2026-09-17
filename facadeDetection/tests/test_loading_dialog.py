@@ -13,8 +13,13 @@ from PySide6.QtCore import Qt
 
 from fakes import Row, SignalRecorder
 from ui.controllers.project_lifecycle import ProjectLifecycleController
-from ui.dialogs.loading_dialog import LoadingDialog
+from ui.dialogs.task_progress_dialog import TaskProgressDialog
 from utils.workers import PointCloudLoadWorker
+
+
+def _make_loading_dialog():
+    """加载窗即 TaskProgressDialog 的点云加载实例。"""
+    return TaskProgressDialog(title='点云加载')
 
 
 # ---------------------------------------------------------------------------
@@ -22,7 +27,7 @@ from utils.workers import PointCloudLoadWorker
 # ---------------------------------------------------------------------------
 class TestLoadingDialogBehavior:
     def test_modal_and_not_user_closable(self, qapp):
-        dlg = LoadingDialog()
+        dlg = _make_loading_dialog()
         assert dlg.windowModality() == Qt.WindowModality.ApplicationModal
         # 无关闭按钮：CustomizeWindowHint + WindowTitleHint，不含 WindowCloseButtonHint
         assert not dlg.windowFlags() & Qt.WindowType.WindowCloseButtonHint
@@ -35,7 +40,7 @@ class TestLoadingDialogBehavior:
         dlg.hide()
 
     def test_progress_updates_are_real(self, qapp):
-        dlg = LoadingDialog()
+        dlg = _make_loading_dialog()
         dlg.update_progress('正在解析 bllygg01.ply')
         assert 'bllygg01.ply' in dlg._label.text()
         dlg.update_progress('点云加载完成')

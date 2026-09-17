@@ -328,6 +328,7 @@ class OverviewPageMixin:
 
             edit_button = QPushButton('编辑')
             edit_button.setObjectName('btn_edit_project')
+            edit_button.setProperty('buttonRole', 'secondary')
             edit_button.setToolTip('修改项目名称')
             edit_button.setAccessibleName('编辑项目')
             edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
