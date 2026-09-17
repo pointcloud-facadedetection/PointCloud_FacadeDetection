@@ -119,7 +119,8 @@ class ResultExportService:
                 }
                 from services.dal.results_repo import ResultsRepo
                 ResultsRepo.ensure_global_indices(quality)
-                temp_quality = {
+                temp_quality = dict(quality)
+                temp_quality.update({
                     'windows': windows,
                     'heatmap_mode': mode,
                     'overall': method_dict.get('overall', {}) if isinstance(
@@ -128,7 +129,9 @@ class ResultExportService:
                     'parameters': method_parameters,
                     'rates': metric_rates,
                     'profile_snapshot': quality.get('profile_snapshot', {}),
-                    'defect_samples': method_dict.get('defect_samples', {}),
+                    # ★ 方法级 defect_samples 必须显式传入（来自
+                    #   quality_comparison.methods[method].defect_samples）
+                    'defect_samples': method_dict.get('defect_samples', {}) or {},
                     '__global_indices': quality.get('__global_indices', []),
                     '__defect_index_space': quality.get(
                         '__defect_index_space', 'raw_global_rows'),
@@ -139,7 +142,22 @@ class ResultExportService:
                         'projection_u_axis', quality.get('projection_u_axis')),
                     'projection_v_axis': method_dict.get(
                         'projection_v_axis', quality.get('projection_v_axis')),
+                })
+                # 显式保留权威域信息，防 method_dict 意外覆盖
+                temp_quality['quality_comparison'] = (
+                    quality.get('quality_comparison', {}) or {})
+                temp_quality['quality_domain'] = (
+                    quality.get('quality_domain', {}) or {})
+
+                # 确认方法级 defect_samples 已注入；为 0 说明上游
+                # compute_block_plane_quality 未返回缺陷样本，需排查。
+                ds = temp_quality.get('defect_samples') or {}
+                ds_info = {
+                    k: (int(len(v.get('raw_ids', []))) if isinstance(v, dict) else 0)
+                    for k, v in ds.items()
                 }
+                print(f'[PCFD] export_all_heatmaps: mode={mode} '
+                      f'defect_samples_sizes={ds_info}', flush=True)
 
                 try:
                     triplet = self._renderer.render(
