@@ -251,7 +251,9 @@ class Open3DViewport(BaseViewport):
         # TODO(渲染生命周期): _init_ui：统一管理 Open3D 原生窗口、createWindowContainer、Overlay 与事件桥接的可见性和销毁顺序，避免页签切换产生残留 UI。
         layout = self._layout
         try:
-            self._adapter.create_window(self._window_title, width=1280, height=960, visible=True)
+            # 创建即隐藏：GLFW 原生窗口不再先独立弹出（白窗闪现），
+            # 由下方 createWindowContainer 嵌入后随容器统一显示。
+            self._adapter.create_window(self._window_title, width=1280, height=960, visible=False)
             handle = self._window_finder.find(
                 self._window_title,
                 timeout=120.0,
