@@ -303,10 +303,10 @@ class PdfReportRenderer:
             "table.triplet img { display:block; margin:0 auto 1px;"
             " max-width:100%; }"
             # 色条列：左侧留出可见间隙，避免色条紧贴相邻热力图
-            "table.triplet td.triplet-bar { padding-left:12px;"
-            " padding-right:6px; }"
+            "table.triplet td.triplet-bar { padding-left:6px;"
+            " padding-right:4px; }"
             ".triplet-title { font-size:7.5pt; color:#365b7d;"
-            " font-weight:600; margin-top:1px; text-align:center;"
+            " font-weight:600; margin-top: 0; text-align:center;"
             " white-space:nowrap; overflow:hidden;"
             " text-overflow:ellipsis; }"
             ".triplet-placeholder { background:#f1f5f9; color:#94a3b8;"

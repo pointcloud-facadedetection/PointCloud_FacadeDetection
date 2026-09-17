@@ -20,6 +20,7 @@ from .controllers.facade_quality import FacadeQualityController
 from .controllers.registration import RegistrationController
 from .controllers.project_lifecycle import ProjectLifecycleController
 from .controllers.model_export import ModelExportController
+from .controllers.photo_match import PhotoMatchController
 from .controllers.step_navigation import StepNavigationController
 from .controllers.task_progress import (
     TASK_LOAD,
@@ -137,6 +138,23 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self._station_selection_timer.setSingleShot(True)
         self._station_selection_timer.setInterval(160)
         self._station_selection_timer.timeout.connect(self._flush_station_selection)
+        # 照片-点云匹配异步结果回调
+        self.photo_match_controller = PhotoMatchController(
+            station_service=self.station_service,
+            pointcloud_service=self.pointcloud_service,
+            facade_service=self.facade_service,
+            task_progress=self.task_progress,
+            project_provider=lambda: getattr(self, 'current_project', None),
+            pool=self._load_pool,
+            parent=self,
+        )
+        self.photo_match_controller.status_message.connect(
+            lambda message, timeout: self.statusBar().showMessage(
+                message, timeout))
+        self.photo_match_controller.warning_requested.connect(
+            lambda message: QMessageBox.warning(self, '图片匹配', message))
+        self.photo_match_controller.report_preview_refresh_requested.connect(
+            self._refresh_report_preview)
         # 配准编排移入独立 controller；按钮使能、弹窗、视口选点等 UI 反馈
         # 全部经信号接回本窗口，worker 状态由 controller 自行持有。
         self.registration_controller = RegistrationController(
@@ -608,4 +626,3 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
                     app.quit()
         except Exception:
             pass
-

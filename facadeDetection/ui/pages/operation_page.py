@@ -1,3 +1,4 @@
+from dataclasses import replace
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QTimer, Qt
@@ -85,7 +86,7 @@ class OperationPageMixin:
         self.standard_summary.setObjectName('standardSummary')
         self.standard_summary.setVisible(False)
         self.interval_combo = QComboBox()
-        for value in (3.0, 5.0, 10.0, 20.0):
+        for value in (4.0, 8.0, 10.0, 20.0):
             self.interval_combo.addItem(f'{value:g}m', value)
         self.interval_combo.setCurrentIndex(3)
         self.interval_combo.setVisible(False)
@@ -1148,11 +1149,14 @@ class OperationPageMixin:
                     print(f'[PCFD] export_context_failed facade_id={facade_id} '
                           'reason=no_facade_source_indices', flush=True)
                     return context
-                points = np.asarray(dataset.processed_raw_points)[raw_indices]
+                # ★ 必须传入完整 processed_raw_points，因为 global_plane 的
+                #   defect_point_indices 是原始全局行号（raw_global_rows），
+                #   若传入子集会导致索引错位或越界。
+                points = np.asarray(dataset.processed_raw_points)
                 source_colors = dataset.index.get_source_colors()
-                colors = (np.asarray(source_colors)[raw_indices]
+                colors = (np.asarray(source_colors)
                           if source_colors is not None and
-                          len(source_colors) > int(raw_indices.max()) else None)
+                          len(source_colors) == len(points) else None)
                 if colors is None:
                     colors = np.tile(np.asarray(
                         self.render_service.facade_color_for(facade), dtype=float),
@@ -1242,7 +1246,7 @@ class OperationPageMixin:
                 )
 
             dlg.finished.connect(_dialog_finished)
-            dlg.open()
+            # dlg.open()
         except Exception as e:
             print(f'[PCFD] ui.dialog_exception facade_id={facade_id} error={e}', flush=True)
             import traceback

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 
@@ -192,6 +193,5 @@ class InspectionReviewPageMixin:
         return row
 
     def _on_facade_image_match(self, facade: dict):
-        """【图片匹配】按钮回调：调用预留桩接口。"""
-        from services.two_d_matching_service import TwoDMatchingService
-        TwoDMatchingService.match(facade)
+        """【图片匹配】按钮回调：委托给 PhotoMatchController 编排。"""
+        self.photo_match_controller.start(facade)

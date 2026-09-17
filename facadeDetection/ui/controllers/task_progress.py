@@ -19,6 +19,7 @@ TASK_QUALITY_BATCH = 'quality_batch'
 TASK_MODEL_EXPORT = 'model_export'
 TASK_PAGE_SWITCH = 'page_switch'
 TASK_REPORT = 'report'
+TASK_PHOTO_MATCH = 'photo_match'
 
 
 class TaskProgressController(QObject):

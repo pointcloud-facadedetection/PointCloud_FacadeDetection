@@ -665,7 +665,7 @@ class ProjectCreateDialog(QDialog):
 
         r = 0
         self.cb_interval = QComboBox()
-        for value in (3.0, 5.0, 10.0, 20.0):
+        for value in (4.0, 8.0, 10.0, 20.0):
             self.cb_interval.addItem(f"{value:g} m", value)
         self.cb_interval.setCurrentIndex(3)
         r = _add_row(r, "区间尺度：", self.cb_interval)
