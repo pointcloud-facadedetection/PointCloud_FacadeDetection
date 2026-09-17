@@ -529,13 +529,13 @@ def _verticality_strip_worker(args):
     返回 (uj, rows_list)。
     """
     (uj, u_c,
-     surf_u, surf_v, surf_ids,
+     surf_u, surf_v, surf_ids, surf_w,
      v_centers, v_lo_bounds, v_hi_bounds,
      horizontal_axis, vertical_axis, origin,
      u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
      half_width, min_points, ruler_length_m, verticality_limit_mm,
      sor_enabled, sor_k, sor_sigma, sor_w_weight, sor_method,
-     select_band, hole_band) = args
+     select_band, hole_band, normal) = args
 
     # ---- 在全局有序的 surf_u 上快速定位 strip ----
     lo_idx = np.searchsorted(surf_u, u_c - half_width, side='left')
@@ -548,12 +548,14 @@ def _verticality_strip_worker(args):
     strip_u = surf_u[lo_idx:hi_idx]
     strip_v = surf_v[lo_idx:hi_idx]
     strip_ids_local = surf_ids[lo_idx:hi_idx]
+    strip_w = surf_w[lo_idx:hi_idx]
 
     # Strip 内按 V (vertical) 排序，用于沿竖直方向滑动窗口
     v_order = np.argsort(strip_v, kind='quicksort')
     strip_v = strip_v[v_order]
     strip_u = strip_u[v_order]
     strip_ids_local = strip_ids_local[v_order]
+    strip_w = strip_w[v_order]
 
     # 向量化计算所有 v 窗口边界
     v_win_lo = np.searchsorted(strip_v, v_lo_bounds, side='left')
@@ -650,9 +652,30 @@ def _verticality_strip_worker(args):
             center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min,
             u_step, v_step)
 
-        # 偏离趋势线最大的点作为 depression_source_id
+        # 偏离趋势线最大的点作为靠点（形成倾斜的关键接触点）
         trend_vals = a * win_v + b
         dep_idx = int(np.argmax(np.abs(win_u - trend_vals)))
+        dep_source_id = int(win_ids[dep_idx])
+        contact_dist = float(win_u[dep_idx] - trend_vals[dep_idx])
+
+        # 垂直度缺陷专用数组（仅在超阈值时填充）
+        verticality_defect_point_indices = []
+        verticality_defect_values_mm = []
+        verticality_defect_types = []
+        verticality_defect_point_xyzs = []
+        if not verticality_pass:
+            signed_vert = float(deviation_mm if contact_dist > 0 else -deviation_mm)
+            verticality_defect_point_indices = [dep_source_id]
+            verticality_defect_values_mm = [signed_vert]
+            verticality_defect_types = ['outward_lean' if contact_dist > 0 else 'inward_sag']
+            # 计算靠点 3D 坐标，供热力图直接定位绘制
+            dep_u = float(strip_u[dep_idx])
+            dep_v = float(strip_v[dep_idx])
+            dep_w = float(strip_w[dep_idx])
+            dep_xyz = (origin + dep_u * np.asarray(horizontal_axis, dtype=float)
+                       + dep_v * np.asarray(vertical_axis, dtype=float)
+                       + dep_w * np.asarray(normal, dtype=float)).tolist()
+            verticality_defect_point_xyzs = [dep_xyz]
 
         rows.append({
             'grid_key': key,
@@ -667,11 +690,15 @@ def _verticality_strip_worker(args):
             'effective_point_count': int(np.sum(final_mask)),
             'snap_distance_m': snap_distance,
             'pivot_source_ids': [int(win_ids[final_mask][0]), int(win_ids[final_mask][-1])],
-            'depression_source_id': int(win_ids[dep_idx]),
+            'depression_source_id': dep_source_id,
             'trend_slope': float(a),
             'trend_intercept': float(b),
             'n_sor_removed': int(np.sum(~keep)),
             'n_used': int(np.sum(final_mask)),
+            'verticality_defect_point_indices': verticality_defect_point_indices,
+            'verticality_defect_values_mm': verticality_defect_values_mm,
+            'verticality_defect_types': verticality_defect_types,
+            'verticality_defect_point_xyzs': verticality_defect_point_xyzs,
         })
 
     return uj, rows
@@ -742,6 +769,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     surf_u = u_h[surf_mask]
     surf_v = v_v[surf_mask]
     surf_ids = raw_ids[surf_mask]
+    surf_w = w_n[surf_mask]
 
     v_min = float(surf_v.min())
     v_max = float(surf_v.max())
@@ -793,7 +821,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         try:
             surf_paths = (shared.dump('surf_u', surf_u),
                           shared.dump('surf_v', surf_v),
-                          shared.dump('surf_ids', surf_ids))
+                          shared.dump('surf_ids', surf_ids),
+                          shared.dump('surf_w', surf_w))
             args_list = []
             for uj, u_c in enumerate(u_centers):
                 args_list.append((
@@ -806,6 +835,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                     params.sor_enabled, params.sor_k, params.sor_sigma,
                     params.sor_w_weight, params.sor_method,
                     params.select_band_m, params.hole_band_m,
+                    normal,
                 ))
             strip_results = _pool_map(
                 min(int(params.n_jobs), os.cpu_count() or 1),
@@ -819,7 +849,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         for uj, u_c in enumerate(u_centers):
             args_list.append((
                 uj, float(u_c),
-                surf_u, surf_v, surf_ids,
+                surf_u, surf_v, surf_ids, surf_w,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
                 u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
@@ -828,6 +858,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                 params.sor_enabled, params.sor_k, params.sor_sigma,
                 params.sor_w_weight, params.sor_method,
                 params.select_band_m, params.hole_band_m,
+                normal,
             ))
         with ProcessPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_verticality_strip_worker, args)
@@ -839,7 +870,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         for uj, u_c in enumerate(u_centers):
             args_list.append((
                 uj, float(u_c),
-                surf_u, surf_v, surf_ids,
+                surf_u, surf_v, surf_ids, surf_w,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
                 u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
@@ -848,6 +879,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                 params.sor_enabled, params.sor_k, params.sor_sigma,
                 params.sor_w_weight, params.sor_method,
                 params.select_band_m, params.hole_band_m,
+                normal,
             ))
         strip_results = [_verticality_strip_worker(args) for args in args_list]
 
@@ -908,13 +940,16 @@ def _direction_worker_mmap(args):
 
 def _verticality_strip_worker_mmap(args):
     """进程模式入口：与 _verticality_strip_worker 数值路径完全一致，
-    仅改为按路径 mmap 自取 surf 三件套。"""
+    仅改为按路径 mmap 自取 surf 四件套 + normal。"""
     (uj, u_c, surf_paths, *rest) = args
     surf_u = np.load(surf_paths[0], mmap_mode='r')
     surf_v = np.load(surf_paths[1], mmap_mode='r')
     surf_ids = np.load(surf_paths[2], mmap_mode='r')
+    surf_w = np.load(surf_paths[3], mmap_mode='r')
+    normal = rest[-1]
+    rest_without_normal = rest[:-1]
     return _verticality_strip_worker(
-        (uj, u_c, surf_u, surf_v, surf_ids, *rest))
+        (uj, u_c, surf_u, surf_v, surf_ids, surf_w, *rest_without_normal, normal))
 
 
 def _direction_worker(args):

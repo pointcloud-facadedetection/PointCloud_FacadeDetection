@@ -216,10 +216,17 @@ class FacadeHeatmapTripletRenderer:
             photo = self._embed_legend(photo, raster, is_bipolar=is_bipolar,
                                        is_cold=is_cold, metric=metric)
 
+        # ★ 透明热力层（无点云底图），供 render_transparent_heatmap 复用
+        transparent_rgba = raster["overlay_rgba"].copy()
+        transparent_bgra = cv2.cvtColor(transparent_rgba, cv2.COLOR_RGBA2BGRA)
+        transparent = self._crop_to_facade(transparent_bgra, raster,
+                                           fill=(0, 0, 0, 0))
+
         return {
             "overlay": self._to_bgr(overlay),
             "heatmap_grid": self._to_bgr(heatmap_grid),
             "photo": self._to_bgr(photo) if photo is not None else None,
+            "transparent": transparent,
         }
 
     @staticmethod

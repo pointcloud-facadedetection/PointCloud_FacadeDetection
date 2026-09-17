@@ -10,7 +10,12 @@ from typing import Optional
 
 import numpy as np
 from algorithms.facade.ruler_quality import RulerQualityParameters, compute_ruler_quality
-from algorithms.facade.global_plane_quality import fit_global_plane, compute_global_plane_quality
+from algorithms.facade.global_plane_quality import (
+    fit_global_plane,
+    compute_global_plane_quality,
+    fit_local_plane_blocks,
+    compute_block_plane_quality,
+)
 from algorithms.facade.coverage import CoverageMask
 from algorithms.geometry import classify_plane, plane_axes
 from services.facade.facade_index_service import FacadeIndexService
@@ -267,6 +272,9 @@ class FacadeQualityService:
             gsize = float(profile.interval_size_m if profile is not None else 20.0)
             if grid_size is not None:
                 gsize = float(grid_size)
+            # 旧项目兼容：3m/5m 映射到 4m
+            if gsize in (3.0, 5.0):
+                gsize = 4.0
 
             rsize = 2.0 if ruler_size is None else float(ruler_size)
             window_width = float(getattr(profile, 'global_window_width_m',
@@ -370,15 +378,55 @@ class FacadeQualityService:
                 'v_min_m': float(q_v0), 'v_max_m': float(q_v1),
             })
 
-            global_result = compute_global_plane_quality(
-                filtered_pts, global_plane, origin_on_plane, u_axis, v_axis,
-                length_m=float(getattr(profile, 'global_window_length_m', rsize)),
-                width_m=window_width,
+            # ---- 分块局部平面拟合（沿 v 方向，interval_size_m 为块高）----
+            blocks = fit_local_plane_blocks(
+                filtered_pts,
+                reference_plane=global_plane,
+                interval_size_m=gsize,
+                origin=origin_on_plane,
+                u_axis=u_axis,
+                v_axis=v_axis,
+                seed=int(getattr(profile, 'global_plane_seed', 42)),
+                huber_delta_m=float(getattr(
+                    profile, 'global_plane_huber_delta_m',
+                    getattr(Config, 'GLOBAL_PLANE_HUBER_DELTA_M', 0.015))),
+                max_iterations=int(getattr(
+                    profile, 'global_plane_max_iterations',
+                    getattr(Config, 'GLOBAL_PLANE_MAX_ITERATIONS', 500))),
+                angle_limit_deg=float(getattr(
+                    profile, 'global_plane_angle_limit_deg',
+                    getattr(Config, 'GLOBAL_PLANE_ANGLE_LIMIT_DEG', 3.0))),
+                outlier_sigma=float(getattr(
+                    profile, 'global_plane_outlier_sigma',
+                    getattr(Config, 'GLOBAL_PLANE_OUTLIER_SIGMA', 3.0))),
+                final_gate_sigma=float(getattr(
+                    profile, 'global_plane_final_gate_sigma',
+                    getattr(Config, 'GLOBAL_PLANE_FINAL_GATE_SIGMA', 2.5))),
+                min_inlier_ratio=float(getattr(
+                    profile, 'global_plane_min_inlier_ratio',
+                    getattr(Config, 'GLOBAL_PLANE_MIN_INLIER_RATIO', 0.30))),
+                max_p95_mm=float(getattr(
+                    profile, 'global_plane_max_p95_mm',
+                    getattr(Config, 'GLOBAL_PLANE_MAX_P95_MM', 100.0))),
+                enable_partition_fallback=bool(getattr(
+                    profile, 'global_plane_enable_partition_fallback',
+                    getattr(Config, 'GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK', True))),
+                partition_depth_gap_m=float(getattr(
+                    profile, 'global_plane_partition_depth_gap_m',
+                    getattr(Config, 'GLOBAL_PLANE_PARTITION_DEPTH_GAP_M', 0.08))),
+                partition_min_points_ratio=float(getattr(
+                    profile, 'global_plane_partition_min_points_ratio',
+                    getattr(Config, 'GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO', 0.10))),
+            )
+
+            global_result = compute_block_plane_quality(
+                filtered_pts, blocks, origin_on_plane, u_axis, v_axis,
                 flatness_limit_mm=float(params.flatness_limit_mm),
                 verticality_limit_mm=float(params.verticality_limit_mm),
-                min_points=int(getattr(profile, 'global_window_min_points', 3)),
-                uv_bounds=(float(q_u0), float(q_u1), float(q_v0), float(q_v1)),
                 raw_ids=quality_indices,
+                grid_res=0.05,
+                ruler_length_m=rsize,
+                ruler_width_m=float(getattr(profile, 'ruler_width_m', .055)),
             )
             # Keep one authoritative point-level payload for the global-plane
             # renderer.  The legacy per-window arrays remain for report/UI
@@ -592,7 +640,11 @@ class FacadeQualityService:
                 return result_intervals
 
             ruler_intervals = list(result.get('intervals') or [])
-            global_intervals = _method_intervals(global_windows)
+            # global 区间与 ruler 保持一致，确保两种方法的区间边界和标签完全对齐
+            if ruler_intervals:
+                global_intervals = [dict(iv) for iv in ruler_intervals]
+            else:
+                global_intervals = _method_intervals(global_windows)
 
             def _attach_interval_rates(intervals, flat_rows, vert_rows,
                                        length_m, width_m):
@@ -670,6 +722,9 @@ class FacadeQualityService:
                         'rates': global_vert_rates,
                     },
                     'parameters': global_result.get('parameters') or {},
+                    #   source_rows 是 filtered_pts 行号。二者都保留，
+                    #   供渲染器按需二次映射。绝不省略本字段，否则渲染器
+                    #   将失去唯一可靠的缺陷位置来源。
                     'defect_samples': global_samples,
                     'overall': global_overall,
                     'intervals': global_intervals,

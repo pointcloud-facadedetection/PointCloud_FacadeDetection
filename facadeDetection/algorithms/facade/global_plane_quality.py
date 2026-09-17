@@ -93,6 +93,308 @@ def _window_centers(lo, hi, length, step):
     return values
 
 
+# =============================================================================
+# 分块局部平面拟合
+# =============================================================================
+
+def fit_local_plane_blocks(points, reference_plane, interval_size_m,
+                           origin, u_axis, v_axis, **fit_kwargs):
+    """沿立面高度 v 方向切分为若干条带，每块独立拟合局部平面。"""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(pts) < 3:
+        raise ValueError('fit_local_plane_blocks requires at least 3 points')
+
+    u_ax = _unit(u_axis)
+    v_ax = _unit(v_axis)
+    origin = np.asarray(origin, dtype=float).reshape(3)
+
+    rel = pts - origin
+    v_all = rel @ v_ax
+
+    v_min, v_max = float(v_all.min()), float(v_all.max())
+    size = max(float(interval_size_m), 1e-6)
+    n_blocks = max(1, int(np.ceil((v_max - v_min) / size)))
+
+    blocks = []
+    for i in range(n_blocks):
+        v0 = v_min + i * size
+        v1 = v_max if i == n_blocks - 1 else v_min + (i + 1) * size
+        mask = ((v_all >= v0) & (v_all < v1)) if i < n_blocks - 1 else (
+            (v_all >= v0) & (v_all <= v1))
+        indices = np.flatnonzero(mask)
+
+        if len(indices) < 3:
+            blocks.append({
+                'v0': v0, 'v1': v1,
+                'plane_model': np.asarray(reference_plane, dtype=float).reshape(4),
+                'point_indices': indices,
+                'fit_accepted': False,
+                'is_last': i == n_blocks - 1,
+            })
+            continue
+
+        block_pts = pts[indices]
+        try:
+            fit = fit_global_plane(block_pts, reference_plane=reference_plane,
+                                   **fit_kwargs)
+        except Exception:
+            fit = {
+                'plane_model': np.asarray(reference_plane, dtype=float).reshape(4),
+                'fit_accepted': False,
+            }
+
+        blocks.append({
+            'v0': v0, 'v1': v1,
+            'plane_model': np.asarray(fit['plane_model'], dtype=float),
+            'point_indices': indices,
+            'fit_accepted': bool(fit.get('fit_accepted', False)),
+            'is_last': i == n_blocks - 1,
+        })
+
+    return blocks
+
+
+def _find_block_for_v(v_coord, blocks):
+    """找到 v 坐标所属的 block 索引。"""
+    for idx, block in enumerate(blocks):
+        if block['v0'] <= v_coord <= block['v1']:
+            return idx
+    if not blocks:
+        return None
+    centers = [(b['v0'] + b['v1']) / 2.0 for b in blocks]
+    return int(np.argmin(np.abs(np.array(centers) - v_coord)))
+
+
+# =============================================================================
+# 分块局部平面质量评估
+# =============================================================================
+
+def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
+                                flatness_limit_mm=8., verticality_limit_mm=10.,
+                                raw_ids=None, grid_res=0.05,
+                                ruler_length_m=2.0, ruler_width_m=0.055):
+    """分块局部平面质量评估：2m×5.5cm 靠尺窗口滑动，每窗口使用中心所在 block 的局部平面。
+
+    变量命名契约（本函数内全程一致）：
+      - ``pts``        : filtered_pts 副本
+      - ``ids``        : raw 全局行号（= raw_ids[ix]）
+      - ``u_all``/``v_all`` : pts 在 UV 框架下的投影坐标
+      - ``all_dist_mm``: 每个点在自己 block 局部平面上的 signed distance (mm)
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    ids = (np.asarray(raw_ids, np.int64).reshape(-1)
+           if raw_ids is not None else np.arange(len(pts)))
+    u_ax = _unit(u_axis)
+    v_ax = _unit(v_axis)
+    origin = np.asarray(origin, dtype=float).reshape(3)
+
+    rel = pts - origin
+    u_all = rel @ u_ax
+    v_all = rel @ v_ax
+
+    u0, u1 = float(u_all.min()), float(u_all.max())
+    v0, v1 = float(v_all.min()), float(v_all.max())
+
+    # 预计算每个点在各自 block 局部平面上的 signed distance (mm)
+    all_dist_mm = np.full(len(pts), np.nan, dtype=np.float64)
+    for block in blocks:
+        idx = block['point_indices']
+        if len(idx) == 0:
+            continue
+        plane = np.asarray(block['plane_model'], dtype=float).reshape(4)
+        plane[:3] = _unit(plane[:3])
+        bpts = pts[idx]
+        all_dist_mm[idx] = (bpts @ plane[:3] + plane[3]) * 1000.0
+
+    # ---- 靠尺窗口滑动 ----
+    length_m = max(float(ruler_length_m), 1e-9)
+    width_m = max(float(ruler_width_m), 1e-9)
+    u_centers = _window_centers(u0, u1, width_m, width_m)
+    v_centers = _window_centers(v0, v1, length_m, length_m)
+
+    windows = []
+    for a, uc in enumerate(u_centers):
+        for b, vc in enumerate(v_centers):
+            u_lo, u_hi = uc - width_m / 2.0, uc + width_m / 2.0
+            v_lo, v_hi = vc - length_m / 2.0, vc + length_m / 2.0
+            ix = np.flatnonzero((u_all >= u_lo) & (u_all <= u_hi) &
+                                (v_all >= v_lo) & (v_all <= v_hi))
+            if len(ix) < 3:
+                continue
+
+            center_block_idx = _find_block_for_v(vc, blocks)
+            if center_block_idx is None or center_block_idx < 0:
+                continue
+
+            win_dist = all_dist_mm[ix]
+            if not np.any(np.isfinite(win_dist)):
+                continue
+
+            valid_mask = np.isfinite(win_dist)
+            win_dist_valid = win_dist[valid_mask]
+            ix_valid = ix[valid_mask]
+
+            depression = max(0.0, float(-win_dist_valid.min()))
+            protrusion = max(0.0, float(win_dist_valid.max()))
+            gap = max(depression, protrusion)
+
+            # 逐点缺陷（平整度）
+            defect_mask = np.abs(win_dist_valid) > flatness_limit_mm
+            if np.any(defect_mask):
+                defect_rows = ix_valid[defect_mask].astype(np.int64).tolist()
+                defect_point_indices = ids[ix_valid][defect_mask].tolist()
+                defect_values_mm = win_dist_valid[defect_mask].tolist()
+                defect_types = [
+                    'depression' if v < 0 else 'protrusion'
+                    for v in defect_values_mm
+                ]
+            else:
+                defect_rows, defect_point_indices = [], []
+                defect_values_mm, defect_types = [], []
+
+            # 垂直度：LOCAL trend of deviation vs height
+            v_pts = v_all[ix_valid]
+            verticality_mm = np.nan
+            if len(v_pts) >= 3 and np.ptp(v_pts) > 0.01:
+                try:
+                    slope, _ = _fit_line(v_pts, win_dist_valid)
+                    verticality_mm = float(abs(slope) * length_m)
+                except (ValueError, np.linalg.LinAlgError):
+                    pass
+
+            vp = (np.isfinite(verticality_mm)
+                  and verticality_mm <= verticality_limit_mm)
+
+            verticality_defect_point_indices = []
+            verticality_defect_point_rows = []
+            verticality_defect_values_mm = []
+            verticality_defect_types = []
+            if (np.isfinite(verticality_mm)
+                    and verticality_mm > verticality_limit_mm):
+                contact_local_idx = int(np.argmax(np.abs(win_dist_valid)))
+                contact_dist = win_dist_valid[contact_local_idx]
+                contact_row = int(ix_valid[contact_local_idx])
+                contact_raw_id = int(ids[contact_row])
+                signed_vert = float(
+                    verticality_mm if contact_dist > 0 else -verticality_mm)
+                verticality_defect_point_indices = [contact_raw_id]
+                verticality_defect_point_rows = [contact_row]
+                verticality_defect_values_mm = [signed_vert]
+                verticality_defect_types = [
+                    'outward_lean' if contact_dist > 0 else 'inward_sag']
+
+            clipped_u = (u1 - u0) < width_m
+            clipped_v = (v1 - v0) < length_m
+            area = max(0.0, min(width_m, u1 - u0) * min(length_m, v1 - v0))
+            center_xyz = (origin + u_ax * uc + v_ax * vc).tolist()
+
+            windows.append({
+                'grid_u': a,
+                'grid_v': b,
+                'point_count': int(len(ix_valid)),
+                'actual_area_m2': float(area),
+                'is_clipped': bool(clipped_u or clipped_v),
+                'covered_source_ids': ids[ix_valid],
+                'depression_mm': depression,
+                'protrusion_mm': protrusion,
+                'flatness_gap_mm': gap,
+                'verticality_deviation_mm': verticality_mm,
+                'flatness_pass': bool(gap <= flatness_limit_mm),
+                'verticality_pass': bool(vp),
+                'center_xyz': center_xyz,
+                'defect_point_indices': defect_point_indices,
+                'defect_point_rows': defect_rows,
+                'defect_values_mm': defect_values_mm,
+                'defect_types': defect_types,
+                'verticality_defect_point_indices': verticality_defect_point_indices,
+                'verticality_defect_point_rows': verticality_defect_point_rows,
+                'verticality_defect_values_mm': verticality_defect_values_mm,
+                'verticality_defect_types': verticality_defect_types,
+            })
+
+    total_pts = len(pts)
+
+    def _metric_rates(windows_list, pass_key):
+        w_area = sum(w.get('actual_area_m2', 0.0) for w in windows_list)
+        p_area = sum(w.get('actual_area_m2', 0.0) for w in windows_list
+                     if w.get(pass_key))
+        w_pts = sum(w.get('point_count', 0) for w in windows_list)
+        p_pts = sum(w.get('point_count', 0) for w in windows_list
+                    if w.get(pass_key))
+        return {
+            'area_rate': (p_area / w_area) if w_area > 0 else 0.0,
+            'point_rate': (p_pts / w_pts) if w_pts > 0 else 0.0,
+            'pass_area_m2': p_area,
+            'fail_area_m2': max(w_area - p_area, 0.0),
+            'total_area_m2': w_area,
+            'pass_points': p_pts,
+            'total_points': w_pts,
+        }
+
+    flat_rates = _metric_rates(windows, 'flatness_pass')
+    vert_rates = _metric_rates(windows, 'verticality_pass')
+
+    flat_sample_ids, flat_sample_rows = [], []
+    flat_sample_values, flat_sample_types = [], []
+    vert_sample_ids, vert_sample_rows = [], []
+    vert_sample_values, vert_sample_types = [], []
+    for window in windows:
+        flat_sample_ids.extend(window.get('defect_point_indices', []))
+        flat_sample_rows.extend(window.get('defect_point_rows', []))
+        flat_sample_values.extend(window.get('defect_values_mm', []))
+        flat_sample_types.extend(window.get('defect_types', []))
+        vert_sample_ids.extend(window.get('verticality_defect_point_indices', []))
+        vert_sample_rows.extend(window.get('verticality_defect_point_rows', []))
+        vert_sample_values.extend(window.get('verticality_defect_values_mm', []))
+        vert_sample_types.extend(window.get('verticality_defect_types', []))
+
+    area_resolution = max(min(width_m, length_m, 0.01), 1e-4)
+    occupied_u = np.floor((u_all - u0) / area_resolution).astype(np.int64)
+    occupied_v = np.floor((v_all - v0) / area_resolution).astype(np.int64)
+    occupied = np.unique(np.column_stack((occupied_u, occupied_v)), axis=0)
+    valid_area = float(len(occupied) * area_resolution * area_resolution)
+
+    return {
+        'windows': windows,
+        'overall': {
+            'window_count': len(windows),
+            'point_count': total_pts,
+            'valid_detection_area_m2': valid_area,
+            'flatness_primary_area_rate': flat_rates['area_rate'],
+            'flatness_secondary_point_rate': flat_rates['point_rate'],
+            'verticality_primary_area_rate': vert_rates['area_rate'],
+            'verticality_secondary_point_rate': vert_rates['point_rate'],
+            'global_tilt_verticality_mm': np.nan,
+        },
+        'parameters': {
+            'window_length_m': length_m,
+            'window_width_m': width_m,
+            'step_u_m': width_m,
+            'step_v_m': length_m,
+        },
+        'defect_samples': {
+            'flatness': {
+                'raw_ids': np.asarray(flat_sample_ids, dtype=np.int64),
+                'source_rows': np.asarray(flat_sample_rows, dtype=np.int64),
+                'values_mm': np.asarray(flat_sample_values, dtype=np.float64),
+                'types': list(flat_sample_types),
+                'index_space': 'raw_global_rows',
+            },
+            'verticality': {
+                'raw_ids': np.asarray(vert_sample_ids, dtype=np.int64),
+                'source_rows': np.asarray(vert_sample_rows, dtype=np.int64),
+                'values_mm': np.asarray(vert_sample_values, dtype=np.float64),
+                'types': list(vert_sample_types),
+                'index_space': 'raw_global_rows',
+            },
+        },
+    }
+
+
+# =============================================================================
+# 全局平面拟合
+# =============================================================================
+
 def fit_global_plane(points, *, reference_plane, seed=42,
                      huber_delta_m=.015, max_iterations=500,
                      convergence_tol=1e-7, angle_limit_deg=3.,
@@ -102,15 +404,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                      partition_depth_gap_m=0.08,
                      partition_min_points_ratio=0.10,
                      partition_angle_limit_deg=5.0):
-    """Huber M-estimator IRLS with prior-normal initialization.
-
-    Robust partition fallback: when the global single-plane fit fails
-    acceptance criteria, the point cloud is sliced along the reference
-    normal into significant depth layers. The largest consistent layer
-    (normal within ``partition_angle_limit_deg`` of reference) is
-    promoted as the facade master plane, enabling reliable quality
-    assessment on facades with balconies, openings, or decorations.
-    """
+    """Huber M-estimator IRLS with prior-normal initialization."""
     raw = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     finite_mask = np.all(np.isfinite(raw), axis=1)
     finite_ids = np.flatnonzero(finite_mask)
@@ -128,16 +422,16 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     w_init = np.where(np.abs(r0 - med0) <= outlier_sigma * mad0, 1.0, 0.0)
 
     delta = max(float(huber_delta_m), 1e-6)
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)  # noqa: F841  (保留以维持接口)
     angle_limit_rad = np.deg2rad(float(angle_limit_deg))
     cos_limit = np.cos(angle_limit_rad)
 
     n = plane[:3].copy()
     d = float(plane[3])
+    it = 0
 
     for it in range(max_iterations):
         residuals = pts @ n + d
-
         abs_r = np.abs(residuals)
         w = np.where(abs_r <= delta, 1.0, delta / (abs_r + 1e-12))
         w *= w_init
@@ -162,7 +456,8 @@ def fit_global_plane(points, *, reference_plane, seed=42,
             perp_norm = np.linalg.norm(perp)
             if perp_norm > 1e-12:
                 perp = perp / perp_norm
-                n_new = np.sin(angle_limit_rad) * perp + np.cos(angle_limit_rad) * n0
+                n_new = (np.sin(angle_limit_rad) * perp
+                         + np.cos(angle_limit_rad) * n0)
                 n_new = _unit(n_new)
 
         d_new = -float((pts * w[:, None]).sum(axis=0) @ n_new) / w_sum
@@ -195,9 +490,11 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
     abs_r = np.abs(residuals)
     inlier_ratio = float(inliers.mean())
-    angle_to_ref = float(np.degrees(np.arccos(np.clip(abs(plane[:3] @ n0), 0, 1))))
+    angle_to_ref = float(np.degrees(np.arccos(
+        np.clip(abs(plane[:3] @ n0), 0, 1))))
 
-    p95_mm = float(np.percentile(abs_r[inliers], 95) * 1000) if inliers.any() else np.inf
+    p95_mm = (float(np.percentile(abs_r[inliers], 95) * 1000)
+              if inliers.any() else np.inf)
     fit_accepted = bool(
         inlier_ratio >= float(min_inlier_ratio)
         and p95_mm <= float(max_p95_mm)
@@ -207,7 +504,8 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     # ===== Partition Fallback =====
     if not fit_accepted and enable_partition_fallback:
         signed_all = pts @ n0 + d0
-        min_points_partition = max(3, int(len(pts) * float(partition_min_points_ratio)))
+        min_points_partition = max(
+            3, int(len(pts) * float(partition_min_points_ratio)))
 
         labels, medians = cluster_depth_significant(
             signed_all,
@@ -235,8 +533,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
             seg_residuals = seg_pts @ part_n + part_plane[3]
             seg_med_r = float(np.median(seg_residuals))
-            seg_mad_r = max(float(np.median(np.abs(seg_residuals - seg_med_r))) * 1.4826, 1e-6)
-            seg_gate = float(np.clip(final_gate_sigma * seg_mad_r, 0.0025, 0.008))
+            seg_mad_r = max(float(np.median(np.abs(
+                seg_residuals - seg_med_r))) * 1.4826, 1e-6)
+            seg_gate = float(np.clip(final_gate_sigma * seg_mad_r,
+                                     0.0025, 0.008))
             seg_inliers = np.abs(seg_residuals - seg_med_r) <= seg_gate
             seg_inlier_ratio = float(seg_inliers.mean())
 
@@ -245,17 +545,25 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                 part_n = part_plane[:3]
                 seg_residuals = seg_pts @ part_n + part_plane[3]
                 seg_med_r = float(np.median(seg_residuals[seg_inliers]))
+                seg_mad_r = max(float(np.median(np.abs(
+                    seg_residuals[seg_inliers] - seg_med_r))) * 1.4826, 1e-6)
+                seg_gate = float(np.clip(final_gate_sigma * seg_mad_r,
+                                         0.0025, 0.008))
+                seg_inliers = np.abs(seg_residuals - seg_med_r) <= seg_gate
 
             seg_abs_r = np.abs(seg_residuals)
-            seg_p95_mm = float(np.percentile(seg_abs_r[seg_inliers], 95) * 1000) if seg_inliers.any() else np.inf
-            seg_angle_to_ref = float(np.degrees(np.arccos(np.clip(abs(part_n @ n0), 0, 1))))
+            seg_p95_mm = (float(np.percentile(
+                seg_abs_r[seg_inliers], 95) * 1000)
+                if seg_inliers.any() else np.inf)
+            seg_angle_to_ref = float(np.degrees(np.arccos(
+                np.clip(abs(part_n @ n0), 0, 1))))
 
             relaxed_inlier_ratio = float(min_inlier_ratio) * 0.85
             relaxed_p95 = float(max_p95_mm) * 1.25
 
-            if (seg_inlier_ratio >= relaxed_inlier_ratio and
-                    seg_p95_mm <= relaxed_p95 and
-                    seg_angle_to_ref <= float(angle_limit_deg)):
+            if (seg_inlier_ratio >= relaxed_inlier_ratio
+                    and seg_p95_mm <= relaxed_p95
+                    and seg_angle_to_ref <= float(angle_limit_deg)):
                 score = seg_count * seg_inlier_ratio
                 if score > best_score:
                     best_score = score
@@ -290,8 +598,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                     plane = -plane
                 residuals = pts @ plane[:3] + plane[3]
                 med_r = float(np.median(residuals[inliers]))
-                mad_r = max(float(np.median(np.abs(residuals[inliers] - med_r))) * 1.4826, 1e-6)
-                gate = float(np.clip(final_gate_sigma * mad_r, 0.0025, 0.008))
+                mad_r = max(float(np.median(np.abs(
+                    residuals[inliers] - med_r))) * 1.4826, 1e-6)
+                gate = float(np.clip(final_gate_sigma * mad_r,
+                                     0.0025, 0.008))
                 inliers = np.abs(residuals - med_r) <= gate
 
             support_mask = np.zeros(len(raw), dtype=bool)
@@ -299,8 +609,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
             abs_r = np.abs(residuals)
             inlier_ratio = float(inliers.mean())
-            angle_to_ref = float(np.degrees(np.arccos(np.clip(abs(plane[:3] @ n0), 0, 1))))
-            p95_mm = float(np.percentile(abs_r[inliers], 95) * 1000) if inliers.any() else np.inf
+            angle_to_ref = float(np.degrees(np.arccos(
+                np.clip(abs(plane[:3] @ n0), 0, 1))))
+            p95_mm = (float(np.percentile(abs_r[inliers], 95) * 1000)
+                      if inliers.any() else np.inf)
 
             return {
                 'plane_model': plane.astype(float),
@@ -310,7 +622,8 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                 'inlier_ratio': inlier_ratio,
                 'residual_mad_mm': float(mad_r * 1000),
                 'p50_abs_residual_mm': float(np.percentile(abs_r, 50) * 1000),
-                'p95_abs_residual_mm': float(np.percentile(abs_r, 95) * 1000),
+                'p95_abs_residual_mm': float(
+                    np.percentile(abs_r, 95) * 1000),
                 'max_abs_residual_mm': float(abs_r.max() * 1000),
                 'normal_angle_to_reference_deg': angle_to_ref,
                 'support_limit_m': gate,
@@ -337,67 +650,76 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     }
 
 
+# =============================================================================
+# 全局平面质量评估（每窗口独立使用同一个全局平面）
+# =============================================================================
+
 def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                                  length_m=2., width_m=.055,
-                                 flatness_limit_mm=8., verticality_limit_mm=10.,
+                                 flatness_limit_mm=8.,
+                                 verticality_limit_mm=10.,
                                  min_points=3,
                                  uv_bounds=None, raw_ids=None,
                                  gravity_axis=(0., 0., 1.)):
     """Measure the facade with an overlapping I-ruler sweep.
 
-    Verticality is computed independently per window as the absolute slope of
-    distance-to-plane vs height, multiplied by `length_m` (mm). No fallback to
-    global tilt is used; windows with insufficient vertical span are marked NaN.
+    变量命名契约（本函数内全程一致）：
+      - ``u``/``v`` : 过滤后点集在 UV 框架下的投影坐标
     """
     source = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     valid = np.all(np.isfinite(source), axis=1)
     pts = source[valid]
-    ids = (np.asarray(raw_ids, np.int64).reshape(-1)[valid]
-           if raw_ids is not None else np.arange(len(pts)))
+    # full_ids: 原始全局行号（对应 processed_raw_points）
+    # local_ids: 过滤后点集内的连续行号（向后兼容 source_rows）
+    full_ids = (np.asarray(raw_ids, np.int64).reshape(-1)[valid]
+                if raw_ids is not None else np.arange(len(pts), dtype=np.int64))
+    local_ids = np.arange(len(pts), dtype=np.int64)
 
     plane = np.asarray(plane_model, float).reshape(4)
     plane[:3] = _unit(plane[:3])
-    origin, u_axis, v_axis = np.asarray(origin, float), _unit(u_axis), _unit(v_axis)
+    origin = np.asarray(origin, float)
+    u_axis = _unit(u_axis)
+    v_axis = _unit(v_axis)
 
     rel = pts - origin
-    u, v = rel @ u_axis, rel @ v_axis
+    u = rel @ u_axis
+    v = rel @ v_axis
 
-    u0, u1, v0, v1 = map(float, uv_bounds) if uv_bounds is not None else (
-        *np.quantile(u, [.005, .995]), *np.quantile(v, [.005, .995])
-    )
+    if uv_bounds is not None:
+        u0, u1, v0, v1 = map(float, uv_bounds)
+    else:
+        u0, u1 = np.quantile(u, [.005, .995])
+        v0, v1 = np.quantile(v, [.005, .995])
+        u0, u1 = float(u0), float(u1)
+        v0, v1 = float(v0), float(v1)
+
     inside = (u >= u0) & (u <= u1) & (v >= v0) & (v <= v1)
     if inside.sum() < min_points:
         inside = np.ones(len(pts), bool)
-        u0, u1, v0, v1 = u.min(), u.max(), v.min(), v.max()
+        u0, u1 = float(u.min()), float(u.max())
+        v0, v1 = float(v.min()), float(v.max())
 
-    pts, ids, u, v = pts[inside], ids[inside], u[inside], v[inside]
+    pts, full_ids, local_ids, u, v = (
+        pts[inside], full_ids[inside], local_ids[inside], u[inside], v[inside])
 
     # Signed distance to plane in MILLIMETRES
     distances_mm = (pts @ plane[:3] + plane[3]) * 1000.0
 
-    # The global method uses the same physical sampling convention as an
-    # I-ruler: width is the transverse pitch and length is the longitudinal
-    # pitch.  The footprint itself remains width x length, therefore adjacent
-    # windows touch for the normal case and the final position is explicitly
-    # appended when arange cannot land on the edge.
     width_m = max(float(width_m), 1e-9)
     length_m = max(float(length_m), 1e-9)
     u_centers = _window_centers(u0, u1, width_m, width_m)
     v_centers = _window_centers(v0, v1, length_m, length_m)
 
-    # Global tilt reference (only for logging, not used per‑window)
     gravity = _unit(gravity_axis)
     normal = plane[:3]
     normal_gravity = float(np.clip(abs(np.dot(normal, gravity)), 0.0, 1.0))
     plane_tilt_angle_rad = float(np.arcsin(normal_gravity))
-    plane_verticality_mm = float(np.tan(plane_tilt_angle_rad) * length_m * 1000.0)
+    plane_verticality_mm = float(
+        np.tan(plane_tilt_angle_rad) * length_m * 1000.0)
 
     windows = []
     for a, uc in enumerate(u_centers):
         for b, vc in enumerate(v_centers):
-            # The rectangle is centred on the physical ruler centre.  This
-            # is intentionally not a bin assignment: overlapping footprints
-            # must be allowed to inspect the same original points.
             u_lo, u_hi = uc - width_m / 2.0, uc + width_m / 2.0
             v_lo, v_hi = vc - length_m / 2.0, vc + length_m / 2.0
             ix = np.flatnonzero((u >= u_lo) & (u <= u_hi) &
@@ -405,31 +727,28 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
             if len(ix) < min_points:
                 continue
 
-            # --- flatness: max deviation from global plane ---
             win_dist = distances_mm[ix]
             depression = max(0.0, float(-win_dist.min()))
             protrusion = max(0.0, float(win_dist.max()))
             gap = max(depression, protrusion)
 
-            # 逐点缺陷索引与凹凸分类（模拟墙面平整度专用）
             defect_mask = np.abs(win_dist) > flatness_limit_mm
-            # Keep the render domain explicit.  ``ids`` may be raw database IDs,
-            # while the renderer receives ``source``.  The old contract exposed
-            # only ids and forced the renderer to guess the index space.
-            defect_rows = ix[defect_mask].astype(np.int64).tolist() if np.any(defect_mask) else []
-            defect_point_indices = ids[ix][defect_mask].tolist() if np.any(defect_mask) else []
-            defect_values_mm = win_dist[defect_mask].tolist() if np.any(defect_mask) else []
-            defect_types = []
-            for val in defect_values_mm:
-                if val < 0:
-                    defect_types.append('depression')
-                else:
-                    defect_types.append('protrusion')
+            if np.any(defect_mask):
+                # local_ids: 过滤后点集内行号（向后兼容 source_rows）
+                defect_rows = local_ids[ix][defect_mask].astype(np.int64).tolist()
+                # full_ids: 原始全局行号（对应 processed_raw_points）
+                defect_point_indices = full_ids[ix][defect_mask].tolist()
+                defect_values_mm = win_dist[defect_mask].tolist()
+                defect_types = [
+                    'depression' if val < 0 else 'protrusion'
+                    for val in defect_values_mm
+                ]
+            else:
+                defect_rows, defect_point_indices = [], []
+                defect_values_mm, defect_types = [], []
 
-            # --- verticality: LOCAL trend of deviation vs height ---
             v_pts = v[ix]
             verticality_mm = np.nan
-
             if len(v_pts) >= 3 and np.ptp(v_pts) > 0.01:
                 try:
                     slope, _ = _fit_line(v_pts, win_dist)
@@ -437,15 +756,30 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 except (ValueError, np.linalg.LinAlgError):
                     pass
 
-            vp = (np.isfinite(verticality_mm) and verticality_mm <= verticality_limit_mm)
+            vp = (np.isfinite(verticality_mm)
+                  and verticality_mm <= verticality_limit_mm)
 
-            # Report the physical footprint, clipped only for dimensions smaller
-            # than the ruler.  Rate calculation is performed by the service using
-            # the effective-point mask, so overlapping areas are never summed.
+            verticality_defect_point_indices = []
+            verticality_defect_point_rows = []
+            verticality_defect_values_mm = []
+            verticality_defect_types = []
+            if (np.isfinite(verticality_mm)
+                    and verticality_mm > verticality_limit_mm):
+                contact_local_idx = int(np.argmax(np.abs(win_dist)))
+                contact_dist = win_dist[contact_local_idx]
+                contact_row = int(ix[contact_local_idx])
+                contact_raw_id = int(full_ids[contact_row])
+                signed_vert = float(
+                    verticality_mm if contact_dist > 0 else -verticality_mm)
+                verticality_defect_point_indices = [contact_raw_id]
+                verticality_defect_point_rows = [contact_row]
+                verticality_defect_values_mm = [signed_vert]
+                verticality_defect_types = [
+                    'outward_lean' if contact_dist > 0 else 'inward_sag']
+
             clipped_u = (u1 - u0) < width_m
             clipped_v = (v1 - v0) < length_m
             area = max(0.0, min(width_m, u1 - u0) * min(length_m, v1 - v0))
-
             center_xyz = (origin + u_axis * uc + v_axis * vc).tolist()
 
             windows.append({
@@ -454,7 +788,7 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 'point_count': int(len(ix)),
                 'actual_area_m2': float(area),
                 'is_clipped': bool(clipped_u or clipped_v),
-                'covered_source_ids': ids[ix],
+                'covered_source_ids': full_ids[ix],
                 'depression_mm': depression,
                 'protrusion_mm': protrusion,
                 'flatness_gap_mm': gap,
@@ -466,19 +800,21 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 'defect_point_rows': defect_rows,
                 'defect_values_mm': defect_values_mm,
                 'defect_types': defect_types,
+                'verticality_defect_point_indices': verticality_defect_point_indices,
+                'verticality_defect_point_rows': verticality_defect_point_rows,
+                'verticality_defect_values_mm': verticality_defect_values_mm,
+                'verticality_defect_types': verticality_defect_types,
             })
 
-    # ------------------------------------------------------------------
-    # These raw rates are retained for standalone callers.  The facade service
-    # replaces them with occupancy-mask rates so pass/fail areas are additive.
-    # ------------------------------------------------------------------
     total_pts = len(pts)
 
     def _metric_rates(windows_list, pass_key):
         w_area = sum(w.get('actual_area_m2', 0.0) for w in windows_list)
-        p_area = sum(w.get('actual_area_m2', 0.0) for w in windows_list if w.get(pass_key))
+        p_area = sum(w.get('actual_area_m2', 0.0) for w in windows_list
+                     if w.get(pass_key))
         w_pts = sum(w.get('point_count', 0) for w in windows_list)
-        p_pts = sum(w.get('point_count', 0) for w in windows_list if w.get(pass_key))
+        p_pts = sum(w.get('point_count', 0) for w in windows_list
+                    if w.get(pass_key))
         return {
             'area_rate': (p_area / w_area) if w_area > 0 else 0.0,
             'point_rate': (p_pts / w_pts) if w_pts > 0 else 0.0,
@@ -492,21 +828,21 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
     flat_rates = _metric_rates(windows, 'flatness_pass')
     vert_rates = _metric_rates(windows, 'verticality_pass')
 
-    # Canonical point-level contract.  IDs are always the raw IDs supplied to
-    # this function; values remain signed so consumers can distinguish
-    # depression (negative) from protrusion (positive).
-    sample_ids, sample_rows, sample_values, sample_types = [], [], [], []
+    flat_sample_ids, flat_sample_rows = [], []
+    flat_sample_values, flat_sample_types = [], []
+    vert_sample_ids, vert_sample_rows = [], []
+    vert_sample_values, vert_sample_types = [], []
     for window in windows:
-        sample_ids.extend(window.get('defect_point_indices', []))
-        sample_rows.extend(window.get('defect_point_rows', []))
-        sample_values.extend(window.get('defect_values_mm', []))
-        sample_types.extend(window.get('defect_types', []))
+        flat_sample_ids.extend(window.get('defect_point_indices', []))
+        flat_sample_rows.extend(window.get('defect_point_rows', []))
+        flat_sample_values.extend(window.get('defect_values_mm', []))
+        flat_sample_types.extend(window.get('defect_types', []))
+        vert_sample_ids.extend(window.get('verticality_defect_point_indices', []))
+        vert_sample_rows.extend(window.get('verticality_defect_point_rows', []))
+        vert_sample_values.extend(window.get('verticality_defect_values_mm', []))
+        vert_sample_types.extend(window.get('verticality_defect_types', []))
 
-    # A standalone caller must receive the same physical-domain area contract
-    # as the orchestration service: occupied projected cells only.  Never use
-    # a window sum here because adjacent windows may overlap at their borders.
-    area_resolution = min(width_m, length_m, 0.01)
-    area_resolution = max(area_resolution, 1e-4)
+    area_resolution = max(min(width_m, length_m, 0.01), 1e-4)
     occupied_u = np.floor((u - u0) / area_resolution).astype(np.int64)
     occupied_v = np.floor((v - v0) / area_resolution).astype(np.int64)
     occupied = np.unique(np.column_stack((occupied_u, occupied_v)), axis=0)
@@ -522,7 +858,6 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
             'flatness_secondary_point_rate': flat_rates['point_rate'],
             'verticality_primary_area_rate': vert_rates['area_rate'],
             'verticality_secondary_point_rate': vert_rates['point_rate'],
-            # Reference tilt (for information only)
             'global_tilt_verticality_mm': plane_verticality_mm,
         },
         'parameters': {
@@ -532,10 +867,19 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
             'step_v_m': length_m,
         },
         'defect_samples': {
-            'raw_ids': np.asarray(sample_ids, dtype=np.int64),
-            'source_rows': np.asarray(sample_rows, dtype=np.int64),
-            'values_mm': np.asarray(sample_values, dtype=np.float64),
-            'types': list(sample_types),
-            'index_space': 'source_row',
+            'flatness': {
+                'raw_ids': np.asarray(flat_sample_ids, dtype=np.int64),
+                'source_rows': np.asarray(flat_sample_rows, dtype=np.int64),
+                'values_mm': np.asarray(flat_sample_values, dtype=np.float64),
+                'types': list(flat_sample_types),
+                'index_space': 'raw_global_rows',
+            },
+            'verticality': {
+                'raw_ids': np.asarray(vert_sample_ids, dtype=np.int64),
+                'source_rows': np.asarray(vert_sample_rows, dtype=np.int64),
+                'values_mm': np.asarray(vert_sample_values, dtype=np.float64),
+                'types': list(vert_sample_types),
+                'index_space': 'raw_global_rows',
+            },
         },
     }
