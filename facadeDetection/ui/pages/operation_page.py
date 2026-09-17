@@ -195,6 +195,15 @@ class OperationPageMixin:
 
         # 立面列表
         from PySide6.QtWidgets import QListWidget
+        # 清除选中：取消视口聚焦（恢复配色 + 摘除 AABB 线框）
+        self.btn_clear_facade_selection = QPushButton('清除选中')
+        self.btn_clear_facade_selection.setObjectName('btn_clear_facade_selection')
+        self.btn_clear_facade_selection.setProperty('buttonRole', 'secondary')
+        self.btn_clear_facade_selection.setToolTip('取消立面选中，恢复视口整体配色')
+        self.btn_clear_facade_selection.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_facade_selection.clicked.connect(
+            self._clear_facade_selection)
+        lay.addWidget(self.btn_clear_facade_selection)
         self.list_facades = QListWidget()
         self.list_facades.setObjectName('lstFacades')
         self.list_facades.setSpacing(4)
@@ -1102,6 +1111,15 @@ class OperationPageMixin:
         self.render_facade.select_facade(cloud, int(f.get('id', 0)))
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
         return
+
+    def _clear_facade_selection(self):
+        """清除立面选中：列表取消选择 + 视口恢复正常配色并摘除聚焦线框。"""
+        self.list_facades.clearSelection()
+        self.list_facades.setCurrentItem(None)
+        cloud = self.facade_quality_controller.active_cloud_name()
+        if cloud:
+            self.render_facade.clear_selected_facade(cloud)
+        self.statusBar().showMessage('已清除立面选中', 3000)
 
     def _show_quality_dialog(self, cloud, facade, quality):
         facade_id = int(facade.get('id', 0))
