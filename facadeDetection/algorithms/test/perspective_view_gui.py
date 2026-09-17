@@ -445,11 +445,11 @@ def launch_viewer(ply_file, json_file, long_side=1024, short_side=576, voxel_siz
 
 
 if __name__ == "__main__":
-    # launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.ply", "../data/bllygg01.json",
-    #               long_side=1024, short_side=576, voxel_size=0.1)
+    launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.ply", 
+    "C:/Users/Gao Liying/Downloads/ply/ply/bllygg01.fls/bllygg01.json", long_side=1024, short_side=576, voxel_size=0.1)
 
     # launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bllygg03.fls/bllygg03.ply", "../data/bllygg03.json",
     #               long_side=1024, short_side=576, voxel_size=0.1)
     
-    launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bly03_new/bllygg03.ply", "../data/bllygg03.json",
-                  long_side=1024, short_side=576, voxel_size=0.1)
+    # launch_viewer("C:/Users/Gao Liying/Downloads/ply/ply/bly03_new/bllygg03.ply", "../data/bllygg03.json",
+    #               long_side=1024, short_side=576, voxel_size=0.1)

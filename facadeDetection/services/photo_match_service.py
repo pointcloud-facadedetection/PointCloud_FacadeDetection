@@ -480,6 +480,13 @@ class PhotoMatchService:
             image_size=image_size,
             crop_subject=crop_subject,
         )
+        # 保留与 cloud_points 一一对应的原始 intensity/RGB，后续调用
+        # photo_matching 重新生成匹配图时继续使用，避免退化为深度着色。
+        rendered['point_values'] = (
+            None
+            if colors is None
+            else np.ascontiguousarray(np.asarray(colors))
+        )
         output_root = (
             self.set_project_path(project_path)
             if project_path is not None
@@ -693,6 +700,7 @@ class PhotoMatchService:
         point_radius: int = 6,
         blur_size: int = 0,
         heatmap_data=None,
+        intensity=None,
         neutral_mm: float | None = None,
         limit_mm: float | None = None,
         vmin_mm: float | None = None,
@@ -704,6 +712,8 @@ class PhotoMatchService:
 
         ``run_photo_facade_heatmap`` 只接收立面几何信息并返回 ``3x4``
         投影矩阵；``heatmap_data`` 仅在本服务中解析和贴图。
+        ``intensity`` 可显式传入；未传时自动复用 ``cloud_projection`` 中
+        与映射点云一一对应的 ``point_values``。
         """
         if self.state.annotating:
             raise ValueError('请先退出标注模式')
@@ -746,12 +756,28 @@ class PhotoMatchService:
             int(projection_image.shape[1]),
             int(projection_image.shape[0]),
         )
+        matching_points = np.asarray(
+            cloud_projection.get('cloud_points', points),
+            dtype=np.float64,
+        ).reshape(-1, 3)
+        matching_values = (
+            intensity
+            if intensity is not None
+            else cloud_projection.get('point_values')
+        )
+        if matching_values is not None:
+            matching_values = np.asarray(matching_values)
+            if len(matching_values) != len(matching_points):
+                raise ValueError(
+                    '用于照片匹配的 intensity 数量与映射点云数量不一致'
+                )
         photo_match_matrix = run_photo_facade_heatmap(
-            points,
+            matching_points,
             photo_bgr,
             scan_pose,
             facade,
             {
+                'colors': matching_values,
                 'mapping_image_size': projection_size,
                 'crop_subject': True,
                 'project_path': self.state.project_path,
