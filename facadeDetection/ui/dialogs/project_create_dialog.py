@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTextEdit,
@@ -270,7 +271,15 @@ class ProjectCreateDialog(QDialog):
     def _build_basic_tab(self) -> QWidget:
         page = QWidget()
         page.setObjectName('formTabPage')
-        form = QFormLayout(page)
+        # 表单贴顶聚拢，多余高度留在底部，避免行间被均摊撑开
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        host = QWidget()
+        host.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
+        outer.addWidget(host)
+        outer.addStretch(1)
+        form = QFormLayout(host)
         form.setContentsMargins(14, 14, 14, 14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(10)
@@ -379,7 +388,7 @@ class ProjectCreateDialog(QDialog):
             layout = QVBoxLayout(box)
             layout.setSpacing(6)
 
-            # 顶部一行：左侧说明，右侧实时计数，用户不必展开列表就知道有没有内容。
+            # 顶部一行：左侧说明，右侧实时计数 + 操作按钮，列表区域保持干净。
             head = QHBoxLayout()
             hint_label = QLabel(hint)
             hint_label.setProperty('uiRole', 'importEmptyHint')
@@ -387,6 +396,14 @@ class ProjectCreateDialog(QDialog):
             counter = QLabel()
             counter.setProperty('uiRole', 'importEmptyHint')
             head.addWidget(counter, 0, Qt.AlignmentFlag.AlignRight)
+            add = QPushButton('新增')
+            clear = QPushButton('清空')
+            add.setProperty('buttonRole', 'primary')
+            clear.setProperty('buttonRole', 'danger')
+            add.clicked.connect(lambda _=False, k=key, t=title, ty=kind: self._add_resource(k, t, ty))
+            clear.clicked.connect(lambda _=False, k=key, t=title: self._clear_resources(k, t))
+            head.addWidget(add)
+            head.addWidget(clear)
             layout.addLayout(head)
 
             # 列表支持从资源管理器直接拖入，交互路径与"新增"按钮完全一致。
@@ -407,15 +424,6 @@ class ProjectCreateDialog(QDialog):
             self._resource_empties[key] = empty
             layout.addWidget(empty)
 
-            actions = QHBoxLayout()
-            actions.addStretch(1)
-            add = QPushButton('新增')
-            clear = QPushButton('清空')
-            add.clicked.connect(lambda _=False, k=key, t=title, ty=kind: self._add_resource(k, t, ty))
-            clear.clicked.connect(lambda _=False, k=key, t=title: self._clear_resources(k, t))
-            actions.addWidget(add)
-            actions.addWidget(clear)
-            layout.addLayout(actions)
             outer.addWidget(box, 1)
             self._refresh_resource_state(key)
         outer.addStretch(1)
@@ -545,7 +553,15 @@ class ProjectCreateDialog(QDialog):
     # ---------- 报告信息 ----------
     def _build_report_tab(self) -> QWidget:
         page = QWidget()
-        form = QFormLayout(page)
+        # 表单贴顶聚拢，多余高度留在底部
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        host = QWidget()
+        host.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
+        outer.addWidget(host)
+        outer.addStretch(1)
+        form = QFormLayout(host)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(10)
 
@@ -614,7 +630,8 @@ class ProjectCreateDialog(QDialog):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setSpacing(10)
-        layout.setContentsMargins(4, 4, 4, 4)
+        # 右侧给垂直滚动条让位，避免压到分组卡片边线
+        layout.setContentsMargins(4, 4, 14, 4)
 
         # --- 标准选择 ---
         std_row = QHBoxLayout()

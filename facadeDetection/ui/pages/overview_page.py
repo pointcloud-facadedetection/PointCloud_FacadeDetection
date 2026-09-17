@@ -221,30 +221,6 @@ class OverviewPageMixin:
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         return dialog.textValue(), accepted
 
-    def _select_project(self):
-        projects = self.project_overview_service.list_projects()
-        if not projects:
-            QMessageBox.information(self, '选择项目', '当前没有可选择的项目。')
-            return
-        labels = [
-            f'{project.name}  |  {project.directory_path}'
-            for project in projects
-        ]
-        selected_label, accepted = QInputDialog.getItem(
-            self,
-            '选择项目',
-            '项目：',
-            labels,
-            0,
-            False,
-        )
-        if not accepted:
-            return
-
-        selected_index = labels.index(selected_label)
-        self._prepare_project_activation(projects[selected_index].project_id)
-        self._activate_project(projects[selected_index])
-
     def _update_overview_workspace(self):
         """同步概览右侧的当前工作区信息。"""
         if self.current_project is None:
@@ -352,6 +328,7 @@ class OverviewPageMixin:
 
             edit_button = QPushButton('编辑')
             edit_button.setObjectName('btn_edit_project')
+            edit_button.setProperty('buttonRole', 'secondary')
             edit_button.setToolTip('修改项目名称')
             edit_button.setAccessibleName('编辑项目')
             edit_button.setCursor(Qt.CursorShape.PointingHandCursor)

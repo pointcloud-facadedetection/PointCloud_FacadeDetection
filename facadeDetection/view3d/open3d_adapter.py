@@ -87,6 +87,12 @@ class Open3DAdapter:
             opt.point_color_option = o3d.visualization.RenderOption.PointColorOption.Color
         except Exception:
             pass
+        # 线宽按屏幕像素固定（AABB/法线/配准线统一加粗），缩放不再消失。
+        # Windows 核心 GL 可能钳制到 1px，失败静默忽略。
+        try:
+            opt.line_width = 2.0
+        except Exception:
+            pass
         self.request_render('render.options')
 
     def add_geometry(self, name, geometry, reset_bounding_box=False):

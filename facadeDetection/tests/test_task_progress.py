@@ -1,19 +1,15 @@
 """进度反馈基础件的实效测试。
 
-分三层断言，与既有 test_loading_dialog.py 的风格保持一致：
+分两层断言：
 
 1. 机制：ThrottledReporter 的"高频写入 → 低频刷新"确实成立，
    且终态必刷、无新数据时不空刷。
-2. 兼容：LoadingDialog 收敛为子类后，历史接口
-   （``_bar`` / ``_label`` / ``update_progress`` / ``reject``）
-   行为逐条不变，避免既有测试与调用方被破坏。
-3. 忙碌条模式：进度条恒为不定量（无百分比、无取消按钮），
+2. 忙碌条模式：进度条恒为不定量（无百分比、无取消按钮），
    finish() 成功 / 失败两条收尾路径都真实生效。
 """
 import pytest
 from PySide6.QtCore import Qt
 
-from ui.dialogs.loading_dialog import LoadingDialog
 from ui.dialogs.task_progress_dialog import TaskProgressDialog
 from utils.throttled_reporter import ThrottledReporter
 
@@ -80,33 +76,6 @@ class TestThrottledReporter:
         assert reporter.pending is False
         assert reporter.snapshot == ''
         assert reporter.is_active() is False
-
-
-# ---------------------------------------------------------------------------
-# LoadingDialog 向后兼容（历史契约不可破坏）
-# ---------------------------------------------------------------------------
-class TestLoadingDialogCompatibility:
-    def test_still_modal_and_not_user_closable(self, qapp):
-        dlg = LoadingDialog()
-        assert dlg.windowModality() == Qt.WindowModality.ApplicationModal
-        assert not dlg.windowFlags() & Qt.WindowType.WindowCloseButtonHint
-        dlg.show()
-        dlg.reject()
-        qapp.processEvents()
-        assert dlg.isVisible()
-        dlg.hide()
-
-    def test_update_progress_updates_text_only(self, qapp):
-        """忙碌条模式：update_progress 只更新文案，进度条恒为不定量。"""
-        dlg = LoadingDialog()
-        dlg.update_progress('正在解析 bllygg01.ply')
-        assert 'bllygg01.ply' in dlg._label.text()
-        assert dlg._bar.maximum() == 0  # 忙碌条
-
-    def test_default_copy_is_preserved(self, qapp):
-        dlg = LoadingDialog()
-        assert dlg.windowTitle() == '点云加载'
-        assert '正在加载点云' in dlg._label.text()
 
 
 # ---------------------------------------------------------------------------

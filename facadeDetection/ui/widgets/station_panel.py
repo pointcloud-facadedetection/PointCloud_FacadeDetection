@@ -40,6 +40,8 @@ class StationPanel(QWidget):
         self.list = StationListWidget()
         self.list.setObjectName('stationList')
         self.list.setWordWrap(False)
+        # 长站名按右省略显示，避免原生水平滚动条贴到底部按钮行
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.setUniformItemSizes(True)
         self.list.setMinimumHeight(150)
         self.list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)

@@ -15,6 +15,9 @@ class ViewportRenderFacade:
     def select_facade(self, cloud_name, facade_id):
         return self._render_service.select_facade(cloud_name, facade_id)
 
+    def clear_selected_facade(self, cloud_name=None):
+        return self._render_service.clear_selected_facade(cloud_name)
+
     def highlight_facades(self, cloud_name, facades):
         return self._render_service.highlight_facades(cloud_name, facades)
 

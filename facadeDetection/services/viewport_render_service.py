@@ -362,14 +362,71 @@ class ViewportRenderService:
             self._highlight_color = tuple(highlight)
 
     def select_facade(self, cloud_name: str, facade_id: int) -> None:
-        """记录选中立面；立面颜色层保持确定性，不重复重绘。"""
+        """选中聚焦：非选中点隐入背景色，选中立面保留原色并加 AABB 线框。"""
         try:
             self._selected_facade_id = int(facade_id)
         except Exception:
             self._selected_facade_id = None
+        self._focus_selected_facade(cloud_name)
 
     def clear_selected_facade(self, cloud_name: str | None = None) -> None:
+        """清除选中：恢复正常立面配色并摘除聚焦线框。"""
         self._selected_facade_id = None
+        self._remove_focus_bbox()
+        if cloud_name:
+            # 聚焦期改写过颜色，使签名缓存失效以强制恢复正常配色
+            self._facade_color_signatures.pop(cloud_name, None)
+            self.restore_highlight(cloud_name,
+                                   self._facades_cache.get(cloud_name, []))
+
+    # ---- 选中聚焦 ----
+    _FOCUS_BBOX_KEY = 'facade_focus'
+
+    def _focus_selected_facade(self, cloud_name: str) -> None:
+        fid = self._selected_facade_id
+        if fid is None:
+            return
+        data = (self.viewport.get_cloud_data(cloud_name)
+                if hasattr(self.viewport, 'get_cloud_data') else None)
+        if data is None:
+            return
+        pos = data.get('pos')
+        if pos is None or len(pos) == 0:
+            return
+        facades = self._facades_cache.get(cloud_name) or []
+        target = next(
+            (f for f in facades
+             if int(f.get('id', -1)) == fid), None)
+        if target is None:
+            return
+        # 聚焦着色：非选中区域（含其他立面）统一降回全量点云的默认灰，
+        # 仅选中立面保留原色
+        colors = np.tile(np.asarray((0.75, 0.75, 0.75), dtype=np.float32)
+                         .reshape(1, 3), (len(pos), 1))
+        order = next((i for i, f in enumerate(facades) if f is target), 0)
+        col = self.facade_color_for(target, order)
+        idx = self._proxy_rows_for_display(
+            cloud_name,
+            target.get('proxy_indices') or target.get('inlier_indices') or [])
+        idx = idx[(idx >= 0) & (idx < len(pos))]
+        if len(idx):
+            colors[idx] = np.asarray(col, dtype=np.float32)
+        self._update_cloud_color(cloud_name, colors)
+        # AABB 线框：现算（np.min/max 微秒级），无需缓存
+        self._remove_focus_bbox()
+        if len(idx) and hasattr(self.viewport, 'toggle_bbox'):
+            pts = pos[idx]
+            self.viewport.toggle_bbox(
+                self._FOCUS_BBOX_KEY,
+                np.asarray(pts.min(axis=0)), np.asarray(pts.max(axis=0)))
+
+    def _remove_focus_bbox(self) -> None:
+        """摘除聚焦线框（toggle_bbox 幂等：在显示才摘）。"""
+        viewport = self.viewport
+        scene = getattr(viewport, '_scene', None)
+        if (scene is not None
+                and scene.bbox_visible.get(self._FOCUS_BBOX_KEY)):
+            viewport.toggle_bbox(self._FOCUS_BBOX_KEY, None, None)
 
     def set_global_point_color(self, color: Tuple[float, float, float]) -> None:
         """在视口内将整个点云场景统一着色."""

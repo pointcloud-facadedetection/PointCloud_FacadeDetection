@@ -59,16 +59,15 @@ QLabel#applicationBrandMark {
 QLabel#applicationPageTitle {
     color: #F8FAFC;
     background-color: transparent;
-    font-size: 22px;
+    font-size: 15px;
     font-weight: 700;
 }
 
 QLabel#currentProjectLabel {
-    color: #DCE6F5;
-    background-color: #111C2E;
-    border: 1px solid #2B3A52;
-    border-radius: 8px;
-    padding: 6px 12px;
+    color: #334155;
+    background-color: transparent;
+    border: none;
+    padding: 0;
     font-size: 13px;
     font-weight: 500;
 }
@@ -213,13 +212,9 @@ QToolButton[uiRole="sidebarToggle"]:checked {
 }
 
 QToolButton[uiRole="windowControl"] {
-    color: #E5EDF8;
     background-color: transparent;
     border: none;
     border-radius: 0;
-    font-family: "Segoe UI Symbol", "Microsoft YaHei UI";
-    font-size: 17px;
-    font-weight: 500;
 }
 
 QToolButton[uiRole="windowControl"]:hover {
@@ -289,36 +284,47 @@ QPushButton[buttonRole="danger"]:disabled {
     border-color: #E2E8F0;
 }
 
-/* Global navigation is a compact command dock instead of four full-screen tabs. */
-QPushButton[uiRole="navigationItem"][navigationLevel="main"] {
-    min-width: 96px;
-    min-height: 42px;
-    padding: 0 18px;
-    color: #475569;
+/* 页面导航位于深色标题栏正中：选中态维持蓝底白字，常态/hover 按深色底设计。 */
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"] {
+    min-width: 92px;
+    min-height: 28px;
+    padding: 0 16px;
+    color: #C7D2E8;
     background-color: transparent;
     border: 1px solid transparent;
-    border-radius: 7px;
-    font-size: 14px;
+    border-radius: 6px;
+    font-size: 13px;
     font-weight: 500;
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:hover {
-    color: #1E40AF;
-    background-color: #F2F6FF;
-    border-color: #D5E0FF;
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:hover {
+    color: #FFFFFF;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.12);
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:checked {
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:checked {
     color: #FFFFFF;
     background-color: #1E40AF;
     border-color: #1E40AF;
     font-weight: 600;
 }
 
-QPushButton[uiRole="navigationItem"][navigationLevel="main"]:disabled {
-    color: #94A3B8;
+QPushButton[uiRole="navigationItem"][navigationLevel="titlebar"]:disabled {
+    color: #64748B;
+    background-color: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+QWidget#titlebarNavigation {
     background-color: transparent;
-    border-color: transparent;
+    border: none;
+}
+
+QWidget#projectContextBar {
+    background-color: #F5F8FC;
+    border: none;
+    border-bottom: 1px solid #D2DBE7;
 }
 
 /* Report sub-pages use the same flat navigation language at a smaller scale. */
@@ -350,22 +356,6 @@ QPushButton[uiRole="navigationItem"][navigationLevel="internal"]:checked {
 
 QDockWidget#bottomDock {
     border: none;
-}
-
-QWidget#bottomDockPanel,
-QWidget#bottomNavigation {
-    border: none;
-}
-
-QWidget#bottomDockPanel {
-    background-color: #E9EEF5;
-    border-top: 1px solid #D2DBE7;
-}
-
-QWidget#bottomNavigation {
-    background-color: #FFFFFF;
-    border: 1px solid #D4DDE9;
-    border-radius: 11px;
 }
 
 QFrame[uiRole="workspaceSection"] {
@@ -592,6 +582,67 @@ QTextEdit:focus {
     border-color: #3B82F6;
 }
 
+/* 下拉箭头区：未写 ::drop-down 时原生箭头在 QSS 下裸奔成堆叠怪图标 */
+QComboBox {
+    padding-right: 30px;
+}
+
+QComboBox::drop-down {
+    width: 26px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: url({{ICON_DIR}}/combo_arrow_down.png);
+    width: 12px;
+    height: 12px;
+}
+
+QComboBox::down-arrow:disabled {
+    image: url({{ICON_DIR}}/combo_arrow_down_disabled.png);
+}
+
+QComboBox:on {
+    border-color: #3B82F6;
+}
+
+/* 数字/日期框的上下箭头：与下拉箭头同一套 QPainter 细线资源 */
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit {
+    padding-right: 24px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    width: 18px;
+    border: none;
+    background: transparent;
+    image: url({{ICON_DIR}}/spin_arrow_up.png);
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    width: 18px;
+    border: none;
+    background: transparent;
+    image: url({{ICON_DIR}}/spin_arrow_down.png);
+}
+
+/* QDateEdit 日历弹层箭头与 QComboBox 同款 */
+QDateEdit::drop-down {
+    width: 24px;
+    border: none;
+    background: transparent;
+}
+
+QDateEdit::down-arrow {
+    image: url({{ICON_DIR}}/combo_arrow_down.png);
+    width: 12px;
+    height: 12px;
+}
+
 QListView,
 QTreeView,
 QTableView {
@@ -635,6 +686,58 @@ QScrollBar::add-page:vertical,
 QScrollBar::sub-page:vertical {
     height: 0;
     background: transparent;
+}
+
+QScrollBar:horizontal {
+    height: 10px;
+    background: transparent;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    min-width: 28px;
+    background: #CBD5E1;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #94A3B8;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    width: 0;
+    background: transparent;
+}
+
+/* 原生弹窗纳入主题：白底、石板灰正文、按钮沿用全局 QPushButton 体系 */
+QDialog,
+QMessageBox {
+    background-color: #FFFFFF;
+}
+
+QMessageBox QLabel {
+    color: #0F172A;
+    background-color: transparent;
+    font-size: 13px;
+}
+
+QMessageBox QPushButton {
+    min-width: 84px;
+    min-height: 30px;
+    padding: 0 14px;
+}
+
+/* 下拉弹出层与全局列表语言对齐 */
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    outline: none;
+    padding: 4px;
+    selection-color: #1E40AF;
+    selection-background-color: #EFF6FF;
 }
 
 QMenu {
@@ -922,4 +1025,10 @@ def apply_application_theme(app: QApplication) -> None:
     # 保证全局只调用一次 setStyleSheet（重复设置会让已有样式表失效）。
     from .form_styles import FORM_STYLE_SHEET
 
-    app.setStyleSheet(APPLICATION_STYLE_SHEET + FORM_STYLE_SHEET)
+    # QSS 的 url() 相对路径解析不稳定，图标目录占位符替换为绝对路径。
+    from pathlib import Path as _Path
+    icon_dir = _Path(__file__).resolve().parents[1] / 'utils' / 'icons'
+    icon_url = icon_dir.as_posix()
+    sheet = (APPLICATION_STYLE_SHEET + FORM_STYLE_SHEET).replace(
+        '{{ICON_DIR}}', icon_url)
+    app.setStyleSheet(sheet)
