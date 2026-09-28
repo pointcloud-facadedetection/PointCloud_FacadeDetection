@@ -23,6 +23,46 @@ from .lod import normalize_colors
 
 BACKGROUND = '#FFFFFF'
 
+# 地面网格 fragment shader（移植自 StudioViewport.tsx 的 GLSL，Z-up 适配）。
+# 拆两段：gridLine 辅助函数放声明区（GLSL 不允许函数内定义函数），
+# 网格计算语句放 //VTK::Light::Impl（该挂钩位于 fragment main 函数体内）。
+# 与原版差异：固定网格（不跟随相机）、alpha 混向白底输出不透明色规避透明深度问题。
+_GRID_FRAGMENT_DECL = """
+in vec3 gridWorldPos;
+
+float gridLine(vec2 p, float scale, float linePx) {
+  vec2 c = p / scale;
+  vec2 fw = fwidth(c);
+  vec2 d = abs(fract(c - 0.5) - 0.5);
+  vec2 halfW = linePx * 0.5 * fw;
+  vec2 line = 1.0 - smoothstep(halfW, halfW + 0.75 * fw, d);
+  return max(line.x, line.y);
+}
+"""
+
+_GRID_FRAGMENT_IMPL = """
+  vec2 p = gridWorldPos.xy;
+  float dist = distance(p, vec2(GRID_CX, GRID_CY));
+
+  float minor = gridLine(p, 0.1, 0.05)
+      * (1.0 - smoothstep(GRID_FADE_NEAR * 2.0, GRID_FADE_FAR * 2.0, dist));
+  float major = gridLine(p, 1.0, 0.05)
+      * (1.0 - smoothstep(GRID_FADE_NEAR * 10.0, GRID_FADE_FAR * 10.0, dist));
+
+  vec3 gridColor = mix(vec3(0.45, 0.45, 0.45), vec3(0.0, 0.0, 0.0), major);
+  float alpha = max(minor, major);
+  if (alpha <= 0.001) discard;
+  gl_FragData[0] = vec4(gridColor, alpha);
+"""
+
+
+def _grid_fragment_for(center):
+    return (_GRID_FRAGMENT_IMPL
+            .replace('GRID_CX', f'{float(center[0]):.6f}')
+            .replace('GRID_CY', f'{float(center[1]):.6f}')
+            .replace('GRID_FADE_NEAR', '8.0')
+            .replace('GRID_FADE_FAR', '15.0'))
+
 
 class _RenderQueue(QObject):
     """跨线程渲染请求编组：worker 只发信号，VTK 对象只在 GUI 线程触碰。"""
@@ -48,6 +88,11 @@ class PyVistaViewport(BaseViewport):
         self._widget.setObjectName('pyvistaViewport')
         self._plotter = self._widget  # QtInteractor 本身即 Plotter API
         self._plotter.set_background(BACKGROUND)
+        # 坐标轴指示（X红/Y绿/Z蓝），替代 Web 版 AxesHelper
+        try:
+            self._plotter.add_axes(line_width=2)
+        except Exception:
+            pass
 
         # 云数据模型与 view3d.scene.PointCloudScene 对齐
         self.point_data: dict[str, dict] = {}
@@ -64,6 +109,8 @@ class PyVistaViewport(BaseViewport):
         self._adapter = _RenderCounterShim()  # 首帧等待兼容垫片
         self._render_enabled = True
         self._scene_view_initialized = False
+        self._grid_actor = None
+        self._grid_border_actor = None
         self._pick_callback = None
         self._last_picked_point = None
 
@@ -83,7 +130,8 @@ class PyVistaViewport(BaseViewport):
     # Z-up 转台交互（左键旋转 / 右键平移 / 滚轮缩放）
     # ------------------------------------------------------------------
     _ROTATE_SPEED_DEG = 0.3   # 每像素旋转角速度（方位/俯仰）
-    _ELEV_LIMIT_DEG = 89.0    # 俯仰钳制，防翻滚防过顶
+    _ELEV_LIMIT_DEG = 85.0    # 俯仰钳制：留出余量，避免视线与全局Z平行
+                               # （平行时VTK每帧刷view-up重置告警）
     _WHEEL_FACTOR = 1.15      # 滚轮缩放倍率
 
     def _install_zup_interaction(self):
@@ -313,13 +361,73 @@ class PyVistaViewport(BaseViewport):
             self._plotter.reset_camera()
             # 与 Config.ORTHO_FOV_DEG≈5° 的 Open3D 正交模式等效
             try:
-                self._plotter.camera.parallel_projection = True
+                self._plotter.enable_parallel_projection()
             except Exception:
                 pass
             self._plotter.reset_camera()  # 正交下重取构图
+            try:
+                # reset 后再强制一次，防止被构图重置回透视
+                self._plotter.enable_parallel_projection()
+            except Exception:
+                pass
+            # 地面网格（StudioViewport.tsx shader 移植）：
+            # 取消下一行注释即可恢复显示
+            # self._add_ground_grid()
             self._scene_view_initialized = True
         except Exception:
             pass
+
+    def _add_ground_grid(self):
+        """场景下方铺地面网格（StudioViewport.tsx 的 shader 移植）。"""
+        try:
+            import vtk
+            if self._grid_actor is not None:
+                return
+            pts = [d['pos'] for d in self.point_data.values()
+                   if len(d.get('pos', []))]
+            if not pts:
+                return
+            allp = np.vstack(pts)
+            center = allp.mean(axis=0)
+            span = float(np.ptp(allp, axis=0).max())
+            grid_z = float(allp[:, 2].min()) - max(0.05, span * 0.01)
+            size = max(120.0, span * 1.5)  # 覆盖点云地面足迹
+            plane = pv.Plane(center=(float(center[0]), float(center[1]),
+                                     grid_z),
+                             direction=(0, 0, 1),
+                             i_size=size, j_size=size,
+                             i_resolution=1, j_resolution=1)
+            actor = self._plotter.add_mesh(plane, name='ground_grid')
+            # 半透明：alpha 低处透出白底，而非混色
+            try:
+                actor.prop.opacity = 0.99
+            except Exception:
+                pass
+            # 外围边框：与网格同尺寸的外圈线框
+            try:
+                edges = plane.extract_feature_edges()
+                self._grid_border_actor = self._plotter.add_mesh(
+                    edges, color=(0.25, 0.25, 0.25), line_width=2,
+                    name='ground_grid_border')
+            except Exception:
+                self._grid_border_actor = None
+            # VTK 9.7：自定义 varying 走 ValuePass 挂钩传递 vertex→fragment
+            prop = actor.GetShaderProperty()
+            prop.AddVertexShaderReplacement(
+                '//VTK::ValuePass::Dec', True,
+                'out vec3 gridWorldPos;', False)
+            prop.AddVertexShaderReplacement(
+                '//VTK::ValuePass::Impl', True,
+                'gridWorldPos = vertexMC.xyz;', False)
+            prop.AddFragmentShaderReplacement(
+                '//VTK::ValuePass::Dec', True,
+                _GRID_FRAGMENT_DECL, False)
+            prop.AddFragmentShaderReplacement(
+                '//VTK::Light::Impl', True,
+                _grid_fragment_for(center), False)
+            self._grid_actor = actor
+        except Exception as exc:
+            print(f'[PCFD] viewport.ground_grid_failed: {exc!r}', flush=True)
 
     def reset_view(self):
         """恢复建筑立面默认正视图（与 Open3D 视口一致）。"""
@@ -398,6 +506,11 @@ class PyVistaViewport(BaseViewport):
             self._plotter.remove_actor(self._actors[name])
         for name in list(self._bbox_actors):
             self._plotter.remove_actor(self._bbox_actors[name])
+        for grid in (self._grid_actor, self._grid_border_actor):
+            if grid is not None:
+                self._plotter.remove_actor(grid)
+        self._grid_actor = None
+        self._grid_border_actor = None
         self._actors.clear()
         self._bbox_actors.clear()
         self._polys.clear()
