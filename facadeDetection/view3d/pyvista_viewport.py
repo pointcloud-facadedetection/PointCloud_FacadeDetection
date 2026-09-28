@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QWidget
 from .base_viewport import BaseViewport
 from .lod import normalize_colors
 
-BACKGROUND = '#111827'
+BACKGROUND = '#FFFFFF'
 
 
 class _RenderQueue(QObject):
@@ -67,10 +67,159 @@ class PyVistaViewport(BaseViewport):
         self._pick_callback = None
         self._last_picked_point = None
 
+        # Z-up 转台交互（Tekla 式）：左键旋转、右键平移、滚轮缩放
+        self._drag_left = None
+        self._drag_right = None
+        self._install_zup_interaction()
+
         # VTK 按需渲染：渲染成功后递增帧计数
         try:
             self._widget.render_window.AddObserver(
                 'EndEvent', self._on_render_end)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Z-up 转台交互（左键旋转 / 右键平移 / 滚轮缩放）
+    # ------------------------------------------------------------------
+    _ROTATE_SPEED_DEG = 0.3   # 每像素旋转角速度（方位/俯仰）
+    _ELEV_LIMIT_DEG = 89.0    # 俯仰钳制，防翻滚防过顶
+    _WHEEL_FACTOR = 1.15      # 滚轮缩放倍率
+
+    def _install_zup_interaction(self):
+        """以 vtkInteractorStyleUser 接管全部鼠标事件，实现 Z 轴锁定转台。
+
+        旋转模型与 Tekla/BIM 一致：水平拖绕注视点的全局 Z 轴转方位，
+        垂直拖改变俯仰并钳制在 ±89°，视线 up 永远锁定全局 Z，绝不滚转。
+        """
+        try:
+            import vtk
+            style = vtk.vtkInteractorStyleUser()
+            style.AddObserver('LeftButtonPressEvent',
+                              lambda o, e: self._on_press('left', o))
+            style.AddObserver('RightButtonPressEvent',
+                              lambda o, e: self._on_press('right', o))
+            style.AddObserver('LeftButtonReleaseEvent',
+                              lambda o, e: self._on_release('left'))
+            style.AddObserver('RightButtonReleaseEvent',
+                              lambda o, e: self._on_release('right'))
+            style.AddObserver('MouseMoveEvent',
+                              lambda o, e: self._on_mouse_move(o))
+            style.AddObserver('MouseWheelForwardEvent',
+                              lambda o, e: self._on_wheel(1))
+            style.AddObserver('MouseWheelBackwardEvent',
+                              lambda o, e: self._on_wheel(-1))
+            # pyvista 的 RenderWindowInteractor 是包装器，底层 vtk 对象在 .interactor
+            vtk_iren = getattr(self._plotter.iren, 'interactor',
+                               self._plotter.iren)
+            vtk_iren.SetInteractorStyle(style)
+            self._zup_style = style  # 防 GC
+        except Exception as exc:
+            print(f'[PCFD] viewport.zup_interaction_failed: {exc!r}',
+                  flush=True)
+
+    @staticmethod
+    def _pointer_xy(style_obj):
+        """从样式对象拿底层 interactor 的事件坐标（包装器不保证有此方法）。"""
+        try:
+            iren = style_obj.GetInteractor()
+            return tuple(iren.GetEventPosition())
+        except Exception:
+            return None
+
+    def _on_press(self, button, style_obj):
+        xy = self._pointer_xy(style_obj)
+        if xy is None:
+            return
+        if button == 'left':
+            self._drag_left = xy
+        else:
+            self._drag_right = xy
+
+    def _on_release(self, button):
+        if button == 'left':
+            self._drag_left = None
+        else:
+            self._drag_right = None
+
+    def _on_mouse_move(self, style_obj):
+        xy = self._pointer_xy(style_obj)
+        if xy is None:
+            return
+        if self._drag_left is not None:
+            dx, dy = xy[0] - self._drag_left[0], xy[1] - self._drag_left[1]
+            self._drag_left = xy
+            if dx or dy:
+                self._turntable_rotate(dx, dy)
+        elif self._drag_right is not None:
+            dx, dy = xy[0] - self._drag_right[0], xy[1] - self._drag_right[1]
+            self._drag_right = xy
+            if dx or dy:
+                self._camera_pan(dx, dy)
+
+    def _turntable_rotate(self, dx, dy):
+        """Z 轴锁定转台：dx→绕全局Z的方位角，dy→俯仰角（钳制）。"""
+        try:
+            camera = self._plotter.camera
+            pos = np.asarray(camera.position, dtype=np.float64)
+            fp = np.asarray(camera.focal_point, dtype=np.float64)
+            off = pos - fp
+            radius = float(np.linalg.norm(off))
+            if radius < 1e-9:
+                return
+            az = np.arctan2(off[1], off[0])
+            el = np.arcsin(np.clip(off[2] / radius, -1.0, 1.0))
+            az -= np.radians(dx * self._ROTATE_SPEED_DEG)
+            el = np.clip(el + np.radians(dy * self._ROTATE_SPEED_DEG),
+                         -np.radians(self._ELEV_LIMIT_DEG),
+                         np.radians(self._ELEV_LIMIT_DEG))
+            new_off = radius * np.array(
+                [np.cos(el) * np.cos(az), np.cos(el) * np.sin(az),
+                 np.sin(el)])
+            camera.position = tuple(fp + new_off)
+            camera.focal_point = tuple(fp)
+            # up 锁回全局 Z：永远不出现滚转
+            camera.up = (0.0, 0.0, 1.0)
+            self._render()
+        except Exception:
+            pass
+
+    def _camera_pan(self, dx, dy):
+        """按注视点深度的世界/像素比平移（VTK 经典配方）。"""
+        try:
+            renderer = self._plotter.renderer
+            camera = self._plotter.camera
+            fp = np.asarray(camera.focal_point, dtype=np.float64)
+            pos = np.asarray(camera.position, dtype=np.float64)
+            renderer.SetWorldPoint(fp[0], fp[1], fp[2], 1.0)
+            renderer.WorldToDisplay()
+            d = renderer.GetDisplayPoint()
+            renderer.SetDisplayPoint(d[0] - dx, d[1] - dy, d[2])
+            renderer.DisplayToWorld()
+            w = renderer.GetWorldPoint()
+            delta = np.array([w[0] / w[3], w[1] / w[3], w[2] / w[3]]) - fp
+            camera.focal_point = tuple(fp + delta)
+            camera.position = tuple(pos + delta)
+            self._render()
+        except Exception:
+            pass
+
+    def _on_wheel(self, direction):
+        """滚轮缩放：正交改 parallel scale，透视走 Dolly。"""
+        try:
+            camera = self._plotter.camera
+            factor = (self._WHEEL_FACTOR if direction > 0
+                      else 1.0 / self._WHEEL_FACTOR)
+            try:
+                parallel = bool(camera.parallel_projection)
+            except Exception:
+                parallel = False
+            if parallel:
+                scale = float(camera.parallel_scale) / factor
+                camera.parallel_scale = max(1e-6, scale)
+            else:
+                camera.Dolly(factor)
+            self._render()
         except Exception:
             pass
 
