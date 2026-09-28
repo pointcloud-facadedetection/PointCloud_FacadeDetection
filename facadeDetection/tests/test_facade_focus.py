@@ -10,7 +10,7 @@ import numpy as np
 
 from services.viewport_render_service import ViewportRenderService
 
-DEFAULT_GRAY = np.array([0.75, 0.75, 0.75], dtype=np.float32)
+DEFAULT_GRAY = np.array([0.55, 0.55, 0.55], dtype=np.float32)
 
 
 class _FakeScene:
@@ -85,7 +85,7 @@ def test_clear_selection_restores_normal_colors_and_removes_bbox():
     colors = viewport.colors
     assert np.allclose(colors[[0, 1, 2]], np.array([0.9, 0.2, 0.2], dtype=np.float32))
     assert np.allclose(colors[[5, 6]], np.array([0.2, 0.9, 0.2], dtype=np.float32))
-    assert np.allclose(colors[3], np.array([0.75, 0.75, 0.75], dtype=np.float32))
+    assert np.allclose(colors[3], np.array([0.55, 0.55, 0.55], dtype=np.float32))
 
 
 def test_switching_selection_replaces_bbox():
@@ -99,3 +99,13 @@ def test_switching_selection_replaces_bbox():
     colors = viewport.colors
     assert np.allclose(colors[[5, 6]], np.array([0.2, 0.9, 0.2], dtype=np.float32))
     assert np.allclose(colors[[0, 1, 2]], DEFAULT_GRAY)
+
+
+def test_consecutive_selections_always_show_bbox():
+    """连续多次选中：线框状态由服务层跟踪，不得出现奇偶翻转。"""
+    service, viewport, _ = _make_service()
+    service.highlight_facades('cloud', _facades())
+    for fid in (1, 2, 1, 2, 1):
+        service.select_facade('cloud', fid)
+        assert viewport._scene.bbox_visible.get('facade_focus') is True, \
+            f'选中立面{fid}后线框不可见'

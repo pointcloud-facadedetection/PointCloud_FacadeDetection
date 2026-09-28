@@ -28,6 +28,7 @@ class ViewportRenderService:
         self._selected_facade_id: Optional[int] = None
         self._facades_cache: Dict[str, list[dict]] = {}
         self._facade_color_signatures: Dict[str, str] = {}
+        self._focus_bbox_visible = False
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
@@ -128,6 +129,7 @@ class ViewportRenderService:
         self._pick_mode = False
         self._picked_points.clear()
         self._selected_facade_id = None
+        self._focus_bbox_visible = False
         self._facades_cache.clear()
         self._facade_color_signatures.clear()
         if hasattr(self.viewport, 'exit_pick_mode'):
@@ -267,7 +269,7 @@ class ViewportRenderService:
         self._picked_points.clear()
 
     # ---- Facade highlighting ----
-    def highlight_facades(self, cloud_name: str, facades: list[dict], base_color=(0.75, 0.75, 0.75)):
+    def highlight_facades(self, cloud_name: str, facades: list[dict], base_color=(0.55, 0.55, 0.55)):
         # TODO(内存/渲染性能): highlight_facades：整云 np.tile 颜色矩阵及代理索引映射。
         """
         立面着色策略（统一颜色规则 + 选中高亮）：
@@ -334,7 +336,7 @@ class ViewportRenderService:
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
 
-    def _facade_base_colors(self, cloud_name, facades, base_color=(0.75, 0.75, 0.75)):
+    def _facade_base_colors(self, cloud_name, facades, base_color=(0.55, 0.55, 0.55)):
         data = self.viewport.get_cloud_data(cloud_name)
         n = len(data.get('pos', [])) if data is not None else 0
         colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
@@ -401,7 +403,7 @@ class ViewportRenderService:
             return
         # 聚焦着色：非选中区域（含其他立面）统一降回全量点云的默认灰，
         # 仅选中立面保留原色
-        colors = np.tile(np.asarray((0.75, 0.75, 0.75), dtype=np.float32)
+        colors = np.tile(np.asarray((0.55, 0.55, 0.55), dtype=np.float32)
                          .reshape(1, 3), (len(pos), 1))
         order = next((i for i, f in enumerate(facades) if f is target), 0)
         col = self.facade_color_for(target, order)
@@ -419,14 +421,18 @@ class ViewportRenderService:
             self.viewport.toggle_bbox(
                 self._FOCUS_BBOX_KEY,
                 np.asarray(pts.min(axis=0)), np.asarray(pts.max(axis=0)))
+            self._focus_bbox_visible = True
 
     def _remove_focus_bbox(self) -> None:
-        """摘除聚焦线框（toggle_bbox 幂等：在显示才摘）。"""
-        viewport = self.viewport
-        scene = getattr(viewport, '_scene', None)
-        if (scene is not None
-                and scene.bbox_visible.get(self._FOCUS_BBOX_KEY)):
-            viewport.toggle_bbox(self._FOCUS_BBOX_KEY, None, None)
+        """摘除聚焦线框。
+
+        可见状态由本服务自行跟踪：toggle_bbox 是翻转语义，Open3D 后端靠
+        viewport._scene 判断可见性，而 PyVista 后端没有该属性，依赖后端
+        自查会导致框状态翻转错乱（奇数次选中出现、偶数次消失）。
+        """
+        if self._focus_bbox_visible:
+            self.viewport.toggle_bbox(self._FOCUS_BBOX_KEY, None, None)
+            self._focus_bbox_visible = False
 
     def set_global_point_color(self, color: Tuple[float, float, float]) -> None:
         """在视口内将整个点云场景统一着色."""
@@ -474,7 +480,7 @@ class ViewportRenderService:
 
     def colorize_by_scalar(self, cloud_name: str, indices: np.ndarray, values: np.ndarray,
                             vmin: float | None = None, vmax: float | None = None,
-                            base_color=(0.75, 0.75, 0.75), cmap: str = 'turbo') -> None:
+                            base_color=(0.55, 0.55, 0.55), cmap: str = 'turbo') -> None:
         """
         根据给定的标量值对指定点进行热力着色，其余点使用 base_color。
         - indices: 全局点索引（0..N-1）的一维数组
@@ -801,7 +807,7 @@ class ViewportRenderService:
                                     heatmap_mode='flatness')
 
     def apply_quality_colors(self, cloud_name: str, quality_result: dict,
-                             base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
+                             base_color: tuple[float, float, float] = (0.55, 0.55, 0.55),
                              index_service=None, _colors=None) -> None:
         """将质量结果应用到点云颜色 - 统一缺陷值热力图（与导出图一致）。
 
