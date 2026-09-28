@@ -63,6 +63,7 @@ class PyVistaViewport(BaseViewport):
             self.update_cloud_points, Qt.QueuedConnection)
         self._adapter = _RenderCounterShim()  # 首帧等待兼容垫片
         self._render_enabled = True
+        self._scene_view_initialized = False
         self._pick_callback = None
         self._last_picked_point = None
 
@@ -150,8 +151,32 @@ class PyVistaViewport(BaseViewport):
         else:
             poly.Modified()
         if reset_view:
-            self._plotter.reset_camera()
+            self._initialize_scene_view()
         self._render()
+
+    def _initialize_scene_view(self):
+        """初始相机与 Open3D 视口对齐：正视立面、Z 轴向上、正交投影。"""
+        try:
+            # 与 Open3DViewport._initialize_scene_view 同向：
+            # front=[0,-1,0]（面向建筑正面），up=[0,0,1]（Z 轴屏幕向上）
+            self._plotter.view_vector((0.0, -1.0, 0.0),
+                                      viewup=(0.0, 0.0, 1.0))
+            self._plotter.reset_camera()
+            # 与 Config.ORTHO_FOV_DEG≈5° 的 Open3D 正交模式等效
+            try:
+                self._plotter.camera.parallel_projection = True
+            except Exception:
+                pass
+            self._plotter.reset_camera()  # 正交下重取构图
+            self._scene_view_initialized = True
+        except Exception:
+            pass
+
+    def reset_view(self):
+        """恢复建筑立面默认正视图（与 Open3D 视口一致）。"""
+        self._scene_view_initialized = False
+        if self.point_data:
+            self._initialize_scene_view()
 
     def update_cloud_color(self, name, colors):
         data = self.point_data.get(name)
