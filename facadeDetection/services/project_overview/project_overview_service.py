@@ -362,6 +362,18 @@ class ProjectOverviewService:
                 all_results[sid] = facades
         return all_results
 
+    def mark_facades_deleted(self, project_id, facade_ids) -> None:
+        """软删除指定立面（失修结果清理），不返回内容。"""
+        ids = {int(x) for x in (facade_ids or [])}
+        if not ids:
+            return
+        from models import Facade
+        with project_session(project_id) as s:
+            for fid in ids:
+                row = s.get(Facade, fid)
+                if row is not None:
+                    row.is_deleted = True
+
     def remove_project(self, project_id: str) -> bool:
         return ProjectRepo.delete_project(project_id, hard=True)
 

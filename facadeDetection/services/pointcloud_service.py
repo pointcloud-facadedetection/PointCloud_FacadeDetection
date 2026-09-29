@@ -61,6 +61,9 @@ class PointCloudService:
     def register_dataset(self, dataset_id: str, points, colors=None, metadata=None) -> PointCloudDataset:
         raw = RawPointStore.from_arrays(points, colors)
         meta = metadata or {}
+        # 处理版本：代理内容变化（去噪/重建）即变化，供结果修订号校验。
+        # 立面/质量结果按该版本盖戳，恢复时与当前数据集比对，防止旧索引错位复用。
+        meta.setdefault('revision', f'{dataset_id}:{len(points)}')
         source_points = None
         source_raw_offsets = None
         source_raw_indices = None

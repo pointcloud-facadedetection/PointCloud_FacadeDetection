@@ -21,7 +21,11 @@ from PySide6.QtWidgets import QWidget
 from .base_viewport import BaseViewport
 from .lod import normalize_colors
 
-BACKGROUND = '#FFFFFF'
+try:
+    from config.settings import Config
+    BACKGROUND = str(getattr(Config, 'VIEWPORT_BACKGROUND', '#FFFFFF'))
+except Exception:
+    BACKGROUND = '#FFFFFF'
 
 # 地面网格 fragment shader（移植自 StudioViewport.tsx 的 GLSL，Z-up 适配）。
 # 拆两段：gridLine 辅助函数放声明区（GLSL 不允许函数内定义函数），
@@ -78,6 +82,28 @@ class _RenderCounterShim:
         self._frames_rendered = 0
 
 
+class _GestureFilter(QObject):
+    """把 Qt 捏合手势转发给视口的缩放处理。"""
+
+    def __init__(self, viewport, parent=None):
+        super().__init__(parent)
+        self._viewport = viewport
+
+    def eventFilter(self, watched, event):
+        try:
+            from PySide6.QtCore import QEvent, Qt
+            if event.type() == QEvent.Gesture:
+                pinch = event.gesture(Qt.PinchGesture)
+                if pinch is not None:
+                    factor = float(pinch.scaleFactor())
+                    if factor > 0:
+                        self._viewport._zoom_by_factor(factor)
+                    return True
+        except Exception:
+            pass
+        return False
+
+
 class PyVistaViewport(BaseViewport):
     """Qt 原生 PyVista 视口，接口与 Open3DViewport 对齐。"""
 
@@ -119,6 +145,35 @@ class PyVistaViewport(BaseViewport):
         self._drag_right = None
         self._install_zup_interaction()
 
+        # 交互模式与拾取状态
+        self._mode = self.InteractionMode.NAVIGATE
+        self._pick_cloud = None
+        self._pick_radius = 8.0
+        self._pick_press = None
+        self._registration_pick_state = None
+        self._registration_callback = None
+        self._pick_marker_actors = []
+
+        # ROI 框选：复用 roi_selection.py 的覆盖层控制器（_interactor 指向自身）
+        self._roi_on_complete = None
+        self._roi_bbox_actor = None
+        self._interactor = self
+        try:
+            from .roi_selection import ROISelectionController
+            self._roi_controller = ROISelectionController(
+                self, container_widget=self._widget)
+        except Exception:
+            self._roi_controller = None
+
+        # 触控手势：捏合缩放（Surface 触屏）
+        try:
+            from PySide6.QtCore import Qt as _Qt
+            self._gesture_filter = _GestureFilter(self)
+            self._widget.grabGesture(_Qt.PinchGesture)
+            self._widget.installEventFilter(self._gesture_filter)
+        except Exception:
+            pass
+
         # VTK 按需渲染：渲染成功后递增帧计数
         try:
             self._widget.render_window.AddObserver(
@@ -148,7 +203,7 @@ class PyVistaViewport(BaseViewport):
             style.AddObserver('RightButtonPressEvent',
                               lambda o, e: self._on_press('right', o))
             style.AddObserver('LeftButtonReleaseEvent',
-                              lambda o, e: self._on_release('left'))
+                              lambda o, e: self._on_release('left', o))
             style.AddObserver('RightButtonReleaseEvent',
                               lambda o, e: self._on_release('right'))
             style.AddObserver('MouseMoveEvent',
@@ -180,12 +235,26 @@ class PyVistaViewport(BaseViewport):
         if xy is None:
             return
         if button == 'left':
+            if self._mode == self.InteractionMode.PICK:
+                # 拾取模式：左键只做点选，不进入旋转
+                self._pick_press = xy
+                return
             self._drag_left = xy
         else:
             self._drag_right = xy
 
-    def _on_release(self, button):
+    def _on_release(self, button, style_obj=None):
         if button == 'left':
+            if self._mode == self.InteractionMode.PICK:
+                press, self._pick_press = self._pick_press, None
+                if press is not None and style_obj is not None:
+                    xy = self._pointer_xy(style_obj)
+                    if (xy is not None
+                            and abs(xy[0] - press[0]) <= 6
+                            and abs(xy[1] - press[1]) <= 6):
+                        from PySide6.QtCore import QPoint
+                        self.handle_pick_screen(QPoint(*xy))
+                return
             self._drag_left = None
         else:
             self._drag_right = None
@@ -254,10 +323,14 @@ class PyVistaViewport(BaseViewport):
 
     def _on_wheel(self, direction):
         """滚轮缩放：正交改 parallel scale，透视走 Dolly。"""
+        factor = (self._WHEEL_FACTOR if direction > 0
+                  else 1.0 / self._WHEEL_FACTOR)
+        self._zoom_by_factor(factor)
+
+    def _zoom_by_factor(self, factor):
+        """按倍率缩放（滚轮/捏合手势共用）：正交改 parallel scale，透视 Dolly。"""
         try:
             camera = self._plotter.camera
-            factor = (self._WHEEL_FACTOR if direction > 0
-                      else 1.0 / self._WHEEL_FACTOR)
             try:
                 parallel = bool(camera.parallel_projection)
             except Exception:
@@ -332,9 +405,14 @@ class PyVistaViewport(BaseViewport):
     def _upload_cloud(self, name, reset_view=False):
         data = self.point_data[name]
         poly = self._polys.get(name)
-        if poly is None:
+        if poly is None or poly.n_points != len(data['pos']):
+            # 点数变化：PolyData 不能就地改尺寸，重建并换掉 actor
             poly = pv.PolyData(data['pos'])
             self._polys[name] = poly
+            old = self._actors.pop(name, None)
+            if old is not None:
+                self._plotter.remove_actor(old)
+            self._actors[name] = None
         else:
             poly.points[:] = data['pos']
         poly.point_data['colors'] = (data['color'] * 255).astype(np.uint8)
@@ -443,9 +521,12 @@ class PyVistaViewport(BaseViewport):
             normalize_colors(colors, len(data['pos'])).astype(np.float32))
         data.pop('display_proxy_lookup', None)
         poly = self._polys.get(name)
-        if poly is not None:
-            poly.point_data['colors'][:] = (data['color'] * 255).astype(np.uint8)
-            poly.Modified()
+        if poly is None or poly.n_points != len(data['pos']):
+            # 点数已变化（换数据集/去噪后）：整朵重传，避免数组长度不匹配
+            self._upload_cloud(name)
+            return
+        poly.point_data['colors'][:] = (data['color'] * 255).astype(np.uint8)
+        poly.Modified()
         self._render()
 
     def update_cloud_points(self, name, positions, colors=None):
@@ -596,95 +677,264 @@ class PyVistaViewport(BaseViewport):
         pass  # VTK 无延迟队列，语义空实现
 
     # ------------------------------------------------------------------
-    # 投影 / 拾取
+    # 投影 / 拾取 / ROI
     # ------------------------------------------------------------------
+    class InteractionMode:
+        NAVIGATE = 'navigate'
+        PICK = 'pick'
+        ROI = 'roi'
+
+    def set_mode(self, mode: str):
+        """交互模式切换：ROI/PICK 由覆盖层或拾取态接管输入。"""
+        self._mode = str(mode).lower()
+
     def project_points(self, points):
-        """3D 点投影为屏幕坐标（逻辑像素）。返回 (screen, valid) 或 None。"""
+        """3D 点投影为屏幕坐标（逻辑像素，与 Qt 事件坐标一致）。
+
+        向量化实现：相机合成投影矩阵一次乘完（不逐点调 vtk，160 万点毫秒级）。
+        VTK display 坐标原点在左下、且为物理像素：换算 y 翻转并除以 dpr。
+        """
         try:
-            import vtk
             renderer = self._plotter.renderer
-            height = self._widget.height()
+            camera = renderer.GetActiveCamera()
+            width = max(1, self._widget.width())
+            height = max(1, self._widget.height())
+            dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+            aspect = width / height
+            vtk_m = camera.GetCompositeProjectionTransformMatrix(
+                aspect, -1.0, 1.0)
+            m = np.array([[vtk_m.GetElement(i, j) for j in range(4)]
+                          for i in range(4)], dtype=np.float64)
             pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-            screen = np.zeros((len(pts), 2), dtype=np.float64)
-            valid = np.zeros(len(pts), dtype=bool)
-            coord = vtk.vtkCoordinate()
-            coord.SetCoordinateSystemToWorld()
-            for i, (x, y, z) in enumerate(pts):
-                coord.SetValue(float(x), float(y), float(z))
-                d = coord.GetComputedDisplayValue(renderer)
-                screen[i] = (d[0], height - d[1])   # VTK display 原点在左下
-                valid[i] = 0.0 < d[2] < 1.0
+            hom = np.concatenate([pts, np.ones((len(pts), 1))], axis=1)
+            clip = hom @ m.T
+            w = clip[:, 3]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ndc = clip[:, :3] / np.where(np.abs(w) < 1e-12, np.nan, w)[:, None]
+            # VTK display：左下原点、物理像素 → 转 Qt 左上原点、逻辑像素
+            sx = (ndc[:, 0] + 1.0) * 0.5 * width
+            sy = (ndc[:, 1] + 1.0) * 0.5 * height
+            screen = np.stack([sx, height - sy], axis=1)
+            valid = np.isfinite(ndc).all(axis=1) & (np.abs(ndc[:, 2]) <= 1.0)
             return screen, valid
-        except Exception:
+        except Exception as exc:
+            print(f'[PCFD] viewport.project_points_failed: {exc!r}',
+                  flush=True)
             return None
 
-    def set_selection_enabled(self, enabled, cloud_name=None):
-        pass  # ROI 交互后续迁移，先空实现保证接口可用
+    # ---- 屏幕拾取（投影最近点，全云通用，无 VTK picker 依赖）----
+    def pick_at_screen(self, pos, cloud_name=None):
+        """屏幕坐标 → 最近云点。返回 {'cloud_name','point','index'} 或 None。"""
+        name = cloud_name or self._active_name
+        data = self.point_data.get(name)
+        if data is None:
+            return None
+        projected = self.project_points(data['pos'])
+        if projected is None:
+            return None
+        screen, valid = projected
+        if not np.any(valid):
+            return None
+        xy = np.array([pos.x(), pos.y()], dtype=np.float64)
+        dist = np.where(valid,
+                        np.hypot(screen[:, 0] - xy[0], screen[:, 1] - xy[1]),
+                        np.inf)
+        row = int(np.argmin(dist))
+        if not np.isfinite(dist[row]) or dist[row] > self._pick_radius:
+            return None
+        point = np.asarray(data['pos'][row], dtype=np.float64)
+        self._last_picked_point = point
+        return {'cloud_name': name, 'point': point, 'index': row}
 
-    def set_pick_enabled(self, enabled, radius=14, cloud_name=None):
-        if not enabled:
-            self._pick_callback = None
-
-    def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
-        self._pick_callback = callback
-        try:
-            self._plotter.enable_point_picking(
-                callback=self._on_picked, show_message=False,
-                use_picker='point')
-        except Exception:
-            pass
-
-    def exit_pick_mode(self):
-        self._pick_callback = None
-        try:
-            self._plotter.disable_picking()
-        except Exception:
-            pass
-
-    def _on_picked(self, picked, *_args):
+    def handle_pick_screen(self, pos):
+        """屏幕点击的唯一拾取入口（与 Open3D 版同语义）。"""
+        picked = self.pick_at_screen(pos, cloud_name=self._pick_cloud)
         if picked is None:
             return
-        point = getattr(picked, 'points', None)
-        if point is not None and len(point):
-            self._last_picked_point = np.asarray(point[0], dtype=np.float64)
-        if self._pick_callback is not None:
+        callback = self._pick_callback
+        if callable(callback):
             try:
-                self._pick_callback(self._last_picked_point)
+                callback(picked)
             except Exception:
                 pass
 
-    def handle_pick_screen(self, pos):
-        pass  # Qt 侧拾取走 VTK picker，屏幕坐标入口暂不需要
+    def set_selection_enabled(self, enabled, cloud_name=None):
+        pass  # 框选由 ROI 模式接管
 
-    def pick_at_screen(self, pos, cloud_name=None):
-        return self._last_picked_point
+    def set_pick_enabled(self, enabled, radius=14, cloud_name=None):
+        if enabled:
+            self._pick_radius = float(radius)
+            if cloud_name:
+                self._pick_cloud = cloud_name
+        else:
+            self._pick_callback = None
+
+    def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
+        self._mode = self.InteractionMode.PICK
+        self._pick_cloud = cloud_name or self._active_name
+        self._pick_radius = float(pick_radius)
+        self._pick_callback = callback
+
+    def exit_pick_mode(self):
+        self._mode = self.InteractionMode.NAVIGATE
+        self._pick_callback = None
+        self._registration_pick_state = None
+        self.clear_pick_markers()
 
     def get_picked_point(self) -> np.ndarray | None:
         return self._last_picked_point
 
+    # ---- 配准人工选点（源/目标交替，契约与 Open3D 版一致）----
+    def enter_registration_pick_mode(self, source_cloud, target_cloud,
+                                     callback, pick_radius=10):
+        self._registration_pick_state = {
+            'source_cloud': source_cloud,
+            'target_cloud': target_cloud,
+            'source_points': [],
+            'target_points': [],
+            'next_is_source': True,
+        }
+        self._mode = self.InteractionMode.PICK
+        self._pick_radius = float(pick_radius)
+        self._pick_cloud = source_cloud   # 第一次先选源站点
+        self._pick_callback = self._on_registration_pick
+        self._registration_callback = callback
+        self.update_pick_markers()
+
+    def _on_registration_pick(self, picked):
+        state = getattr(self, '_registration_pick_state', None)
+        if state is None:
+            return
+        cloud_name = picked.get('cloud_name')
+        point = np.asarray(picked['point'], dtype=np.float64)
+        expected = (state['source_cloud'] if state['next_is_source']
+                    else state['target_cloud'])
+        if cloud_name != expected:
+            return
+        if state['next_is_source']:
+            state['source_points'].append(point)
+            state['next_is_source'] = False
+            self._pick_cloud = state['target_cloud']
+        else:
+            state['target_points'].append(point)
+            state['next_is_source'] = True
+            self._pick_cloud = state['source_cloud']
+        self.update_pick_markers(state['source_points'],
+                                 state['target_points'])
+        callback = getattr(self, '_registration_callback', None)
+        if callable(callback):
+            try:
+                callback(picked, state['next_is_source'])
+            except Exception:
+                pass
+
     def registration_pick_points(self):
-        return [], []
+        state = getattr(self, '_registration_pick_state', None) or {}
+        return (list(state.get('source_points', [])),
+                list(state.get('target_points', [])))
 
     def update_pick_markers(self, src_points=None, tgt_points=None):
-        pass
+        """配准选点标记：红=源，绿=目标（VTK 球体，线宽无关）。"""
+        self.clear_pick_markers()
+        for points, color in ((src_points or [], (1.0, 0.3, 0.3)),
+                              (tgt_points or [], (0.3, 0.9, 0.5))):
+            for p in points:
+                try:
+                    actor = self._plotter.add_mesh(
+                        pv.Sphere(radius=self._marker_radius(), center=tuple(p)),
+                        color=color, name='pick_marker')
+                    self._pick_marker_actors.append(actor)
+                except Exception:
+                    pass
+        self._render()
+
+    def _marker_radius(self):
+        try:
+            pts = [d['pos'] for d in self.point_data.values()
+                   if len(d.get('pos', []))]
+            if pts:
+                span = float(np.ptp(np.vstack(pts), axis=0).max())
+                return max(1e-3, span * 0.004)
+        except Exception:
+            pass
+        return 0.05
 
     def clear_pick_markers(self):
-        pass
+        for actor in self._pick_marker_actors:
+            try:
+                self._plotter.remove_actor(actor)
+            except Exception:
+                pass
+        self._pick_marker_actors.clear()
+        self._render()
 
-    # ------------------------------------------------------------------
-    # ROI（占位：视觉层后续迁移，接口先对齐）
-    # ------------------------------------------------------------------
-    def enter_roi_selection(self, *args, **kwargs):
-        pass
+    # ---- ROI 框选（复用 roi_selection.py 的覆盖层与控制器）----
+    def enter_roi_selection(self, cloud_name=None, on_complete=None):
+        """ROI 框选：ROISelectionController 接管，覆盖层锁定输入。"""
+        try:
+            self.clear_roi_visuals()
+        except Exception:
+            pass
+        self._roi_on_complete = on_complete
+        if self._roi_controller is not None:
+            self.set_mode(self.InteractionMode.ROI)
+            self._roi_controller.start(cloud_name, self._handle_roi_complete)
 
-    def exit_roi_selection(self, *args, **kwargs):
-        pass
+    def exit_roi_selection(self):
+        try:
+            if self._roi_controller is not None:
+                self._roi_controller.cancel()
+        except Exception:
+            pass
+        self._roi_on_complete = None
+        self.set_mode(self.InteractionMode.NAVIGATE)
+
+    def _handle_roi_complete(self, min_bound, max_bound, indices, p1=None, p2=None):
+        cb = self._roi_on_complete
+        if callable(cb):
+            try:
+                cb(min_bound, max_bound, indices, p1, p2)
+            except Exception:
+                pass
+
+    def select_indices_in_rect(self, cloud_name, start, end):
+        """屏幕矩形选框 → 框内点的全局行索引（ROISelectionController 调用）。"""
+        name = cloud_name or self._active_name
+        data = self.point_data.get(name)
+        if data is None:
+            return np.array([], dtype=np.int64)
+        projected = self.project_points(data['pos'])
+        if projected is None:
+            return np.array([], dtype=np.int64)
+        screen, valid = projected
+        x1, x2 = sorted((start.x(), end.x()))
+        y1, y2 = sorted((start.y(), end.y()))
+        mask = (valid
+                & (screen[:, 0] >= x1) & (screen[:, 0] <= x2)
+                & (screen[:, 1] >= y1) & (screen[:, 1] <= y2))
+        return np.flatnonzero(mask).astype(np.int64)
 
     def clear_roi_visuals(self):
-        pass
+        self._remove_roi_bbox()
 
-    def show_roi_bbox(self, *args, **kwargs):
-        pass
+    def show_roi_bbox(self, min_bound, max_bound, color=(1.0, 1.0, 1.0)):
+        self._remove_roi_bbox()
+        bounds = [min_bound[0], max_bound[0],
+                  min_bound[1], max_bound[1],
+                  min_bound[2], max_bound[2]]
+        self._roi_bbox_actor = self._plotter.add_mesh(
+            pv.Box(bounds=bounds), style='wireframe',
+            color=color, line_width=2, name='roi_bbox')
+        self._render()
+
+    def _remove_roi_bbox(self):
+        if self._roi_bbox_actor is not None:
+            try:
+                self._plotter.remove_actor(self._roi_bbox_actor)
+            except Exception:
+                pass
+            self._roi_bbox_actor = None
+            self._render()
 
     # ------------------------------------------------------------------
     # 截图 / 生命周期

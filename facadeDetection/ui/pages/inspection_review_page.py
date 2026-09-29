@@ -164,7 +164,15 @@ class InspectionReviewPageMixin:
             tuple(int(max(0, min(1, x)) * 255) for x in color)
         )
         row_layout.addWidget(swatch)
-        if review_mode:
+        if f.get('__stale'):
+            # 修订号失修（去噪后旧索引）：禁用操作，避免对错位结果继续评估
+            info.setText(f"立面{display_no}（已失效）")
+            info.setStyleSheet('font-size: 12px; color: #94A3B8;')
+            action_button = QPushButton('已失效')
+            action_button.setFixedWidth(84)
+            action_button.setMinimumHeight(32)
+            action_button.setEnabled(False)
+        elif review_mode:
             action_button = QPushButton('图片匹配')
             action_button.setFixedWidth(84)
             action_button.setMinimumHeight(32)
