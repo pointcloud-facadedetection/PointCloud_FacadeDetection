@@ -165,6 +165,10 @@ class PyVistaViewport(BaseViewport):
         except Exception:
             self._roi_controller = None
 
+        # 渲染服务算建筑包围盒需要 viewport._camera.project_points()，
+        # 签名与本类同名方法一致，直接以自身充当相机垫片。
+        self._camera = self
+
         # 触控手势：捏合缩放（Surface 触屏）
         try:
             from PySide6.QtCore import Qt as _Qt

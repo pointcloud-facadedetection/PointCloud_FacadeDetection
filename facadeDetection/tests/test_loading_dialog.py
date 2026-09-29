@@ -105,12 +105,10 @@ class TestLoadLifecycleSignals:
         kinds = rec.kinds()
         assert kinds.count('started') == 1
         assert kinds.count('finished') == 1
-        # worker.run 真实的两次进度回报（2% 准备 / 100% 完成）
-        progresses = [e for e in rec.events if e[0] == 'progress']
-        assert len(progresses) >= 2
-        assert progresses[0][1] == 2 and progresses[-1][1] == 100
-        # 顺序：started 在第一次 progress 前，finished 在最后
-        assert kinds.index('started') < kinds.index('progress')
+        # worker 进度回报已移除（忙碌条模式不依赖百分比），
+        # 但 started/finished 顺序契约不变；commit 提交段必须真实执行。
+        # 顺序：started 在最前，finished 在最后
+        assert kinds.index('started') == 0
         assert kinds[-1] == 'finished'
         assert controller._load_in_progress is False
         # 提交段确实被调用（机制真实走完）
