@@ -143,7 +143,7 @@ class ResultsRepo:
                     geometry = {key: facade_data.get(key) for key in (
                         'plane_model', 'normal', 'center', 'inlier_indices',
                         'proxy_indices', 'measurement_indices', 'voxel_ids',
-                        'cloud_name', '__index_space')
+                        'cloud_name', '__index_space', 'facade_geometry')
                         if facade_data.get(key) is not None}
                     point_count = int(facade_data.get('point_count') or
                                       len(facade_data.get('proxy_indices') or
@@ -167,6 +167,9 @@ class ResultsRepo:
             if facade is None:
                 raise ValueError(
                     f'立面不存在: facade_id={facade_id}, display_no={display_no}')
+            # 几何描述属于立面资产而非某一种检测方法；质量结果生成后将
+            # 统一几何同步到 plane_json，保证历史立面与质量报告都可读取。
+            geometry_payload = quality.get('facade_geometry') if isinstance(quality, dict) else None
             if isinstance(facade_data, dict):
                 if expected_station is not None and int(facade.station_id or -1) != expected_station:
                     raise ValueError(
@@ -179,6 +182,10 @@ class ResultsRepo:
                     facade.dataset_id = _sqlite_scalar_text(facade_data.get('dataset_id'))
                 if facade_data.get('dataset_fingerprint') is not None:
                     facade.dataset_fingerprint = _sqlite_scalar_text(facade_data.get('dataset_fingerprint'))
+            if isinstance(geometry_payload, dict):
+                plane_json = dict(facade.plane_json or {})
+                plane_json['facade_geometry'] = geometry_payload
+                facade.plane_json = plane_json
             facade.quality_report_json = report
             if display_no is not None:
                 facade.display_no = int(display_no)
@@ -280,7 +287,7 @@ class ResultsRepo:
                         "plane_model", "normal", "center", "inlier_indices",
                         "proxy_indices", "measurement_indices", "voxel_ids",
                         "review_status",
-                        "cloud_name", "__index_space",
+                        "cloud_name", "__index_space", "facade_geometry",
                     ) if item.get(key) is not None} | {
                         'point_count': point_count,
                         'raw_point_count': raw_point_count,
@@ -326,7 +333,7 @@ class ResultsRepo:
                             "plane_model", "normal", "center", "inlier_indices",
                             "proxy_indices", "measurement_indices", "voxel_ids",
                             "review_status",
-                            "cloud_name", "__index_space",
+                            "cloud_name", "__index_space", "facade_geometry",
                         ) if d.get(key) is not None
                     },
                     bbox_json=d.get("bbox_json"),

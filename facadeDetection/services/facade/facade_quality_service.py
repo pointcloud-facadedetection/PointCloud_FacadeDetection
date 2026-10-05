@@ -17,6 +17,7 @@ from algorithms.facade.global_plane_quality import (
     compute_block_plane_quality,
 )
 from algorithms.facade.coverage import CoverageMask
+from algorithms.facade.facade_geometry import extract_facade_geometry
 from algorithms.geometry import classify_plane, plane_axes
 from services.facade.facade_index_service import FacadeIndexService
 from utils.logging_utils import trace
@@ -339,6 +340,13 @@ class FacadeQualityService:
             # from the raw cloud, otherwise heatmap locations drift.
             result['projection_origin'] = origin_on_plane.tolist()
             result['projection_u_axis'] = u_axis.tolist()
+
+            # 传入质量评估立面的顶点坐标和边中点坐标，供 3D 热力面片/边界锚点渲染使用。
+            # 两套质量分支共享同一质量域和投影坐标系，统一输出可直接用于
+            # 3D 热力面片/边界锚点的几何描述；不改变底层算法返回结构。
+            result['facade_geometry'] = extract_facade_geometry(
+                plane_model, origin_on_plane, u_axis, v_axis,
+                (q_u0, q_v0, q_u1, q_v1))
             result['projection_v_axis'] = v_axis.tolist()
 
             result.setdefault('thresholds', {})
