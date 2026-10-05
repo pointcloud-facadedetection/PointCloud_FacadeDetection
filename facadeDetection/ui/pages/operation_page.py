@@ -179,20 +179,8 @@ class OperationPageMixin:
         
         # 原"评估立面质量"按钮已由顶部步骤④取代，此处不再重复提供入口。
 
-        # 热力切换显示：按改造要求从右侧面板迁移到左侧站点管理面板。
-        self.btn_heatmap_toggle = QPushButton('热力切换显示')
-        self.btn_heatmap_toggle.setObjectName('btn_heatmap_toggle')
-        self.btn_heatmap_toggle.setToolTip('在平整度热力与垂直度热力之间切换')
-        self.btn_heatmap_toggle.setMinimumHeight(34)
-        self.btn_heatmap_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_heatmap_toggle.clicked.connect(self._toggle_heatmap_display)
-        self.btn_heatmap_toggle.setEnabled(False)
-        left_panel = self.left_dock.findChild(QWidget, 'leftDockPanel')
-        left_layout = left_panel.layout() if left_panel is not None else None
-        if left_layout is not None:
-            left_layout.addWidget(self.btn_heatmap_toggle)
-        else:
-            lay.addWidget(self.btn_heatmap_toggle)
+        # 注：【热力切换显示】按钮已迁移至【项目复核】页右侧 Panel，
+        #     此处不再创建，避免操作页与复核页重复。
 
         # 立面列表
         from PySide6.QtWidgets import QListWidget
@@ -1016,17 +1004,11 @@ class OperationPageMixin:
         self._refresh_report_preview()
 
     def _refresh_heatmap_button_state(self):
-        button = getattr(self, 'btn_heatmap_toggle', None)
-        if button is None:
-            return
+        # 操作页按钮已移除，仅保留兼容调用；状态刷新同步到复核页。
         controller = self.facade_quality_controller
-        enabled = bool(controller.compatible_quality_results())
-        button.setEnabled(enabled)
-        mode = controller.heatmap_mode
-        current = '平整度' if mode == 'flatness' else '垂直度'
-        next_mode = '垂直度' if mode == 'flatness' else '平整度'
-        button.setText(f'热力切换显示（当前：{current}）')
-        button.setToolTip(f'点击切换至{next_mode}热力映射')
+        # 若复核页控件已安装，同步刷新其状态
+        if hasattr(self, '_refresh_review_heatmap_status'):
+            self._refresh_review_heatmap_status()
 
     def _toggle_heatmap_display(self):
         self.facade_quality_controller.toggle_heatmap_display()

@@ -490,12 +490,35 @@ class ProjectOverviewService:
             project_uuid, FileKind.raw_pointcloud)}
         for p in pcs:
             if p in existing_pcs:
+                # 对已存在的 E57 资产：校验缓存是否有效，无效时尝试重建
+                if Path(p).suffix.lower() == '.e57':
+                    existing_asset = next(
+                        (a for a in FileRepo.list_assets_by_kind(
+                            project_uuid, FileKind.raw_pointcloud) if a.path == p),
+                        None,
+                    )
+                    if existing_asset is not None:
+                        meta = dict(existing_asset.meta_json or {})
+                        cache_path = meta.get('cache_path')
+                        cache_valid = cache_path and Path(cache_path).is_file() and Path(cache_path).stat().st_size > 0
+                        if not cache_valid:
+                            try:
+                                ensure_e57_cache(project_uuid, existing_asset)
+                            except Exception as exc:
+                                log_event(project_uuid, 'e57.cache.rebuild_failed',
+                                          source_path=p, error=repr(exc))
+                                raise ValueError(f'E57 缓存重建失败：{exc}') from exc
                 continue
             asset = FileRepo.import_file(
                 project_uuid, p, FileKind.raw_pointcloud,
                 copy_into_project=False)
             if Path(p).suffix.lower() == '.e57':
-                ensure_e57_cache(project_uuid, asset)
+                try:
+                    ensure_e57_cache(project_uuid, asset)
+                except Exception as exc:
+                    log_event(project_uuid, 'e57.cache.failed',
+                              source_path=p, error=repr(exc))
+                    raise ValueError(f'E57 转换失败，无法导入该文件：{exc}') from exc
 
         # 3) 照片
         existing_photos = {a.path for a in FileRepo.list_assets_by_kind(

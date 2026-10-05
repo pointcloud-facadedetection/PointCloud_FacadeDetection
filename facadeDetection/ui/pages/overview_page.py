@@ -385,10 +385,6 @@ class OverviewPageMixin:
 
         values = dlg.values()
 
-        # 保存旧资源列表用于计算差集
-        old_fls = set(getattr(project, 'fls_directories', []) or [])
-        old_pcs = set(getattr(project, 'pointcloud_files', []) or [])
-
         try:
             updated_project = self.project_overview_service.update_project(
                 project_id, **values
@@ -396,10 +392,6 @@ class OverviewPageMixin:
         except (ValueError, OSError) as error:
             QMessageBox.warning(self, '编辑项目', str(error))
             return
-
-        # 计算新增资源（编辑项目只导入新增项，不重复加载已有项）
-        new_fls = [d for d in (values.get('fls_directories') or []) if d not in old_fls]
-        new_pcs = [p for p in (values.get('pointcloud_files') or []) if p not in old_pcs]
 
         is_current = (
             self.current_project is not None
@@ -409,13 +401,11 @@ class OverviewPageMixin:
         if is_current:
             self._set_current_project(updated_project)
 
-        # 当前项目新增资源需同步视口；非当前项目仅需后台转换 FLS
-        if new_fls:
-            self._start_load('fls', project_id, directories=new_fls)
-        elif new_pcs:
-            self._start_load('upload', project_id, file_paths=new_pcs)
-        elif is_current:
-            # 无新增资源（或仅删除）时刷新现有视口与面板
+        # update_project 内部已调用 update_project_assets 同步完成资源导入
+        # （包括 FLS 转换、E57 cache 生成、站点同步），因此无需再走 _start_load
+        # 异步链路。直接在当前线程刷新 UI，避免 before_ids 已包含新站点导致
+        # on_load_finished 找不到"新"站点而跳过视口刷新。
+        if is_current:
             try:
                 self.station_service.refresh()
                 stations = self.station_service.list_stations()

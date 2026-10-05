@@ -275,6 +275,10 @@ class ProjectLifecycleController(QObject):
                 payload = result.get('result') or {}
                 if payload.get('success'):
                     # FLS 导入功能已实现资产的持久化存储和同步
+                    # 注意：prepare_project_activation 可能已调用 dispose_project_runtime
+                    # 清除了 station_service 的 project_uuid，必须先恢复再刷新
+                    if self.station_service.project_uuid != project_id:
+                        self.station_service.set_project(project_id)
                     self.station_service.refresh()
                     new_station = self._find_new_station(before_ids)
                     if new_station is not None:
@@ -286,6 +290,14 @@ class ProjectLifecycleController(QObject):
                         prepared = self.station_service.reload_single(new_station)
                         self.station_service.commit_show_single(new_station, prepared)
                         self.station_panel_refresh_requested.emit(new_station.id)
+                    else:
+                        # 未识别到新站点但仍可能存在站点（如缓存重建场景），
+                        # 兜底渲染首个可用站点并刷新面板
+                        stations = self.station_service.list_stations()
+                        if stations:
+                            first = stations[0]
+                            self.station_service.show_single(first)
+                            self.station_panel_refresh_requested.emit(first.id)
                 else:
                     self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))
             elif operation == 'activate':
