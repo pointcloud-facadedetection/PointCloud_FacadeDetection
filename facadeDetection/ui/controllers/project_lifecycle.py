@@ -194,6 +194,28 @@ class ProjectLifecycleController(QObject):
                 # 全量恢复：加载所有站点的历史立面检测结果到聚合存储
                 all_historical = self.project_overview_service.load_all_historical_facades(
                     project_uuid)
+                # 失修立面清理：修订号与当前数据集不匹配的旧结果软删出存储，
+                # 不再进入列表与着色（防止旧索引错位复用）
+                try:
+                    from services.viewport_render_service import ViewportRenderService
+                    for station_id, facades in list(all_historical.items()):
+                        ds = self.pointcloud_service.get_dataset(
+                            f'{project_uuid}:{station_id}')
+                        revision = (str(getattr(ds, 'revision', '') or '')
+                                    if ds is not None else '')
+                        if not revision:
+                            continue
+                        stale_ids = {int(f['id']) for f in facades
+                                     if ViewportRenderService._facade_stale(
+                                         f, revision)}
+                        if stale_ids:
+                            self.project_overview_service.mark_facades_deleted(
+                                project_uuid, stale_ids)
+                            all_historical[station_id] = [
+                                f for f in facades
+                                if int(f['id']) not in stale_ids]
+                except Exception:
+                    pass
                 for station_id, facades in all_historical.items():
                     self.project_operation_service.set_facade_results_for_station(
                         station_id, facades)

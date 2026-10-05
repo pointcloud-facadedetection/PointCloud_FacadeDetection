@@ -6,6 +6,8 @@ from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
 from config.settings import Config
+
+_BASE_GRAY = tuple(Config.FACADE_BASE_COLOR)
 from utils.array_utils import as_array
 from utils.logging_utils import trace
 from services.heatmap_spec import heatmap_spec, normalize_heatmap_mode, defect_colormap
@@ -28,6 +30,7 @@ class ViewportRenderService:
         self._selected_facade_id: Optional[int] = None
         self._facades_cache: Dict[str, list[dict]] = {}
         self._facade_color_signatures: Dict[str, str] = {}
+        self._focus_bbox_visible = False
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
@@ -128,6 +131,7 @@ class ViewportRenderService:
         self._pick_mode = False
         self._picked_points.clear()
         self._selected_facade_id = None
+        self._focus_bbox_visible = False
         self._facades_cache.clear()
         self._facade_color_signatures.clear()
         if hasattr(self.viewport, 'exit_pick_mode'):
@@ -266,8 +270,38 @@ class ViewportRenderService:
             self.viewport.clear_pick_markers()
         self._picked_points.clear()
 
+    def _current_dataset_revision(self, data) -> str:
+        """当前显示云对应的数据集修订号：云元数据优先，回退到数据集注册表。"""
+        rev = str(data.get('dataset_revision') or '')
+        if rev:
+            return rev
+        try:
+            svc = getattr(self, 'pointcloud_service', None)
+            ds = (svc.get_dataset(str(data.get('dataset_id') or ''))
+                  if svc is not None else None)
+            if ds is not None:
+                return str(getattr(ds, 'revision', '') or '')
+        except Exception:
+            pass
+        return ''
+
+    @staticmethod
+    def _facade_stale(facade, current_revision) -> bool:
+        """立面结果的修订号与当前数据集不一致即失效。
+
+        dataset_revision（检测时盖的真修订号）优先，dataset_id（站点式
+        旧格式）兜底；两侧任一为空时不判失效（兼容无标记数据）。
+        """
+        if not current_revision:
+            return False
+        marker = str(facade.get('dataset_revision')
+                     or facade.get('dataset_id') or '')
+        return bool(marker and marker != current_revision)
+
     # ---- Facade highlighting ----
-    def highlight_facades(self, cloud_name: str, facades: list[dict], base_color=(0.75, 0.75, 0.75)):
+    def highlight_facades(self, cloud_name: str, facades: list[dict], base_color=None):
+        if base_color is None:
+            base_color = _BASE_GRAY
         # TODO(内存/渲染性能): highlight_facades：整云 np.tile 颜色矩阵及代理索引映射。
         """
         立面着色策略（统一颜色规则 + 选中高亮）：
@@ -289,7 +323,7 @@ class ViewportRenderService:
 
             n = len(pos)
             dataset_id = str(data.get('dataset_id') or '')
-            revision = str(data.get('dataset_revision') or '')
+            revision = self._current_dataset_revision(data)
             digest = hashlib.sha1()
             digest.update(f'{cloud_name}|{dataset_id}|{revision}|{n}'.encode())
             for facade in facades or []:
@@ -307,6 +341,12 @@ class ViewportRenderService:
                 pass
 
             for order, f in enumerate(facades or []):
+                # 修订号校验：立面结果按检测时的数据集版本盖戳，代理内容变化
+                # （去噪/重建）后旧索引会错位——失修立面不刷色并标记 __stale。
+                if self._facade_stale(f, revision):
+                    f['__stale'] = True
+                    continue
+                f.pop('__stale', None)
                 col = self.facade_color_for(f, order)
 
                 if col is None:
@@ -323,7 +363,9 @@ class ViewportRenderService:
                     colors[idx] = col
 
             trace('facade.color', cloud=cloud_name,
-                  facades=len(facades or []), displayed_points=n,
+                  facades=len(facades or []),
+                  stale=int(sum(1 for f in (facades or []) if f.get('__stale'))),
+                  displayed_points=n,
                   valid_proxy_indices=int(sum(
                       len(self._proxy_rows_for_display(cloud_name,
                           f.get('proxy_indices') or f.get('inlier_indices', [])))
@@ -334,7 +376,9 @@ class ViewportRenderService:
         except Exception as e:
             print(f"highlight_facades failed: {e}", flush=True)
 
-    def _facade_base_colors(self, cloud_name, facades, base_color=(0.75, 0.75, 0.75)):
+    def _facade_base_colors(self, cloud_name, facades, base_color=None):
+        if base_color is None:
+            base_color = _BASE_GRAY
         data = self.viewport.get_cloud_data(cloud_name)
         n = len(data.get('pos', [])) if data is not None else 0
         colors = np.tile(np.asarray(base_color, dtype=np.float32).reshape(1, 3), (n, 1))
@@ -401,7 +445,7 @@ class ViewportRenderService:
             return
         # 聚焦着色：非选中区域（含其他立面）统一降回全量点云的默认灰，
         # 仅选中立面保留原色
-        colors = np.tile(np.asarray((0.75, 0.75, 0.75), dtype=np.float32)
+        colors = np.tile(np.asarray(_BASE_GRAY, dtype=np.float32)
                          .reshape(1, 3), (len(pos), 1))
         order = next((i for i, f in enumerate(facades) if f is target), 0)
         col = self.facade_color_for(target, order)
@@ -419,14 +463,18 @@ class ViewportRenderService:
             self.viewport.toggle_bbox(
                 self._FOCUS_BBOX_KEY,
                 np.asarray(pts.min(axis=0)), np.asarray(pts.max(axis=0)))
+            self._focus_bbox_visible = True
 
     def _remove_focus_bbox(self) -> None:
-        """摘除聚焦线框（toggle_bbox 幂等：在显示才摘）。"""
-        viewport = self.viewport
-        scene = getattr(viewport, '_scene', None)
-        if (scene is not None
-                and scene.bbox_visible.get(self._FOCUS_BBOX_KEY)):
-            viewport.toggle_bbox(self._FOCUS_BBOX_KEY, None, None)
+        """摘除聚焦线框。
+
+        可见状态由本服务自行跟踪：toggle_bbox 是翻转语义，Open3D 后端靠
+        viewport._scene 判断可见性，而 PyVista 后端没有该属性，依赖后端
+        自查会导致框状态翻转错乱（奇数次选中出现、偶数次消失）。
+        """
+        if self._focus_bbox_visible:
+            self.viewport.toggle_bbox(self._FOCUS_BBOX_KEY, None, None)
+            self._focus_bbox_visible = False
 
     def set_global_point_color(self, color: Tuple[float, float, float]) -> None:
         """在视口内将整个点云场景统一着色."""
@@ -474,7 +522,7 @@ class ViewportRenderService:
 
     def colorize_by_scalar(self, cloud_name: str, indices: np.ndarray, values: np.ndarray,
                             vmin: float | None = None, vmax: float | None = None,
-                            base_color=(0.75, 0.75, 0.75), cmap: str = 'turbo') -> None:
+                            base_color=None, cmap: str = 'turbo') -> None:
         """
         根据给定的标量值对指定点进行热力着色，其余点使用 base_color。
         - indices: 全局点索引（0..N-1）的一维数组
@@ -801,7 +849,7 @@ class ViewportRenderService:
                                     heatmap_mode='flatness')
 
     def apply_quality_colors(self, cloud_name: str, quality_result: dict,
-                             base_color: tuple[float, float, float] = (0.75, 0.75, 0.75),
+                             base_color: tuple[float, float, float] | None = None,
                              index_service=None, _colors=None) -> None:
         """将质量结果应用到点云颜色 - 统一缺陷值热力图（与导出图一致）。
 

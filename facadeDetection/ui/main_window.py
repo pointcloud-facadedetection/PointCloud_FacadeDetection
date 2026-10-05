@@ -42,6 +42,20 @@ from view3d.open3d_viewport import Open3DViewport
 
 
 
+def _create_viewport():
+    """视口后端工厂：默认 PyVista/VTK，失败回退 Open3D。"""
+    import os
+    if os.getenv('FACD_VIEWPORT', '').lower() != 'open3d':
+        try:
+            from view3d.pyvista_viewport import PyVistaViewport
+            print('[PCFD] viewport.backend=pyvista', flush=True)
+            return PyVistaViewport()
+        except Exception as exc:
+            print(f'[PCFD] viewport.pyvista_unavailable: {exc!r}, '
+                  'fallback to open3d', flush=True)
+    return Open3DViewport()
+
+
 class MainWindow(OverviewPageMixin, OperationPageMixin,
                  InspectionReviewPageMixin, ReportPageMixin,
                  ScaffoldPageMixin,
@@ -58,7 +72,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self.resize(1600, 900)
         # 三维工作台在过窄尺寸下失去可用性；该下限同时保证命令栏和四页签不溢出。
         self.setMinimumSize(960, 640)
-        self.viewport = Open3DViewport()
+        # 视口后端：优先 PyVista/VTK（Qt 原生、宽线/材质生效），
+        # pyvista 不可用时回退 Open3D。FACD_VIEWPORT=open3d 可强制旧后端。
+        self.viewport = _create_viewport()
         # Unified render service for business modules
         self.render_service = ViewportRenderService(self.viewport, db=None)
         self.render_facade = ViewportRenderFacade(self.render_service)

@@ -387,7 +387,7 @@ def stratified_proxy_build(points, colors, ranges, **kwargs):
         crop = float(np.max(rng)) if len(rng) and np.isfinite(np.max(rng)) else 1.0
     # min_range 高于全部距离时，壳层循环会把所有点排除，proxy 退化为空。
     # 此时把下限回落到实际最小距离，保证代理域恒非空。
-    if len(rng) and lo > float(np.min(rng)):
+    if len(rng) and lo > float(np.max(rng)):
         lo = max(0.0, float(np.min(rng)))
     if lo >= crop:
         crop = lo + max(float(rng.max()) if len(rng) else 1.0, 1e-6)

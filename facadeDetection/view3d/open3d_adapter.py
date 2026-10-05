@@ -78,8 +78,14 @@ class Open3DAdapter:
         if self.vis is None:
             return
         opt = self.vis.get_render_option()
-        # Match the Corporate Clean viewport token (#111827).
-        opt.background_color = np.array([17 / 255, 24 / 255, 39 / 255])
+        # Match the Corporate Clean viewport token (Config.VIEWPORT_BACKGROUND).
+        try:
+            from config.settings import Config
+            opt.background_color = np.array(
+                [int(Config.VIEWPORT_BACKGROUND.lstrip('#')[i:i+2], 16) / 255
+                 for i in (0, 2, 4)])
+        except Exception:
+            opt.background_color = np.array([1.0, 1.0, 1.0])
         opt.point_size = self.MIN_POINT_PIXEL_SIZE
         opt.show_coordinate_frame = True
         # 强制使用点云自带颜色；避免 Open3D 默认以 Default/XCoordinate 等模式

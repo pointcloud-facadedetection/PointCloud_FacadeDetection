@@ -420,8 +420,8 @@ class TestOverviewPrepareCommitSplit:
         assert len(payload['prepared']) == 1
         dataset = pointcloud.get_dataset('u1:w.ply')
         assert payload['prepared'][0].points is dataset.proxy_points
-        assert events['progress'][0] == 2       # worker 起始进度
-        assert events['progress'][-1] == 100    # worker 完成进度
+        assert events['progress'][0] == 10      # worker 起始进度
+        assert 2 not in events['progress']      # 反测：旧版 2% 起点已废弃
         assert render.calls == []               # worker 只做计算段
 
     def test_cancelled_worker_skips_compute(self, tmp_path, monkeypatch):

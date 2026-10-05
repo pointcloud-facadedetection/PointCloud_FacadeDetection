@@ -42,6 +42,10 @@ QUALITY_WINDOW_ROW_KEYS = {
     'center_uv', 'hole_length_m', 'angle_deg', 'source_direction',
     'snap_distance_m', 'directional_measurements',
     'verticality_angle_deg', 'verticality_deviation_mm', 'verticality_pass',
+    # 热力映射新增（ruiqi 图片匹配热力渲染）：
+    'all_defect_source_ids', 'all_defect_values_mm',
+    'defect_point_indices', 'defect_values_mm',
+    'ruler_defect_grid', 'u_center',
 }
 
 QUALITY_DIRECTION_MEASUREMENT_KEYS = {
@@ -72,6 +76,9 @@ QUALITY_OVERALL_KEYS = {
 
 QUALITY_VERTICALITY_KEYS = {
     'ok', 'verticality_pass', 'verticality_pass_rate',
+    # 垂直度条带网格扩展（ruiqi 热力渲染）：
+    'rows', 'verticality_deviation_mm', 'verticality_avg_deviation_mm',
+    'verticality_max_angle_deg',
 }
 
 QUALITY_PROJECTION_KEYS = {
@@ -151,8 +158,15 @@ class TestQualityReportStructureFrozen:
         assert len(report['intervals']) > 0
         # 数据：键集合逐字等于冻结清单
         assert set(report.keys()) == QUALITY_TOP_KEYS
+        # 窗口行：基础键每行必有；缺陷键仅存在缺陷的行才携带（可选键）。
+        # 契约 = 每行键集是"全集的子集"且"含全部基础键"。
+        optional_keys = {'all_defect_source_ids', 'all_defect_values_mm'}
+        base_keys = QUALITY_WINDOW_ROW_KEYS - optional_keys
         for row in report['windows']:
-            assert set(row.keys()) == QUALITY_WINDOW_ROW_KEYS
+            keys = set(row.keys())
+            assert base_keys <= keys, f'窗口行缺基础键: {base_keys - keys}'
+            assert keys <= QUALITY_WINDOW_ROW_KEYS, \
+                f'窗口行出现白名单外键: {keys - QUALITY_WINDOW_ROW_KEYS}'
             assert isinstance(row['grid_key'], tuple) and len(row['grid_key']) == 2
             assert len(row['center_xyz']) == 3
         measured = [m for row in report['windows']

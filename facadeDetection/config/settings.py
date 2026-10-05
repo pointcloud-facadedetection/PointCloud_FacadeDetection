@@ -157,8 +157,12 @@ class Config:
     }
 
     HIGHLIGHT_COLOR = [0.2, 0.8, 0.2]
-    FACADE_BASE_COLOR = [0.75, 0.75, 0.75]
+    FACADE_BASE_COLOR = [0.55, 0.55, 0.55]
     QUALITY_HEATMAP_BASE_COLOR = [0.72, 0.78, 0.86]
+
+    # --- Viewport appearance (both backends read these) ---
+    VIEWPORT_BACKGROUND = '#FFFFFF'
+    DEFAULT_CLOUD_GRAY = 0.45
 
     # --- Quality evaluation constants ---
     QUALITY_PASS = 0

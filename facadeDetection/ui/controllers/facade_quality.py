@@ -609,8 +609,13 @@ class FacadeQualityController(QObject):
                                     'dataset_revision': getattr(dataset, 'revision', None)})
                     break
             self.heatmap_button_refresh_requested.emit()
-            # 单立面评估同样导出热力图 PNG，供 PDF 报告预览使用
-            self._export_batch_heatmaps(cloud, f, quality)
+            # 热力图 PNG 导出为尽力而为：导出失败不得把已成功的
+            # 评估与持久化翻转成"结果保存失败"
+            try:
+                self._export_batch_heatmaps(cloud, f, quality)
+            except Exception as exc:
+                print(f'[PCFD] quality.heatmap_export_failed '
+                      f'facade_id={facade_no} error={exc!r}', flush=True)
             # 同步到项目级聚合存储，确保 PDF 报告预览即时刷新
             self._upsert_facade_to_aggregated(f)
         except Exception as exc:
