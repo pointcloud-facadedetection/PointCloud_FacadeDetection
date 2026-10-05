@@ -655,9 +655,9 @@ class PdfReportRenderer:
 
         # 列定义保持"两组图同一页"的高度契约不变，仅让横向宽度自适应。
         columns = (
-            ('overlay', 'Overlay', '点云立面热力映射图'),
-            ('heatmap_grid', 'Heatmap Grid', '独立热力网格图'),
-            ('photo', '2D Photo Overlay', '2D现场热力映射图'),
+            ('overlay', 'Overlay', '点云立面图（暗红色为不合格靠尺）'),
+            ('heatmap_grid', 'Heatmap Grid', '立面网格图（暗红色为不合格靠尺）'),
+            ('photo', '2D Photo Overlay', '现场照片叠加图（暗红色为不合格靠尺）'),
         )
 
         def render_group(mode: str, title: str) -> str:

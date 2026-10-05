@@ -76,6 +76,7 @@ class FacadeHeatmapTripletRenderer:
     _OVERLAY_BASE_COLOR = np.array([230, 232, 235], dtype=np.uint8)
     _OVERLAY_FILL_COLOR = (238, 240, 243)
     _HEATMAP_BG_COLOR = 248
+    _FAILED_RULER_RGB = np.array([128, 0, 32], dtype=np.uint8)
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,14 +99,9 @@ class FacadeHeatmapTripletRenderer:
 
         # ---- 按 method + metric 路由到不同的样本准备策略 ----
         physical_cell_m = None
-        if method == "ruler" and metric == "flatness":
-            prepare_result = self._prepare_ruler_flatness_grid(
+        if method == "ruler":
+            defect_points, values, defect_colors = self._ruler_anchor_samples(
                 windows, spec, quality)
-            if prepare_result is None:
-                prepare_result = self._prepare_subgrid(
-                    windows, spec, quality, metric='flatness')
-            defect_points, values, defect_colors = prepare_result
-            physical_cell_m = 0.10
         elif method == "global_plane" and metric == "flatness":
             prepare_result = self._prepare_global_plane_point_samples(
                 points, windows, spec, quality, metric='flatness')
@@ -120,14 +116,6 @@ class FacadeHeatmapTripletRenderer:
                 raise ValueError(f'global {metric} requires explicit defect samples')
             defect_points, values, defect_colors = prepare_result
             physical_cell_m = 0.15
-        elif method == "ruler" and metric == "verticality":
-            prepare_result = self._prepare_ruler_verticality_points(
-                windows, spec, quality)
-            if prepare_result is None:
-                prepare_result = self._prepare_subgrid(
-                    windows, spec, quality, metric='verticality')
-            defect_points, values, defect_colors = prepare_result
-            physical_cell_m = 0.10
         else:
             defect_points, values, defect_colors = self._prepare_subgrid(
                 windows, spec, quality, metric=metric)
@@ -184,6 +172,13 @@ class FacadeHeatmapTripletRenderer:
             uv_range=uv_range,          # ★ 显式画布边界
         )
 
+        # 靠尺法不是连续数值热力图：只显示实际检测失败的靠尺位置。
+        # 注意：靠尺必须是独立的顶层图层，不能替换 raster 的热力层；
+        # 否则后续底图/热力合成会使靠尺出现断条或被覆盖。
+        if method == "ruler":
+            raster["ruler_overlay_rgba"] = self._ruler_segments_rgba(
+                raster, windows, metric, quality, spec)
+
         overlay = self._build_overlay(raster)
         heatmap_grid = self._build_isolated_heatmap_with_grid(
             raster, self.GRID_STEP_M)
@@ -193,18 +188,21 @@ class FacadeHeatmapTripletRenderer:
         #   global_plane_* → bipolar_colormap（双极）
         is_bipolar = (method == "global_plane"
                       and metric in ("flatness", "verticality"))
-        is_cold = (method == "ruler"
-                   and metric in ("flatness", "verticality"))
-        overlay = self._embed_legend(overlay, raster, is_bipolar=is_bipolar,
-                                     is_cold=is_cold, metric=metric)
-        heatmap_grid = self._embed_legend(heatmap_grid, raster,
-                                          is_bipolar=is_bipolar,
-                                          is_cold=is_cold, metric=metric)
+        is_cold = False
+        # 靠尺是离散的失败条带，不附加连续值色条；模拟墙面仍保留热力图图例。
+        if method != "ruler":
+            overlay = self._embed_legend(overlay, raster,
+                                         is_bipolar=is_bipolar,
+                                         is_cold=is_cold, metric=metric)
+            heatmap_grid = self._embed_legend(heatmap_grid, raster,
+                                              is_bipolar=is_bipolar,
+                                              is_cold=is_cold, metric=metric)
 
         if photo_path and Path(photo_path).is_file():
             photo = self._build_photo_overlay(raster, photo_path)
         else:
-            overlay_rgba = raster["overlay_rgba"].copy()
+            overlay_rgba = self._compose_rgba_layers(
+                raster["overlay_rgba"], raster.get("ruler_overlay_rgba"))
             overlay_rgba[:, :, 3] = np.where(
                 overlay_rgba[:, :, 3] > 0,
                 np.maximum(overlay_rgba[:, :, 3], 210),
@@ -212,12 +210,14 @@ class FacadeHeatmapTripletRenderer:
             ).astype(np.uint8)
             cropped_rgb = self._crop_to_facade(
                 overlay_rgba, raster, fill=(0, 0, 0, 0))
-            photo = cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR)
-            photo = self._embed_legend(photo, raster, is_bipolar=is_bipolar,
-                                       is_cold=is_cold, metric=metric)
+            photo = cv2.cvtColor(cropped_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+            if method != "ruler":
+                photo = self._embed_legend(photo, raster, is_bipolar=is_bipolar,
+                                           is_cold=is_cold, metric=metric)
 
         # ★ 透明热力层（无点云底图），供 render_transparent_heatmap 复用
-        transparent_rgba = raster["overlay_rgba"].copy()
+        transparent_rgba = self._compose_rgba_layers(
+            raster["overlay_rgba"], raster.get("ruler_overlay_rgba"))
         transparent_bgra = cv2.cvtColor(transparent_rgba, cv2.COLOR_RGBA2BGRA)
         transparent = self._crop_to_facade(transparent_bgra, raster,
                                            fill=(0, 0, 0, 0))
@@ -243,6 +243,111 @@ class FacadeHeatmapTripletRenderer:
             blended = (bgr * alpha + white * (1.0 - alpha)).astype(np.uint8)
             return blended
         return img
+
+    @classmethod
+    def _ruler_anchor_samples(cls, windows, spec, quality):
+        """Minimal anchors used only to establish the projection canvas."""
+        limit = float((quality.get("profile_snapshot", {}) or {}).get(
+            spec["limit_key"], (quality.get("thresholds", {}) or {}).get(
+                spec["limit_key"], 4.0)))
+        pts = []
+        for window in windows or []:
+            try:
+                failed = (window.get(spec["pass_key"]) is False or
+                          abs(float(window.get(spec["value_key"], np.nan))) > limit)
+            except (TypeError, ValueError):
+                failed = False
+            center = window.get("center_xyz")
+            if failed and center is not None and len(center) == 3:
+                pts.append(center)
+        if not pts:
+            raise ValueError("No valid failed ruler windows")
+        points = np.asarray(pts, dtype=float).reshape(-1, 3)
+        return points, np.ones(len(points), dtype=float), np.ones((len(points), 3), dtype=float)
+
+    @classmethod
+    def _ruler_segments_rgba(cls, raster, windows, metric, quality, spec):
+        """Render each failed ruler window as one independent thin line.
+
+        This is deliberately a presentation-only projection.  It consumes the
+        already persisted window result and never re-runs detection.  Flatness
+        uses the window's original direction (the four-way ``米`` scan is
+        therefore represented naturally by its individual windows).
+        """
+        h, w = raster["overlay_rgba"].shape[:2]
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        origin = np.asarray(quality.get("projection_origin"), float)
+        ua = np.asarray(quality.get("projection_u_axis"), float)
+        va = np.asarray(quality.get("projection_v_axis"), float)
+        if origin.shape != (3,) or ua.shape != (3,) or va.shape != (3,):
+            return out
+        ua /= max(np.linalg.norm(ua), 1e-12)
+        va /= max(np.linalg.norm(va), 1e-12)
+        params = quality.get("parameters", {}) or {}
+        length = float(params.get("ruler_length_m", params.get("window_length_m", 2.0)))
+        limit = float((quality.get("profile_snapshot", {}) or {}).get(
+            spec["limit_key"], (quality.get("thresholds", {}) or {}).get(
+                spec["limit_key"], 4.0)))
+        bounds = np.asarray(raster.get("bounds"), float)
+        size = float(raster.get("pixel_size", .01))
+        mask = np.asarray(raster.get("facade_mask"), bool)
+
+        def uv_to_px(uv):
+            return np.array([(uv[0] - bounds[0]) / size,
+                             h - 1 - (uv[1] - bounds[1]) / size])
+
+        # 线宽是显示属性而非靠尺物理宽度。限制为细线，避免 PDF 缩放后
+        # 相邻靠尺融合；每次 cv2.line 调用均代表一个独立图元。
+        line_width = int(np.clip(round(0.018 / max(size, 1e-6)), 1, 2))
+
+        for window in windows or []:
+            pass_key = spec["pass_key"]
+            value = window.get(spec["value_key"], np.nan)
+            try:
+                failed = (window.get(pass_key) is False or abs(float(value)) > limit)
+            except (TypeError, ValueError):
+                failed = False
+            if not failed:
+                continue
+            center = np.asarray(window.get("center_xyz"), float)
+            if center.shape != (3,) or not np.all(np.isfinite(center)):
+                continue
+            angle = 90.0 if metric == "verticality" else float(window.get("direction_deg", 0.0))
+            rad = np.deg2rad(angle)
+            along = np.cos(rad) * ua + np.sin(rad) * va
+            c = center - origin
+            u0, v0 = float(c @ ua), float(c @ va)
+            half = length / 2.0
+            p0 = np.round(uv_to_px([u0 - half * (along @ ua),
+                                    v0 - half * (along @ va)])).astype(int)
+            p1 = np.round(uv_to_px([u0 + half * (along @ ua),
+                                    v0 + half * (along @ va)])).astype(int)
+            cv2.line(out, tuple(p0), tuple(p1),
+                     (*cls._FAILED_RULER_RGB.tolist(), 255), line_width,
+                     cv2.LINE_AA)
+
+        if mask.shape == out.shape[:2]:
+            out[:, :, 3] *= mask.astype(np.uint8)
+        out[out[:, :, 3] == 0] = 0
+        return out
+
+    @staticmethod
+    def _compose_rgba_layers(base, top):
+        """Alpha-composite a presentation layer above the heatmap layer."""
+        result = np.asarray(base, dtype=np.uint8).copy()
+        if top is None:
+            return result
+        foreground = np.asarray(top, dtype=np.uint8)
+        if foreground.shape != result.shape:
+            return result
+        alpha = foreground[:, :, 3:4].astype(np.float32) / 255.0
+        result[:, :, :3] = np.where(
+            alpha > 0,
+            foreground[:, :, :3],
+            result[:, :, :3],
+        ).astype(np.uint8)
+        result[:, :, 3] = np.maximum(result[:, :, 3], foreground[:, :, 3])
+        return result
 
     # ------------------------------------------------------------------
     # Sample preparation
@@ -749,7 +854,8 @@ class FacadeHeatmapTripletRenderer:
     # Overlay（点云底图 + 热力）
     # ------------------------------------------------------------------
     def _build_overlay(self, raster: dict) -> np.ndarray:
-        overlay_rgba = np.asarray(raster["overlay_rgba"])
+        overlay_rgba = self._compose_rgba_layers(
+            raster["overlay_rgba"], raster.get("ruler_overlay_rgba"))
         h, w = overlay_rgba.shape[:2]
         overlay_rgba[:, :, 3] = np.where(
             overlay_rgba[:, :, 3] > 0,
@@ -813,7 +919,9 @@ class FacadeHeatmapTripletRenderer:
     def _build_isolated_heatmap_with_grid(
         self, raster: dict, grid_step_m: float = 1.0
     ) -> np.ndarray:
-        overlay_rgba = raster["overlay_rgba"].copy()
+        # 网格属于底层辅助信息，先与热力层绘制完成，再叠加靠尺。
+        overlay_rgba = np.asarray(raster["overlay_rgba"], dtype=np.uint8).copy()
+        ruler_overlay = raster.get("ruler_overlay_rgba")
         h, w = overlay_rgba.shape[:2]
         pixel_size = raster["pixel_size"]
         grid_px = max(int(grid_step_m / pixel_size), 1)
@@ -843,6 +951,15 @@ class FacadeHeatmapTripletRenderer:
             background.astype(np.float32) * (1.0 - alpha)
             + foreground * alpha
         ).astype(np.uint8)
+        if ruler_overlay is not None:
+            ruler = np.asarray(ruler_overlay, dtype=np.uint8)
+            if ruler.shape == overlay_rgba.shape:
+                ruler_alpha = ruler[:, :, 3:4].astype(np.float32) / 255.0
+                composite = np.where(
+                    ruler_alpha > 0,
+                    ruler[:, :, :3],
+                    composite,
+                ).astype(np.uint8)
         bgr = cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
         return self._crop_to_facade(bgr, raster,
                                     fill=(self._HEATMAP_BG_COLOR,) * 3)
@@ -1010,6 +1127,25 @@ class FacadeHeatmapTripletRenderer:
         spec = heatmap_spec(mode)
         method = spec.get("method", "ruler")
         metric = spec.get("metric", "flatness")
+
+        # 靠尺模式直接复用线段渲染结果，禁止重新进入旧的点热力/splat链路。
+        if method == "ruler":
+            triplet = self.render(mode, points, colors, windows, plane_model,
+                                  quality, pixel_size=pixel_size)
+            image = np.asarray(triplet["transparent"], dtype=np.uint8)
+            if image.ndim != 3 or image.shape[2] != 4:
+                raise ValueError("靠尺透明图必须是 RGBA 四通道")
+            image[image[:, :, 3] == 0] = 0
+            if not return_metadata:
+                return image
+            # 照片 warp 只需裁剪后图像的有效 UV 外框；使用质量域作为
+            # 稳定的画布契约，避免透明像素参与边界估计。
+            domain = _resolve_domain_uv_range(quality)
+            if domain is None:
+                return {'image': image, 'uv_bounds': (0., 0., 0., 0.),
+                        'pixel_size': pixel_size}
+            return {'image': image, 'uv_bounds': tuple(map(float, domain)),
+                    'pixel_size': pixel_size}
 
         physical_cell_m = None
         if method == "ruler" and metric == "flatness":
