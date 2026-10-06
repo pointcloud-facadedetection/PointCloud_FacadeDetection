@@ -8,3 +8,5 @@ pypinyin
 pye57
 torch
 torchvision
+pyvista
+pyvistaqt
