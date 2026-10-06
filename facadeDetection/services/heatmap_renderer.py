@@ -100,7 +100,10 @@ class FacadeHeatmapTripletRenderer:
         # ---- 按 method + metric 路由到不同的样本准备策略 ----
         physical_cell_m = None
         if method == "ruler":
-            defect_points, values, defect_colors = self._ruler_anchor_samples(
+            # Ruler mode uses the failed-window centers only to establish the
+            # projection canvas.  Its visual primitive is the independent
+            # top-level line layer below, never a heatmap splat.
+            defect_points, values, defect_colors = self._ruler_canvas_samples(
                 windows, spec, quality)
         elif method == "global_plane" and metric == "flatness":
             prepare_result = self._prepare_global_plane_point_samples(
@@ -245,8 +248,13 @@ class FacadeHeatmapTripletRenderer:
         return img
 
     @classmethod
-    def _ruler_anchor_samples(cls, windows, spec, quality):
-        """Minimal anchors used only to establish the projection canvas."""
+    def _ruler_canvas_samples(cls, windows, spec, quality):
+        """Return non-defect anchors used only to establish the canvas.
+
+        The centers intentionally carry a below-threshold value so
+        ``rasterize_facade`` builds the wall background without producing a
+        ruler splat.  Failed rulers are rendered separately as line geometry.
+        """
         limit = float((quality.get("profile_snapshot", {}) or {}).get(
             spec["limit_key"], (quality.get("thresholds", {}) or {}).get(
                 spec["limit_key"], 4.0)))
@@ -263,7 +271,9 @@ class FacadeHeatmapTripletRenderer:
         if not pts:
             raise ValueError("No valid failed ruler windows")
         points = np.asarray(pts, dtype=float).reshape(-1, 3)
-        return points, np.ones(len(points), dtype=float), np.ones((len(points), 3), dtype=float)
+        limit_mm = max(limit, 1e-6)
+        return (points, np.zeros(len(points), dtype=float),
+                np.zeros((len(points), 3), dtype=float))
 
     @classmethod
     def _ruler_segments_rgba(cls, raster, windows, metric, quality, spec):
@@ -275,12 +285,15 @@ class FacadeHeatmapTripletRenderer:
         therefore represented naturally by its individual windows).
         """
         h, w = raster["overlay_rgba"].shape[:2]
-        out = np.zeros((h, w, 4), dtype=np.uint8)
+        # Draw at 4x resolution and reduce once.  This keeps independent
+        # segments continuous when the final PNG is later fitted into PDF.
+        supersample = 4
+        hi = np.zeros((h * supersample, w * supersample, 4), dtype=np.uint8)
         origin = np.asarray(quality.get("projection_origin"), float)
         ua = np.asarray(quality.get("projection_u_axis"), float)
         va = np.asarray(quality.get("projection_v_axis"), float)
         if origin.shape != (3,) or ua.shape != (3,) or va.shape != (3,):
-            return out
+            return np.zeros((h, w, 4), dtype=np.uint8)
         ua /= max(np.linalg.norm(ua), 1e-12)
         va /= max(np.linalg.norm(va), 1e-12)
         params = quality.get("parameters", {}) or {}
@@ -290,7 +303,6 @@ class FacadeHeatmapTripletRenderer:
                 spec["limit_key"], 4.0)))
         bounds = np.asarray(raster.get("bounds"), float)
         size = float(raster.get("pixel_size", .01))
-        mask = np.asarray(raster.get("facade_mask"), bool)
 
         def uv_to_px(uv):
             return np.array([(uv[0] - bounds[0]) / size,
@@ -298,7 +310,7 @@ class FacadeHeatmapTripletRenderer:
 
         # 线宽是显示属性而非靠尺物理宽度。限制为细线，避免 PDF 缩放后
         # 相邻靠尺融合；每次 cv2.line 调用均代表一个独立图元。
-        line_width = int(np.clip(round(0.018 / max(size, 1e-6)), 1, 2))
+        line_width = supersample * 1
 
         for window in windows or []:
             pass_key = spec["pass_key"]
@@ -318,16 +330,15 @@ class FacadeHeatmapTripletRenderer:
             c = center - origin
             u0, v0 = float(c @ ua), float(c @ va)
             half = length / 2.0
-            p0 = np.round(uv_to_px([u0 - half * (along @ ua),
-                                    v0 - half * (along @ va)])).astype(int)
-            p1 = np.round(uv_to_px([u0 + half * (along @ ua),
-                                    v0 + half * (along @ va)])).astype(int)
-            cv2.line(out, tuple(p0), tuple(p1),
+            p0 = np.rint(uv_to_px([u0 - half * (along @ ua),
+                                   v0 - half * (along @ va)]) * supersample).astype(int)
+            p1 = np.rint(uv_to_px([u0 + half * (along @ ua),
+                                   v0 + half * (along @ va)]) * supersample).astype(int)
+            cv2.line(hi, tuple(p0), tuple(p1),
                      (*cls._FAILED_RULER_RGB.tolist(), 255), line_width,
                      cv2.LINE_AA)
 
-        if mask.shape == out.shape[:2]:
-            out[:, :, 3] *= mask.astype(np.uint8)
+        out = cv2.resize(hi, (w, h), interpolation=cv2.INTER_AREA)
         out[out[:, :, 3] == 0] = 0
         return out
 
@@ -399,48 +410,6 @@ class FacadeHeatmapTripletRenderer:
             scale_mm = limit_mm * 0.15
         t = np.clip(excess / scale_mm, 0.0, 1.0)
         return centers, values, defect_colormap(t)
-
-    @staticmethod
-    def _prepare_ruler_verticality_points(windows, spec, quality):
-        """靠尺垂直度专用：优先使用 strip worker 输出的 3D 靠点坐标。"""
-        centers, values = [], []
-        for w in windows or []:
-            xyzs = w.get('verticality_defect_point_xyzs', [])
-            vals = w.get('verticality_defect_values_mm', [])
-            if not xyzs or not vals:
-                continue
-            for xyz, val in zip(xyzs, vals):
-                if xyz is None or len(xyz) != 3:
-                    continue
-                try:
-                    if not all(np.isfinite(float(x)) for x in xyz):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                centers.append([float(x) for x in xyz])
-                values.append(abs(float(val)))
-
-        if not centers:
-            return None
-
-        centers = np.asarray(centers, dtype=float).reshape(-1, 3)
-        values = np.asarray(values, dtype=float)
-        profile = quality.get("profile_snapshot", {}) or {}
-        limit = float(profile.get(
-            spec["limit_key"],
-            (quality.get("thresholds") or {}).get(
-                spec["limit_key"],
-                (quality.get("parameters") or {}).get(spec["limit_key"], 4.0),
-            ),
-        ))
-        excess = np.maximum(values - limit, 0.0)
-        finite = excess[np.isfinite(excess)]
-        scale = max(
-            float(np.percentile(finite, 98)) if finite.size else limit * 0.15,
-            limit * 0.15, 1e-6,
-        )
-        return centers, values, cold_defect_colormap(
-            np.clip(excess / scale, 0.0, 1.0))
 
     @staticmethod
     def _prepare_subgrid(windows, spec, quality, metric='flatness'):
@@ -558,71 +527,6 @@ class FacadeHeatmapTripletRenderer:
         else:
             colors = defect_colormap(np.clip(excess / scale, 0.0, 1.0))
         return centers, values, colors
-
-    @staticmethod
-    def _prepare_ruler_flatness_grid(windows, spec, quality):
-        """靠尺平整度专用：解析 ruler_defect_grid 得到 40 个网格单元中心点。
-
-        ★ 与色条 is_cold 保持一致，使用单极冷色色带。
-        """
-        origin = np.asarray(quality.get("projection_origin"), dtype=float)
-        u_axis = np.asarray(quality.get("projection_u_axis"), dtype=float)
-        v_axis = np.asarray(quality.get("projection_v_axis"), dtype=float)
-
-        if (origin.shape != (3,) or not np.all(np.isfinite(origin))
-                or u_axis.shape != (3,) or not np.all(np.isfinite(u_axis))
-                or v_axis.shape != (3,) or not np.all(np.isfinite(v_axis))):
-            return None
-
-        u_axis = u_axis / max(np.linalg.norm(u_axis), 1e-12)
-        v_axis = v_axis / max(np.linalg.norm(v_axis), 1e-12)
-
-        profile = quality.get("profile_snapshot", {}) or {}
-        limit = float(profile.get(
-            spec["limit_key"],
-            (quality.get("thresholds") or {}).get(
-                spec["limit_key"],
-                (quality.get("parameters") or {}).get(spec["limit_key"], 4.0),
-            ),
-        ))
-
-        centers, values = [], []
-        for w in windows or []:
-            grid_info = w.get('ruler_defect_grid')
-            if not grid_info or not grid_info.get('grids'):
-                continue
-            u_center = float(w.get('u_center', np.nan))
-            direction_deg = float(w.get('direction_deg', 0.0))
-            if not np.isfinite(u_center):
-                continue
-            rad = np.deg2rad(direction_deg)
-            along = np.cos(rad) * u_axis + np.sin(rad) * v_axis
-            center = np.asarray(w.get('center_xyz'), dtype=float)
-            if center.shape != (3,) or not np.all(np.isfinite(center)):
-                continue
-            for g in grid_info['grids']:
-                if abs(g.get('max_defect_mm', 0)) <= limit:
-                    continue
-                local_center = (g['u_start_m'] + g['u_end_m']) / 2.0
-                u_offset = local_center - u_center
-                grid_center = center + u_offset * along
-                centers.append(grid_center)
-                values.append(abs(g['max_defect_mm']))
-
-        if not centers:
-            return None
-
-        centers = np.asarray(centers, dtype=float).reshape(-1, 3)
-        values = np.asarray(values, dtype=float)
-        excess = np.maximum(values - limit, 0.0)
-        finite = excess[np.isfinite(excess)]
-        scale = max(
-            float(np.percentile(finite, 98)) if finite.size else limit * 0.15,
-            limit * 0.15, 1e-6,
-        )
-        # ★ 单极冷色，与 is_cold 图例一致
-        return centers, values, cold_defect_colormap(
-            np.clip(excess / scale, 0.0, 1.0))
 
     @staticmethod
     def _prepare_global_plane_point_samples(points, windows, spec, quality,
@@ -1148,15 +1052,7 @@ class FacadeHeatmapTripletRenderer:
                     'pixel_size': pixel_size}
 
         physical_cell_m = None
-        if method == "ruler" and metric == "flatness":
-            prepare_result = self._prepare_ruler_flatness_grid(
-                windows, spec, quality)
-            if prepare_result is None:
-                prepare_result = self._prepare_subgrid(
-                    windows, spec, quality, metric='flatness')
-            defect_points, values, defect_colors = prepare_result
-            physical_cell_m = 0.10
-        elif method == "global_plane" and metric == "flatness":
+        if method == "global_plane" and metric == "flatness":
             prepare_result = self._prepare_global_plane_point_samples(
                 points, windows, spec, quality, metric='flatness')
             if prepare_result is None:
@@ -1170,14 +1066,6 @@ class FacadeHeatmapTripletRenderer:
                 return None
             defect_points, values, defect_colors = prepare_result
             physical_cell_m = 0.15
-        elif method == "ruler" and metric == "verticality":
-            prepare_result = self._prepare_ruler_verticality_points(
-                windows, spec, quality)
-            if prepare_result is None:
-                prepare_result = self._prepare_subgrid(
-                    windows, spec, quality, metric='verticality')
-            defect_points, values, defect_colors = prepare_result
-            physical_cell_m = 0.10
         else:
             defect_points, values, defect_colors = self._prepare_subgrid(
                 windows, spec, quality, metric=metric)
