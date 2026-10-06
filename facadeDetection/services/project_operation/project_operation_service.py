@@ -432,7 +432,8 @@ class ProjectOperationService:
         except Exception as exc:
             print(f"进入 ROI 框选模式失败: {exc}", flush=True)
 
-    def _on_roi_selected(self, min_bound, max_bound, indices, p1=None, p2=None):
+    def _on_roi_selected(self, min_bound, max_bound, indices, p1=None, p2=None,
+                         roi_geometry=None):
         """ROI 框选完成回调"""
         t0 = time.monotonic()
         try:
@@ -511,12 +512,17 @@ class ProjectOperationService:
                     print(f"[ROI] AABB失败: {e}", flush=True)
                     return
 
-            try:
-                render.visualize_building_bbox(bmin, bmax, color=(1.0, 0.2, 0.2))
-            except Exception as e:
-                print(f"[ROI] 可视化失败: {e}", flush=True)
+            # PyVista 已经按选框快照绘制了 OBB；不要用世界轴 AABB 覆盖它。
+            if roi_geometry is None:
+                try:
+                    render.visualize_building_bbox(bmin, bmax, color=(1.0, 0.2, 0.2))
+                except Exception as e:
+                    print(f"[ROI] 可视化失败: {e}", flush=True)
 
-            self.set_detection_roi(bmin, bmax, None)
+            # 屏幕框内命中的显示点是 ROI 的权威集合；不要再用世界 AABB
+            # 反推索引，否则旋转视角下会把框外点重新纳入检测。
+            self.set_detection_roi(bmin, bmax, indices_list,
+                                   roi_geometry=roi_geometry)
             elapsed = time.monotonic() - t0
             print(
                 f"[ROI] 完成 (耗时{elapsed:.3f}s): "
@@ -539,7 +545,8 @@ class ProjectOperationService:
             return self._pointcloud_service.render_service
         return None
 
-    def set_detection_roi(self, min_bound, max_bound, indices=None):
+    def set_detection_roi(self, min_bound, max_bound, indices=None,
+                          roi_geometry=None):
         """设置当前检测 ROI。
         - min_bound, max_bound: 3D AABB（世界坐标）
         - indices: 可选，已选点的全局索引；若未提供，则根据 AABB 计算。
@@ -583,9 +590,11 @@ class ProjectOperationService:
                 self._last_roi_bounds = (np.minimum(bmin, bmax), np.maximum(bmin, bmax))
             else:
                 self._last_roi_bounds = None
+            self._last_roi_geometry = roi_geometry
         except Exception:
             self._last_roi_indices = None
             self._last_roi_bounds = None
+            self._last_roi_geometry = None
 
 
     def facade_detection(self):

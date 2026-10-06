@@ -724,17 +724,30 @@ class OperationPageMixin:
         )
 
     def _on_roi_box_detection_selected(self, min_bound, max_bound, indices, p1=None, p2=None):
-        """ROI 框选绘制完成：保存数据、渲染预览 AABB、弹出确认卡片。"""
+        """保存屏幕命中点，并优先显示与当前视角一致的定向 ROI 盒。"""
+        cloud = self.project_operation_service._active_cloud_name()
+        geometry = None
+        if cloud and indices is not None and len(indices) > 0:
+            try:
+                build = getattr(self.viewport, 'build_roi_obb', None)
+                if callable(build):
+                    geometry = build(cloud, indices, (p1, p2), pad_px=2.0)
+                    if geometry is not None and hasattr(self.viewport, 'show_roi_obb'):
+                        self.viewport.show_roi_obb(
+                            geometry['center'], geometry['axes'],
+                            geometry['half_extents'])
+            except Exception as exc:
+                print(f'[ROI] view-aligned box failed: {exc}', flush=True)
         self._pending_roi_data = {
             'min_bound': min_bound,
             'max_bound': max_bound,
             'indices': indices,
             'p1': p1,
             'p2': p2,
+            'geometry': geometry,
         }
-        # 先渲染预览用的 3D AABB 框，让用户直观确认框选范围
-        cloud = self.project_operation_service._active_cloud_name()
-        if cloud and indices is not None and len(indices) > 0:
+        # Open3D/旧视口没有 OBB 能力时保留 AABB 兼容预览。
+        if geometry is None and cloud and indices is not None and len(indices) > 0:
             try:
                 self.project_operation_service._render_roi_bbox(cloud, indices)
             except Exception:
@@ -834,7 +847,7 @@ class OperationPageMixin:
         # 复用原有 ROI 处理：3D AABB 生成、视口框体渲染、set_detection_roi
         self.project_operation_service._on_roi_selected(
             data['min_bound'], data['max_bound'], data['indices'],
-            data['p1'], data['p2'],
+            data['p1'], data['p2'], data.get('geometry'),
         )
         # 启动立面提取进度弹窗并触发算法
         self._begin_step_task(self.STEP_BOX_DETECT)

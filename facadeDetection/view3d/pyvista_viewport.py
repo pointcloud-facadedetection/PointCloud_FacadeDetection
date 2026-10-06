@@ -701,10 +701,15 @@ class PyVistaViewport(BaseViewport):
         try:
             renderer = self._plotter.renderer
             camera = renderer.GetActiveCamera()
-            width = max(1, self._widget.width())
-            height = max(1, self._widget.height())
+            # VTK display coordinates are framebuffer (physical) pixels while
+            # Qt mouse events are logical pixels.  Use the renderer size for
+            # the matrix and convert exactly once at the API boundary.
+            fb_w, fb_h = (int(v) for v in renderer.GetSize())
+            fb_w = max(1, fb_w); fb_h = max(1, fb_h)
             dpr = max(1.0, float(self._widget.devicePixelRatioF()))
-            aspect = width / height
+            width = fb_w / dpr
+            height = fb_h / dpr
+            aspect = fb_w / fb_h
             vtk_m = camera.GetCompositeProjectionTransformMatrix(
                 aspect, -1.0, 1.0)
             m = np.array([[vtk_m.GetElement(i, j) for j in range(4)]
@@ -716,8 +721,8 @@ class PyVistaViewport(BaseViewport):
             with np.errstate(divide='ignore', invalid='ignore'):
                 ndc = clip[:, :3] / np.where(np.abs(w) < 1e-12, np.nan, w)[:, None]
             # VTK display：左下原点、物理像素 → 转 Qt 左上原点、逻辑像素
-            sx = (ndc[:, 0] + 1.0) * 0.5 * width
-            sy = (ndc[:, 1] + 1.0) * 0.5 * height
+            sx = (ndc[:, 0] + 1.0) * 0.5 * fb_w / dpr
+            sy = (ndc[:, 1] + 1.0) * 0.5 * fb_h / dpr
             screen = np.stack([sx, height - sy], axis=1)
             valid = np.isfinite(ndc).all(axis=1) & (np.abs(ndc[:, 2]) <= 1.0)
             return screen, valid
@@ -918,6 +923,52 @@ class PyVistaViewport(BaseViewport):
                 & (screen[:, 1] >= y1) & (screen[:, 1] <= y2))
         return np.flatnonzero(mask).astype(np.int64)
 
+    def build_roi_obb(self, cloud_name, indices, screen_rect=None,
+                      pad_px=2.0, depth_pad=0.0):
+        """Build the view-aligned ROI box for the exact screen selection.
+
+        The selected indices are authoritative.  The box is deliberately not
+        a world-axis AABB: its axes are the current camera right/up/front
+        basis, so rotating the camera cannot turn a screen selection into a
+        misleading, oversized XYZ box.
+        """
+        data = self.point_data.get(cloud_name or self._active_name)
+        if data is None or indices is None:
+            return None
+        pts = np.asarray(data.get('pos'), dtype=np.float64)
+        idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+        idx = idx[(idx >= 0) & (idx < len(pts))]
+        if len(idx) == 0:
+            return None
+        cam = self._plotter.renderer.GetActiveCamera()
+        pos = np.asarray(cam.GetPosition(), dtype=np.float64)
+        focal = np.asarray(cam.GetFocalPoint(), dtype=np.float64)
+        front = focal - pos; front /= max(np.linalg.norm(front), 1e-12)
+        up = np.asarray(cam.GetViewUp(), dtype=np.float64)
+        up -= front * np.dot(up, front); up /= max(np.linalg.norm(up), 1e-12)
+        right = np.cross(front, up); right /= max(np.linalg.norm(right), 1e-12)
+        up = np.cross(right, front); up /= max(np.linalg.norm(up), 1e-12)
+        axes = np.column_stack((right, up, front))
+        local = (pts[idx] - focal) @ axes
+        lo, hi = local.min(axis=0), local.max(axis=0)
+        if screen_rect is not None and pad_px > 0:
+            # Convert pixel padding using local projected extent.  This is
+            # intentionally small and never has a fixed 0.5 m world floor.
+            x1, y1, x2, y2 = map(float, (screen_rect[0].x(), screen_rect[0].y(),
+                                         screen_rect[1].x(), screen_rect[1].y()))
+            span_px = max(abs(x2-x1), abs(y2-y1), 1.0)
+            span_local = max(float(np.ptp(local[:, :2], axis=0).max()), 1e-6)
+            pad = span_local * float(pad_px) / span_px
+            lo[:2] -= pad; hi[:2] += pad
+        lo[2] -= float(depth_pad); hi[2] += float(depth_pad)
+        center_local = (lo + hi) * 0.5
+        center = focal + center_local @ axes.T
+        half = (hi - lo) * 0.5
+        corners = np.asarray([center + np.array([sx*half[0], sy*half[1], sz*half[2]]) @ axes.T
+                              for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+        return {'center': center, 'axes': axes, 'half_extents': half,
+                'corners': corners, 'indices': idx}
+
     def clear_roi_visuals(self):
         self._remove_roi_bbox()
 
@@ -929,6 +980,25 @@ class PyVistaViewport(BaseViewport):
         self._roi_bbox_actor = self._plotter.add_mesh(
             pv.Box(bounds=bounds), style='wireframe',
             color=color, line_width=2, name='roi_bbox')
+        self._render()
+
+    def show_roi_obb(self, center, axes, half_extents,
+                     color=(1.0, 0.2, 0.2)):
+        """Render an explicit oriented wire box (never pv.Box AABB)."""
+        self._remove_roi_bbox()
+        c = np.asarray(center, dtype=float); a = np.asarray(axes, dtype=float)
+        h = np.asarray(half_extents, dtype=float)
+        corners = np.asarray([c + np.array([sx*h[0], sy*h[1], sz*h[2]]) @ a.T
+                              for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+        edges = []
+        for i in range(8):
+            for bit in (0, 1, 2):
+                j = i ^ (1 << bit)
+                if i < j: edges.append((i, j))
+        lines = np.asarray([[2, i, j] for i, j in edges], dtype=np.int64).ravel()
+        mesh = pv.PolyData(corners); mesh.lines = lines
+        self._roi_bbox_actor = self._plotter.add_mesh(mesh, color=color,
+                                                       line_width=2, name='roi_bbox')
         self._render()
 
     def _remove_roi_bbox(self):
