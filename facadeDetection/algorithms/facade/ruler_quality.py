@@ -15,6 +15,11 @@ from .ruler_flatness_3d import (
     prepare_surface, ruler_at, fit_line,
     sor_mask_local, sor_mask_grid, sor_mask_exact,
 )
+from .local_baseline import (
+    fit_interval_baseline_planes,
+    compute_block_signed_distances_mm,
+    find_block_for_v,
+)
 
 _EMPTY_SOURCE_IDS = np.empty(0, dtype=np.int64)
 
@@ -93,7 +98,7 @@ class _SharedArrayFiles:
 class RulerQualityParameters:
     ruler_length_m: float = 2.0
     ruler_width_m: float = .055
-    scan_step_m: float = 2.0
+    scan_step_m: float = 1.0
     strip_step_m: float = .055
     flatness_angles_deg: tuple = (0., 45., 90., 135.)
     select_band_m: float = .01
@@ -102,7 +107,7 @@ class RulerQualityParameters:
     top_q: float = 1.
     flatness_limit_mm: float = 8.
     verticality_limit_mm: float = 4. 
-    verticality_bin_size_m: float = 2.0
+    verticality_bin_size_m: float = 1.0
     min_points: int = 30
     sor_enabled: bool = True
     sor_sigma: float = 4.
@@ -575,33 +580,34 @@ def _verticality_strip_worker(args):
 
         win_u = strip_u[wlo:whi]  # H (horizontal)
         win_v = strip_v[wlo:whi]  # V (vertical)
+        win_w = strip_w[wlo:whi]  # N (signed distance to global plane)
         win_ids = strip_ids_local[wlo:whi]
 
         # ================================================================
         #  统一数据清洗层
         # ================================================================
         
-        # 1) SOR 去噪
+        # 1) SOR 去噪（基于法向深度 win_w 与竖直坐标 win_v，排除横向 win_u）
         keep = np.ones(n_win, dtype=bool)
         if sor_enabled and n_win > 16:
             if sor_method == 'local':
-                keep = sor_mask_local(win_v, win_u, sor_k, sor_sigma)
+                keep = sor_mask_local(win_v, win_w, sor_k, sor_sigma)
             elif sor_method == 'grid':
-                keep = sor_mask_grid(win_v, win_u, sor_k, sor_sigma, w_weight=sor_w_weight)
+                keep = sor_mask_grid(win_v, win_w, sor_k, sor_sigma, w_weight=sor_w_weight)
             elif sor_method == 'exact':
-                keep = sor_mask_exact(win_v, win_u, sor_k, sor_sigma, w_weight=sor_w_weight)
+                keep = sor_mask_exact(win_v, win_w, sor_k, sor_sigma, w_weight=sor_w_weight)
             else:
-                keep = sor_mask_local(win_v, win_u, sor_k, sor_sigma)
+                keep = sor_mask_local(win_v, win_w, sor_k, sor_sigma)
             
             if np.sum(keep) < 3:
                 keep[:] = True
-        # 2) 表面点筛选（select_band 等价）
+        # 2) 表面点筛选（select_band 等价）：拟合 win_w vs win_v 的参考线
         try:
-            a_ref, b_ref = fit_line(win_v[keep], win_u[keep])
+            a_ref, b_ref = fit_line(win_v[keep], win_w[keep])
         except (np.linalg.LinAlgError, ValueError):
             continue
         
-        residual = win_u - (a_ref * win_v + b_ref)
+        residual = win_w - (a_ref * win_v + b_ref)
         surf = keep & (np.abs(residual) <= select_band)
         if np.sum(surf) < 3:
             surf = keep  # fallback：放宽到 keep 点
@@ -619,9 +625,10 @@ def _verticality_strip_worker(args):
         if np.sum(final_mask) < 3:
             continue
 
-        # Window-Level 鲁棒拟合
+        # Window-Level 鲁棒拟合：拟合法向深度 win_w 随竖直高度 win_v 的线性趋势
+        # 以衡量墙面相对于铅垂线的倾斜（垂直度）。
         try:
-            a, b = fit_line(win_v[final_mask], win_u[final_mask])
+            a, b = fit_line(win_v[final_mask], win_w[final_mask])
         except (np.linalg.LinAlgError, ValueError):
             continue
 
@@ -654,9 +661,9 @@ def _verticality_strip_worker(args):
 
         # 偏离趋势线最大的点作为靠点（形成倾斜的关键接触点）
         trend_vals = a * win_v + b
-        dep_idx = int(np.argmax(np.abs(win_u - trend_vals)))
+        dep_idx = int(np.argmax(np.abs(win_w - trend_vals)))
         dep_source_id = int(win_ids[dep_idx])
-        contact_dist = float(win_u[dep_idx] - trend_vals[dep_idx])
+        contact_dist = float(win_w[dep_idx] - trend_vals[dep_idx])
 
         # 垂直度缺陷专用数组（仅在超阈值时填充）
         verticality_defect_point_indices = []
@@ -671,7 +678,7 @@ def _verticality_strip_worker(args):
             # 计算靠点 3D 坐标，供热力图直接定位绘制
             dep_u = float(strip_u[dep_idx])
             dep_v = float(strip_v[dep_idx])
-            dep_w = float(strip_w[dep_idx])
+            dep_w = float(win_w[dep_idx])
             dep_xyz = (origin + dep_u * np.asarray(horizontal_axis, dtype=float)
                        + dep_v * np.asarray(vertical_axis, dtype=float)
                        + dep_w * np.asarray(normal, dtype=float)).tolist()
@@ -704,7 +711,8 @@ def _verticality_strip_worker(args):
     return uj, rows
 
 def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
-                         params, u_min_full=None, v_min_full=None):
+                         params, u_min_full=None, v_min_full=None,
+                         precomputed_w_mm=None):
     """
     垂直度 = 墙面相对于铅垂线的倾斜程度（I 形靠尺）
 
@@ -758,6 +766,10 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     u_h = rel @ horizontal_axis
     v_v = rel @ vertical_axis
     w_n = rel @ normal
+    if precomputed_w_mm is not None:
+        cached = np.asarray(precomputed_w_mm, dtype=float).reshape(-1)
+        if cached.shape == (len(points),):
+            w_n = cached / 1000.0
 
     # ---- Step 3: 表面点过滤 ----
     surface_band = float(getattr(params, 'select_band_m', 0.02))
@@ -782,8 +794,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     half = params.ruler_length_m / 2.0
     half_width = params.ruler_width_m / 2.0
 
-    # ★ 关键修正：I 形靠尺窗口步长 = 纵向尺长 / 横向尺宽
-    v_step = max(float(params.ruler_length_m), 1e-6)
+    # ★ 统一步长：纵向 = 半尺长 (verticality_bin_size_m)，横向 = 尺宽
+    v_step = max(float(params.verticality_bin_size_m), 1e-6)
     u_step = max(float(params.ruler_width_m), 1e-6)
 
     v_centers = _full_window_centers(v_min, v_max, v_step, params.ruler_length_m)
@@ -930,12 +942,14 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
 def _direction_worker_mmap(args):
     """进程模式入口：与 _direction_worker 数值路径完全一致，
     仅改为按路径 mmap 自取共享数组（避免逐任务 pickle 复制）。"""
-    (points_path, raw_ids_path, plane_model, origin, u_axis, v_axis,
-     angle, params_dict) = args
+    (points_path, raw_ids_path, precomputed_w_path, plane_model, origin,
+     u_axis, v_axis, angle, params_dict) = args
     points = np.load(points_path, mmap_mode='r')
     raw_ids = np.load(raw_ids_path, mmap_mode='r')
+    precomputed_w = (np.load(precomputed_w_path, mmap_mode='r')
+                     if precomputed_w_path else None)
     return _direction_worker((points, raw_ids, plane_model, origin,
-                              u_axis, v_axis, angle, params_dict))
+                              u_axis, v_axis, angle, params_dict, precomputed_w))
 
 
 def _verticality_strip_worker_mmap(args):
@@ -953,12 +967,21 @@ def _verticality_strip_worker_mmap(args):
 
 
 def _direction_worker(args):
-    (points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict) = args
+    if len(args) == 9:
+        points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict, precomputed_w = args
+    else:
+        points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict = args
+        precomputed_w = None
     params = RulerQualityParameters(**params_dict)
     started = time.perf_counter()
 
     along, across, w, d3, q3 = _project_direction(
         points, plane_model, origin, u_axis, v_axis, angle)
+    
+    # ★ 使用共享局部基准面深度替代全局平面深度
+    if precomputed_w is not None:
+        w = precomputed_w / 1000.0
+    
     along_range = float(along.max() - along.min())
     across_range = float(across.max() - across.min())
     projection_time = time.perf_counter() - started
@@ -1031,7 +1054,7 @@ def _unpack_direction_result(result):
 
 
 def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
-                          params=None):
+                          params=None, baseline_blocks=None):
     params = params or RulerQualityParameters()
     started = time.perf_counter()
     points = np.asarray(points, float).reshape(-1, 3)
@@ -1070,6 +1093,24 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
           f'points={len(points)}', flush=True)
 
     # ==============================================================
+    # 共享局部基准面：沿 v 方向不重叠 block，供 strip 法深度使用
+    # ==============================================================
+    blocks = baseline_blocks
+    if blocks is None:
+        blocks = fit_interval_baseline_planes(
+            points,
+            reference_plane=plane_model,
+            interval_size_m=params.interval_size_m,
+            origin=origin,
+            u_axis=u_axis,
+            v_axis=v_axis,
+        )
+    precomputed_w_mm = compute_block_signed_distances_mm(
+        points, blocks, origin, v_axis)
+    print(f'[PCFD] quality.baseline_planes '
+          f'blocks={len(blocks)} interval={params.interval_size_m}m', flush=True)
+
+    # ==============================================================
     # 平整度（星形米字）—— 四方向并行
     # ==============================================================
     n_workers = min(len(params.flatness_angles_deg), params.n_jobs,
@@ -1082,11 +1123,13 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         try:
             points_path = shared.dump('points', points)
             raw_ids_path = shared.dump('raw_ids', raw_ids)
+            precomputed_w_path = shared.dump('precomputed_w', precomputed_w_mm)
             args_list = []
             for angle in params.flatness_angles_deg:
                 args_list.append((
-                    points_path, raw_ids_path, plane_model, origin,
-                    u_axis, v_axis, angle, params.snapshot()
+                    points_path, raw_ids_path, precomputed_w_path,
+                    plane_model, origin, u_axis, v_axis,
+                    angle, params.snapshot()
                 ))
             results = _pool_map(
                 min(int(params.n_jobs), os.cpu_count() or 1),
@@ -1098,7 +1141,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         for angle in params.flatness_angles_deg:
             args_list.append((
                 points, raw_ids, plane_model, origin, u_axis, v_axis,
-                angle, params.snapshot()
+                angle, params.snapshot(), precomputed_w_mm
             ))
         print(f'[PCFD] quality.parallel_thread workers={n_workers} '
               f'points={len(points)}', flush=True)
@@ -1199,7 +1242,8 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
     # ==============================================================
     verticality = _compute_verticality(
         points, raw_ids, plane_model, u_axis, v_axis, origin, params,
-        u_min_full=u_min_full, v_min_full=v_min_full)
+        u_min_full=u_min_full, v_min_full=v_min_full,
+        precomputed_w_mm=precomputed_w_mm)
 
     # 将垂直度数据按 grid_key 合并到 windows 行（接口契约要求）
     verticality_by_key = {}

@@ -556,6 +556,8 @@ def _weak_boundary_recall(main_facades, points, normals, remaining, ranges,
     max_components = int(getattr(Config, 'FACADE_WEAK_MAX_COMPONENTS', 3))
     extend_tol_mult = float(getattr(Config, 'FACADE_WEAK_EXTEND_TOL_MULT', 0.8))
     extend_angle_deg = float(getattr(Config, 'FACADE_WEAK_EXTEND_ANGLE_DEG', 5.0))
+    # 拐角面专属参数：法向与主面正交时放宽面积/密度门槛
+    corner_area_thr = float(getattr(Config, 'FACADE_WEAK_CORNER_AREA_M2', 5.0))
 
     recalled = []
     fid = len(main_facades)
@@ -648,15 +650,35 @@ def _weak_boundary_recall(main_facades, points, normals, remaining, ranges,
             if len(ext_ids) < weak_min_pts:
                 continue
 
-            # ---------- 面积校验 ----------
+            # ---------- 面积校验（含拐角面专属放宽）----------
             info_temp = _info(0, seed, points[ext_ids], ext_ids, ranges[ext_ids])
             area = info_temp.get('area', 0.0)
-            if area < weak_min_area:
+            # 拐角面判定：法向与主面接近正交，且位于主面 bbox 边缘 ±0.5m 内
+            is_corner_candidate = False
+            cos_sn_n = abs(float(sn @ n))
+            if cos_sn_n < 0.3:  # 接近正交（>72°）
+                # 检查是否在主立面 UV bbox 边缘
+                ext_local = np.column_stack([
+                    (points[ext_ids] - center) @ u,
+                    (points[ext_ids] - center) @ v
+                ])
+                near_edge = (
+                    (np.any(ext_local[:, 0] < u_min + 0.5) or
+                     np.any(ext_local[:, 0] > u_max - 0.5)) or
+                    (np.any(ext_local[:, 1] < v_min + 0.5) or
+                     np.any(ext_local[:, 1] > v_max - 0.5))
+                )
+                if near_edge:
+                    is_corner_candidate = True
+
+            effective_min_area = corner_area_thr if is_corner_candidate else weak_min_area
+            if area < effective_min_area:
                 continue
 
             # ---------- 密度校验 ----------
             density = len(ext_ids) / area if area > 0 else 0.0
-            if density < min_density:
+            effective_min_density = min_density * 0.5 if is_corner_candidate else min_density
+            if density < effective_min_density:
                 continue
 
             # ---------- 结构完整性校验 ----------
@@ -982,60 +1004,77 @@ def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
 
             # ===== 密度自适应参数计算 =====
             if density_adaptive:
-                # 计算该空间块的点密度（点/立方米）
                 block_pts = points[sp_ids]
                 if len(block_pts) >= 3:
-                    # 使用 AABB 体积估计
                     bbox_vol = np.ptp(block_pts, axis=0).prod()
                     density = len(sp_ids) / max(bbox_vol, 1e-6)
                 else:
-                    density = float('inf')  # 太小，按正常处理
-
+                    density = float('inf')
                 is_low_density = density < low_density_thresh
-
                 if is_low_density:
-                    # 低密度：增大 bin，降低支持度，允许更近的峰值，降低突出比
                     adaptive_bin = max(base * low_density_bin_mult, 0.05)
                     min_support = max(20, int(min_count * low_density_min_support_ratio))
                     min_peak_dist = low_density_min_peak_dist
                     prominence_ratio = low_density_prominence_ratio
                 else:
-                    # 正常密度：使用原有逻辑
                     adaptive_bin = max(float(voxel_size),
                                       float(np.median(tol[sp_ids])) * 0.8)
                     min_support = max(50, min_count // 3)
                     min_peak_dist = max(0.30, base * 3)
                     prominence_ratio = 0.08
             else:
-                # 不启用自适应，统一使用原有参数
                 adaptive_bin = max(float(voxel_size),
                                   float(np.median(tol[sp_ids])) * 0.8)
                 min_support = max(50, min_count // 3)
                 min_peak_dist = max(0.30, base * 3)
                 prominence_ratio = 0.08
 
-            rho_peaks = rho_hough_peaks(
-                points[sp_ids], direction,
-                bin_size=adaptive_bin,
-                min_support=min_support,
-                min_peak_distance=min_peak_dist,
-                prominence_ratio=prominence_ratio,
-                max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 24)))
+            # ===== 深度预隔离：按有符号深度分段后分别 rho 投票 =====
+            # 根因：法向一致但深度略有差异（如 8cm 退台）的平行面
+            # 在统一 rho 投票中会被平滑为单峰。先在深度方向分段，
+            # 每段独立 rho 投票，确保不同台阶的面各得一个 seed。
+            signed = points[sp_ids] @ direction
+            depth_seg_labels, depth_seg_medians = cluster_depth_significant(
+                signed,
+                tolerance=None,
+                min_gap=max(base * 2, 0.06),   # 6cm 起分，匹配抹灰层厚度
+                min_points=max(50, len(sp_ids) // 20))
 
-            # 同方向、同空间块内的 rho 峰构成一组"台阶竞争关系"，
-            # 并峰判定需在组内做，而不是全局按 30cm 硬距离砍。
-            block_key = (tuple(np.round(direction, 3)),
-                         int(np.floor(float(np.median(points[sp_ids] @ direction)) /
-                                      max(adaptive_bin, 1e-6))))
-            for rho_peak in rho_peaks:
-                hough_seeds.append({
-                    'direction': direction,
-                    'rho': rho_peak.value,
-                    'spatial_ids': sp_ids,
-                    'support': rho_peak.support,
-                    'block': block_key,
-                    'bin': float(adaptive_bin),
-                })
+            for seg_idx in range(len(depth_seg_medians)):
+                seg_mask = depth_seg_labels == seg_idx
+                seg_ids = sp_ids[seg_mask]
+                if len(seg_ids) < max(min_support, min_count // 4):
+                    continue
+
+                # 每个深度段独立调整 rho 峰值距离：高密度用 8cm/1.5xbase，
+                # 低密度放宽到 15cm/2xbase，避免过合并
+                if density_adaptive and density < low_density_thresh:
+                    seg_peak_dist = max(0.15, base * 2)
+                else:
+                    seg_peak_dist = max(0.08, base * 1.5)
+
+                seg_rho_peaks = rho_hough_peaks(
+                    points[seg_ids], direction,
+                    bin_size=adaptive_bin,
+                    min_support=max(min_support // 2, 20),
+                    min_peak_distance=seg_peak_dist,
+                    prominence_ratio=prominence_ratio,
+                    max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 24)))
+
+                block_key = (tuple(np.round(direction, 3)),
+                             int(np.floor(float(np.median(points[seg_ids] @ direction)) /
+                                          max(adaptive_bin, 1e-6))),
+                             seg_idx)
+                for rho_peak in seg_rho_peaks:
+                    hough_seeds.append({
+                        'direction': direction,
+                        'rho': rho_peak.value,
+                        'spatial_ids': seg_ids,
+                        'support': rho_peak.support,
+                        'block': block_key,
+                        'bin': float(adaptive_bin),
+                        'depth_seg': seg_idx,
+                    })
 
     # ===== 阶段 1：候选选择 = 分块配额 + 谷深比并峰 + 弱峰保底 =====
     # 原实现直接按 support 全局排序截断前 K，把拐角窄面、门窗侧壁这类
