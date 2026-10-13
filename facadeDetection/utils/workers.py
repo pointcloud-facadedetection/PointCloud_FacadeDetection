@@ -215,13 +215,15 @@ class ModelExportWorker(QRunnable):
     """
 
     def __init__(self, service, station_id, target_path, *,
-                 voxel_size=0.2, project_uuid=None):
+                 voxel_size=0.2, project_uuid=None, heatmap_mode=None):
         super().__init__()
         self.service = service
         self.station_id = station_id
         self.target_path = target_path
         self.voxel_size = voxel_size
         self.project_uuid = project_uuid
+        #: 非 None 时导出"检测立面域 + 热力染色"的 PLY。
+        self.heatmap_mode = heatmap_mode
         self.signals = ModelExportWorkerSignals()
         # 中止标志：GUI 线程置位，工作线程在阶段边界读取。
         # 用 bool 而非 threading.Event 是刻意的——只需一次可见性，
@@ -246,12 +248,20 @@ class ModelExportWorker(QRunnable):
         # 惰性导入，规避与 services 包的循环导入（详见模块头注释）。
         from services.model_export_service import ModelExportCancelled
         try:
-            result = self.service.export_station_ply(
-                self.station_id, self.target_path,
-                voxel_size=self.voxel_size,
-                project_uuid=self.project_uuid,
-                progress_cb=self._report_progress,
-                cancel_check=self.is_cancelled)
+            if self.heatmap_mode:
+                result = self.service.export_station_heatmap_ply(
+                    self.station_id, self.target_path, self.heatmap_mode,
+                    voxel_size=self.voxel_size,
+                    project_uuid=self.project_uuid,
+                    progress_cb=self._report_progress,
+                    cancel_check=self.is_cancelled)
+            else:
+                result = self.service.export_station_ply(
+                    self.station_id, self.target_path,
+                    voxel_size=self.voxel_size,
+                    project_uuid=self.project_uuid,
+                    progress_cb=self._report_progress,
+                    cancel_check=self.is_cancelled)
             if self._cancelled:
                 # 检查点之间的极窄竞态：已在写盘后又被取消。
                 # 不发 finished，避免 GUI 弹"导出成功"。

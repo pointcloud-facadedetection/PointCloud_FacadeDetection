@@ -153,6 +153,11 @@ class PyVistaViewport(BaseViewport):
         self._registration_pick_state = None
         self._registration_callback = None
         self._pick_marker_actors = []
+        self._measure_actors = []
+        self._ruler_actors = []
+        self._heatmap_quad_actor = None
+        self._plane_pick_model = None
+        self._plane_pick_callback = None
 
         # ROI 框选：复用 roi_selection.py 的覆盖层控制器（_interactor 指向自身）
         self._roi_on_complete = None
@@ -454,7 +459,7 @@ class PyVistaViewport(BaseViewport):
                 pass
             # 地面网格（StudioViewport.tsx shader 移植）：
             # 取消下一行注释即可恢复显示
-            # self._add_ground_grid()
+            self._add_ground_grid()
             self._scene_view_initialized = True
         except Exception:
             pass
@@ -757,6 +762,18 @@ class PyVistaViewport(BaseViewport):
 
     def handle_pick_screen(self, pos):
         """屏幕点击的唯一拾取入口（与 Open3D 版同语义）。"""
+        if self._plane_pick_model is not None:
+            point = self.ray_plane_pick(pos, self._plane_pick_model)
+            if point is None:
+                return
+            callback = self._plane_pick_callback
+            if callable(callback):
+                try:
+                    callback({'cloud_name': self._active_name,
+                              'point': point, 'index': -1})
+                except Exception:
+                    pass
+            return
         picked = self.pick_at_screen(pos, cloud_name=self._pick_cloud)
         if picked is None:
             return
@@ -766,6 +783,48 @@ class PyVistaViewport(BaseViewport):
                 callback(picked)
             except Exception:
                 pass
+
+    # ---- 平面射线拾取（复核页测距/靠尺：屏幕点 → 相机射线 → 立面平面交点）----
+    def ray_plane_pick(self, pos, plane_model):
+        """Qt 屏幕坐标 → 相机射线与 plane_model（ax+by+cz+d=0）的交点。
+
+        display 坐标换算与 project_points 同一约定：display 为物理像素、
+        左下原点，Qt 事件为逻辑像素、左上原点（y 翻转 + dpr）。
+        正交投影下射线起点在近平面、方向恒定，天然正确。
+        """
+        try:
+            renderer = self._plotter.renderer
+            fb_w, fb_h = (int(v) for v in renderer.GetSize())
+            fb_w = max(1, fb_w); fb_h = max(1, fb_h)
+            dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+            x = float(pos.x()) * dpr
+            y = fb_h - float(pos.y()) * dpr
+            endpoints = []
+            for depth in (0.0, 1.0):
+                renderer.SetDisplayPoint(x, y, depth)
+                renderer.DisplayToWorld()
+                w = renderer.GetWorldPoint()
+                if abs(w[3]) < 1e-12:
+                    return None
+                endpoints.append(
+                    np.array([w[0] / w[3], w[1] / w[3], w[2] / w[3]],
+                             dtype=np.float64))
+            direction = endpoints[1] - endpoints[0]
+            if np.linalg.norm(direction) < 1e-12:
+                return None
+            from algorithms.facade.interactive_ruler import ray_plane_intersect
+            return ray_plane_intersect(endpoints[0], direction, plane_model)
+        except Exception as exc:
+            print(f'[PCFD] viewport.ray_plane_pick_failed: {exc!r}',
+                  flush=True)
+            return None
+
+    def enter_plane_pick_mode(self, plane_model, callback=None):
+        """平面拾取：复用 PICK 模式的 6px 点击判定，回调直接给平面交点。"""
+        self._mode = self.InteractionMode.PICK
+        self._plane_pick_model = np.asarray(plane_model, dtype=np.float64)
+        self._plane_pick_callback = callback
+        self._pick_callback = None
 
     def set_selection_enabled(self, enabled, cloud_name=None):
         pass  # 框选由 ROI 模式接管
@@ -783,10 +842,14 @@ class PyVistaViewport(BaseViewport):
         self._pick_cloud = cloud_name or self._active_name
         self._pick_radius = float(pick_radius)
         self._pick_callback = callback
+        self._plane_pick_model = None
+        self._plane_pick_callback = None
 
     def exit_pick_mode(self):
         self._mode = self.InteractionMode.NAVIGATE
         self._pick_callback = None
+        self._plane_pick_model = None
+        self._plane_pick_callback = None
         self._registration_pick_state = None
         self.clear_pick_markers()
 
@@ -876,6 +939,207 @@ class PyVistaViewport(BaseViewport):
                 pass
         self._pick_marker_actors.clear()
         self._render()
+
+    # ---- 复核页工具可视化（测距连线 / 交互靠尺），不入 BaseViewport 契约 ----
+    def show_measure_line(self, p1, p2, color=(0.12, 0.39, 0.85)):
+        """两点测距连线 + 端点球标记。"""
+        self.clear_measure_visuals()
+        try:
+            actor = self._plotter.add_mesh(
+                pv.Line(tuple(p1), tuple(p2)), color=color,
+                line_width=3, name='measure_line')
+            self._measure_actors.append(actor)
+            for p in (p1, p2):
+                actor = self._plotter.add_mesh(
+                    pv.Sphere(radius=self._marker_radius(), center=tuple(p)),
+                    color=color, name='measure_point')
+                self._measure_actors.append(actor)
+        except Exception:
+            pass
+        self._render()
+
+    def clear_measure_visuals(self):
+        for actor in self._measure_actors:
+            try:
+                self._plotter.remove_actor(actor)
+            except Exception:
+                pass
+        self._measure_actors.clear()
+        self._render()
+
+    def show_ruler_overlay(self, render, exceeded=False):
+        """交互靠尺渲染规格：corners(4,3) 尺面 + defect_segments 着色分段。
+
+        分段按超限红 / 合格绿着色；尺面超限整体转红色调。
+        """
+        self.clear_ruler_overlay()
+        try:
+            corners = np.asarray(render.get('corners'), dtype=np.float64)
+            if corners.shape == (4, 3):
+                plate_color = ((0.85, 0.25, 0.22) if exceeded
+                               else (0.30, 0.55, 0.95))
+                plate = pv.PolyData(corners,
+                                    faces=np.array([4, 0, 1, 2, 3]))
+                actor = self._plotter.add_mesh(
+                    plate, color=plate_color, opacity=0.35,
+                    name='ruler_plate')
+                self._ruler_actors.append(actor)
+                loop = np.vstack([corners, corners[0]])
+                actor = self._plotter.add_mesh(
+                    pv.lines_from_points(loop), color=plate_color,
+                    line_width=3, name='ruler_outline')
+                self._ruler_actors.append(actor)
+            for seg in render.get('defect_segments') or []:
+                color = ((0.86, 0.15, 0.15) if seg.get('exceed')
+                         else (0.13, 0.65, 0.35))
+                actor = self._plotter.add_mesh(
+                    pv.Line(tuple(seg['start']), tuple(seg['end'])),
+                    color=color, line_width=6, name='ruler_defect')
+                self._ruler_actors.append(actor)
+            depression = render.get('depression_xyz')
+            if depression is not None:
+                actor = self._plotter.add_mesh(
+                    pv.Sphere(radius=self._marker_radius() * 1.4,
+                              center=tuple(depression)),
+                    color=(0.95, 0.45, 0.10), name='ruler_depression')
+                self._ruler_actors.append(actor)
+        except Exception:
+            pass
+        self._render()
+
+    def clear_ruler_overlay(self):
+        for actor in self._ruler_actors:
+            try:
+                self._plotter.remove_actor(actor)
+            except Exception:
+                pass
+        self._ruler_actors.clear()
+        self._render()
+
+    def clear_tool_visuals(self):
+        self.clear_measure_visuals()
+        self.clear_ruler_overlay()
+        self.clear_heatmap_quad()
+        self.clear_pick_markers()
+
+    # ---- 热力图贴图 quad（复核页选中立面呈现）----
+    def show_heatmap_quad(self, raster, normal=None, lift=0.015):
+        """把质量热力光栅贴到立面四边面上（RGBA 纹理，alpha 镂空）。
+
+        raster 来自 rasterize_quality_heatmap：origin/u_axis/v_axis/bounds/
+        overlay_rgba。overlay 行序与 sample_heatmap_colors 同约定：
+        行 0 = v 最大（画布顶部），故 v 小的两角 TCoords 取 t=1。
+        """
+        self.clear_heatmap_quad()
+        try:
+            origin = np.asarray(raster['origin'], dtype=np.float64).reshape(3)
+            u_axis = np.asarray(raster['u_axis'], dtype=np.float64).reshape(3)
+            v_axis = np.asarray(raster['v_axis'], dtype=np.float64).reshape(3)
+            u0, v0, u1, v1 = np.asarray(raster['bounds'],
+                                        dtype=np.float64).reshape(4)
+            overlay = np.asarray(raster['overlay_rgba'])
+            if overlay.ndim != 3 or overlay.shape[2] != 4:
+                return
+            if normal is None:
+                n = np.cross(u_axis, v_axis)
+                norm = np.linalg.norm(n)
+                n = n / norm if norm > 1e-12 else np.zeros(3)
+            else:
+                n = np.asarray(normal, dtype=np.float64).reshape(3)
+                norm = np.linalg.norm(n)
+                n = n / norm if norm > 1e-12 else np.zeros(3)
+            offset = n * float(lift)
+            corners = np.array([
+                origin + u0 * u_axis + v0 * v_axis,
+                origin + u1 * u_axis + v0 * v_axis,
+                origin + u1 * u_axis + v1 * v_axis,
+                origin + u0 * u_axis + v1 * v_axis,
+            ]) + offset
+            quad = pv.PolyData(corners, faces=np.array([4, 0, 1, 2, 3]))
+            # pyvista 0.49 无 t_coords 便捷属性，走底层 VTK 接口
+            from vtk.util.numpy_support import numpy_to_vtk
+            tcoords = np.array([[0, 1], [1, 1], [1, 0], [0, 0]],
+                               dtype=np.float32)
+            quad.GetPointData().SetTCoords(numpy_to_vtk(tcoords))
+            texture = pv.Texture(np.ascontiguousarray(
+                overlay.astype(np.uint8)))
+            actor = self._plotter.add_mesh(quad, texture=texture,
+                                           name='heatmap_quad')
+            self._heatmap_quad_actor = actor
+        except Exception as exc:
+            print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}', flush=True)
+        self._render()
+
+    def clear_heatmap_quad(self):
+        if self._heatmap_quad_actor is not None:
+            try:
+                self._plotter.remove_actor(self._heatmap_quad_actor)
+            except Exception:
+                pass
+            self._heatmap_quad_actor = None
+            self._render()
+
+    # ---- 相机：快照/恢复 + 正视平面（复核页贴图呈现配套）----
+    def snapshot_camera(self):
+        try:
+            camera = self._plotter.camera
+            return {
+                'position': tuple(camera.position),
+                'focal_point': tuple(camera.focal_point),
+                'up': tuple(camera.up),
+                'parallel_scale': float(camera.parallel_scale),
+                'parallel_projection': bool(camera.parallel_projection),
+            }
+        except Exception:
+            return None
+
+    def restore_camera(self, state):
+        if not state:
+            return
+        try:
+            camera = self._plotter.camera
+            camera.position = tuple(state['position'])
+            camera.focal_point = tuple(state['focal_point'])
+            camera.up = tuple(state['up'])
+            if state.get('parallel_projection'):
+                self._plotter.enable_parallel_projection()
+            else:
+                self._plotter.disable_parallel_projection()
+            camera.parallel_scale = float(state['parallel_scale'])
+            self._render()
+        except Exception:
+            pass
+
+    def focus_plane(self, normal, center, up, span):
+        """正视立面：视线沿 -normal、viewup=up、正交投影、按跨度取景。
+
+        相机位置显式放在 center + normal * 原视距处（不走 view_vector，
+        避免其内部重取构图改动 focal_point）。span 为 (u 跨度, v 跨度)
+        （米）；parallel_scale 取半高并兼顾横向跨度与视口宽高比，
+        留 10% 边距。
+        """
+        try:
+            camera = self._plotter.camera
+            normal = np.asarray(normal, dtype=np.float64)
+            normal = normal / np.linalg.norm(normal)
+            center = np.asarray(center, dtype=np.float64)
+            distance = float(np.linalg.norm(
+                np.asarray(camera.position, dtype=np.float64)
+                - np.asarray(camera.focal_point, dtype=np.float64)))
+            if distance < 1e-6:
+                distance = max(span) * 3.0
+            camera.focal_point = tuple(center)
+            camera.position = tuple(center + normal * distance)
+            camera.up = tuple(np.asarray(up, dtype=np.float64))
+            self._plotter.enable_parallel_projection()
+            u_span, v_span = (float(s) for s in span)
+            fb_w, fb_h = (int(v) for v in self._plotter.renderer.GetSize())
+            aspect = max(fb_w, 1) / max(fb_h, 1)
+            camera.parallel_scale = max(v_span * 0.5,
+                                        u_span * 0.5 / aspect) * 1.1
+            self._render()
+        except Exception as exc:
+            print(f'[PCFD] viewport.focus_plane_failed: {exc!r}', flush=True)
 
     # ---- ROI 框选（复用 roi_selection.py 的覆盖层与控制器）----
     def enter_roi_selection(self, cloud_name=None, on_complete=None):

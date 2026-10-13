@@ -339,7 +339,7 @@ class Open3DViewport(BaseViewport):
             self._fallback_label = QLabel(error_msg)
             self._fallback_label.setAlignment(Qt.AlignCenter)
             self._fallback_label.setStyleSheet(
-                "background:#111827;color:#fca5a5;font-size:12px;padding:24px;"
+                "background:#FFFFFF;color:#B91C1C;font-size:12px;padding:24px;"
             )
             layout.addWidget(self._fallback_label)
             self._adapter.destroy()

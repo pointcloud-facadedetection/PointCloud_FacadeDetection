@@ -6,6 +6,8 @@ qtwebview2==0.5.0
 sqlalchemy
 pypinyin
 pye57
+pyvista
+pyvistaqt
 torch
 torchvision
 pyvista

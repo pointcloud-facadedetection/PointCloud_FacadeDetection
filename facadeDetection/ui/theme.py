@@ -28,7 +28,6 @@ COLORS = {
     "danger": "#B91C1C",
     "danger_hover": "#DC2626",
     "danger_soft": "#FEF2F2",
-    "viewport": "#111827",
 }
 
 
@@ -485,14 +484,14 @@ QWidget[uiRole="sidebarBody"] {
 }
 
 /* 三维视口（外层容器）：主工作区"画框"。
-   白底 + 1px 描边 + 10px 圆角把白色页面与深色视口隔开。
-   注意：内嵌的 Open3D 原生 GLFW surface 本身是直角矩形，因此外层圆角
+   白底 + 1px 描边 + 10px 圆角勾勒视口卡片边界。
+   注意：内嵌的原生渲染 surface 本身是直角矩形，因此外层圆角
    必须由 8px 的布局留白（operation_page 的 viewport_layout）喂出来，
    而不是靠面板自身裁切；内层再由 open3dViewport 的描边与圆角收边，
    四角才不会露出灰缝。 */
 QWidget#viewportPanel {
     /* 视口面板是三维视图的卡片外框：只在四角做圆角、四周描一圈细边，
-       面板本身用中性底色，让内部的深色 Open3D 视图成为唯一视觉主体。
+       面板本身用与渲染面一致的白色底色。
        配合 operation_page 中 8px 的内容边距，卡片与左右侧栏之间始终留白，
        圆角不会被相邻面板裁掉。 */
     background-color: #FFFFFF;
@@ -510,9 +509,9 @@ QLabel#viewportStateLabel {
 }
 
 QWidget#open3dViewport {
-    /* 深色画布与面板圆角保持同一个视觉半径；描边取比底色略亮的冷灰，
-       在浅色工作台上形成清晰的画布边界，不再是"深块直接切边"。 */
-    background-color: #111827;
+    /* 渲染面本身是白底（Config.VIEWPORT_BACKGROUND），这里保持同色，
+       圆角边缘与原生窗口未绘区域才不会透出异色；描边取冷灰形成画布边界。 */
+    background-color: #FFFFFF;
     border: 1px solid #C3CFDF;
     border-radius: 9px;
 }

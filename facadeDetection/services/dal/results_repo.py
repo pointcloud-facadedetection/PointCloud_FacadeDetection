@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable, Optional
 from datetime import datetime
 import json
@@ -24,6 +25,42 @@ def _sqlite_scalar_text(value):
     return str(value)
 
 class ResultsRepo:
+    @staticmethod
+    def list_station_quality_reports(project_uuid: str, station_id: int) -> list[dict]:
+        """读取站点已完成质量评估的报告（供离线热力导出使用）。
+
+        返回按 display_no 排序的 dict 列表：``{facade_id, display_no,
+        quality}``；quality 为持久化的报告 JSON，quality_artifact_path 已
+        还原为绝对路径，``__global_indices`` 仍按 ensure_global_indices
+        的约定惰性解压。
+        """
+        from config.storage import Storage
+        with project_session(project_uuid) as s:
+            rows = s.execute(select(Facade).where(
+                Facade.station_id == int(station_id),
+                Facade.is_deleted == 0,
+                Facade.quality_status == 'complete',
+            ).order_by(Facade.display_no, Facade.id)).scalars().all()
+            result = []
+            for row in rows:
+                report = row.quality_report_json
+                if not isinstance(report, dict):
+                    continue
+                report = dict(report)
+                artifact = report.get('quality_artifact_path')
+                if artifact:
+                    path = Path(artifact)
+                    if not path.is_absolute():
+                        path = Path(Storage.ensure_project_dirs(
+                            project_uuid)['results']) / path
+                    report['quality_artifact_path'] = str(path)
+                result.append({
+                    'facade_id': int(row.id),
+                    'display_no': int(row.display_no or 0),
+                    'quality': report,
+                })
+            return result
+
     @staticmethod
     def persist_quality_artifact(results_dir, facade_id: int, quality: dict) -> str | None:
         """Persist only the raw-index vector needed to replay a heatmap."""

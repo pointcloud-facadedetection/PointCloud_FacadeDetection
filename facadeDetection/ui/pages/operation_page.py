@@ -916,6 +916,37 @@ class OperationPageMixin:
         profile = self._quality_profile_provider()
         return float(getattr(profile, 'interval_size_m', 20.0))
 
+    def _review_ruler_params(self):
+        """复核页交互靠尺的参数快照：尺体参数读隐藏控件，限差读当前 profile。"""
+        profile = self._quality_profile_provider()
+
+        def _spin_value(spin, fallback):
+            try:
+                return float(spin.value())
+            except Exception:
+                return float(fallback)
+
+        return {
+            'ruler_length': _spin_value(self.quality_length_spin, 2.0),
+            'ruler_width': _spin_value(self.quality_width_spin, 0.055),
+            'threshold_mm': float(
+                getattr(profile, 'flatness_limit_mm', 8.0) or 8.0),
+            'select_band': _spin_value(self.quality_select_band_spin, 0.01),
+            'hole_band': _spin_value(self.quality_hole_band_spin, 0.02),
+            'bin_size': _spin_value(self.quality_bin_size_spin, 0.04),
+            'top_q': _spin_value(self.quality_top_q_spin, 1.0),
+            'max_hole_ratio': _spin_value(
+                self.quality_max_hole_ratio_spin, 0.2),
+            'sor': {
+                'enable': bool(self.quality_sor_check.isChecked()),
+                'sigma': _spin_value(self.quality_sor_sigma_spin, 4.0),
+                'k': int(self.quality_sor_k_spin.value()),
+                'method': str(self.quality_sor_method_combo.currentData()
+                              or 'local'),
+                'w_weight': _spin_value(self.quality_sor_w_weight_spin, 50.0),
+            },
+        }
+
     def _connect_facade_quality_controller(self):
         controller = self.facade_quality_controller
         controller.status_message.connect(self._show_quality_status)
@@ -1105,6 +1136,12 @@ class OperationPageMixin:
             return
 
         self.render_facade.select_facade(cloud, int(f.get('id', 0)))
+        if getattr(self.render_service, 'review_mode', False):
+            # 复核页模式：选中立面 → 重建工具拾取面 + 热力贴图 + 相机正视
+            controller = getattr(self, 'viewport_tools_controller', None)
+            if controller is not None:
+                controller.invalidate()
+            self._review_present_facade(f)
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
         return
 
@@ -1115,6 +1152,12 @@ class OperationPageMixin:
         cloud = self.facade_quality_controller.active_cloud_name()
         if cloud:
             self.render_facade.clear_selected_facade(cloud)
+        if getattr(self.render_service, 'review_mode', False):
+            # 复核页模式：摘除贴图并恢复相机；依附立面的工具一并退出
+            controller = getattr(self, 'viewport_tools_controller', None)
+            if controller is not None:
+                controller.cancel()
+            self._review_clear_presentation()
         self.statusBar().showMessage('已清除立面选中', 3000)
 
     def _show_quality_dialog(self, cloud, facade, quality):

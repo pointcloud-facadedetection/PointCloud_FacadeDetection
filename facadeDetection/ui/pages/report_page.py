@@ -211,9 +211,10 @@ class ReportPageMixin:
     def _open_report_pdf(self):
         """【打开 PDF】已重构为【导出模型】。
 
-        业务：选择当前项目的站点（或全部站点）→ 对源点云做 voxel=0.2 的
-        downsample → 以 PLY 格式导出到用户指定路径。耗时步骤全部在后台
-        线程池执行，并由 TaskProgressController 提供模态进度弹窗。
+        业务：选择当前项目的站点与着色方式（原始 RGB / 4 档热力图）→
+        对源点云（或检测立面域）做 voxel=0.2 的 downsample → 以 PLY 格式
+        导出到用户指定路径。耗时步骤全部在后台线程池执行，并由
+        TaskProgressController 提供模态进度弹窗。
         """
         if self.current_project is None:
             QMessageBox.information(self, '导出模型', '请先创建或选择项目。')
@@ -229,7 +230,10 @@ class ReportPageMixin:
         if station is None:
             return
 
-        default_name = f'{self._sanitize_export_name(station.display_name)}_export.ply'
+        station, heatmap_mode = station
+        stem = self._sanitize_export_name(station.display_name)
+        suffix = f'_{heatmap_mode}' if heatmap_mode else ''
+        default_name = f'{stem}{suffix}_export.ply'
         default_dir = Path(self.current_project.directory_path) / 'exports'
         default_dir.mkdir(parents=True, exist_ok=True)
         path, _selected_filter = QFileDialog.getSaveFileName(
@@ -240,7 +244,8 @@ class ReportPageMixin:
         )
         if not path:
             return
-        self.model_export_controller.export_station(station, path)
+        self.model_export_controller.export_station(
+            station, path, heatmap_mode=heatmap_mode)
 
     # ------------------------------------------------------------------
     # 【导出模型】入口辅助：站点枚举 / 站点选择 / 文件名清洗
@@ -253,10 +258,11 @@ class ReportPageMixin:
         return []
 
     def _prompt_export_station(self, stations):
-        """选择要导出的站点；单站点直接返回，多站点弹对话框。"""
+        """选择要导出的站点与着色方式；取消返回 None，
+        否则返回 ``(station, heatmap_mode)``。"""
         controller = getattr(self, 'model_export_controller', None)
         if controller is None:
-            return stations[0] if stations else None
+            return (stations[0], None) if stations else None
         return controller.prompt_station(self, stations)
 
     @staticmethod

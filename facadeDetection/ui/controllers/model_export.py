@@ -20,13 +20,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from services.model_export_service import DEFAULT_VOXEL_SIZE, ModelExportService
+from services.model_export_service import (
+    DEFAULT_VOXEL_SIZE,
+    HEATMAP_EXPORT_MODES,
+    ModelExportService,
+)
+from services.heatmap_spec import heatmap_spec
 from ui.controllers.task_progress import TASK_MODEL_EXPORT, TaskProgressController
 from utils.workers import ModelExportWorker
 
 
 class StationExportDialog(QDialog):
-    """站点选择对话框：只选择"要导出哪个站点的点云"。"""
+    """站点选择对话框：选择要导出的站点与点云着色方式。"""
 
     def __init__(self, stations, parent=None, project_name: str = ''):
         super().__init__(parent)
@@ -57,6 +62,14 @@ class StationExportDialog(QDialog):
                 label = f'{label}（资产失效）'
             self.station_combo.addItem(label, int(station.id))
         form.addRow('导出站点', self.station_combo)
+
+        self.color_combo = QComboBox()
+        self.color_combo.setObjectName('stationExportColorCombo')
+        self.color_combo.addItem('原始 RGB 色彩（整站）', None)
+        for mode in HEATMAP_EXPORT_MODES:
+            self.color_combo.addItem(
+                f'热力图（立面域，灰底）：{heatmap_spec(mode)["title"]}', mode)
+        form.addRow('点云着色', self.color_combo)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -71,6 +84,11 @@ class StationExportDialog(QDialog):
     def selected_station_id(self) -> Optional[int]:
         value = self.station_combo.currentData()
         return None if value is None else int(value)
+
+    def selected_heatmap_mode(self) -> Optional[str]:
+        """着色方式：None 表示原始 RGB；否则为 4 档热力模式之一。"""
+        value = self.color_combo.currentData()
+        return None if value is None else str(value)
 
 
 class ModelExportController(QObject):
@@ -112,14 +130,15 @@ class ModelExportController(QObject):
     # 站点选择
     # ------------------------------------------------------------------
     def prompt_station(self, parent=None, stations=None):
-        """弹出站点选择对话框；取消返回 None。"""
+        """弹出站点选择对话框；取消返回 None，否则返回
+        ``(station, heatmap_mode)``（heatmap_mode 为 None 表示原始 RGB）。
+
+        对话框现在还承载"点云着色"选择，因此单站点场景也不再跳过。
+        """
         stations = list(stations if stations is not None
                         else self.exportable_stations())
         if not stations:
             return None
-        if len(stations) == 1:
-            # 只有一个站点时免去一次点击，直接进入路径选择。
-            return stations[0]
         project = self._current_project()
         dialog = StationExportDialog(
             stations, parent,
@@ -127,13 +146,19 @@ class ModelExportController(QObject):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         station_id = dialog.selected_station_id()
-        return next((s for s in stations if int(s.id) == station_id), None)
+        station = next((s for s in stations if int(s.id) == station_id), None)
+        if station is None:
+            return None
+        return station, dialog.selected_heatmap_mode()
 
     # ------------------------------------------------------------------
     # 导出主流程
     # ------------------------------------------------------------------
-    def export_station(self, station, target_path):
-        """在后台线程池执行 voxel=0.2 下采样并导出 PLY。"""
+    def export_station(self, station, target_path, heatmap_mode=None):
+        """在后台线程池执行 voxel=0.2 下采样并导出 PLY。
+
+        heatmap_mode 非 None 时导出"检测立面域 + 热力染色"的 PLY。
+        """
         if station is None:
             return
         project = self._current_project()
@@ -144,14 +169,16 @@ class ModelExportController(QObject):
 
         self.service.set_project(project_uuid)
         station_name = str(getattr(station, 'display_name', '') or '站点')
+        title = '正在导出热力点云' if heatmap_mode else '正在导出模型'
         self.progress.begin(
             TASK_MODEL_EXPORT,
-            '正在导出模型',
+            title,
             f'准备导出「{station_name}」的点云模型',
         )
 
         # 参数严格对齐 ModelExportWorker.__init__：
-        # (service, station_id, target_path, *, voxel_size, project_uuid)。
+        # (service, station_id, target_path, *, voxel_size, project_uuid,
+        #  heatmap_mode)。
         # 线程池不属于 worker 的构造参数，改由 _start() 决定在哪执行。
         worker = ModelExportWorker(
             self.service,
@@ -159,6 +186,7 @@ class ModelExportController(QObject):
             str(target_path),
             voxel_size=DEFAULT_VOXEL_SIZE,
             project_uuid=project_uuid,
+            heatmap_mode=heatmap_mode,
         )
         self._workers.add(worker)
         self._active_worker = worker
@@ -191,6 +219,9 @@ class ModelExportController(QObject):
         path = (payload or {}).get('path')
         exported = int((payload or {}).get('exported_points') or 0)
         message = (f'已导出 {exported:,} 点')
+        colored = (payload or {}).get('colored_points')
+        if colored is not None:
+            message += f'（热力染色 {int(colored):,} 点）'
         self.progress.finish(TASK_MODEL_EXPORT, True, message)
         self.status_message.emit(f'模型已导出：{Path(str(path)).name}', 8000)
         self.info_requested.emit(

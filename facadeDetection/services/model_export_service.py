@@ -9,11 +9,22 @@ import numpy as np
 
 from algorithms.preprocess import voxel_downsample
 from services.dal.pointcloud_station_repo import PointCloudStationRepo
+from services.dal.results_repo import ResultsRepo
+from services.heatmap_point_coloring import colorize_points_with_quality_reports
+from services.heatmap_spec import heatmap_spec
 from utils.ply_fast_reader import read_ply_fast
 from utils.ply_writer import write_point_cloud_ply_atomic
 
 #: 业务规定的导出下采样体素边长（米）。
 DEFAULT_VOXEL_SIZE = 0.2
+
+#: 热力导出可选模式（2 套算法 × 2 指标），与报告 PNG 导出口径一致。
+HEATMAP_EXPORT_MODES = (
+    'ruler_flatness_area',
+    'ruler_verticality_area',
+    'global_plane_flatness_area',
+    'global_plane_verticality_area',
+)
 
 
 class ModelExportCancelled(RuntimeError):
@@ -55,6 +66,14 @@ class ModelExportService:
         safe = ''.join(
             ch if ch not in '\\/:*?"<>|' else '_' for ch in name) or 'station'
         return f'{safe}_voxel{DEFAULT_VOXEL_SIZE:g}.ply'
+
+    def default_heatmap_output_name(self, station, heatmap_mode) -> str:
+        """热力导出默认文件名：``<站点名>_<模式>_voxel0.2.ply``。"""
+        name = str(getattr(station, 'display_name', '') or 'station').strip()
+        safe = ''.join(
+            ch if ch not in '\\/:*?"<>|' else '_' for ch in name) or 'station'
+        file_key = heatmap_spec(heatmap_mode)['file_key']
+        return f'{safe}_{file_key}_voxel{DEFAULT_VOXEL_SIZE:g}.ply'
 
     # ------------------------------------------------------------------
     # 源点云读取
@@ -172,5 +191,114 @@ class ModelExportService:
             'source_points': source_count,
             'exported_points': int(result['point_count']),
             'voxel_size': voxel,
+        })
+        return payload
+
+    def export_station_heatmap_ply(self, station_id, target_path, heatmap_mode,
+                                   voxel_size: float = DEFAULT_VOXEL_SIZE,
+                                   project_uuid: Optional[str] = None,
+                                   progress_cb: Optional[ProgressCallback] = None,
+                                   cancel_check: Optional[Callable[[], bool]] = None):
+        """导出"检测立面域"的下采样点云，并按指定热力模式染色。
+
+        与 :meth:`export_station_ply` 的差异：
+        - 点域：各立面质量结果 ``__global_indices``（原始点行号）的并集，
+          而非整站；更贴合检测复核场景；
+        - 颜色：纯灰色基准（Config.FACADE_BASE_COLOR，与视口立面基准色
+          一致）+ 热力染色：下采样点投影到各立面 UV 热力光栅取色（与三维
+          视口/导出 PNG 同一 rasterize_facade 实现），未被任一热力图覆盖
+          的点保持灰色。
+
+        返回 dict 在 export_station_ply 基础上增加 ``heatmap_mode``、
+        ``facade_count``、``colored_points``。
+        """
+        def check_cancelled():
+            if cancel_check is not None and cancel_check():
+                raise ModelExportCancelled('导出已取消')
+
+        def report(percent, text):
+            if progress_cb is not None:
+                try:
+                    progress_cb(int(percent), str(text))
+                except Exception:
+                    pass
+
+        target = Path(target_path)
+        if target.suffix.lower() != '.ply':
+            target = target.with_suffix('.ply')
+
+        check_cancelled()
+        report(2, '正在定位站点源点云...')
+        station = self.get_station(station_id, project_uuid)
+        if station is None:
+            raise ValueError(f'未找到站点：{station_id}')
+        if getattr(station, 'last_error', None):
+            raise RuntimeError(f'站点资产无效：{station.last_error}')
+
+        uuid_value = project_uuid or self.project_uuid
+        report(6, '正在读取质量评估结果...')
+        reports = []
+        for entry in ResultsRepo.list_station_quality_reports(
+                uuid_value, int(station.id)):
+            quality = entry['quality']
+            if ResultsRepo.ensure_global_indices(quality) is None:
+                continue
+            reports.append(quality)
+        if not reports:
+            raise ValueError(
+                f'站点「{station.display_name}」没有已完成的质量评估结果，'
+                '无法导出热力点云')
+
+        check_cancelled()
+        report(10, '正在读取站点源点云...')
+        points, _source_colors = self.load_source_points(station)
+        if points is None or len(points) == 0:
+            raise ValueError(f'站点「{station.display_name}」源点云为空')
+        source_count = int(len(points))
+
+        # __global_indices 是 load_source_points 同一数组的行号
+        # （index.source_points 与该 PLY 逐点一致）。
+        domain = np.unique(np.concatenate([
+            np.asarray(q.get('__global_indices'), dtype=np.int64).reshape(-1)
+            for q in reports]))
+        domain = domain[(domain >= 0) & (domain < source_count)]
+        if len(domain) == 0:
+            raise ValueError(
+                f'站点「{station.display_name}」的质量域索引与源点云不匹配')
+        domain_points = np.asarray(points)[domain]
+
+        if voxel_size is None or float(voxel_size) <= 0:
+            raise ValueError(f'voxel_size 必须大于 0，当前为 {voxel_size}')
+        voxel = float(voxel_size)
+
+        # 热力导出是灰底染色，颜色不参与下采样平均。
+        check_cancelled()
+        report(50, f'立面域 {len(domain):,} 点，正在下采样...')
+        down_points, _ = voxel_downsample(
+            domain_points, None, voxel_size=voxel)
+        if len(down_points) == 0:
+            raise ValueError(
+                f'下采样后点云为空（voxel={voxel:g}m 过大），请调小体素')
+
+        check_cancelled()
+        report(80, f'已下采样至 {len(down_points):,} 点，正在按热力图染色...')
+        final_colors, color_stats = colorize_points_with_quality_reports(
+            down_points, None, reports, heatmap_mode)
+
+        check_cancelled()
+        report(92, '正在写入 PLY...')
+        result = write_point_cloud_ply_atomic(target, down_points, final_colors)
+        report(100, f'导出完成：{result["point_count"]:,} 点')
+
+        payload = dict(result)
+        payload.update({
+            'station_id': int(station.id),
+            'station_name': str(getattr(station, 'display_name', '') or ''),
+            'source_points': source_count,
+            'exported_points': int(result['point_count']),
+            'voxel_size': voxel,
+            'heatmap_mode': str(heatmap_mode),
+            'facade_count': int(color_stats['applied_facades']),
+            'colored_points': int(color_stats['colored_points']),
         })
         return payload

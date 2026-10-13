@@ -1,5 +1,7 @@
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -11,6 +13,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+import numpy as np
+
+from services.heatmap_point_coloring import rasterize_quality_heatmap
+from services.heatmap_spec import heatmap_spec
+
 
 class InspectionReviewPageMixin:
     """检测复核页 mixin：布局 + 视口迁移 + 复核立面列表。
@@ -19,8 +26,20 @@ class InspectionReviewPageMixin:
     right_dock（立面检测结果面板），形成两栏布局。
     """
 
+    # 复核页热力贴图的 4 档模式（值为 heatmap_spec 的规范模式名）
+    REVIEW_HEATMAP_MODES = (
+        ('ruler_flatness_area', '靠尺平整度'),
+        ('ruler_verticality_area', '靠尺垂直度'),
+        ('global_flatness_area', '全局平整度'),
+        ('global_verticality_area', '全局垂直度'),
+    )
+
     def _create_inspection_review_page(self, page_title, page_key):
         page, body_layout = self._create_page_shell(page_title, page_key)
+
+        self._review_camera_snapshot = None
+        self._review_heatmap_mode = self.REVIEW_HEATMAP_MODES[0][0]
+        body_layout.addWidget(self._create_review_tools_bar(), 0)
 
         # 检测复核页：两栏 splitter（视口 + 右侧面板）
         self.review_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -56,6 +75,232 @@ class InspectionReviewPageMixin:
         return page
 
     # ------------------------------------------------------------------
+    # 视口工具区：测距 / 放靠尺 / 清除（编排见 ViewportToolsController）
+    # ------------------------------------------------------------------
+    def _create_review_tools_bar(self):
+        bar = QFrame()
+        bar.setObjectName('reviewToolsBar')
+        bar.setStyleSheet("""
+            #reviewToolsBar {
+                background: #fafbfc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+        """)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(8)
+
+        title = QLabel('视口工具')
+        title.setStyleSheet('font-weight:700; color:#1e293b; font-size:12px;')
+        row.addWidget(title)
+
+        self.btn_review_measure = QPushButton('测距')
+        self.btn_review_measure.setObjectName('btn_review_measure')
+        self.btn_review_measure.setProperty('buttonRole', 'secondary')
+        self.btn_review_measure.setCheckable(True)
+        self.btn_review_measure.setToolTip('在视口中依次点击两个点，测量其距离')
+        self.btn_review_measure.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_measure.toggled.connect(self._on_review_measure_toggled)
+        row.addWidget(self.btn_review_measure)
+
+        self.btn_review_ruler = QPushButton('放靠尺')
+        self.btn_review_ruler.setObjectName('btn_review_ruler')
+        self.btn_review_ruler.setProperty('buttonRole', 'secondary')
+        self.btn_review_ruler.setCheckable(True)
+        self.btn_review_ruler.setToolTip('先在右侧列表选中立面，再在视口中点击放置 2m 靠尺')
+        self.btn_review_ruler.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_ruler.toggled.connect(self._on_review_ruler_toggled)
+        row.addWidget(self.btn_review_ruler)
+
+        self.btn_review_clear = QPushButton('清除')
+        self.btn_review_clear.setObjectName('btn_review_clear')
+        self.btn_review_clear.setProperty('buttonRole', 'secondary')
+        self.btn_review_clear.setToolTip('清除测距连线与靠尺标记')
+        self.btn_review_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_clear.clicked.connect(self._on_review_clear_clicked)
+        row.addWidget(self.btn_review_clear)
+
+        mode_label = QLabel('热力图')
+        mode_label.setStyleSheet('color:#475569; font-size:12px;')
+        row.addWidget(mode_label)
+        self.review_heatmap_combo = QComboBox()
+        self.review_heatmap_combo.setObjectName('reviewHeatmapCombo')
+        for mode, label in self.REVIEW_HEATMAP_MODES:
+            self.review_heatmap_combo.addItem(label, mode)
+        self.review_heatmap_combo.setToolTip('选中立面后切换热力贴图模式')
+        self.review_heatmap_combo.currentIndexChanged.connect(
+            self._on_review_heatmap_mode_changed)
+        row.addWidget(self.review_heatmap_combo)
+
+        self.btn_review_open_results = QPushButton('打开结果文件夹')
+        self.btn_review_open_results.setObjectName('btn_review_open_results')
+        self.btn_review_open_results.setProperty('buttonRole', 'secondary')
+        self.btn_review_open_results.setToolTip('打开选中立面所在站点的结果目录')
+        self.btn_review_open_results.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_open_results.clicked.connect(
+            self._on_review_open_results_dir)
+        row.addWidget(self.btn_review_open_results)
+
+        self.lbl_review_heatmap_hint = QLabel('')
+        self.lbl_review_heatmap_hint.setObjectName('lblReviewHeatmapHint')
+        self.lbl_review_heatmap_hint.setStyleSheet(
+            'color:#64748B; font-size:12px;')
+        row.addWidget(self.lbl_review_heatmap_hint)
+
+        self.lbl_review_tool_result = QLabel('')
+        self.lbl_review_tool_result.setObjectName('lblReviewToolResult')
+        self.lbl_review_tool_result.setStyleSheet(
+            'color:#334155; font-size:12px;')
+        row.addWidget(self.lbl_review_tool_result, 1)
+
+        controller = self.viewport_tools_controller
+        controller.measure_text.connect(self.lbl_review_tool_result.setText)
+        controller.tool_activated.connect(self._on_review_tool_activated)
+        controller.tool_deactivated.connect(self._on_review_tool_deactivated)
+
+        escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.viewport_panel)
+        escape.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape.activated.connect(controller.cancel)
+        return bar
+
+    def _on_review_measure_toggled(self, checked):
+        self.viewport_tools_controller.toggle_measure(checked)
+
+    def _on_review_ruler_toggled(self, checked):
+        self.viewport_tools_controller.toggle_ruler(checked)
+
+    def _on_review_clear_clicked(self):
+        self.viewport_tools_controller.clear_visuals()
+        self._review_repaint_quad()
+
+    def _on_review_tool_activated(self, tool):
+        buttons = {'measure': self.btn_review_measure,
+                   'ruler': self.btn_review_ruler}
+        for name, button in buttons.items():
+            button.blockSignals(True)
+            button.setChecked(name == tool)
+            button.blockSignals(False)
+        # 工具激活清过一轮工具可视化，热力贴图需补回
+        self._review_repaint_quad()
+
+    def _on_review_tool_deactivated(self):
+        for button in (self.btn_review_measure, self.btn_review_ruler):
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+        self._review_repaint_quad()
+
+    def _selected_review_facade(self):
+        """靠尺交互与热力贴图的立面来源：右侧立面列表当前选中行。"""
+        if not hasattr(self, 'list_facades'):
+            return None
+        items = self.list_facades.selectedItems()
+        if not items:
+            return None
+        return items[0].data(Qt.ItemDataRole.UserRole)
+
+    # ------------------------------------------------------------------
+    # 选中立面呈现：热力贴图 quad + 相机正视（仅复核页模式）
+    # ------------------------------------------------------------------
+    def _review_repaint_quad(self):
+        facade = self._selected_review_facade()
+        if facade is not None and getattr(self.render_service,
+                                          'review_mode', False):
+            self._review_present_facade(facade, focus_camera=False)
+
+    def _review_present_facade(self, facade, focus_camera=True):
+        """选中立面：热力图贴到检测面四边面上 + 相机正视该平面。"""
+        viewport = getattr(self, 'viewport', None)
+        hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
+        if viewport is None or not hasattr(viewport, 'show_heatmap_quad'):
+            return
+        quality = facade.get('quality_report') if isinstance(facade, dict) \
+            else None
+        geometry = quality.get('facade_geometry') \
+            if isinstance(quality, dict) else None
+        normal = None
+        if isinstance(geometry, dict):
+            normal = geometry.get('normal')
+            if normal is None:
+                normal = np.asarray(geometry['plane_model'],
+                                    dtype=float)[:3]
+            normal = np.asarray(normal, dtype=np.float64)
+            if focus_camera and hasattr(viewport, 'focus_plane'):
+                if self._review_camera_snapshot is None:
+                    self._review_camera_snapshot = viewport.snapshot_camera()
+                bounds = np.asarray(geometry['uv_bounds'],
+                                    dtype=np.float64).reshape(4)
+                corners = np.asarray(geometry.get('corners_3d') or [],
+                                     dtype=np.float64).reshape(-1, 3)
+                center = (corners.mean(axis=0) if len(corners)
+                          else np.asarray(geometry['origin'],
+                                          dtype=np.float64))
+                viewport.focus_plane(normal, center,
+                                     geometry['v_axis'],
+                                     (bounds[2] - bounds[0],
+                                      bounds[3] - bounds[1]))
+        elif focus_camera and isinstance(quality, dict):
+            plane = np.asarray((quality.get('overall') or {}).get(
+                'plane_model') or quality.get('plane_model') or [],
+                dtype=float).reshape(-1)
+            if plane.size == 4:
+                normal = plane[:3] / np.linalg.norm(plane[:3])
+
+        viewport.clear_heatmap_quad()
+        hint = ''
+        if not isinstance(quality, dict):
+            hint = '该立面暂无质量结果，无法生成热力图'
+        else:
+            raster = rasterize_quality_heatmap(
+                quality, self._review_heatmap_mode)
+            if raster is None:
+                hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
+                        '：该立面此模式无超限数据')
+            else:
+                viewport.show_heatmap_quad(raster, normal=normal)
+                hint = heatmap_spec(self._review_heatmap_mode)['title']
+        if hint_label is not None:
+            hint_label.setText(hint)
+
+    def _review_clear_presentation(self):
+        """清除选中/迁出复核页：摘除贴图并恢复选中前的相机。"""
+        viewport = getattr(self, 'viewport', None)
+        if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
+            viewport.clear_heatmap_quad()
+        if self._review_camera_snapshot is not None and viewport is not None \
+                and hasattr(viewport, 'restore_camera'):
+            viewport.restore_camera(self._review_camera_snapshot)
+        self._review_camera_snapshot = None
+        hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
+        if hint_label is not None:
+            hint_label.setText('')
+
+    def _on_review_heatmap_mode_changed(self, index):
+        mode = self.review_heatmap_combo.itemData(index)
+        if mode:
+            self._review_heatmap_mode = mode
+        self._review_repaint_quad()
+
+    def _on_review_open_results_dir(self):
+        facade = self._selected_review_facade()
+        if not facade:
+            self.statusBar().showMessage('请先在右侧列表中选中一个立面', 3000)
+            return
+        project_uuid = getattr(self.current_project, 'project_id', None)
+        if not project_uuid:
+            self.statusBar().showMessage('当前没有打开的项目', 3000)
+            return
+        results_dir = self.facade_quality_controller._quality_results_dir(
+            project_uuid, facade)
+        if not results_dir.exists():
+            self.statusBar().showMessage(
+                f'结果目录不存在：{results_dir}', 5000)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(results_dir)))
+
+
+    # ------------------------------------------------------------------
     # 视口迁移：检测复核页 ↔ 项目操作页
     # ------------------------------------------------------------------
     def _migrate_workspace_to_review(self):
@@ -75,14 +320,27 @@ class InspectionReviewPageMixin:
         self.review_splitter.insertWidget(1, self.right_dock)
         self.review_splitter.setSizes([1040, 300])
         self._show_operation_placeholder()
+        # 复核页呈现模式：点云恒灰 + 热力贴图；相机快照态随进入重置
+        self._review_camera_snapshot = None
+        self.render_service.set_review_mode(True)
         results = self.project_operation_service.last_facade_results or []
         self._show_facade_results_review(results)
+        controller = getattr(self, 'viewport_tools_controller', None)
+        if controller is not None:
+            controller.invalidate()
         self._workspace_in_review = True
 
     def _migrate_workspace_to_operation(self):
         """将 viewport_panel + right_dock 迁回项目操作页。"""
         if not getattr(self, '_workspace_in_review', False):
             return
+        # 视口迁出复核页前退出测距/靠尺工具，避免拾取回调挂在隐藏页面上
+        controller = getattr(self, 'viewport_tools_controller', None)
+        if controller is not None:
+            controller.cancel()
+        # 摘除热力贴图、恢复相机，再退出灰色呈现模式
+        self._review_clear_presentation()
+        self.render_service.set_review_mode(False)
         self.operation_splitter.insertWidget(1, self.viewport_panel)
         self.operation_splitter.insertWidget(2, self.right_dock)
         # 占位 widget 挂回复核页，保持其默认引导界面可用

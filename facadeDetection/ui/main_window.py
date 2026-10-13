@@ -22,6 +22,7 @@ from .controllers.project_lifecycle import ProjectLifecycleController
 from .controllers.model_export import ModelExportController
 from .controllers.photo_match import PhotoMatchController
 from .controllers.step_navigation import StepNavigationController
+from .controllers.viewport_tools import ViewportToolsController
 from .controllers.task_progress import (
     TASK_LOAD,
     TaskProgressController,
@@ -199,6 +200,21 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             parent=self,
         )
         self._connect_facade_quality_controller()
+        # 复核页视口工具（测距 / 交互靠尺）：纯交互编排，facade/参数经
+        # 可调用对象惰性读取，避免依赖控件创建顺序。
+        self.viewport_tools_controller = ViewportToolsController(
+            viewport=self.viewport,
+            facade_service=self.facade_service,
+            cloud_provider=self.facade_quality_controller.active_cloud_name,
+            facade_provider=self._selected_review_facade,
+            ruler_params_provider=self._review_ruler_params,
+            parent=self,
+        )
+        self.viewport_tools_controller.status_message.connect(
+            lambda message, timeout: self.statusBar().showMessage(
+                message, timeout))
+        self.viewport_tools_controller.warning_requested.connect(
+            lambda message: QMessageBox.warning(self, '视口工具', message))
         # 项目加载/激活/销毁编排移入独立 controller；项目列表、页签、标题、
         # 状态栏等 UI 反馈全部经信号接回本窗口。销毁链路需要直接复位质量域
         # 状态，故显式注入 facade_quality_controller。

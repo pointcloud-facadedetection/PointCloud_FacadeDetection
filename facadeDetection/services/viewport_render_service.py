@@ -31,6 +31,15 @@ class ViewportRenderService:
         self._facades_cache: Dict[str, list[dict]] = {}
         self._facade_color_signatures: Dict[str, str] = {}
         self._focus_bbox_visible = False
+        # 复核页呈现模式：点云恒灰（无彩色立面分色），热力以贴图 quad 呈现
+        self._review_mode = False
+
+    @property
+    def review_mode(self) -> bool:
+        return self._review_mode
+
+    def set_review_mode(self, enabled: bool) -> None:
+        self._review_mode = bool(enabled)
 
     # 通知渲染器：显示点云，可选颜色
     def show_point_cloud(self, name: str, points: np.ndarray, colors: Optional[np.ndarray] = None):
@@ -311,6 +320,23 @@ class ViewportRenderService:
         - 其它（如倾斜面）统一使用 Config.FACADE_TYPE_COLORS['inclined']（若存在）。
         - 当存在选中的立面 self._selected_facade_id 时，该立面的点使用 Config.HIGHLIGHT_COLOR。
         """
+        if self._review_mode:
+            # 复核页模式：整云恒灰，不做彩色分色；仍缓存立面列表供聚焦使用。
+            # 弹出签名缓存，使迁回操作页后正常分色路径强制重刷。
+            try:
+                self._facades_cache[cloud_name] = facades or []
+                data = (self.viewport.get_cloud_data(cloud_name)
+                        if hasattr(self.viewport, 'get_cloud_data') else None)
+                pos = data.get('pos') if data is not None else None
+                if pos is not None and len(pos):
+                    colors = np.tile(
+                        np.asarray(_BASE_GRAY, dtype=np.float32).reshape(1, 3),
+                        (len(pos), 1))
+                    self._update_cloud_color(cloud_name, colors)
+                self._facade_color_signatures.pop(cloud_name, None)
+            except Exception as e:
+                print(f"highlight_facades(review) failed: {e}", flush=True)
+            return
         try:
             if not hasattr(self.viewport, 'get_cloud_data'):
                 return
@@ -857,6 +883,9 @@ class ViewportRenderService:
         中动态选取对应的窗口集（靠尺法/全局平面法 × 平整度/垂直度）。
         使用与 result_export_service 一致的 5 节点色标和值域映射。
         """
+        if self._review_mode:
+            # 复核页模式停用点染色热力链路（热力以贴图 quad 呈现）
+            return
         try:
             if not isinstance(quality_result, dict):
                 raise TypeError(f'quality_result must be dict, got {type(quality_result).__name__}')
@@ -1027,6 +1056,9 @@ class ViewportRenderService:
     def render_quality_reports(self, cloud_name: str, facades: list[dict], index_service=None,
                               heatmap_mode: str = 'flatness') -> bool:
         """恢复分色并按指定模式叠加全部兼容质量报告。"""
+        if self._review_mode:
+            # 复核页模式停用点染色热力链路（热力以贴图 quad 呈现）
+            return False
         heatmap_mode = normalize_heatmap_mode(heatmap_mode)
         self.highlight_facades(cloud_name, facades or [])
         reports = self.compatible_quality_reports(cloud_name, facades or [], index_service=index_service)
