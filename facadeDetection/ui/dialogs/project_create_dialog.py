@@ -687,7 +687,8 @@ class ProjectCreateDialog(QDialog):
         self.spin_step_longitudinal = QDoubleSpinBox()
         self.spin_step_longitudinal.setRange(0.001, 10.0)
         self.spin_step_longitudinal.setDecimals(3)
-        self.spin_step_longitudinal.setValue(2.0)
+        # 纵向滑动步长 = 半尺长（2000 x 55 x 25 mm 靠尺）
+        self.spin_step_longitudinal.setValue(1.0)
         self.spin_step_longitudinal.setSuffix(" m")
         r = _add_row(r, "纵向采样步长：", self.spin_step_longitudinal)
 
@@ -911,7 +912,7 @@ class ProjectCreateDialog(QDialog):
                 self.cb_ruler_length.setCurrentIndex(idx)
 
         self.spin_ruler_width.setValue(float(p.get("ruler_width_m", 0.055)))
-        self.spin_step_longitudinal.setValue(float(p.get("step_longitudinal_m", 2.0)))
+        self.spin_step_longitudinal.setValue(float(p.get("step_longitudinal_m", 1.0)))
         self.spin_step_transverse.setValue(float(p.get("step_transverse_m", 0.055)))
         self.spin_flatness_limit.setValue(float(p.get("flatness_limit_mm", 4.0)))
         self.spin_verticality_limit.setValue(float(p.get("verticality_limit_mm", 4.0)))

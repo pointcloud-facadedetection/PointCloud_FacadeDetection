@@ -11,8 +11,9 @@ class InspectionProfile:
     flatness_limit_mm: float
     verticality_limit_mm: float
     interval_size_m: float = 20.0
-    window_size_m: float = 0.05
-    step_size_m: float = 0.05
+    # 质量窗口：靠尺宽度为横向窗口/步长，纵向滑移由半尺长控制。
+    window_size_m: float = 0.055
+    step_size_m: float = 0.055
     measure_height_m: float = 2.0
     min_points: int = 30
     pass_rate: float = 0.95
@@ -24,15 +25,15 @@ class InspectionProfile:
     hole_band_m: float = 0.02
     bin_size_m: float = 0.04
     top_q: float = 1.0
-    strip_step_m: float = 0.05
+    strip_step_m: float = 0.055
     sor_enabled: bool = True
     sor_sigma: float = 4.0
     sor_k: int = 8
     sor_method: str = "local"
     sor_w_weight: float = 50.0
-    scan_step_m: float = 0.05
+    scan_step_m: float = 1.0
     max_hole_ratio: float = 0.20
-    verticality_bin_size_m: float = 0.05
+    verticality_bin_size_m: float = 1.0
     verticality_enabled: bool = True
     parallel_mode: str = "process"
     n_jobs: int = 4

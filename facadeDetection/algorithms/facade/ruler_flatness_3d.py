@@ -197,7 +197,7 @@ class Surface:
 def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
                     select_band=.01, hole_band=.02, bin_size=.04,
                     top_q=1.0, sor=None, plane_model=None,
-                    plane_origin=None):
+                    plane_origin=None, precomputed_w=None):
     # Validate and filter input
     p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if len(p) < 3:
@@ -235,7 +235,14 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     eu, ev = make_frame(normal, p, ruler_dir)
     local = (p - centroid) @ np.column_stack((eu, ev, normal))
     order = np.argsort(local[:, 0], kind="stable")
-    u, w, ids = local[order, 0], local[order, 2], ids[order]
+    u, ids = local[order, 0], ids[order]
+    if precomputed_w is not None:
+        precomputed_w = np.asarray(precomputed_w, dtype=np.float64).reshape(-1)
+        if len(precomputed_w) != len(p):
+            raise ValueError("precomputed_w length must match points")
+        w = precomputed_w[order]
+    else:
+        w = local[order, 2]
     
     # Store full u_span before any filtering
     u_min_full = float(u.min())

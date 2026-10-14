@@ -2,7 +2,14 @@
 from __future__ import annotations
 
 import numpy as np
-from algorithms.geometry import cluster_depth_significant
+
+# 从 local_baseline 导入平面拟合与分块工具（已迁移至此，避免循环依赖）
+from algorithms.facade.local_baseline import (
+    fit_global_plane,
+    fit_interval_baseline_planes,
+    compute_block_signed_distances_mm,
+    find_block_for_v,
+)
 
 
 def _unit(value):
@@ -46,22 +53,6 @@ def _compute_hull_area(points_2d):
     return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
-def _plane_from_points(points, weights=None):
-    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    if weights is None:
-        center = points.mean(axis=0)
-        covariance = (points - center).T @ (points - center)
-    else:
-        weights = np.asarray(weights, dtype=np.float64)
-        total = max(float(weights.sum()), 1e-12)
-        center = (points * weights[:, None]).sum(axis=0) / total
-        centered = points - center
-        covariance = (centered * weights[:, None]).T @ centered / total
-    _, _, vh = np.linalg.svd(covariance, full_matrices=False)
-    normal = _unit(vh[-1])
-    return np.r_[normal, -float(normal @ center)]
-
-
 def _fit_line(u, w):
     """Robust line fit w = a*u + b with iterative outlier rejection."""
     u, w = np.asarray(u, float), np.asarray(w, float)
@@ -94,75 +85,34 @@ def _window_centers(lo, hi, length, step):
 
 
 # =============================================================================
-# 分块局部平面拟合
+# 分块局部平面拟合（委托到 local_baseline，无重叠 block）
 # =============================================================================
 
 def fit_local_plane_blocks(points, reference_plane, interval_size_m,
                            origin, u_axis, v_axis, **fit_kwargs):
-    """沿立面高度 v 方向切分为若干条带，每块独立拟合局部平面。"""
-    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    if len(pts) < 3:
-        raise ValueError('fit_local_plane_blocks requires at least 3 points')
+    """委托到 local_baseline.fit_interval_baseline_planes（无重叠 block）。
 
-    u_ax = _unit(u_axis)
-    v_ax = _unit(v_axis)
-    origin = np.asarray(origin, dtype=float).reshape(3)
-
-    rel = pts - origin
-    v_all = rel @ v_ax
-
-    v_min, v_max = float(v_all.min()), float(v_all.max())
-    size = max(float(interval_size_m), 1e-6)
-    n_blocks = max(1, int(np.ceil((v_max - v_min) / size)))
-
-    blocks = []
-    for i in range(n_blocks):
-        v0 = v_min + i * size
-        v1 = v_max if i == n_blocks - 1 else v_min + (i + 1) * size
-        mask = ((v_all >= v0) & (v_all < v1)) if i < n_blocks - 1 else (
-            (v_all >= v0) & (v_all <= v1))
-        indices = np.flatnonzero(mask)
-
-        if len(indices) < 3:
-            blocks.append({
-                'v0': v0, 'v1': v1,
-                'plane_model': np.asarray(reference_plane, dtype=float).reshape(4),
-                'point_indices': indices,
-                'fit_accepted': False,
-                'is_last': i == n_blocks - 1,
-            })
-            continue
-
-        block_pts = pts[indices]
-        try:
-            fit = fit_global_plane(block_pts, reference_plane=reference_plane,
-                                   **fit_kwargs)
-        except Exception:
-            fit = {
-                'plane_model': np.asarray(reference_plane, dtype=float).reshape(4),
-                'fit_accepted': False,
-            }
-
-        blocks.append({
-            'v0': v0, 'v1': v1,
-            'plane_model': np.asarray(fit['plane_model'], dtype=float),
-            'point_indices': indices,
-            'fit_accepted': bool(fit.get('fit_accepted', False)),
-            'is_last': i == n_blocks - 1,
-        })
-
-    return blocks
+    旧接口兼容：返回字典列表，保持与 compute_block_plane_quality 的契约。
+    """
+    blocks = fit_interval_baseline_planes(
+        points, reference_plane, interval_size_m, origin, u_axis, v_axis,
+        **fit_kwargs)
+    return [
+        {
+            'v0': b.v0,
+            'v1': b.v1,
+            'plane_model': b.plane_model,
+            'point_indices': b.point_indices,
+            'fit_accepted': True,
+        }
+        for b in blocks
+    ]
 
 
 def _find_block_for_v(v_coord, blocks):
-    """找到 v 坐标所属的 block 索引。"""
-    for idx, block in enumerate(blocks):
-        if block['v0'] <= v_coord <= block['v1']:
-            return idx
-    if not blocks:
-        return None
-    centers = [(b['v0'] + b['v1']) / 2.0 for b in blocks]
-    return int(np.argmin(np.abs(np.array(centers) - v_coord)))
+    """委托到 local_baseline.find_block_for_v。"""
+    idx = find_block_for_v(v_coord, blocks)
+    return idx
 
 
 # =============================================================================
@@ -196,21 +146,35 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
     v0, v1 = float(v_all.min()), float(v_all.max())
 
     # 预计算每个点在各自 block 局部平面上的 signed distance (mm)
+    # 兼容两种 block 格式：旧 dict 或新 BaselineBlock dataclass
     all_dist_mm = np.full(len(pts), np.nan, dtype=np.float64)
     for block in blocks:
-        idx = block['point_indices']
-        if len(idx) == 0:
-            continue
-        plane = np.asarray(block['plane_model'], dtype=float).reshape(4)
-        plane[:3] = _unit(plane[:3])
-        bpts = pts[idx]
-        all_dist_mm[idx] = (bpts @ plane[:3] + plane[3]) * 1000.0
+        # 旧 dict 格式
+        if isinstance(block, dict):
+            idx = block.get('point_indices', np.array([], dtype=np.int64))
+            if len(idx) == 0:
+                continue
+            plane = np.asarray(block.get('plane_model', [0,0,1,0]), dtype=float).reshape(4)
+            plane[:3] = _unit(plane[:3])
+            bpts = pts[idx]
+            all_dist_mm[idx] = (bpts @ plane[:3] + plane[3]) * 1000.0
+        else:
+            # 新 BaselineBlock dataclass
+            idx = block.point_indices
+            if len(idx) == 0:
+                continue
+            plane = block.plane_model
+            bpts = pts[idx]
+            all_dist_mm[idx] = (bpts @ plane[:3] + plane[3]) * 1000.0
 
-    # ---- 靠尺窗口滑动 ----
+    # ---- 靠尺窗口滑动：步长统一为半尺长/尺宽 ----
     length_m = max(float(ruler_length_m), 1e-9)
     width_m = max(float(ruler_width_m), 1e-9)
-    u_centers = _window_centers(u0, u1, width_m, width_m)
-    v_centers = _window_centers(v0, v1, length_m, length_m)
+    # ★ 纵向步长 = 半尺长 (1.0m)，横向步长 = 尺宽 (0.055m)
+    u_step = width_m
+    v_step = length_m / 2.0
+    u_centers = _window_centers(u0, u1, width_m, u_step)
+    v_centers = _window_centers(v0, v1, length_m, v_step)
 
     windows = []
     for a, uc in enumerate(u_centers):
@@ -388,265 +352,6 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
                 'index_space': 'raw_global_rows',
             },
         },
-    }
-
-
-# =============================================================================
-# 全局平面拟合
-# =============================================================================
-
-def fit_global_plane(points, *, reference_plane, seed=42,
-                     huber_delta_m=.015, max_iterations=500,
-                     convergence_tol=1e-7, angle_limit_deg=3.,
-                     outlier_sigma=3.0, final_gate_sigma=2.5,
-                     min_inlier_ratio=0.30, max_p95_mm=100.0,
-                     enable_partition_fallback=True,
-                     partition_depth_gap_m=0.08,
-                     partition_min_points_ratio=0.10,
-                     partition_angle_limit_deg=5.0):
-    """Huber M-estimator IRLS with prior-normal initialization."""
-    raw = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    finite_mask = np.all(np.isfinite(raw), axis=1)
-    finite_ids = np.flatnonzero(finite_mask)
-    pts = raw[finite_mask]
-    if len(pts) < 3:
-        raise ValueError('global plane requires at least three finite points')
-
-    n0 = _unit(reference_plane[:3])
-    d0 = -float(np.median(pts @ n0))
-    plane = np.r_[n0, d0]
-
-    r0 = pts @ n0 + d0
-    med0 = float(np.median(r0))
-    mad0 = max(float(np.median(np.abs(r0 - med0))) * 1.4826, 1e-6)
-    w_init = np.where(np.abs(r0 - med0) <= outlier_sigma * mad0, 1.0, 0.0)
-
-    delta = max(float(huber_delta_m), 1e-6)
-    rng = np.random.default_rng(seed)  # noqa: F841  (保留以维持接口)
-    angle_limit_rad = np.deg2rad(float(angle_limit_deg))
-    cos_limit = np.cos(angle_limit_rad)
-
-    n = plane[:3].copy()
-    d = float(plane[3])
-    it = 0
-
-    for it in range(max_iterations):
-        residuals = pts @ n + d
-        abs_r = np.abs(residuals)
-        w = np.where(abs_r <= delta, 1.0, delta / (abs_r + 1e-12))
-        w *= w_init
-
-        w_sum = float(w.sum())
-        if w_sum < 3:
-            break
-
-        centroid = (pts * w[:, None]).sum(axis=0) / w_sum
-        centered = pts - centroid
-        cov = (centered * w[:, None]).T @ centered / w_sum
-
-        _, _, vh = np.linalg.svd(cov, full_matrices=False)
-        n_new = _unit(vh[-1])
-
-        if n_new @ n0 < 0:
-            n_new = -n_new
-
-        cos_angle = float(n_new @ n0)
-        if cos_angle < cos_limit:
-            perp = n_new - cos_angle * n0
-            perp_norm = np.linalg.norm(perp)
-            if perp_norm > 1e-12:
-                perp = perp / perp_norm
-                n_new = (np.sin(angle_limit_rad) * perp
-                         + np.cos(angle_limit_rad) * n0)
-                n_new = _unit(n_new)
-
-        d_new = -float((pts * w[:, None]).sum(axis=0) @ n_new) / w_sum
-
-        dn = float(np.linalg.norm(n_new - n))
-        dd = abs(d_new - d)
-        if dn < convergence_tol and dd < convergence_tol:
-            break
-
-        n, d = n_new, d_new
-
-    plane = np.r_[n, d]
-
-    residuals = pts @ plane[:3] + plane[3]
-    med_r = float(np.median(residuals))
-    mad_r = max(float(np.median(np.abs(residuals - med_r))) * 1.4826, 1e-6)
-
-    gate = float(np.clip(final_gate_sigma * mad_r, 0.0025, 0.008))
-    inliers = np.abs(residuals - med_r) <= gate
-
-    if inliers.sum() >= 3:
-        plane = _plane_from_points(pts[inliers])
-        if plane[:3] @ n0 < 0:
-            plane = -plane
-        residuals = pts @ plane[:3] + plane[3]
-        med_r = float(np.median(residuals[inliers]))
-
-    support_mask = np.zeros(len(raw), dtype=bool)
-    support_mask[finite_ids] = inliers
-
-    abs_r = np.abs(residuals)
-    inlier_ratio = float(inliers.mean())
-    angle_to_ref = float(np.degrees(np.arccos(
-        np.clip(abs(plane[:3] @ n0), 0, 1))))
-
-    p95_mm = (float(np.percentile(abs_r[inliers], 95) * 1000)
-              if inliers.any() else np.inf)
-    fit_accepted = bool(
-        inlier_ratio >= float(min_inlier_ratio)
-        and p95_mm <= float(max_p95_mm)
-        and angle_to_ref <= float(angle_limit_deg)
-    )
-
-    # ===== Partition Fallback =====
-    if not fit_accepted and enable_partition_fallback:
-        signed_all = pts @ n0 + d0
-        min_points_partition = max(
-            3, int(len(pts) * float(partition_min_points_ratio)))
-
-        labels, medians = cluster_depth_significant(
-            signed_all,
-            tolerance=None,
-            min_gap=float(partition_depth_gap_m),
-            min_points=min_points_partition,
-        )
-
-        best_partition = None
-        best_score = -1.0
-        cos_part_limit = np.cos(np.deg2rad(float(partition_angle_limit_deg)))
-
-        for seg_idx in range(len(medians)):
-            seg_mask = labels == seg_idx
-            seg_count = int(seg_mask.sum())
-            if seg_count < min_points_partition:
-                continue
-
-            seg_pts = pts[seg_mask]
-            part_plane = _plane_from_points(seg_pts)
-            part_n = part_plane[:3]
-
-            if abs(float(part_n @ n0)) < cos_part_limit:
-                continue
-
-            seg_residuals = seg_pts @ part_n + part_plane[3]
-            seg_med_r = float(np.median(seg_residuals))
-            seg_mad_r = max(float(np.median(np.abs(
-                seg_residuals - seg_med_r))) * 1.4826, 1e-6)
-            seg_gate = float(np.clip(final_gate_sigma * seg_mad_r,
-                                     0.0025, 0.008))
-            seg_inliers = np.abs(seg_residuals - seg_med_r) <= seg_gate
-            seg_inlier_ratio = float(seg_inliers.mean())
-
-            if seg_inliers.sum() >= 3:
-                part_plane = _plane_from_points(seg_pts[seg_inliers])
-                part_n = part_plane[:3]
-                seg_residuals = seg_pts @ part_n + part_plane[3]
-                seg_med_r = float(np.median(seg_residuals[seg_inliers]))
-                seg_mad_r = max(float(np.median(np.abs(
-                    seg_residuals[seg_inliers] - seg_med_r))) * 1.4826, 1e-6)
-                seg_gate = float(np.clip(final_gate_sigma * seg_mad_r,
-                                         0.0025, 0.008))
-                seg_inliers = np.abs(seg_residuals - seg_med_r) <= seg_gate
-
-            seg_abs_r = np.abs(seg_residuals)
-            seg_p95_mm = (float(np.percentile(
-                seg_abs_r[seg_inliers], 95) * 1000)
-                if seg_inliers.any() else np.inf)
-            seg_angle_to_ref = float(np.degrees(np.arccos(
-                np.clip(abs(part_n @ n0), 0, 1))))
-
-            relaxed_inlier_ratio = float(min_inlier_ratio) * 0.85
-            relaxed_p95 = float(max_p95_mm) * 1.25
-
-            if (seg_inlier_ratio >= relaxed_inlier_ratio
-                    and seg_p95_mm <= relaxed_p95
-                    and seg_angle_to_ref <= float(angle_limit_deg)):
-                score = seg_count * seg_inlier_ratio
-                if score > best_score:
-                    best_score = score
-                    best_partition = {
-                        'plane': part_plane,
-                        'inliers': seg_inliers,
-                        'seg_mask': seg_mask,
-                        'inlier_ratio': seg_inlier_ratio,
-                        'p95_mm': seg_p95_mm,
-                        'angle_to_ref': seg_angle_to_ref,
-                        'med_r': seg_med_r,
-                        'mad_r': seg_mad_r,
-                        'gate': seg_gate,
-                    }
-
-        if best_partition is not None:
-            bp = best_partition
-            plane = bp['plane']
-            n = plane[:3]
-            d = plane[3]
-
-            residuals = pts @ n + d
-            med_r = bp['med_r']
-            mad_r = bp['mad_r']
-            gate = bp['gate']
-            inliers = np.zeros(len(pts), dtype=bool)
-            inliers[bp['seg_mask']] = bp['inliers']
-
-            if inliers.sum() >= 3:
-                plane = _plane_from_points(pts[inliers])
-                if plane[:3] @ n0 < 0:
-                    plane = -plane
-                residuals = pts @ plane[:3] + plane[3]
-                med_r = float(np.median(residuals[inliers]))
-                mad_r = max(float(np.median(np.abs(
-                    residuals[inliers] - med_r))) * 1.4826, 1e-6)
-                gate = float(np.clip(final_gate_sigma * mad_r,
-                                     0.0025, 0.008))
-                inliers = np.abs(residuals - med_r) <= gate
-
-            support_mask = np.zeros(len(raw), dtype=bool)
-            support_mask[finite_ids] = inliers
-
-            abs_r = np.abs(residuals)
-            inlier_ratio = float(inliers.mean())
-            angle_to_ref = float(np.degrees(np.arccos(
-                np.clip(abs(plane[:3] @ n0), 0, 1))))
-            p95_mm = (float(np.percentile(abs_r[inliers], 95) * 1000)
-                      if inliers.any() else np.inf)
-
-            return {
-                'plane_model': plane.astype(float),
-                'fit_accepted': True,
-                'inlier_count': int(inliers.sum()),
-                'point_count': int(len(pts)),
-                'inlier_ratio': inlier_ratio,
-                'residual_mad_mm': float(mad_r * 1000),
-                'p50_abs_residual_mm': float(np.percentile(abs_r, 50) * 1000),
-                'p95_abs_residual_mm': float(
-                    np.percentile(abs_r, 95) * 1000),
-                'max_abs_residual_mm': float(abs_r.max() * 1000),
-                'normal_angle_to_reference_deg': angle_to_ref,
-                'support_limit_m': gate,
-                'support_mask': support_mask,
-                'iterations': it + 1,
-                'partition_fallback': True,
-            }
-
-    return {
-        'plane_model': plane.astype(float),
-        'fit_accepted': fit_accepted,
-        'inlier_count': int(inliers.sum()),
-        'point_count': int(len(pts)),
-        'inlier_ratio': inlier_ratio,
-        'residual_mad_mm': float(mad_r * 1000),
-        'p50_abs_residual_mm': float(np.percentile(abs_r, 50) * 1000),
-        'p95_abs_residual_mm': float(np.percentile(abs_r, 95) * 1000),
-        'max_abs_residual_mm': float(abs_r.max() * 1000),
-        'normal_angle_to_reference_deg': angle_to_ref,
-        'support_limit_m': gate,
-        'support_mask': support_mask,
-        'iterations': it + 1,
-        'partition_fallback': False,
     }
 
 

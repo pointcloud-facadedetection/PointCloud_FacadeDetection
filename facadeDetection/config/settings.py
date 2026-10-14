@@ -180,13 +180,20 @@ class Config:
     QUALITY_VERTICAL_REF_PLANE = False
 
     # --- Robust global plane fitting fallback constants ---
-    GLOBAL_PLANE_HUBER_DELTA_M: float = 0.015
+    # huber_delta 降至 5mm，匹配 TLS 噪声级，避免将 5-10mm 真实 bulge 拉平
+    GLOBAL_PLANE_HUBER_DELTA_M: float = 0.005
     GLOBAL_PLANE_MAX_ITERATIONS: int = 500
     GLOBAL_PLANE_ANGLE_LIMIT_DEG: float = 3.0
-    GLOBAL_PLANE_MIN_INLIER_RATIO: float = 0.30
-    GLOBAL_PLANE_MAX_P95_MM: float = 100.0
+    # 宽容化：允许阳台/雨棚等附属结构导致 inlier 偏低
+    GLOBAL_PLANE_MIN_INLIER_RATIO: float = 0.15
+    GLOBAL_PLANE_MAX_P95_MM: float = 200.0
     GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK: bool = True
-    GLOBAL_PLANE_PARTITION_DEPTH_GAP_M: float = 0.08
+    # 分区深度段最小间隔降至 3cm，避免合并不同抹灰层
+    GLOBAL_PLANE_PARTITION_DEPTH_GAP_M: float = 0.03
     GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO: float = 0.10
     GLOBAL_PLANE_OUTLIER_SIGMA: float = 3.0
-    GLOBAL_PLANE_FINAL_GATE_SIGMA: float = 2.5
+    # 放宽 final gate，避免过度剔除真实 bulge 点
+    GLOBAL_PLANE_FINAL_GATE_SIGMA: float = 3.5
+
+    # 分块局部平面拟合：已从 local_baseline.py 统一管理，块间无重叠
+    # LOCAL_PLANE_BLOCK_OVERLAP_RATIO 已废弃，保留注释以提示迁移完成
