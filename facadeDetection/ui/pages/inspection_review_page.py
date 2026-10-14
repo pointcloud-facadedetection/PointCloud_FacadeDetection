@@ -103,6 +103,7 @@ class InspectionReviewPageMixin:
         self.btn_review_measure.setObjectName('btn_review_measure')
         self.btn_review_measure.setProperty('buttonRole', 'secondary')
         self.btn_review_measure.setCheckable(True)
+        self.btn_review_measure.setEnabled(False)
         self.btn_review_measure.setToolTip('在视口中依次点击两个点，测量其距离')
         self.btn_review_measure.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_measure.toggled.connect(self._on_review_measure_toggled)
@@ -112,6 +113,7 @@ class InspectionReviewPageMixin:
         self.btn_review_ruler.setObjectName('btn_review_ruler')
         self.btn_review_ruler.setProperty('buttonRole', 'secondary')
         self.btn_review_ruler.setCheckable(True)
+        self.btn_review_ruler.setEnabled(False)
         self.btn_review_ruler.setToolTip('先在右侧列表选中立面，再在视口中点击放置 2m 靠尺')
         self.btn_review_ruler.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_ruler.toggled.connect(self._on_review_ruler_toggled)
@@ -179,6 +181,14 @@ class InspectionReviewPageMixin:
     def _on_review_clear_clicked(self):
         self.viewport_tools_controller.clear_visuals()
         self._review_repaint_quad()
+
+    def _review_update_tool_buttons(self):
+        """测距/放靠尺依赖选中立面：无选中时禁用，避免空激活。"""
+        enabled = self._selected_review_facade() is not None
+        for name in ('btn_review_measure', 'btn_review_ruler'):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(enabled)
 
     def _on_review_tool_activated(self, tool):
         buttons = {'measure': self.btn_review_measure,
@@ -430,6 +440,7 @@ class InspectionReviewPageMixin:
         self.render_service.set_review_mode(True)
         results = self.project_operation_service.last_facade_results or []
         self._show_facade_results_review(results)
+        self._review_update_tool_buttons()
         controller = getattr(self, 'viewport_tools_controller', None)
         if controller is not None:
             controller.invalidate()

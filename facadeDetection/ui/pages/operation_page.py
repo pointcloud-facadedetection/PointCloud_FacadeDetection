@@ -1142,6 +1142,7 @@ class OperationPageMixin:
             if controller is not None:
                 controller.invalidate()
             self._review_present_facade(f)
+        self._review_update_tool_buttons()
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
         return
 
@@ -1158,6 +1159,7 @@ class OperationPageMixin:
             if controller is not None:
                 controller.cancel()
             self._review_clear_presentation()
+        self._review_update_tool_buttons()
         self.statusBar().showMessage('已清除立面选中', 3000)
 
     def _show_quality_dialog(self, cloud, facade, quality):

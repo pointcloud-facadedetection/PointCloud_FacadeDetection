@@ -791,7 +791,15 @@ class PyVistaViewport(BaseViewport):
         screen, valid = projected
         if not np.any(valid):
             return None
-        xy = np.array([pos.x(), pos.y()], dtype=np.float64)
+        # pos 是 VTK 事件坐标（物理像素、左下原点）；project_points 输出
+        # 是 Qt 逻辑像素、左上原点——单边换算后比较
+        renderer = self._plotter.renderer
+        fb_w, fb_h = (int(v) for v in renderer.GetSize())
+        dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+        height_logical = max(1, fb_h) / dpr
+        xy = np.array([float(pos.x()) / dpr,
+                       height_logical - float(pos.y()) / dpr],
+                      dtype=np.float64)
         dist = np.where(valid,
                         np.hypot(screen[:, 0] - xy[0], screen[:, 1] - xy[1]),
                         np.inf)
@@ -831,19 +839,15 @@ class PyVistaViewport(BaseViewport):
 
     # ---- 平面射线拾取（复核页测距/靠尺：屏幕点 → 相机射线 → 立面平面交点）----
     def ray_plane_pick(self, pos, plane_model):
-        """Qt 屏幕坐标 → 相机射线与 plane_model（ax+by+cz+d=0）的交点。
+        """屏幕点击 → 相机射线与 plane_model（ax+by+cz+d=0）的交点。
 
-        display 坐标换算与 project_points 同一约定：display 为物理像素、
-        左下原点，Qt 事件为逻辑像素、左上原点（y 翻转 + dpr）。
-        正交投影下射线起点在近平面、方向恒定，天然正确。
+        pos 来自 VTK interactor 的 GetEventPosition：已是物理像素、
+        左下原点的 display 坐标，直接喂给 SetDisplayPoint，不做任何
+        dpr 缩放或 y 翻转（二次换算会把射线偏出立面）。
         """
         try:
             renderer = self._plotter.renderer
-            fb_w, fb_h = (int(v) for v in renderer.GetSize())
-            fb_w = max(1, fb_w); fb_h = max(1, fb_h)
-            dpr = max(1.0, float(self._widget.devicePixelRatioF()))
-            x = float(pos.x()) * dpr
-            y = fb_h - float(pos.y()) * dpr
+            x, y = float(pos.x()), float(pos.y())
             endpoints = []
             for depth in (0.0, 1.0):
                 renderer.SetDisplayPoint(x, y, depth)
@@ -956,17 +960,20 @@ class PyVistaViewport(BaseViewport):
     def update_pick_markers(self, src_points=None, tgt_points=None):
         """配准选点标记：红=源，绿=目标。屏幕空间点精灵（约 12px），
         不随相机缩放；覆盖层渲染，永压点云之上。"""
-        self.clear_pick_markers()
-        for points, color in ((src_points or [], (1.0, 0.3, 0.3)),
-                              (tgt_points or [], (0.3, 0.9, 0.5))):
-            for p in points:
-                try:
-                    actor = self._point_marker_actor(p, color, 12,
-                                                     'pick_marker')
-                    self._pick_marker_actors.append(actor)
-                except Exception:
-                    pass
-        self._render()
+        self.set_render_enabled(False)
+        try:
+            self.clear_pick_markers()
+            for points, color in ((src_points or [], (1.0, 0.3, 0.3)),
+                                  (tgt_points or [], (0.3, 0.9, 0.5))):
+                for p in points:
+                    try:
+                        actor = self._point_marker_actor(p, color, 12,
+                                                         'pick_marker')
+                        self._pick_marker_actors.append(actor)
+                    except Exception:
+                        pass
+        finally:
+            self.set_render_enabled(True)
 
     def clear_pick_markers(self):
         for actor in self._pick_marker_actors:
@@ -1028,19 +1035,22 @@ class PyVistaViewport(BaseViewport):
     # ---- 复核页工具可视化（测距连线 / 交互靠尺），不入 BaseViewport 契约 ----
     def show_measure_line(self, p1, p2, color=(0.12, 0.39, 0.85)):
         """两点测距连线 + 端点标记（屏幕空间点精灵，约 12px）。"""
-        self.clear_measure_visuals()
+        self.set_render_enabled(False)
         try:
-            actor = self._plotter.add_mesh(
-                pv.Line(tuple(p1), tuple(p2)), color=color,
-                line_width=3, lighting=False, name='measure_line')
-            self._measure_actors.append(self._to_overlay(actor))
-            for p in (p1, p2):
-                actor = self._point_marker_actor(p, color, 12,
-                                                 'measure_point')
-                self._measure_actors.append(actor)
-        except Exception:
-            pass
-        self._render()
+            self.clear_measure_visuals()
+            try:
+                actor = self._plotter.add_mesh(
+                    pv.Line(tuple(p1), tuple(p2)), color=color,
+                    line_width=3, lighting=False, name='measure_line')
+                self._measure_actors.append(self._to_overlay(actor))
+                for p in (p1, p2):
+                    actor = self._point_marker_actor(p, color, 12,
+                                                     'measure_point')
+                    self._measure_actors.append(actor)
+            except Exception:
+                pass
+        finally:
+            self.set_render_enabled(True)
 
     def clear_measure_visuals(self):
         for actor in self._measure_actors:
@@ -1053,8 +1063,9 @@ class PyVistaViewport(BaseViewport):
 
         分段按超限红 / 合格绿着色；尺面超限整体转红色调。
         """
-        self.clear_ruler_overlay()
+        self.set_render_enabled(False)
         try:
+            self.clear_ruler_overlay()
             corners = np.asarray(render.get('corners'), dtype=np.float64)
             if corners.shape == (4, 3):
                 plate_color = ((0.85, 0.25, 0.22) if exceeded
@@ -1090,7 +1101,8 @@ class PyVistaViewport(BaseViewport):
                 self._ruler_actors.append(actor)
         except Exception:
             pass
-        self._render()
+        finally:
+            self.set_render_enabled(True)
 
     def clear_ruler_overlay(self):
         for actor in self._ruler_actors:
@@ -1099,10 +1111,15 @@ class PyVistaViewport(BaseViewport):
         self._render()
 
     def clear_tool_visuals(self):
-        self.clear_measure_visuals()
-        self.clear_ruler_overlay()
-        self.clear_heatmap_quad()
-        self.clear_pick_markers()
+        # 合并渲染：四个 clear 各自会补帧，挂起后统一渲染一次
+        self.set_render_enabled(False)
+        try:
+            self.clear_measure_visuals()
+            self.clear_ruler_overlay()
+            self.clear_heatmap_quad()
+            self.clear_pick_markers()
+        finally:
+            self.set_render_enabled(True)
 
     # ---- 热力图贴图 quad（复核页选中立面呈现）----
     def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
@@ -1115,8 +1132,9 @@ class PyVistaViewport(BaseViewport):
         故 actor 必须进透明通道（ForceTranslucentOn），否则镂空区变黑块。
         lift 缺省自适应：max(5cm, 跨度×0.1%)，保证贴图浮在残留几何之上。
         """
-        self.clear_heatmap_quad()
+        self.set_render_enabled(False)
         try:
+            self.clear_heatmap_quad()
             rgba = np.asarray(image)
             if rgba.ndim != 3 or rgba.shape[2] != 4:
                 return
@@ -1163,8 +1181,10 @@ class PyVistaViewport(BaseViewport):
             self._heatmap_quad_actors.append(self._to_overlay(actor))
             self._add_heatmap_frame(corners)
         except Exception as exc:
-            print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}', flush=True)
-        self._render()
+            print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}',
+                  flush=True)
+        finally:
+            self.set_render_enabled(True)
 
     def _add_heatmap_frame(self, corners):
         """四边面边缘高亮：外圈宽线低透明做发光，内圈亮线收边。"""
@@ -1185,8 +1205,9 @@ class PyVistaViewport(BaseViewport):
 
     def show_heatmap_frame(self, corners_3d, lift=None):
         """仅画四边面边缘高亮（选中立面无热力 PNG 时的选中反馈）。"""
-        self.clear_heatmap_quad()
+        self.set_render_enabled(False)
         try:
+            self.clear_heatmap_quad()
             corners = np.asarray(corners_3d, dtype=np.float64).reshape(-1, 3)
             if len(corners) < 3:
                 return
@@ -1202,7 +1223,8 @@ class PyVistaViewport(BaseViewport):
             self._add_heatmap_frame(corners)
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_frame_failed: {exc!r}', flush=True)
-        self._render()
+        finally:
+            self.set_render_enabled(True)
 
     def clear_heatmap_quad(self):
         if self._heatmap_quad_actors:
