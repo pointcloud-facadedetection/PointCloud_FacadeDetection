@@ -310,7 +310,7 @@ class FacadeHeatmapTripletRenderer:
 
         # 线宽是显示属性而非靠尺物理宽度。限制为细线，避免 PDF 缩放后
         # 相邻靠尺融合；每次 cv2.line 调用均代表一个独立图元。
-        line_width = supersample * 1
+        line_width = max(1, int(round(supersample * 0.5)))
 
         for window in windows or []:
             pass_key = spec["pass_key"]
