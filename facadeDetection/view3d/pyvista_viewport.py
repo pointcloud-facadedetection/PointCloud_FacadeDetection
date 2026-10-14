@@ -157,6 +157,7 @@ class PyVistaViewport(BaseViewport):
         self._measure_actors = []
         self._ruler_actors = []
         self._heatmap_quad_actors = []
+        self._overlay_renderer = None
         self._plane_pick_model = None
         self._plane_pick_callback = None
 
@@ -944,53 +945,89 @@ class PyVistaViewport(BaseViewport):
                 list(state.get('target_points', [])))
 
     def update_pick_markers(self, src_points=None, tgt_points=None):
-        """配准选点标记：红=源，绿=目标（VTK 球体，线宽无关）。"""
+        """配准选点标记：红=源，绿=目标。屏幕空间点精灵（约 12px），
+        不随相机缩放；覆盖层渲染，永压点云之上。"""
         self.clear_pick_markers()
         for points, color in ((src_points or [], (1.0, 0.3, 0.3)),
                               (tgt_points or [], (0.3, 0.9, 0.5))):
             for p in points:
                 try:
-                    actor = self._plotter.add_mesh(
-                        pv.Sphere(radius=self._marker_radius(), center=tuple(p)),
-                        color=color, name='pick_marker')
+                    actor = self._point_marker_actor(p, color, 12,
+                                                     'pick_marker')
                     self._pick_marker_actors.append(actor)
                 except Exception:
                     pass
         self._render()
 
-    def _marker_radius(self):
-        try:
-            pts = [d['pos'] for d in self.point_data.values()
-                   if len(d.get('pos', []))]
-            if pts:
-                span = float(np.ptp(np.vstack(pts), axis=0).max())
-                return max(1e-3, span * 0.004)
-        except Exception:
-            pass
-        return 0.05
-
     def clear_pick_markers(self):
         for actor in self._pick_marker_actors:
-            try:
-                self._plotter.remove_actor(actor)
-            except Exception:
-                pass
+            self._remove_visual_actor(actor)
         self._pick_marker_actors.clear()
         self._render()
 
+    # ---- 覆盖层渲染管线（layer-1）：工具可视化独立管线，永压点云之上 ----
+    def _get_overlay_renderer(self):
+        """layer-1 覆盖层：共享主相机（自动同步），每帧清深度缓冲，
+        本层内容（热力贴图/边框/测距/靠尺/标记点）不被点云遮挡。"""
+        if self._overlay_renderer is None:
+            import vtk
+            rw = self._plotter.render_window
+            main = self._plotter.renderer
+            if rw.GetNumberOfLayers() < 2:
+                rw.SetNumberOfLayers(2)
+            ren = vtk.vtkRenderer()
+            ren.SetLayer(1)
+            ren.InteractiveOff()
+            ren.SetActiveCamera(main.GetActiveCamera())
+            ren.PreserveDepthBufferOff()
+            rw.AddRenderer(ren)
+            self._overlay_renderer = ren
+        return self._overlay_renderer
+
+    def _to_overlay(self, actor):
+        """把 add_mesh/add_points 建好的 actor 挪进覆盖层管线。"""
+        try:
+            ren = self._get_overlay_renderer()
+            self._plotter.renderer.RemoveActor(actor)
+            ren.AddActor(actor)
+        except Exception:
+            pass
+        return actor
+
+    def _remove_visual_actor(self, actor):
+        """移除可能在主层或覆盖层的可视化 actor。"""
+        try:
+            self._plotter.remove_actor(actor)
+        except Exception:
+            pass
+        ren = self._overlay_renderer
+        if ren is not None:
+            try:
+                ren.RemoveActor(actor)
+            except Exception:
+                pass
+
+    def _point_marker_actor(self, point, color, size_px, name):
+        """屏幕空间点标记：点精灵（非三维球体），尺寸只随分辨率像素，
+        不随相机缩放变化；进覆盖层。"""
+        poly = pv.PolyData(np.asarray(point, dtype=np.float64).reshape(1, 3))
+        actor = self._plotter.add_points(
+            poly, color=color, point_size=int(size_px),
+            render_points_as_spheres=False, lighting=False, name=name)
+        return self._to_overlay(actor)
+
     # ---- 复核页工具可视化（测距连线 / 交互靠尺），不入 BaseViewport 契约 ----
     def show_measure_line(self, p1, p2, color=(0.12, 0.39, 0.85)):
-        """两点测距连线 + 端点球标记。"""
+        """两点测距连线 + 端点标记（屏幕空间点精灵，约 12px）。"""
         self.clear_measure_visuals()
         try:
             actor = self._plotter.add_mesh(
                 pv.Line(tuple(p1), tuple(p2)), color=color,
-                line_width=3, name='measure_line')
-            self._measure_actors.append(actor)
+                line_width=3, lighting=False, name='measure_line')
+            self._measure_actors.append(self._to_overlay(actor))
             for p in (p1, p2):
-                actor = self._plotter.add_mesh(
-                    pv.Sphere(radius=self._marker_radius(), center=tuple(p)),
-                    color=color, name='measure_point')
+                actor = self._point_marker_actor(p, color, 12,
+                                                 'measure_point')
                 self._measure_actors.append(actor)
         except Exception:
             pass
@@ -998,10 +1035,7 @@ class PyVistaViewport(BaseViewport):
 
     def clear_measure_visuals(self):
         for actor in self._measure_actors:
-            try:
-                self._plotter.remove_actor(actor)
-            except Exception:
-                pass
+            self._remove_visual_actor(actor)
         self._measure_actors.clear()
         self._render()
 
@@ -1020,26 +1054,30 @@ class PyVistaViewport(BaseViewport):
                                     faces=np.array([4, 0, 1, 2, 3]))
                 actor = self._plotter.add_mesh(
                     plate, color=plate_color, opacity=0.35,
-                    name='ruler_plate')
-                self._ruler_actors.append(actor)
+                    lighting=False, name='ruler_plate')
+                try:
+                    actor.ForceTranslucentOn()
+                except Exception:
+                    pass
+                self._ruler_actors.append(self._to_overlay(actor))
                 loop = np.vstack([corners, corners[0]])
                 actor = self._plotter.add_mesh(
                     pv.lines_from_points(loop), color=plate_color,
-                    line_width=3, name='ruler_outline')
-                self._ruler_actors.append(actor)
+                    line_width=3, lighting=False, name='ruler_outline')
+                self._ruler_actors.append(self._to_overlay(actor))
             for seg in render.get('defect_segments') or []:
                 color = ((0.86, 0.15, 0.15) if seg.get('exceed')
                          else (0.13, 0.65, 0.35))
                 actor = self._plotter.add_mesh(
                     pv.Line(tuple(seg['start']), tuple(seg['end'])),
-                    color=color, line_width=6, name='ruler_defect')
-                self._ruler_actors.append(actor)
+                    color=color, line_width=6, lighting=False,
+                    name='ruler_defect')
+                self._ruler_actors.append(self._to_overlay(actor))
             depression = render.get('depression_xyz')
             if depression is not None:
-                actor = self._plotter.add_mesh(
-                    pv.Sphere(radius=self._marker_radius() * 1.4,
-                              center=tuple(depression)),
-                    color=(0.95, 0.45, 0.10), name='ruler_depression')
+                actor = self._point_marker_actor(
+                    depression, (0.95, 0.45, 0.10), 16,
+                    'ruler_depression')
                 self._ruler_actors.append(actor)
         except Exception:
             pass
@@ -1047,10 +1085,7 @@ class PyVistaViewport(BaseViewport):
 
     def clear_ruler_overlay(self):
         for actor in self._ruler_actors:
-            try:
-                self._plotter.remove_actor(actor)
-            except Exception:
-                pass
+            self._remove_visual_actor(actor)
         self._ruler_actors.clear()
         self._render()
 
@@ -1115,7 +1150,7 @@ class PyVistaViewport(BaseViewport):
                 actor.ForceTranslucentOn()
             except Exception:
                 pass
-            self._heatmap_quad_actors.append(actor)
+            self._heatmap_quad_actors.append(self._to_overlay(actor))
             self._add_heatmap_frame(corners)
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}', flush=True)
@@ -1132,11 +1167,11 @@ class PyVistaViewport(BaseViewport):
             glow.ForceTranslucentOn()
         except Exception:
             pass
-        self._heatmap_quad_actors.append(glow)
+        self._heatmap_quad_actors.append(self._to_overlay(glow))
         core = self._plotter.add_mesh(lines, color='#0284C7',
                                       line_width=4, lighting=False,
                                       name='heatmap_frame_core')
-        self._heatmap_quad_actors.append(core)
+        self._heatmap_quad_actors.append(self._to_overlay(core))
 
     def show_heatmap_frame(self, corners_3d, lift=None):
         """仅画四边面边缘高亮（选中立面无热力 PNG 时的选中反馈）。"""
@@ -1162,10 +1197,7 @@ class PyVistaViewport(BaseViewport):
     def clear_heatmap_quad(self):
         if self._heatmap_quad_actors:
             for actor in self._heatmap_quad_actors:
-                try:
-                    self._plotter.remove_actor(actor)
-                except Exception:
-                    pass
+                self._remove_visual_actor(actor)
             self._heatmap_quad_actors = []
             self._render()
 
@@ -1205,10 +1237,9 @@ class PyVistaViewport(BaseViewport):
 
         相机位置显式放在 center + normal * 原视距处（不走 view_vector，
         避免其内部重取构图改动 focal_point）。span 为 (u 跨度, v 跨度)
-        （米），up 为 v 轴方向。长短边自动定向：v 跨度明显长于
-        u 跨度 × 视口宽高比时，viewup 改用 ±u 轴（u = up × normal），
-        让长方向横过来铺满宽屏；符号取与世界上方向点积为正的一侧。
-        parallel_scale 留 10% 边距。
+        （米）。相机的上方向恒为世界上方向 +Z（z-up 约定），仅当平面
+        法向接近 ±Z（水平面，up 退化）时才回退到传入的 up。
+        parallel_scale 按屏幕上/侧向跨度留 10% 边距。
         """
         try:
             camera = self._plotter.camera
@@ -1219,20 +1250,14 @@ class PyVistaViewport(BaseViewport):
             u_span, v_span = (float(s) for s in span)
             fb_w, fb_h = (int(v) for v in self._plotter.renderer.GetSize())
             aspect = max(fb_w, 1) / max(fb_h, 1)
-            screen_up_span, screen_side_span = v_span, u_span
-            if v_span > u_span * aspect:
-                # 窄高立面横屏铺满：viewup 换为 ±u 轴
-                orig_up = up
-                u_axis = np.cross(up, normal)
-                if np.linalg.norm(u_axis) > 1e-12:
-                    up = u_axis / np.linalg.norm(u_axis)
-                    dot_z = float(up[2])
-                    # 与世界上方向点积为正优先；u 恰水平时取让原 v 轴
-                    # （约等于世界上方）指向屏幕右侧的符号，内容尽量正立
-                    if dot_z < 0 or (abs(dot_z) < 1e-9
-                                     and float(orig_up[2]) > 0):
-                        up = -up
-                    screen_up_span, screen_side_span = u_span, v_span
+            # z-up：相机上方向恒为 +Z；法向几乎平行 Z 时退化，回退传入 up
+            if abs(float(normal[2])) < 0.99:
+                up = np.array([0.0, 0.0, 1.0])
+            elif np.linalg.norm(up) < 1e-12:
+                up = np.array([0.0, 1.0, 0.0])
+            # z-up 下屏幕上方向 = v 轴在垂直 normal 平面内的投影方向
+            screen_up_span = v_span
+            screen_side_span = u_span
             distance = float(np.linalg.norm(
                 np.asarray(camera.position, dtype=np.float64)
                 - np.asarray(camera.focal_point, dtype=np.float64)))

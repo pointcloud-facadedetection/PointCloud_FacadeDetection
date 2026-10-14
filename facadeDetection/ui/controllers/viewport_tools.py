@@ -9,9 +9,57 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from algorithms.facade import interactive_ruler
+
+
+class _RulerSurfaceWorker(QThread):
+    """后台构建靠尺 Surface（1.8M 立面点约 1.8s，同步会卡 UI）。
+
+    generation 用于作废过期结果：cancel/invalidate 后 worker 仍跑完，
+    但代数不匹配的结果直接丢弃。
+    """
+
+    done = Signal(int, object, int)      # generation, surface, facade_id
+    failed = Signal(int, str)
+
+    def __init__(self, generation, facade_id, facade, plane_model,
+                 plane_origin, params, facade_service, cloud, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._facade_id = facade_id
+        self._facade = facade
+        self._plane_model = plane_model
+        self._plane_origin = plane_origin
+        self._params = params
+        self._facade_service = facade_service
+        self._cloud = cloud
+
+    def run(self):
+        try:
+            dataset = self._facade_service.get_dataset(self._cloud)
+            points = interactive_ruler.extract_facade_points(
+                self._facade, dataset.processed_raw_points,
+                index=getattr(dataset, 'index', None))
+            if points is None:
+                self.failed.emit(self._generation,
+                                 '选中立面点数不足，无法放置靠尺。')
+                return
+            p = self._params
+            surface = interactive_ruler.build_interactive_surface(
+                points, self._plane_model,
+                plane_origin=self._plane_origin,
+                ruler_dir=interactive_ruler.resolve_ruler_direction(
+                    self._facade),
+                select_band=float(p.get('select_band', 0.01)),
+                hole_band=float(p.get('hole_band', 0.02)),
+                bin_size=float(p.get('bin_size', 0.04)),
+                top_q=float(p.get('top_q', 1.0)),
+                sor=p.get('sor'))
+            self.done.emit(self._generation, surface, self._facade_id)
+        except Exception as exc:
+            self.failed.emit(self._generation, str(exc))
 
 
 class ViewportToolsController(QObject):
@@ -40,6 +88,9 @@ class ViewportToolsController(QObject):
         self._plane_geometry = None
         self._ruler_surface = None
         self._ruler_facade_id = None
+        self._surface_gen = 0
+        self._surface_pending = False
+        self._surface_worker = None
 
     @property
     def active_tool(self):
@@ -60,25 +111,28 @@ class ViewportToolsController(QObject):
         elif self._tool == self.TOOL_RULER:
             self.cancel()
 
+    def _hint(self, message):
+        """前置条件提示：工具区标签 + 状态栏，不用模态弹窗（避免遮挡冻结）。"""
+        self.measure_text.emit(message)
+        self.status_message.emit(message, 6000)
+
     def _activate(self, tool):
         viewport = self._viewport
         if viewport is None or not hasattr(viewport, 'enter_plane_pick_mode'):
-            self.warning_requested.emit('当前视口后端不支持平面拾取。')
+            self._hint('当前视口后端不支持平面拾取。')
             self.tool_deactivated.emit()
             return
         facade = self._facade_provider()
         if not facade:
-            self.warning_requested.emit(
-                '请先在右侧立面列表中选中一个立面，再使用视口工具。')
+            self._hint('请先在右侧立面列表中选中一个立面，再使用测距/靠尺。')
             self.tool_deactivated.emit()
             return
         if not self._prepare_plane(facade):
             self.tool_deactivated.emit()
             return
         self._clear_state()
-        if tool == self.TOOL_RULER and not self._prepare_ruler(facade):
-            self.tool_deactivated.emit()
-            return
+        if tool == self.TOOL_RULER:
+            self._start_ruler_surface_build(facade)
         self._tool = tool
         if tool == self.TOOL_MEASURE:
             viewport.enter_plane_pick_mode(self._plane_model,
@@ -106,7 +160,7 @@ class ViewportToolsController(QObject):
                                dtype=np.float64).reshape(-1)
             geometry = None
         if plane.size != 4 or np.linalg.norm(plane[:3]) < 1e-12:
-            self.warning_requested.emit('选中立面缺少平面参数，无法使用视口工具。')
+            self._hint('选中立面缺少平面参数，请先完成质量检测。')
             return False
         self._plane_model = plane
         self._plane_geometry = geometry
@@ -121,6 +175,8 @@ class ViewportToolsController(QObject):
                 viewport.exit_pick_mode()
             except Exception:
                 pass
+        self._surface_gen += 1        # 作废在跑的靠尺表面构建结果
+        self._surface_pending = False
         if self._tool is not None:
             self._tool = None
             self.measure_text.emit('')
@@ -138,6 +194,8 @@ class ViewportToolsController(QObject):
         """选中立面/点云切换：清空靠尺缓存；工具激活中则以新立面重建。"""
         self._ruler_surface = None
         self._ruler_facade_id = None
+        self._surface_gen += 1        # 作废在跑的构建结果
+        self._surface_pending = False
         if self._tool is not None:
             tool = self._tool
             self._tool = None
@@ -187,47 +245,65 @@ class ViewportToolsController(QObject):
     # ------------------------------------------------------------------
     # 交互靠尺（平面交点作为尺心，place_ruler 内部自行钳制）
     # ------------------------------------------------------------------
-    def _prepare_ruler(self, facade):
+    def _start_ruler_surface_build(self, facade):
+        """后台构建靠尺 Surface（百万级立面点约 1-2s，同步会卡 UI）。
+
+        已有匹配缓存则直接复用；构建期间点击会得到"准备中"提示。
+        """
+        facade_id = int(facade.get('id', -1))
+        if (self._ruler_surface is not None
+                and self._ruler_facade_id == facade_id):
+            return
         cloud = self._cloud_provider()
         if not cloud:
-            self.warning_requested.emit('当前没有可用点云。')
-            return False
-        try:
-            dataset = self._facade_service.get_dataset(cloud)
-            points = interactive_ruler.extract_facade_points(
-                facade, dataset.processed_raw_points,
-                index=getattr(dataset, 'index', None))
-        except Exception as exc:
-            self.warning_requested.emit(f'立面点数据读取失败：{exc}')
-            return False
-        if points is None:
-            self.warning_requested.emit('选中立面点数不足，无法放置靠尺。')
-            return False
-        params = dict(self._ruler_params_provider() or {})
+            self._hint('当前没有可用点云。')
+            self.tool_deactivated.emit()
+            return
         plane_origin = None
         if isinstance(self._plane_geometry, dict):
             plane_origin = self._plane_geometry.get('origin')
         if plane_origin is None:
             plane_origin = facade.get('center')
-        try:
-            surface = interactive_ruler.build_interactive_surface(
-                points, self._plane_model,
-                plane_origin=plane_origin,
-                ruler_dir=interactive_ruler.resolve_ruler_direction(facade),
-                select_band=float(params.get('select_band', 0.01)),
-                hole_band=float(params.get('hole_band', 0.02)),
-                bin_size=float(params.get('bin_size', 0.04)),
-                top_q=float(params.get('top_q', 1.0)),
-                sor=params.get('sor'))
-        except Exception as exc:
-            self.warning_requested.emit(f'靠尺表面构建失败：{exc}')
-            return False
+        params = dict(self._ruler_params_provider() or {})
+        self._surface_gen += 1
+        generation = self._surface_gen
+        self._surface_pending = True
+        worker = _RulerSurfaceWorker(
+            generation, facade_id, facade, self._plane_model,
+            plane_origin, params, self._facade_service, cloud, parent=self)
+        worker.done.connect(self._on_surface_built)
+        worker.failed.connect(self._on_surface_build_failed)
+        worker.finished.connect(self._on_surface_thread_finished)
+        self._surface_worker = worker
+        self.measure_text.emit('靠尺：正在准备靠尺表面…')
+        worker.start()
+
+    def _on_surface_built(self, generation, surface, facade_id):
+        if generation != self._surface_gen:
+            return    # 已取消/换立面，丢弃过期结果
         self._ruler_surface = surface
-        self._ruler_facade_id = int(facade.get('id', -1))
-        return True
+        self._ruler_facade_id = facade_id
+        self._surface_pending = False
+        if self._tool == self.TOOL_RULER:
+            self.measure_text.emit('靠尺：在立面上点击放置位置')
+
+    def _on_surface_build_failed(self, generation, message):
+        if generation != self._surface_gen:
+            return
+        self._surface_pending = False
+        self._hint(f'靠尺表面构建失败：{message}')
+        if self._tool == self.TOOL_RULER:
+            self.cancel()
+
+    def _on_surface_thread_finished(self):
+        self._surface_worker = None
 
     def _on_ruler_pick(self, picked):
-        if not picked or self._ruler_surface is None:
+        if not picked:
+            return
+        if self._ruler_surface is None:
+            if self._surface_pending:
+                self.measure_text.emit('靠尺表面准备中，请稍候…')
             return
         params = dict(self._ruler_params_provider() or {})
         threshold_mm = params.get('threshold_mm')
