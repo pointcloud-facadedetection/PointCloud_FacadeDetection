@@ -1145,9 +1145,10 @@ class PyVistaViewport(BaseViewport):
             ]) + offset
             quad = pv.PolyData(corners, faces=np.array([4, 0, 1, 2, 3]))
             # pyvista 0.49 无 t_coords 便捷属性，走底层 VTK 接口；
-            # PNG 行序：行 0 = v 最大（图像顶部），故 v 小的两角 t=1
+            # PNG 行序：行 0 = v 最大（图像顶部），VTK t=1 为纹理顶部。
+            # 因此 v 小的物理底部对应纹理底部 t=0，v 大的物理顶部对应 t=1。
             from vtk.util.numpy_support import numpy_to_vtk
-            tcoords = np.array([[0, 1], [1, 1], [1, 0], [0, 0]],
+            tcoords = np.array([[0, 0], [1, 0], [1, 1], [0, 1]],
                                dtype=np.float32)
             quad.GetPointData().SetTCoords(numpy_to_vtk(tcoords))
             texture = pv.Texture(rgba)
