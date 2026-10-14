@@ -450,15 +450,8 @@ class ViewportRenderService:
         self._selected_facade_id = None
         self._remove_focus_bbox()
         if self._review_mode:
-            # 复核页整云恒灰（选中期间未改写过颜色），无需恢复配色，
-            # 避免全云颜色数组重建；恢复被摘除的立面点。
-            if hasattr(self.viewport, 'set_hidden_rows'):
-                names = ([cloud_name] if cloud_name else
-                         list(self.viewport.get_cloud_names()
-                              if hasattr(self.viewport, 'get_cloud_names')
-                              else []))
-                for name in names:
-                    self.viewport.set_hidden_rows(name, None)
+            # 复核页整云恒灰（选中期间未改写过颜色、未隐藏点），
+            # 摘除线框后直接返回，避免全云颜色数组重建。
             return
         if cloud_name:
             # 聚焦期改写过颜色，使签名缓存失效以强制恢复正常配色
@@ -487,22 +480,9 @@ class ViewportRenderService:
         if target is None:
             return
         if self._review_mode:
-            # 复核页：整云恒灰不动（高亮交给热力贴图），只画 AABB 线框。
-            # 选中/取消均零颜色重算。同时把选中立面的点从显示中摘除，
-            # 使热力贴图 quad 在任意视角都不被本立面点云遮挡。
-            idx = self._proxy_rows_for_display(
-                cloud_name,
-                target.get('proxy_indices') or target.get('inlier_indices') or [])
-            idx = idx[(idx >= 0) & (idx < len(pos))]
-            if hasattr(self.viewport, 'set_hidden_rows'):
-                self.viewport.set_hidden_rows(cloud_name, idx)
-            self._remove_focus_bbox()
-            if len(idx) and hasattr(self.viewport, 'toggle_bbox'):
-                pts = pos[idx]
-                self.viewport.toggle_bbox(
-                    self._FOCUS_BBOX_KEY,
-                    np.asarray(pts.min(axis=0)), np.asarray(pts.max(axis=0)))
-                self._focus_bbox_visible = True
+            # 复核页：整云恒灰不动、不隐藏点、不画 AABB 线框；
+            # 选中高亮由复核页的热力贴图边框（四边线 + 发光）承担，
+            # 透过贴图镂空区仍可见灰色点云。
             return
         # 聚焦着色：非选中区域（含其他立面）统一降回全量点云的默认灰，
         # 仅选中立面保留原色

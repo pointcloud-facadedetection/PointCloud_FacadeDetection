@@ -252,6 +252,12 @@ class InspectionReviewPageMixin:
         else:
             rgba = self._review_heat_png(facade, quality)
             if rgba is None:
+                # 无热力 PNG 也要给选中反馈：仅画四边面边缘高亮
+                corners = np.asarray(geometry.get('corners_3d') or [],
+                                     dtype=np.float64).reshape(-1, 3)
+                if len(corners) >= 3 and hasattr(viewport,
+                                                 'show_heatmap_frame'):
+                    viewport.show_heatmap_frame(corners)
                 hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
                         '：该立面此模式无热力图')
             else:
@@ -358,14 +364,10 @@ class InspectionReviewPageMixin:
         return None
 
     def _review_clear_presentation(self):
-        """清除选中/迁出复核页：摘除贴图、恢复被摘除的立面点与相机。"""
+        """清除选中/迁出复核页：摘除贴图与边缘高亮、恢复相机。"""
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()
-        if viewport is not None and hasattr(viewport, 'set_hidden_rows'):
-            cloud = self.facade_quality_controller.active_cloud_name()
-            if cloud:
-                viewport.set_hidden_rows(cloud, None)
         if self._review_camera_snapshot is not None and viewport is not None \
                 and hasattr(viewport, 'restore_camera'):
             viewport.restore_camera(self._review_camera_snapshot)

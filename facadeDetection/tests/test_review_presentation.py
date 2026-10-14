@@ -1,5 +1,5 @@
-"""复核页呈现链路：选中立面隐藏点云（热力贴图防遮挡）、恒灰着色跳过、
-操作页行为不受 review 分支影响。
+"""复核页呈现链路：选中立面零重算（不刷色/不藏点/不画 AABB，高亮由
+热力贴图边框承担）、恒灰着色跳过、操作页行为不受 review 分支影响。
 """
 import os
 
@@ -51,7 +51,7 @@ def _service():
 
 
 class TestReviewModeSelection:
-    def test_select_hides_rows_without_color_recompute(self):
+    def test_select_is_pure_noop_in_review_mode(self):
         service, viewport, facades = _service()
         service.set_review_mode(True)
         service.highlight_facades('c', facades)
@@ -59,16 +59,17 @@ class TestReviewModeSelection:
         assert np.allclose(viewport.data['c']['color'], _BASE_GRAY)
 
         service.select_facade('c', 1)
-        assert viewport.hidden['c'].tolist() == [0, 1, 2]
+        assert viewport.hidden == {}, '复核页选中不得隐藏点（透过贴图可见灰云）'
         assert viewport.color_updates == 1, '选中不得重算点云颜色'
-        assert viewport.bbox_calls >= 1, 'AABB 线框仍应绘制'
+        assert viewport.bbox_calls == 0, '复核页选中不画 AABB，高亮由贴图边框承担'
 
         service.select_facade('c', 2)
-        assert viewport.hidden['c'].tolist() == [5, 6], '改选应替换隐藏行'
+        assert viewport.hidden == {}
         assert viewport.color_updates == 1
+        assert viewport.bbox_calls == 0
 
         service.clear_selected_facade('c')
-        assert viewport.hidden == {}, '取消选中应恢复完整点云'
+        assert viewport.hidden == {}
         assert viewport.color_updates == 1, '取消选中不得重算点云颜色'
 
     def test_gray_repaint_skipped_when_already_gray(self):

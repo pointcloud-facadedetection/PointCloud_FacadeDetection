@@ -156,7 +156,7 @@ class PyVistaViewport(BaseViewport):
         self._pick_marker_actors = []
         self._measure_actors = []
         self._ruler_actors = []
-        self._heatmap_quad_actor = None
+        self._heatmap_quad_actors = []
         self._plane_pick_model = None
         self._plane_pick_callback = None
 
@@ -392,7 +392,7 @@ class PyVistaViewport(BaseViewport):
     # ------------------------------------------------------------------
     # 云管理（语义对齐 PointCloudScene）
     # ------------------------------------------------------------------
-    def add_cloud(self, name, positions, colors=None, point_size=0.5):
+    def add_cloud(self, name, positions, colors=None, point_size=0.75):
         positions = np.ascontiguousarray(
             np.asarray(positions, dtype=np.float32).reshape(-1, 3))
         has_source_colors = (
@@ -460,7 +460,7 @@ class PyVistaViewport(BaseViewport):
         if actor is None:
             actor = self._plotter.add_points(
                 poly, scalars='colors', rgb=True,
-                point_size=max(1, int(round(data['size'] * 3))),
+                point_size=max(1, int(round(data['size'] * 4))),
                 render_points_as_spheres=False, name=f'cloud::{name}')
             self._actors[name] = actor
         else:
@@ -662,7 +662,7 @@ class PyVistaViewport(BaseViewport):
         data = self.point_data.get(name)
         actor = self._actors.get(name)
         if data is not None and actor is not None:
-            value = max(1, int(round(float(size) * 3)))
+            value = max(1, int(round(float(size) * 4)))
             data['size'] = float(size)
             actor.prop.point_size = value
             self._render()
@@ -1115,18 +1115,58 @@ class PyVistaViewport(BaseViewport):
                 actor.ForceTranslucentOn()
             except Exception:
                 pass
-            self._heatmap_quad_actor = actor
+            self._heatmap_quad_actors.append(actor)
+            self._add_heatmap_frame(corners)
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}', flush=True)
         self._render()
 
+    def _add_heatmap_frame(self, corners):
+        """四边面边缘高亮：外圈宽线低透明做发光，内圈亮线收边。"""
+        loop = np.vstack([corners, corners[0]])
+        lines = pv.lines_from_points(loop)
+        glow = self._plotter.add_mesh(lines, color='#38BDF8', opacity=0.30,
+                                      line_width=12, lighting=False,
+                                      name='heatmap_frame_glow')
+        try:
+            glow.ForceTranslucentOn()
+        except Exception:
+            pass
+        self._heatmap_quad_actors.append(glow)
+        core = self._plotter.add_mesh(lines, color='#0284C7',
+                                      line_width=4, lighting=False,
+                                      name='heatmap_frame_core')
+        self._heatmap_quad_actors.append(core)
+
+    def show_heatmap_frame(self, corners_3d, lift=None):
+        """仅画四边面边缘高亮（选中立面无热力 PNG 时的选中反馈）。"""
+        self.clear_heatmap_quad()
+        try:
+            corners = np.asarray(corners_3d, dtype=np.float64).reshape(-1, 3)
+            if len(corners) < 3:
+                return
+            if lift is None:
+                span = float(np.linalg.norm(
+                    corners.max(axis=0) - corners.min(axis=0)))
+                lift = max(0.05, 0.001 * span)
+            n = np.cross(corners[1] - corners[0],
+                         corners[2] - corners[0])
+            norm = np.linalg.norm(n)
+            if norm > 1e-12:
+                corners = corners + (n / norm) * float(lift)
+            self._add_heatmap_frame(corners)
+        except Exception as exc:
+            print(f'[PCFD] viewport.heatmap_frame_failed: {exc!r}', flush=True)
+        self._render()
+
     def clear_heatmap_quad(self):
-        if self._heatmap_quad_actor is not None:
-            try:
-                self._plotter.remove_actor(self._heatmap_quad_actor)
-            except Exception:
-                pass
-            self._heatmap_quad_actor = None
+        if self._heatmap_quad_actors:
+            for actor in self._heatmap_quad_actors:
+                try:
+                    self._plotter.remove_actor(actor)
+                except Exception:
+                    pass
+            self._heatmap_quad_actors = []
             self._render()
 
     # ---- 相机：快照/恢复 + 正视平面（复核页贴图呈现配套）----
@@ -1351,12 +1391,12 @@ class PyVistaViewport(BaseViewport):
         pass
 
     def add_point_cloud(self, name=None, points=None, colors=None,
-                        positions=None, point_size=0.5, **_ignored):
+                        positions=None, point_size=0.75, **_ignored):
         self.add_cloud(name, points if points is not None else positions,
                        colors, point_size=point_size)
 
     def add_cloud_numpy(self, name=None, points=None, colors=None,
-                        positions=None, point_size=0.5, **_ignored):
+                        positions=None, point_size=0.75, **_ignored):
         self.add_cloud(name, points if points is not None else positions,
                        colors, point_size=point_size)
 
