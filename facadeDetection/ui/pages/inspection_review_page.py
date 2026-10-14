@@ -169,9 +169,11 @@ class InspectionReviewPageMixin:
         return bar
 
     def _on_review_measure_toggled(self, checked):
+        print(f'[PCFD] review.btn_measure_toggled({checked})', flush=True)
         self.viewport_tools_controller.toggle_measure(checked)
 
     def _on_review_ruler_toggled(self, checked):
+        print(f'[PCFD] review.btn_ruler_toggled({checked})', flush=True)
         self.viewport_tools_controller.toggle_ruler(checked)
 
     def _on_review_clear_clicked(self):
@@ -202,7 +204,10 @@ class InspectionReviewPageMixin:
         items = self.list_facades.selectedItems()
         if not items:
             return None
-        return items[0].data(Qt.ItemDataRole.UserRole)
+        facade = items[0].data(Qt.ItemDataRole.UserRole)
+        print(f'[PCFD] review.selected_facade -> '
+              f'{None if not facade else facade.get("id")}', flush=True)
+        return facade
 
     # ------------------------------------------------------------------
     # 选中立面呈现：热力贴图 quad + 相机正视（仅复核页模式）

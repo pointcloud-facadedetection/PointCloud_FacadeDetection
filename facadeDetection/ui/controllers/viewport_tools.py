@@ -100,12 +100,14 @@ class ViewportToolsController(QObject):
     # 工具开关（由复核页 checkable 按钮驱动）
     # ------------------------------------------------------------------
     def toggle_measure(self, enabled):
+        print(f'[PCFD] tools.toggle_measure({enabled})', flush=True)
         if enabled:
             self._activate(self.TOOL_MEASURE)
         elif self._tool == self.TOOL_MEASURE:
             self.cancel()
 
     def toggle_ruler(self, enabled):
+        print(f'[PCFD] tools.toggle_ruler({enabled})', flush=True)
         if enabled:
             self._activate(self.TOOL_RULER)
         elif self._tool == self.TOOL_RULER:
@@ -113,6 +115,7 @@ class ViewportToolsController(QObject):
 
     def _hint(self, message):
         """前置条件提示：工具区标签 + 状态栏，不用模态弹窗（避免遮挡冻结）。"""
+        print(f'[PCFD] tools.hint: {message}', flush=True)
         self.measure_text.emit(message)
         self.status_message.emit(message, 6000)
 
@@ -123,6 +126,8 @@ class ViewportToolsController(QObject):
             self.tool_deactivated.emit()
             return
         facade = self._facade_provider()
+        print(f'[PCFD] tools._activate({tool}) facade='
+              f'{None if not facade else facade.get("id")}', flush=True)
         if not facade:
             self._hint('请先在右侧立面列表中选中一个立面，再使用测距/靠尺。')
             self.tool_deactivated.emit()
@@ -168,6 +173,10 @@ class ViewportToolsController(QObject):
 
     def cancel(self):
         """Esc / 页面迁出：退出拾取模式并清空全部工具可视化。"""
+        import traceback
+        print('[PCFD] tools.cancel() tool=%s\n%s'
+              % (self._tool, ''.join(traceback.format_stack(limit=6)[:-1])),
+              flush=True)
         self._clear_state()
         viewport = self._viewport
         if viewport is not None and hasattr(viewport, 'exit_pick_mode'):
@@ -214,6 +223,8 @@ class ViewportToolsController(QObject):
     # 测距（平面交点）
     # ------------------------------------------------------------------
     def _on_measure_pick(self, picked):
+        print(f'[PCFD] tools._on_measure_pick picked={picked is not None}',
+              flush=True)
         if not picked:
             return
         point = np.asarray(picked.get('point'), dtype=np.float64)

@@ -249,6 +249,7 @@ class PyVistaViewport(BaseViewport):
             if self._mode == self.InteractionMode.PICK:
                 # 拾取模式：左键只做点选，不进入旋转
                 self._pick_press = xy
+                print(f'[PCFD] viewport.pick_press {xy}', flush=True)
                 return
             self._drag_left = xy
         else:
@@ -264,6 +265,8 @@ class PyVistaViewport(BaseViewport):
                             and abs(xy[0] - press[0]) <= 6
                             and abs(xy[1] - press[1]) <= 6):
                         from PySide6.QtCore import QPoint
+                        print(f'[PCFD] viewport.pick_release {xy}',
+                              flush=True)
                         self.handle_pick_screen(QPoint(*xy))
                 return
             self._drag_left = None
@@ -803,6 +806,7 @@ class PyVistaViewport(BaseViewport):
         """屏幕点击的唯一拾取入口（与 Open3D 版同语义）。"""
         if self._plane_pick_model is not None:
             point = self.ray_plane_pick(pos, self._plane_pick_model)
+            print(f'[PCFD] viewport.plane_pick -> {point}', flush=True)
             if point is None:
                 return
             callback = self._plane_pick_callback
@@ -814,6 +818,8 @@ class PyVistaViewport(BaseViewport):
                     pass
             return
         picked = self.pick_at_screen(pos, cloud_name=self._pick_cloud)
+        print(f'[PCFD] viewport.cloud_pick -> {picked is not None}',
+              flush=True)
         if picked is None:
             return
         callback = self._pick_callback
@@ -860,6 +866,7 @@ class PyVistaViewport(BaseViewport):
 
     def enter_plane_pick_mode(self, plane_model, callback=None):
         """平面拾取：复用 PICK 模式的 6px 点击判定，回调直接给平面交点。"""
+        print('[PCFD] viewport.enter_plane_pick_mode', flush=True)
         self._mode = self.InteractionMode.PICK
         self._plane_pick_model = np.asarray(plane_model, dtype=np.float64)
         self._plane_pick_callback = callback
@@ -877,6 +884,7 @@ class PyVistaViewport(BaseViewport):
             self._pick_callback = None
 
     def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
+        print('[PCFD] viewport.enter_pick_mode（会顶掉平面拾取）', flush=True)
         self._mode = self.InteractionMode.PICK
         self._pick_cloud = cloud_name or self._active_name
         self._pick_radius = float(pick_radius)
@@ -885,6 +893,7 @@ class PyVistaViewport(BaseViewport):
         self._plane_pick_callback = None
 
     def exit_pick_mode(self):
+        print('[PCFD] viewport.exit_pick_mode', flush=True)
         self._mode = self.InteractionMode.NAVIGATE
         self._pick_callback = None
         self._plane_pick_model = None
