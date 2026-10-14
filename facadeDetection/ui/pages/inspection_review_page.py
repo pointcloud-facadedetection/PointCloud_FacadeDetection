@@ -13,9 +13,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+import os
+
+import cv2
 import numpy as np
 
-from services.heatmap_point_coloring import rasterize_quality_heatmap
+from algorithms.facade import interactive_ruler
 from services.heatmap_spec import heatmap_spec
 
 
@@ -26,12 +29,12 @@ class InspectionReviewPageMixin:
     right_dock（立面检测结果面板），形成两栏布局。
     """
 
-    # 复核页热力贴图的 4 档模式（值为 heatmap_spec 的规范模式名）
+    # 复核页热力贴图的 4 档模式（值与导出 PNG 文件名中的 mode 一致）
     REVIEW_HEATMAP_MODES = (
         ('ruler_flatness_area', '靠尺平整度'),
         ('ruler_verticality_area', '靠尺垂直度'),
-        ('global_flatness_area', '全局平整度'),
-        ('global_verticality_area', '全局垂直度'),
+        ('global_plane_flatness_area', '全局平整度'),
+        ('global_plane_verticality_area', '全局垂直度'),
     )
 
     def _create_inspection_review_page(self, page_title, page_key):
@@ -210,7 +213,7 @@ class InspectionReviewPageMixin:
             self._review_present_facade(facade, focus_camera=False)
 
     def _review_present_facade(self, facade, focus_camera=True):
-        """选中立面：热力图贴到检测面四边面上 + 相机正视该平面。"""
+        """选中立面：检测时导出的热力 PNG 贴到四边面上 + 相机正视。"""
         viewport = getattr(self, 'viewport', None)
         hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
         if viewport is None or not hasattr(viewport, 'show_heatmap_quad'):
@@ -240,28 +243,76 @@ class InspectionReviewPageMixin:
                                      geometry['v_axis'],
                                      (bounds[2] - bounds[0],
                                       bounds[3] - bounds[1]))
-        elif focus_camera and isinstance(quality, dict):
-            plane = np.asarray((quality.get('overall') or {}).get(
-                'plane_model') or quality.get('plane_model') or [],
-                dtype=float).reshape(-1)
-            if plane.size == 4:
-                normal = plane[:3] / np.linalg.norm(plane[:3])
 
         viewport.clear_heatmap_quad()
         hint = ''
-        if not isinstance(quality, dict):
+        if not isinstance(quality, dict) or not isinstance(geometry, dict):
             hint = '该立面暂无质量结果，无法生成热力图'
         else:
-            raster = rasterize_quality_heatmap(
-                quality, self._review_heatmap_mode)
-            if raster is None:
+            png_path = self._review_heatmap_png_path(facade, quality)
+            image = (cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
+                     if png_path else None)
+            if image is None or image.ndim != 3 or image.shape[2] != 4:
                 hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
-                        '：该立面此模式无超限数据')
+                        '：该立面此模式无热力图')
             else:
-                viewport.show_heatmap_quad(raster, normal=normal)
+                rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                uv_bounds = self._review_heat_uv_bounds(
+                    facade, quality, image.shape[:2])
+                viewport.show_heatmap_quad(
+                    rgba, geometry['origin'], geometry['u_axis'],
+                    geometry['v_axis'], uv_bounds, normal=normal)
                 hint = heatmap_spec(self._review_heatmap_mode)['title']
         if hint_label is not None:
             hint_label.setText(hint)
+
+    def _review_heatmap_png_path(self, facade, quality):
+        """检测时导出的透明热力 PNG 路径（facade_NNN_{mode}_transparent.png）。"""
+        context = quality.get('__export_context') or {}
+        results_dir = context.get('results_dir')
+        facade_no = int(context.get('facade_no')
+                        or facade.get('display_no') or facade.get('id', 0))
+        if not results_dir:
+            project_uuid = getattr(self.current_project, 'project_id', None)
+            if not project_uuid:
+                return None
+            results_dir = str(
+                self.facade_quality_controller._quality_results_dir(
+                    project_uuid, facade))
+        folder = os.path.join(str(results_dir), f'facade_{facade_no:03d}')
+        name = f'facade_{facade_no:03d}_{self._review_heatmap_mode}_transparent.png'
+        path = os.path.join(folder, name)
+        return path if os.path.isfile(path) else None
+
+    def _review_heat_uv_bounds(self, facade, quality, image_hw):
+        """transparent PNG 的 UV 矩形：重建导出裁剪框，尺寸不符回退 domain。
+
+        重建结果与模式无关（四档共用同一 facade_mask 裁剪），按
+        (立面 id, 数据集 revision) 缓存，切换模式/重选不重复计算。
+        """
+        fallback = tuple(np.asarray(quality['facade_geometry']['uv_bounds'],
+                                    dtype=np.float64).reshape(4))
+        try:
+            cloud = self.facade_quality_controller.active_cloud_name()
+            dataset = self.facade_service.get_dataset(cloud)
+            key = (int(facade.get('id', -1)),
+                   str(getattr(dataset, 'revision', None)))
+            cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
+            if key not in cache:
+                cache[key] = interactive_ruler.transparent_png_uv_rect(
+                    dataset.processed_raw_points, quality)
+            rect = cache[key]
+            if rect:
+                x0, y0, x1, y1 = rect['crop_xy']
+                h, w = int(image_hw[0]), int(image_hw[1])
+                if (x1 - x0 + 1, y1 - y0 + 1) == (w, h):
+                    return rect['uv_bounds']
+                print(f'[PCFD] review.heat_rect_mismatch facade={key[0]} '
+                      f'crop=({x1 - x0 + 1}x{y1 - y0 + 1}) png=({w}x{h})',
+                      flush=True)
+        except Exception as exc:
+            print(f'[PCFD] review.heat_rect_failed: {exc!r}', flush=True)
+        return fallback
 
     def _review_clear_presentation(self):
         """清除选中/迁出复核页：摘除贴图并恢复选中前的相机。"""

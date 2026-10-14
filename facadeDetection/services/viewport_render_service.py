@@ -443,6 +443,10 @@ class ViewportRenderService:
         """清除选中：恢复正常立面配色并摘除聚焦线框。"""
         self._selected_facade_id = None
         self._remove_focus_bbox()
+        if self._review_mode:
+            # 复核页整云恒灰（选中期间未改写过颜色），无需恢复配色，
+            # 避免全云颜色数组重建。
+            return
         if cloud_name:
             # 聚焦期改写过颜色，使签名缓存失效以强制恢复正常配色
             self._facade_color_signatures.pop(cloud_name, None)
@@ -468,6 +472,21 @@ class ViewportRenderService:
             (f for f in facades
              if int(f.get('id', -1)) == fid), None)
         if target is None:
+            return
+        if self._review_mode:
+            # 复核页：整云恒灰不动（高亮交给热力贴图），只画 AABB 线框。
+            # 选中/取消均零颜色重算。
+            idx = self._proxy_rows_for_display(
+                cloud_name,
+                target.get('proxy_indices') or target.get('inlier_indices') or [])
+            idx = idx[(idx >= 0) & (idx < len(pos))]
+            self._remove_focus_bbox()
+            if len(idx) and hasattr(self.viewport, 'toggle_bbox'):
+                pts = pos[idx]
+                self.viewport.toggle_bbox(
+                    self._FOCUS_BBOX_KEY,
+                    np.asarray(pts.min(axis=0)), np.asarray(pts.max(axis=0)))
+                self._focus_bbox_visible = True
             return
         # 聚焦着色：非选中区域（含其他立面）统一降回全量点云的默认灰，
         # 仅选中立面保留原色

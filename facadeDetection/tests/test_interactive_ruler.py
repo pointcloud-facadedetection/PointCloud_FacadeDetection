@@ -225,3 +225,56 @@ class TestPlaneIntersectionDrivenRuler:
         assert result['ok'] is True
         assert result['gap_mm'] == pytest.approx(5.0, abs=1.5)
         assert result['exceeded'] is True
+
+
+class TestTransparentPngUvRect:
+    """复刻导出链路画布+裁剪：domain 外扩 5%、max_size 像素步长、
+    facade_mask 2% 行列覆盖率裁剪。合成 u∈[0,4] v∈[0,3] 密墙，
+    裁剪框应精确还原为 (0,0,4,3)。"""
+
+    def _quality(self):
+        return {
+            'quality_comparison': {'domain': {
+                'u_min_m': 0.0, 'v_min_m': 0.0,
+                'u_max_m': 4.0, 'v_max_m': 3.0}},
+            'projection_origin': [0.0, 0.0, 0.0],
+            'projection_u_axis': [0.0, 1.0, 0.0],
+            'projection_v_axis': [0.0, 0.0, 1.0],
+        }
+
+    def _wall(self):
+        ys = np.arange(0.0, 4.0 + 1e-9, 0.05)
+        zs = np.arange(0.0, 3.0 + 1e-9, 0.05)
+        y, z = np.meshgrid(ys, zs)
+        return np.column_stack([np.zeros(y.size), y.ravel(), z.ravel()])
+
+    def test_crop_rect_recovers_wall_extent(self):
+        rect = interactive_ruler.transparent_png_uv_rect(
+            self._wall(), self._quality())
+        assert rect is not None
+        # 画布：domain 外扩 5%（u ±0.2, v ±0.15），size=0.01
+        assert rect['canvas_wh'] == (441, 331)
+        assert rect['crop_xy'] == (20, 15, 420, 315)
+        u0, v0, u1, v1 = rect['uv_bounds']
+        assert (u0, v0, u1, v1) == pytest.approx((0.0, 0.0, 4.0, 3.0))
+
+    def test_max_size_downscales_pixel(self):
+        # 90m 长边触发 max_size=3200 降采样：size = 99/3199（含 5% 边距）
+        quality = self._quality()
+        quality['quality_comparison']['domain'].update(
+            {'u_max_m': 4.0, 'v_max_m': 90.0})
+        ys = np.arange(0.0, 4.0 + 1e-9, 0.05)
+        zs = np.arange(0.0, 90.0 + 1e-9, 0.05)
+        y, z = np.meshgrid(ys, zs)
+        pts = np.column_stack([np.zeros(y.size), y.ravel(), z.ravel()])
+        rect = interactive_ruler.transparent_png_uv_rect(pts, quality)
+        assert rect['pixel_size'] == pytest.approx(99.0 / 3199)
+        u0, v0, u1, v1 = rect['uv_bounds']
+        assert (u0, u1) == pytest.approx((0.0, 4.0), abs=0.05)
+        assert (v0, v1) == pytest.approx((0.0, 90.0), abs=0.05)
+
+    def test_missing_domain_returns_none(self):
+        assert interactive_ruler.transparent_png_uv_rect(
+            self._wall(), {}) is None
+        assert interactive_ruler.transparent_png_uv_rect(
+            self._wall(), None) is None

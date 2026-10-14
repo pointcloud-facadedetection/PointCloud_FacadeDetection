@@ -183,3 +183,78 @@ def place_ruler(surface, click_point, ruler_length=2.0, ruler_width=0.055,
                                          dtype=np.float64),
         },
     }
+
+
+def transparent_png_uv_rect(points, quality, pixel_size=0.01, max_size=3200):
+    """重建 transparent PNG（裁剪后）对应的 UV 矩形。
+
+    导出链路（heatmap_renderer.render_transparent_heatmap）的画布与裁剪：
+    画布 = quality domain 外扩 5%，像素步长 = max(pixel_size, 长边/(max_size-1))，
+    再按 facade_mask（全量点投影覆盖率 ≥2% 的行列）裁剪。
+    本函数用同一份 processed_raw_points 复刻该过程，返回裁剪框的 UV 矩形。
+    与模式无关（四种模式的画布/裁剪共用同一 facade_mask）。
+
+    返回 dict：uv_bounds=(u0,v0,u1,v1)、canvas_wh=(W,H)、crop_xy=(x0,y0,x1,y1)、
+    pixel_size；domain 缺失或点不足时返回 None。
+    """
+    if not isinstance(quality, dict):
+        return None
+    domain = (quality.get('quality_comparison') or {}).get('domain') \
+        or quality.get('quality_domain') or {}
+    try:
+        u0 = float(domain['u_min_m']); v0 = float(domain['v_min_m'])
+        u1 = float(domain['u_max_m']); v1 = float(domain['v_max_m'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (u1 > u0 and v1 > v0):
+        return None
+    origin = np.asarray(quality.get('projection_origin') or [],
+                        dtype=np.float64).reshape(-1)
+    u_axis = np.asarray(quality.get('projection_u_axis') or [],
+                        dtype=np.float64).reshape(-1)
+    v_axis = np.asarray(quality.get('projection_v_axis') or [],
+                        dtype=np.float64).reshape(-1)
+    if origin.size != 3 or u_axis.size != 3 or v_axis.size != 3:
+        return None
+    u_axis = u_axis / np.linalg.norm(u_axis)
+    v_axis = v_axis / np.linalg.norm(v_axis)
+
+    pts = np.asarray(points)
+    if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) == 0:
+        return None
+
+    du, dv = (u1 - u0) * 0.05, (v1 - v0) * 0.05
+    lo = np.array([u0 - du, v0 - dv])
+    hi = np.array([u1 + du, v1 + dv])
+    size = max(float(pixel_size), float(np.max(hi - lo)) / max(max_size - 1, 1))
+    width = int(np.ceil((hi[0] - lo[0]) / size)) + 1
+    height = int(np.ceil((hi[1] - lo[1]) / size)) + 1
+
+    counts = np.zeros(height * width, dtype=np.uint32)
+    chunk = 4_000_000
+    for start in range(0, len(pts), chunk):
+        block = np.asarray(pts[start:start + chunk], dtype=np.float32)
+        rel = block - origin.astype(np.float32)
+        fu = rel @ u_axis.astype(np.float32)
+        fv = rel @ v_axis.astype(np.float32)
+        fx = np.clip(((fu - lo[0]) / size).astype(np.int64), 0, width - 1)
+        fy = np.clip((height - 1 - (fv - lo[1]) / size).astype(np.int64),
+                     0, height - 1)
+        counts += np.bincount(fy * width + fx,
+                              minlength=height * width).astype(np.uint32)
+    mask = counts.reshape(height, width) > 0
+    col_cov = mask.sum(axis=0) / float(height)
+    row_cov = mask.sum(axis=1) / float(width)
+    cols = np.where(col_cov >= 0.02)[0]
+    rows = np.where(row_cov >= 0.02)[0]
+    if len(cols) == 0 or len(rows) == 0:
+        return None
+    x0, x1 = int(cols[0]), int(cols[-1])
+    y0, y1 = int(rows[0]), int(rows[-1])
+    return {
+        'uv_bounds': (float(lo[0] + x0 * size), float(hi[1] - y1 * size),
+                      float(lo[0] + x1 * size), float(hi[1] - y0 * size)),
+        'canvas_wh': (width, height),
+        'crop_xy': (x0, y0, x1, y1),
+        'pixel_size': float(size),
+    }

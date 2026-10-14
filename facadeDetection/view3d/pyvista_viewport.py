@@ -1023,23 +1023,26 @@ class PyVistaViewport(BaseViewport):
         self.clear_pick_markers()
 
     # ---- 热力图贴图 quad（复核页选中立面呈现）----
-    def show_heatmap_quad(self, raster, normal=None, lift=0.015):
-        """把质量热力光栅贴到立面四边面上（RGBA 纹理，alpha 镂空）。
+    def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
+                          normal=None, lift=0.015):
+        """把透明热力 PNG（RGBA）贴到立面四边面上（逐像素 alpha 镂空）。
 
-        raster 来自 rasterize_quality_heatmap：origin/u_axis/v_axis/bounds/
-        overlay_rgba。overlay 行序与 sample_heatmap_colors 同约定：
-        行 0 = v 最大（画布顶部），故 v 小的两角 TCoords 取 t=1。
+        image 为检测时导出的 facade_NNN_{mode}_transparent.png（RGBA uint8，
+        行 0 = v 最大）；uv_bounds=(u0,v0,u1,v1) 必须与 PNG 内容严格对应
+        （见 interactive_ruler.transparent_png_uv_rect）。透明像素 RGB 为黑，
+        故 actor 必须进透明通道（ForceTranslucentOn），否则镂空区变黑块。
         """
         self.clear_heatmap_quad()
         try:
-            origin = np.asarray(raster['origin'], dtype=np.float64).reshape(3)
-            u_axis = np.asarray(raster['u_axis'], dtype=np.float64).reshape(3)
-            v_axis = np.asarray(raster['v_axis'], dtype=np.float64).reshape(3)
-            u0, v0, u1, v1 = np.asarray(raster['bounds'],
-                                        dtype=np.float64).reshape(4)
-            overlay = np.asarray(raster['overlay_rgba'])
-            if overlay.ndim != 3 or overlay.shape[2] != 4:
+            rgba = np.asarray(image)
+            if rgba.ndim != 3 or rgba.shape[2] != 4:
                 return
+            rgba = np.ascontiguousarray(rgba.astype(np.uint8))
+            origin = np.asarray(origin, dtype=np.float64).reshape(3)
+            u_axis = np.asarray(u_axis, dtype=np.float64).reshape(3)
+            v_axis = np.asarray(v_axis, dtype=np.float64).reshape(3)
+            u0, v0, u1, v1 = np.asarray(uv_bounds,
+                                        dtype=np.float64).reshape(4)
             if normal is None:
                 n = np.cross(u_axis, v_axis)
                 norm = np.linalg.norm(n)
@@ -1056,15 +1059,21 @@ class PyVistaViewport(BaseViewport):
                 origin + u0 * u_axis + v1 * v_axis,
             ]) + offset
             quad = pv.PolyData(corners, faces=np.array([4, 0, 1, 2, 3]))
-            # pyvista 0.49 无 t_coords 便捷属性，走底层 VTK 接口
+            # pyvista 0.49 无 t_coords 便捷属性，走底层 VTK 接口；
+            # PNG 行序：行 0 = v 最大（图像顶部），故 v 小的两角 t=1
             from vtk.util.numpy_support import numpy_to_vtk
             tcoords = np.array([[0, 1], [1, 1], [1, 0], [0, 0]],
                                dtype=np.float32)
             quad.GetPointData().SetTCoords(numpy_to_vtk(tcoords))
-            texture = pv.Texture(np.ascontiguousarray(
-                overlay.astype(np.uint8)))
+            texture = pv.Texture(rgba)
             actor = self._plotter.add_mesh(quad, texture=texture,
+                                           lighting=False,
                                            name='heatmap_quad')
+            try:
+                # 逐像素 alpha 混合：镂空区不写深度、不遮点云
+                actor.ForceTranslucentOn()
+            except Exception:
+                pass
             self._heatmap_quad_actor = actor
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}', flush=True)
@@ -1111,32 +1120,49 @@ class PyVistaViewport(BaseViewport):
             pass
 
     def focus_plane(self, normal, center, up, span):
-        """正视立面：视线沿 -normal、viewup=up、正交投影、按跨度取景。
+        """正视立面：视线沿 -normal、正交投影、按跨度取景。
 
         相机位置显式放在 center + normal * 原视距处（不走 view_vector，
         避免其内部重取构图改动 focal_point）。span 为 (u 跨度, v 跨度)
-        （米）；parallel_scale 取半高并兼顾横向跨度与视口宽高比，
-        留 10% 边距。
+        （米），up 为 v 轴方向。长短边自动定向：v 跨度明显长于
+        u 跨度 × 视口宽高比时，viewup 改用 ±u 轴（u = up × normal），
+        让长方向横过来铺满宽屏；符号取与世界上方向点积为正的一侧。
+        parallel_scale 留 10% 边距。
         """
         try:
             camera = self._plotter.camera
             normal = np.asarray(normal, dtype=np.float64)
             normal = normal / np.linalg.norm(normal)
             center = np.asarray(center, dtype=np.float64)
+            up = np.asarray(up, dtype=np.float64)
+            u_span, v_span = (float(s) for s in span)
+            fb_w, fb_h = (int(v) for v in self._plotter.renderer.GetSize())
+            aspect = max(fb_w, 1) / max(fb_h, 1)
+            screen_up_span, screen_side_span = v_span, u_span
+            if v_span > u_span * aspect:
+                # 窄高立面横屏铺满：viewup 换为 ±u 轴
+                orig_up = up
+                u_axis = np.cross(up, normal)
+                if np.linalg.norm(u_axis) > 1e-12:
+                    up = u_axis / np.linalg.norm(u_axis)
+                    dot_z = float(up[2])
+                    # 与世界上方向点积为正优先；u 恰水平时取让原 v 轴
+                    # （约等于世界上方）指向屏幕右侧的符号，内容尽量正立
+                    if dot_z < 0 or (abs(dot_z) < 1e-9
+                                     and float(orig_up[2]) > 0):
+                        up = -up
+                    screen_up_span, screen_side_span = u_span, v_span
             distance = float(np.linalg.norm(
                 np.asarray(camera.position, dtype=np.float64)
                 - np.asarray(camera.focal_point, dtype=np.float64)))
             if distance < 1e-6:
-                distance = max(span) * 3.0
+                distance = max(u_span, v_span) * 3.0
             camera.focal_point = tuple(center)
             camera.position = tuple(center + normal * distance)
-            camera.up = tuple(np.asarray(up, dtype=np.float64))
+            camera.up = tuple(up)
             self._plotter.enable_parallel_projection()
-            u_span, v_span = (float(s) for s in span)
-            fb_w, fb_h = (int(v) for v in self._plotter.renderer.GetSize())
-            aspect = max(fb_w, 1) / max(fb_h, 1)
-            camera.parallel_scale = max(v_span * 0.5,
-                                        u_span * 0.5 / aspect) * 1.1
+            camera.parallel_scale = max(screen_up_span * 0.5,
+                                        screen_side_span * 0.5 / aspect) * 1.1
             self._render()
         except Exception as exc:
             print(f'[PCFD] viewport.focus_plane_failed: {exc!r}', flush=True)
