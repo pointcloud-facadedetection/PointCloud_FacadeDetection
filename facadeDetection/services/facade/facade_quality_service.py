@@ -80,8 +80,6 @@ class FacadeQualityService:
                 flatness_limit = profile.flatness_limit_mm / 1000.0
                 verticality_limit_mm = profile.verticality_limit_mm
                 ruler_size = float(getattr(profile, 'measure_height_m', ruler_size or 2.0))
-                # New-window defaults are authoritative. A caller may still
-                # explicitly override the step for legacy profiles.
                 if ruler_step is None:
                     ruler_step = None
 
@@ -154,7 +152,6 @@ class FacadeQualityService:
             plane_model = plane_model / norm
 
             # 鲁棒全局平面拟合：先验法向量 + Huber IRLS（全量点）
-            # 新参数优先从 profile 读取，无则回退 Config 常量，保证老项目兼容
             from config.settings import Config
             global_fit = fit_global_plane(
                 filtered_pts,
@@ -162,31 +159,31 @@ class FacadeQualityService:
                 seed=int(getattr(profile, 'global_plane_seed', 42)),
                 huber_delta_m=float(getattr(
                     profile, 'global_plane_huber_delta_m',
-                    getattr(Config, 'GLOBAL_PLANE_HUBER_DELTA_M', 0.015))),
+                    getattr(Config, 'GLOBAL_PLANE_HUBER_DELTA_M', 0.008))),
                 max_iterations=int(getattr(
                     profile, 'global_plane_max_iterations',
                     getattr(Config, 'GLOBAL_PLANE_MAX_ITERATIONS', 500))),
                 angle_limit_deg=float(getattr(
                     profile, 'global_plane_angle_limit_deg',
-                    getattr(Config, 'GLOBAL_PLANE_ANGLE_LIMIT_DEG', 3.0))),
+                    getattr(Config, 'GLOBAL_PLANE_ANGLE_LIMIT_DEG', 2.0))),
                 outlier_sigma=float(getattr(
                     profile, 'global_plane_outlier_sigma',
-                    getattr(Config, 'GLOBAL_PLANE_OUTLIER_SIGMA', 3.0))),
+                    getattr(Config, 'GLOBAL_PLANE_OUTLIER_SIGMA', 2.5))),
                 final_gate_sigma=float(getattr(
                     profile, 'global_plane_final_gate_sigma',
-                    getattr(Config, 'GLOBAL_PLANE_FINAL_GATE_SIGMA', 2.5))),
+                    getattr(Config, 'GLOBAL_PLANE_FINAL_GATE_SIGMA', 2.0))),
                 min_inlier_ratio=float(getattr(
                     profile, 'global_plane_min_inlier_ratio',
                     getattr(Config, 'GLOBAL_PLANE_MIN_INLIER_RATIO', 0.30))),
                 max_p95_mm=float(getattr(
                     profile, 'global_plane_max_p95_mm',
-                    getattr(Config, 'GLOBAL_PLANE_MAX_P95_MM', 100.0))),
+                    getattr(Config, 'GLOBAL_PLANE_MAX_P95_MM', 50.0))),
                 enable_partition_fallback=bool(getattr(
                     profile, 'global_plane_enable_partition_fallback',
                     getattr(Config, 'GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK', True))),
                 partition_depth_gap_m=float(getattr(
                     profile, 'global_plane_partition_depth_gap_m',
-                    getattr(Config, 'GLOBAL_PLANE_PARTITION_DEPTH_GAP_M', 0.08))),
+                    getattr(Config, 'GLOBAL_PLANE_PARTITION_DEPTH_GAP_M', 0.05))),
                 partition_min_points_ratio=float(getattr(
                     profile, 'global_plane_partition_min_points_ratio',
                     getattr(Config, 'GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO', 0.10))),
@@ -196,8 +193,6 @@ class FacadeQualityService:
                       reason='global_plane_fit_below_threshold_forcing_continue',
                       inlier_ratio=global_fit.get('inlier_ratio'),
                       p95_mm=global_fit.get('p95_abs_residual_mm'))
-                # 降级拦截为警告，强制继续执行质量评估。
-                # 若拟合返回退化平面，则回退到检测阶段提供的参考平面。
                 fallback_plane = np.asarray(
                     global_fit.get('plane_model', plane_model), dtype=np.float64)
                 global_fit['plane_model'] = fallback_plane
@@ -207,17 +202,11 @@ class FacadeQualityService:
             if float(global_plane[:3] @ plane_model[:3]) < 0:
                 global_plane *= -1.0
 
-            # The fitted support, not the raw candidate cloud, defines the
-            # facade extent.  Raw candidates may contain balconies, frames and
-            # background fragments; they are still measured *inside* this
-            # extent but must never inflate the common area denominator.
             support_mask = np.asarray(global_fit.pop('support_mask', []), dtype=bool)
             if support_mask.shape != (len(filtered_pts),) or support_mask.sum() < 3:
                 support_mask = np.ones(len(filtered_pts), dtype=bool)
             support_pts = filtered_pts[support_mask]
 
-            # Use robust support quantiles for the frame origin; raw outliers
-            # must not move the frame or inflate the effective facade area.
             facade_type_seed, _, _, _ = classify_plane(plane_model[:3])
             seed_u_axis, seed_v_axis = plane_axes(plane_model[:3], facade_type_seed)
             seed_rel = support_pts - np.mean(support_pts, axis=0)
@@ -228,8 +217,6 @@ class FacadeQualityService:
             bbox_center = (np.mean(support_pts, axis=0) +
                            seed_u_axis * ((q_u0 + q_u1) * .5) +
                            seed_v_axis * ((q_v0 + q_v1) * .5))
-            # Both algorithms use the robust global reference frame. The
-            # detected facade plane is retained only as the orientation prior.
             plane_model = global_plane
             plane_d = float(plane_model[3])
             plane_n = plane_model[:3]
@@ -243,21 +230,14 @@ class FacadeQualityService:
             trace("quality.domain_ready", facade_no=facade_no,
                   quality_points=n_valid, seconds=f"{time.perf_counter()-started:.2f}")
 
-            # Compute axes
             facade_type, _, _, _ = classify_plane(plane_model[:3])
             u_axis, v_axis = plane_axes(plane_model[:3], facade_type)
 
-            # Full UV range. Bounds are computed in the final shared global
-            # reference frame, so the same values can be passed to both
-            # algorithms without an origin/axis mismatch.
             support_rel = support_pts - origin_on_plane
             support_u = support_rel @ u_axis
             support_v = support_rel @ v_axis
             q_u0, q_u1 = np.quantile(support_u, [0.0025, 0.9975])
             q_v0, q_v1 = np.quantile(support_v, [0.0025, 0.9975])
-            # Keep every raw candidate inside the reliable facade envelope;
-            # this includes actual local bulges/recesses but removes detached
-            # structures that were responsible for the 4.2m/23.4m domain split.
             raw_rel = filtered_pts - origin_on_plane
             raw_u, raw_v = raw_rel @ u_axis, raw_rel @ v_axis
             bounds_mask = ((raw_u >= q_u0) & (raw_u <= q_u1) &
@@ -277,14 +257,12 @@ class FacadeQualityService:
             gsize = float(profile.interval_size_m if profile is not None else 20.0)
             if grid_size is not None:
                 gsize = float(grid_size)
-            # 旧项目兼容：3m/5m 映射到 4m
             if gsize in (3.0, 5.0):
                 gsize = 4.0
 
             rsize = 2.0 if ruler_size is None else float(ruler_size)
             window_width = float(getattr(profile, 'global_window_width_m',
                                          getattr(profile, 'ruler_width_m', .055)))
-            # ★ 纵向步长统一为半尺长 (1.0m)，横向步长 = 尺宽 (0.055m)
             default_scan_step = rsize / 2.0
             rstep = float(ruler_step) if ruler_step is not None else float(
                 getattr(profile, 'scan_step_m', default_scan_step))
@@ -301,7 +279,7 @@ class FacadeQualityService:
                 ruler_width_m=float(getattr(profile, 'ruler_width_m', .055)),
                 scan_step_m=rstep,
                 strip_step_m=float(getattr(profile, 'strip_step_m', window_width)),
-                select_band_m=float(getattr(profile, 'select_band_m', .01)),
+                select_band_m=float(getattr(profile, 'select_band_m', .03)),
                 hole_band_m=float(getattr(profile, 'hole_band_m', .02)),
                 bin_size_m=float(getattr(profile, 'bin_size_m', .04)),
                 top_q=float(getattr(profile, 'top_q', 1.0)),
@@ -332,16 +310,17 @@ class FacadeQualityService:
                 u_axis=u_axis,
                 v_axis=v_axis,
                 seed=int(getattr(profile, 'global_plane_seed', 42)),
-                huber_delta_m=float(getattr(profile, 'global_plane_huber_delta_m', .005)),
+                huber_delta_m=float(getattr(profile, 'local_baseline_huber_delta_m', .002)),
                 max_iterations=int(getattr(profile, 'global_plane_max_iterations', 500)),
-                angle_limit_deg=float(getattr(profile, 'global_plane_angle_limit_deg', 3.0)),
-                outlier_sigma=float(getattr(profile, 'global_plane_outlier_sigma', 3.0)),
-                final_gate_sigma=float(getattr(profile, 'global_plane_final_gate_sigma', 3.5)),
-                min_inlier_ratio=float(getattr(profile, 'global_plane_min_inlier_ratio', .15)),
-                max_p95_mm=float(getattr(profile, 'global_plane_max_p95_mm', 200.0)),
+                angle_limit_deg=float(getattr(profile, 'global_plane_angle_limit_deg', 2.0)),
+                outlier_sigma=float(getattr(profile, 'global_plane_outlier_sigma', 2.5)),
+                final_gate_sigma=float(getattr(profile, 'local_baseline_final_gate_sigma', 2.5)),
+                min_inlier_ratio=float(getattr(profile, 'local_baseline_min_inlier_ratio', .20)),
+                max_p95_mm=float(getattr(profile, 'local_baseline_max_p95_mm', 50.0)),
                 enable_partition_fallback=bool(getattr(profile, 'global_plane_enable_partition_fallback', True)),
-                partition_depth_gap_m=float(getattr(profile, 'global_plane_partition_depth_gap_m', .03)),
-                partition_min_points_ratio=float(getattr(profile, 'global_plane_partition_min_points_ratio', .10)),
+                partition_depth_gap_m=float(getattr(profile, 'local_baseline_partition_depth_gap_m', .02)),
+                partition_min_points_ratio=float(getattr(profile, 'global_plane_partition_min_points_ratio', .15)),
+                continuity_constraint_mm=float(getattr(profile, 'local_baseline_continuity_mm', 5.0)),
             )
             trace("quality.baseline_planes", facade_no=facade_no,
                   blocks=len(baseline_blocks), interval=gsize)
@@ -355,22 +334,15 @@ class FacadeQualityService:
 
             result['interval_size_m'] = gsize
 
-            # Ensure overall contains all required fields with correct names
             result.setdefault('overall', {})
             result['overall'].update({
                 'plane_model': plane_model.tolist(),
                 'normal': plane_model[:3].tolist(),
                 'center': facade_ref['center'],
             })
-            # Persist the exact projection frame used by both quality
-            # algorithms. Export/render code must not reconstruct an origin
-            # from the raw cloud, otherwise heatmap locations drift.
             result['projection_origin'] = origin_on_plane.tolist()
             result['projection_u_axis'] = u_axis.tolist()
 
-            # 传入质量评估立面的顶点坐标和边中点坐标，供 3D 热力面片/边界锚点渲染使用。
-            # 两套质量分支共享同一质量域和投影坐标系，统一输出可直接用于
-            # 3D 热力面片/边界锚点的几何描述；不改变底层算法返回结构。
             result['facade_geometry'] = extract_facade_geometry(
                 plane_model, origin_on_plane, u_axis, v_axis,
                 (q_u0, q_v0, q_u1, q_v1))
@@ -413,6 +385,7 @@ class FacadeQualityService:
                 'v_min_m': float(q_v0), 'v_max_m': float(q_v1),
             })
 
+            # ★ 模拟墙面法：透传预处理参数（SOR + select_band 与靠尺法对齐）
             global_result = compute_block_plane_quality(
                 filtered_pts, baseline_blocks, origin_on_plane, u_axis, v_axis,
                 flatness_limit_mm=float(params.flatness_limit_mm),
@@ -421,24 +394,20 @@ class FacadeQualityService:
                 grid_res=0.05,
                 ruler_length_m=rsize,
                 ruler_width_m=float(getattr(profile, 'ruler_width_m', .055)),
+                select_band_m=float(getattr(profile, 'select_band_m', .03)),
+                sor_enabled=bool(getattr(profile, 'sor_enabled', True)),
+                sor_k=int(getattr(profile, 'sor_k', 8)),
+                sor_sigma=float(getattr(profile, 'sor_sigma', 4.0)),
             )
-            # Keep one authoritative point-level payload for the global-plane
-            # renderer.  The legacy per-window arrays remain for report/UI
-            # compatibility, but are no longer the preferred export source.
             global_samples = global_result.get('defect_samples') or {}
             ruler_overall = result.get('overall') or {}
             valid_windows = [w for w in result.get('windows', [])
                              if w.get('coverage_valid', True)]
             raw_total = len(np.unique(quality_indices))
 
-            # ---- 真实有效立面面积：使用滤波后点云投影掩码（排除无点空白区）----
-            global_overall = global_result.get('overall') or {}
-            ruler_length = float(params.ruler_length_m)
-            ruler_width = float(params.ruler_width_m)
-            _DOMAIN_RES = 0.01  # UV 掩码分辨率 1cm
+            _DOMAIN_RES = 0.01
 
             def _window_rect(w, length_m, width_m):
-                """窗口在 UV 面上的覆盖矩形（靠尺定向/全局轴对齐）。"""
                 cx = np.asarray(w.get('center_xyz'), dtype=float)
                 if cx.size != 3 or not np.all(np.isfinite(cx)):
                     return None
@@ -455,25 +424,14 @@ class FacadeQualityService:
                 if np.isfinite(wdir):
                     adeg = float(wdir) % 180.0
                     if abs(adeg) <= 45.0 or abs(adeg - 180.0) <= 45.0:
-                        # 水平靠尺：长边沿 u
                         return (cu - hl, cv - hw, cu + hl, cv + hw)
                     if abs(adeg - 90.0) <= 45.0:
-                        # 竖直靠尺：长边沿 v
                         return (cu - hw, cv - hl, cu + hw, cv + hl)
-                    # 45/135 对角：取覆盖盒
                     return (cu - hl, cv - hl, cu + hl, cv + hl)
-                # 全局平面窗口：轴对齐，长边沿 v
                 return (cu - hw, cv - hl, cu + hw, cv + hl)
 
             def _coverage_rates(windows_list, pass_key, length_m, width_m,
                                 bounds=None):
-                """统一去重的面积/点数合格率（布尔掩码并集）。
-
-                面积合格率 = 被合格窗口覆盖且有点的掩码面积 / 有点的掩码总面积。
-                点数合格率 = 合格掩码单元内点数 / 总点数（每点唯一归属一个单元）。
-                布尔并集天然抵消重叠，恒 <= 1.0；有效面积基于真实点投影掩码，
-                而非 UV 包围盒 / 凸包（两者都会计入无点区造成虚高）。
-                """
                 if not windows_list:
                     return {'area_rate': 0.0, 'point_rate': 0.0,
                             'pass_area_m2': 0.0, 'total_area_m2': 0.0,
@@ -508,10 +466,6 @@ class FacadeQualityService:
 
                 pass_cells = pass_mask.mask.reshape(-1) & (cell_counts > 0)
                 pass_area = float(np.sum(pass_cells)) * res * res
-                # Total/pass/fail must share the same physical-domain
-                # denominator.  Window unions are only a sampling mechanism;
-                # using their area for fail_area while using point occupancy
-                # for total_area made fail_area exceed total_area.
                 detection_area = total_area
                 fail_area = max(total_area - pass_area, 0.0)
                 pass_points = int(np.sum(cell_counts[pass_cells]))
@@ -531,16 +485,17 @@ class FacadeQualityService:
                     'total_windows': len(windows_list),
                 }
 
-            # 真实有效立面积（点投影掩码），作为两套链路共用的面积口径
             _support = CoverageMask(q_u0, q_v0, q_u1, q_v1, resolution=_DOMAIN_RES)
             _rel_all = filtered_pts - origin_on_plane
             _support.mark_pts(_rel_all @ u_axis, _rel_all @ v_axis)
-            valid_facade_area = _support.area_m2()  # 替代原凸包口径
+            valid_facade_area = _support.area_m2()
+            global_overall = global_result.get('overall') or {}
+            ruler_length = float(params.ruler_length_m)
+            ruler_width = float(params.ruler_width_m)
             if not np.isfinite(valid_facade_area) or valid_facade_area <= 0.0:
                 valid_facade_area = float(global_overall.get('valid_detection_area_m2', 0.0))
             global_overall['valid_detection_area_m2'] = valid_facade_area
 
-            # 靠尺法平整度（米字）—— 掩码并集去重
             ruler_flat_all = [dict(w) for w in valid_windows
                               if np.isfinite(w.get('flatness_gap_mm', np.nan))]
             for w in ruler_flat_all:
@@ -548,11 +503,6 @@ class FacadeQualityService:
             ruler_flat_rates = _coverage_rates(ruler_flat_all, 'flatness_pass',
                                                ruler_length, ruler_width)
 
-            # 靠尺法垂直度（I字）—— 掩码并集去重
-            # Public quality contract intentionally keeps verticality summary
-            # only; verticality measurements are merged into the canonical
-            # result windows above.  Do not read the removed
-            # ``verticality.windows`` key or the I-ruler area becomes zero.
             ruler_vert_all = [dict(w) for w in result.get('verticality', {}).get('rows', [])
                               if np.isfinite(w.get('verticality_deviation_mm', np.nan))]
             for w in ruler_vert_all:
@@ -573,22 +523,18 @@ class FacadeQualityService:
                 )
             )
 
-            # 全局平面法平整度 —— 掩码并集去重。全局窗口尺寸必须使用
-            # 全局算法自己的参数，不能悄悄复用靠尺尺寸。
             global_windows = list(global_result.get('windows') or [])
             global_flat_all = [dict(w) for w in global_windows
                                if np.isfinite(w.get('flatness_gap_mm', np.nan))]
             global_flat_rates = _coverage_rates(global_flat_all, 'flatness_pass',
                                                 global_length, global_width)
 
-            # 全局平面法垂直度 —— 掩码并集去重
             global_vert_all = [dict(w) for w in global_windows
                                if np.isfinite(w.get('verticality_deviation_mm', np.nan))]
             global_vert_rates = _coverage_rates(global_vert_all, 'verticality_pass',
                                                 global_length, global_width)
 
             def _method_intervals(rows, include_vertical=False):
-                """按共享 v 轴生成方法专属区间，避免 UI 复用 ruler intervals。"""
                 if not rows:
                     return []
                 size = max(float(gsize), 1e-6)
@@ -634,7 +580,6 @@ class FacadeQualityService:
                 return result_intervals
 
             ruler_intervals = list(result.get('intervals') or [])
-            # global 区间与 ruler 保持一致，确保两种方法的区间边界和标签完全对齐
             if ruler_intervals:
                 global_intervals = [dict(iv) for iv in ruler_intervals]
             else:
@@ -642,12 +587,6 @@ class FacadeQualityService:
 
             def _attach_interval_rates(intervals, flat_rows, vert_rows,
                                        length_m, width_m):
-                """Add canonical area/point rates to every method interval.
-
-                The denominator is the occupied point domain *inside that
-                interval* and the numerator is the clipped union of passing
-                footprints.  This is deliberately not a mean of window flags.
-                """
                 for interval in intervals:
                     lo, hi = float(interval['v_min_m']), float(interval['v_max_m'])
                     def in_interval(row):
@@ -665,7 +604,6 @@ class FacadeQualityService:
                     interval['flatness_point_rate'] = fr['point_rate']
                     interval['verticality_area_rate'] = vr['area_rate']
                     interval['verticality_point_rate'] = vr['point_rate']
-                    # Keep explicit window rate separate from physical area rate.
                     interval['flatness_window_rate'] = (
                         fr['pass_windows'] / fr['total_windows']
                         if fr['total_windows'] else 0.0)
@@ -680,7 +618,6 @@ class FacadeQualityService:
                 global_intervals, global_flat_all, global_vert_all,
                 global_length, global_width)
 
-            # 全局平面法窗口为空时回退为完整复制原始窗口，避免链路空转
             if not global_flat_all:
                 global_flat_all = [dict(w) for w in global_windows]
             if not global_vert_all:
@@ -716,9 +653,6 @@ class FacadeQualityService:
                         'rates': global_vert_rates,
                     },
                     'parameters': global_result.get('parameters') or {},
-                    #   source_rows 是 filtered_pts 行号。二者都保留，
-                    #   供渲染器按需二次映射。绝不省略本字段，否则渲染器
-                    #   将失去唯一可靠的缺陷位置来源。
                     'defect_samples': global_samples,
                     'overall': global_overall,
                     'intervals': global_intervals,
@@ -737,7 +671,6 @@ class FacadeQualityService:
                     'plane_model': global_plane.tolist(),
                 },
                 'methods': methods,
-                # Compatibility bridge for legacy callers
                 'ruler_method': methods['ruler'],
                 'global_plane_method': methods['global_plane'],
             }
@@ -751,7 +684,6 @@ class FacadeQualityService:
             if profile is not None:
                 result['profile_snapshot'] = profile.snapshot()
 
-            # 仅保留一个轻量级的导出描述符。
             result['__export_context'] = {
                 'results_dir': str(results_dir) if results_dir else None,
                 'facade_no': facade_no,

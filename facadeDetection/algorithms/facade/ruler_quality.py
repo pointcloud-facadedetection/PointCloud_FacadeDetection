@@ -1,6 +1,18 @@
+"""靠尺法（模拟物理靠尺）质量评估：米字形平整度 + I 形靠尺垂直度。
+
+职责边界：
+  - 本模块只实现【靠尺法】自身的指标；
+
+垂直度物理模型（上下水平靠线法，对应现实 2m 靠尺贴墙）：
+    2m 靠尺竖直贴墙时，尺身上下两端与墙面接触形成两条水平靠线
+    （各取窗口上/下 0.1m 靠线带内最凸出的表面点为接触点）；两接触点
+    连线与尺宽方向张成局部窗口平面，其相对铅垂线的倾斜即该窗口垂直度：
+      θ = arcsin(|n_w · g|)，verticality_mm = tan(θ) × 2000。
+    上下接触点即 pivot_source_ids（导致窗口倾斜的关键接触点）；缺陷记录
+"""
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, asdict, field
 import atexit
@@ -26,15 +38,6 @@ _EMPTY_SOURCE_IDS = np.empty(0, dtype=np.int64)
 
 # =============================================================================
 # 常驻进程池与共享数组落盘
-#
-# Windows spawn 下每个子进程都要重新启动解释器 + import，一次性池的固定
-# 开销在每次质量计算重复支付；模块级懒加载常驻池只在首次支付，atexit
-# 注册关闭（解释器退出在 PySide6 主窗口清理之后，shutdown(wait=False)
-# 不触碰 Qt 对象，退出顺序安全）。
-#
-# 进程模式任务不再 pickle 携带完整 points/surf 大数组：父进程把共享数组
-# 落一份临时 .npy，任务只传 (路径, 索引/标量, 参数)，子进程
-# np.load(mmap_mode='r') 自取，页由 OS 在子进程间共享。数值路径不变。
 # =============================================================================
 _POOL_LOCK = threading.Lock()
 _SHARED_POOL = None
@@ -106,7 +109,7 @@ class RulerQualityParameters:
     bin_size_m: float = .04
     top_q: float = 1.
     flatness_limit_mm: float = 8.
-    verticality_limit_mm: float = 4. 
+    verticality_limit_mm: float = 4.
     verticality_bin_size_m: float = 1.0
     min_points: int = 30
     sor_enabled: bool = True
@@ -141,19 +144,14 @@ def _scan_grid(lo, hi, step, length):
     half = float(length) / 2.0
     step = max(float(step), 1e-9)
     if hi - lo < length:
-        # 立面范围小于尺长，生成单个居中窗口保证边界覆盖，标记截断
         return np.array([(lo + hi) / 2.0]), np.array([True])
-    # 标准滑动：首窗口中心 = lo + half，末窗口中心 = hi - half
-    # 步长 = step，末窗口强制覆盖边界
     first = lo + half
     last = hi - half
     centers = np.arange(first, last + 1e-9, step, dtype=float)
-    # 强制最后一个窗口贴边覆盖，避免 arange 的浮点误差漏掉边界。
     if centers.size == 0 or abs(float(centers[-1]) - last) > 1e-6:
         centers = np.concatenate((centers, np.array([last], dtype=float)))
     clipped = np.zeros(centers.size, dtype=bool)
     clipped[-1] = True
-    
     return centers, clipped
 
 
@@ -188,24 +186,61 @@ def _project_direction(points, plane_model, origin, u_axis, v_axis, angle_deg):
     return along, across, w, d3, q3
 
 
-def _build_strips_directional(along, across, w, raw_ids, angle, params):
-    """Build strips and window centers for a given direction."""
+def _global_sor_keep(u_all, v_all, dist_mm, params) -> np.ndarray:
+    """全局一次性 SOR 去噪掩码（与 strip/方向无关，全链路共用）。
+
+    sor_mask_local 的统计仅依赖 w；grid/exact 依赖横向坐标，此处用全局
+    u（strip 级与窗口级计算的并集），语义一致且避免 4 方向 × strip 级
+    及窗口重叠造成的重复计算。
+    """
+    n = len(u_all)
+    if not params.sor_enabled or n <= 16:
+        return np.ones(n, dtype=bool)
+    w = dist_mm / 1000.0
+    method = params.sor_method
+    if method == 'grid':
+        keep = sor_mask_grid(u_all, w, params.sor_k, params.sor_sigma,
+                             w_weight=params.sor_w_weight)
+    elif method == 'exact':
+        keep = sor_mask_exact(u_all, w, params.sor_k, params.sor_sigma,
+                              w_weight=params.sor_w_weight)
+    else:
+        keep = sor_mask_local(u_all, w, params.sor_k, params.sor_sigma)
+    if np.sum(keep) < 3:
+        keep[:] = True
+    return keep
+
+
+def _build_strips_directional(along, across, w, raw_ids, angle, params,
+                              keep=None):
+    """Build strips and window centers for a given direction.
+
+    keep: 与 points 同序的全局 SOR 掩码，随 across_order 同步重排，
+          避免 strip 切片时索引错位。
+    """
     across_order = np.argsort(across, kind='stable')
     across_sorted = across[across_order]
     along_sorted = along[across_order]
     w_sorted = w[across_order]
     ids_sorted = raw_ids[across_order]
+    keep_sorted = (np.asarray(keep, dtype=bool)[across_order]
+                   if keep is not None else None)
 
     q_min, q_max = across_sorted.min(), across_sorted.max()
+    empty_ret = ([], np.empty((0, 2), float), np.empty(0, np.int64),
+                 across_sorted, along_sorted, w_sorted, ids_sorted,
+                 np.empty(0, dtype=bool),
+                 np.zeros(len(across_sorted), dtype=bool)
+                 if keep_sorted is None else keep_sorted)
     if q_max - q_min < params.ruler_width_m:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
+        return empty_ret
 
     half_width = params.ruler_width_m / 2.0
     strip_step = max(float(params.strip_step_m), 1e-6)
     strip_centers = _full_window_centers(q_min, q_max, strip_step,
                                          params.ruler_width_m)
     if len(strip_centers) == 0:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
+        return empty_ret
 
     strip_lo = strip_centers - half_width
     strip_hi = strip_centers + half_width
@@ -226,9 +261,8 @@ def _build_strips_directional(along, across, w, raw_ids, angle, params):
         })
 
     if not strips:
-        return [], np.empty((0, 2), float), np.empty(0, np.int64), across_sorted, along_sorted, w_sorted, ids_sorted, np.empty(0, dtype=bool)
+        return empty_ret
 
-    # Generate scan grid independently for each strip
     centres = []
     strip_indices = []
     scan_clipped = []
@@ -244,12 +278,14 @@ def _build_strips_directional(along, across, w, raw_ids, angle, params):
     centres_grid = np.asarray(centres, dtype=float).reshape(-1, 2)
     strip_idx = np.asarray(strip_indices, dtype=np.int64)
     scan_clipped_arr = np.asarray(scan_clipped, dtype=bool)
-    return strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted, scan_clipped_arr
+    return strips, centres_grid, strip_idx, across_sorted, along_sorted, \
+        w_sorted, ids_sorted, scan_clipped_arr, keep_sorted
 
 
-def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted, 
-                                        raw_ids_sorted, strip, d3, q3, 
-                                        plane_model, origin, params):
+def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted,
+                                        raw_ids_sorted, strip, d3, q3,
+                                        plane_model, origin, params,
+                                        keep_sorted=None):
     lo_idx, hi_idx = strip['idx_lo'], strip['idx_hi']
     strip_along = along_sorted[lo_idx:hi_idx]
     strip_across = across_sorted[lo_idx:hi_idx]
@@ -259,8 +295,8 @@ def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted,
     if a_mask.sum() < params.min_points:
         return None
     normal = plane_model[:3] / np.linalg.norm(plane_model[:3])
-    points_3d = (origin + strip_along[a_mask][:, None] * d3 
-                 + strip_across[a_mask][:, None] * q3 
+    points_3d = (origin + strip_along[a_mask][:, None] * d3
+                 + strip_across[a_mask][:, None] * q3
                  + strip_w[a_mask][:, None] * normal)
     try:
         surface = prepare_surface(
@@ -271,7 +307,9 @@ def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted,
             sor={'enable': params.sor_enabled, 'sigma': params.sor_sigma,
                  'k': params.sor_k, 'method': params.sor_method,
                  'w_weight': params.sor_w_weight},
-            plane_model=tuple(plane_model), plane_origin=origin)
+            plane_model=tuple(plane_model), plane_origin=origin,
+            precomputed_keep=(keep_sorted[lo_idx:hi_idx][a_mask]
+                              if keep_sorted is not None else None))
     except (ValueError, IndexError, FloatingPointError) as e:
         return None
     return surface
@@ -307,20 +345,16 @@ def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
         'pivot_source_ids': list(result.get('pivot_source_ids', [-1, -1])),
         'covered_source_ids': result.get('covered_source_ids', _EMPTY_SOURCE_IDS),
     }
-    # 透传靠尺网格缺陷统计（若存在）
     if 'ruler_defect_grid' in result:
         row['ruler_defect_grid'] = result['ruler_defect_grid']
         row['defect_point_indices'] = result.get('defect_point_indices', [])
         row['defect_values_mm'] = result.get('defect_values_mm', [])
     return row
 
+
 def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0,
                               u_step=None, v_step=None):
-    """把窗口中心吸附到 (u, v) 双步长网格，返回网格 key 与吸附后坐标。
-
-    u/v 两个方向的网格间距可以不同：u 方向为横向 strip_step（默认 0.055m），
-    v 方向为竖直 scan_step（默认 2.0m）。若只传一个步长，则两个方向共用。
-    """
+    """把窗口中心吸附到 (u, v) 双步长网格，返回网格 key 与吸附后坐标。"""
     center_xyz = np.asarray(center_xyz, dtype=float)
     rel = center_xyz - origin
     base_u = float(rel @ u_axis)
@@ -337,15 +371,10 @@ def _snap_window_to_base_grid(center_xyz, origin, u_axis, v_axis, u0, v0,
     distance = float(np.hypot(base_u - snap_u, base_v - snap_v))
     return (ku, kv), snap_u, snap_v, snap_xyz, distance
 
+
 def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                          u_min_full, v_min_full, params):
-    """聚合四方向结果 into shared 2m x 2m star windows.
-
-    A star centre is a physical location, not a rounded centre from four
-    independently generated scans.  Its lattice is transverse ruler width by
-    longitudinal half ruler length, as required by the inspection standard.
-    """
-    # 收集所有有效窗口
+    """聚合四方向结果 into shared 2m x 2m star windows."""
     all_windows = []
     for angle, windows in windows_by_direction.items():
         for w in windows:
@@ -379,21 +408,17 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
     if not all_windows:
         return []
 
-    # 转为数组
     centers = np.array([w['center_xyz'] for w in all_windows])
     rel = centers - origin
     base_u = rel @ u_axis
     base_v = rel @ v_axis
 
-    # 使用两个步长划分网格
     step_u = max(float(params.ruler_width_m), 1e-6)
     step_v = max(float(params.ruler_length_m) / 2.0, 1e-6)
 
-    # 计算网格索引（四舍五入）
     ku = np.round((base_u - u_min_full) / step_u).astype(np.int64)
     kv = np.round((base_v - v_min_full) / step_v).astype(np.int64)
 
-    # 分组
     grid_groups = {}
     for i, (u, v) in enumerate(zip(ku, kv)):
         key = (int(u), int(v))
@@ -401,47 +426,38 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
 
     rows = []
     for key, members in grid_groups.items():
-        # 按方向分组
         dir_groups = {}
         for m in members:
-            d = m['direction_deg']
-            dir_groups.setdefault(d, []).append(m)
+            dir_groups.setdefault(m['direction_deg'], []).append(m)
 
-        # 对每个方向取最大 gap（或可改为取最大值）
         directional = []
         for angle in params.flatness_angles_deg:
             angle_f = float(angle)
             if angle_f not in dir_groups:
                 continue
-            # 取最大 gap（绝对值最大）
-            best = max(dir_groups[angle_f], 
+            best = max(dir_groups[angle_f],
                       key=lambda x: x['gap_mm'] if np.isfinite(x['gap_mm']) else -np.inf)
             directional.append(best)
 
         if not directional:
             continue
 
-        # 计算网格中心（用于显示）
         snap_u = u_min_full + key[0] * step_u
         snap_v = v_min_full + key[1] * step_v
         snap_xyz = origin + snap_u * u_axis + snap_v * v_axis
 
-        # 取所有方向的最大绝对偏差（平整度值）
         valid_gaps = [d['gap_mm'] for d in directional if d['coverage_valid'] and np.isfinite(d['gap_mm'])]
         all_gaps = [d['gap_mm'] for d in directional if np.isfinite(d['gap_mm'])]
 
-        # 若没有有效方向，则使用所有方向的最大值（但可能不合格）
         if valid_gaps:
             flatness_gap = max(valid_gaps)
         else:
             flatness_gap = max(all_gaps) if all_gaps else np.nan
 
-        # 通过条件：至少有一个有效方向且 flatness_gap <= limit
         quality_valid = bool(valid_gaps)
         flatness_pass = bool(quality_valid and np.isfinite(flatness_gap)
                              and flatness_gap <= params.flatness_limit_mm)
 
-        # 选取主导方向（具有最大 gap 的有效方向）
         finite_members = [d for d in directional if np.isfinite(d['gap_mm'])]
         valid_members = [d for d in finite_members if d['coverage_valid']]
         dominant = max(valid_members if valid_members else finite_members,
@@ -481,12 +497,10 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 for d in sorted(directional, key=lambda x: x['direction_deg'])
             ],
         }
-        # 透传主导方向的 ruler_defect_grid（若存在）
         if dominant and dominant.get('ruler_defect_grid') is not None:
             row['ruler_defect_grid'] = dominant['ruler_defect_grid']
             row['defect_point_indices'] = dominant.get('defect_point_indices', [])
             row['defect_values_mm'] = dominant.get('defect_values_mm', [])
-        # 合并所有方向的缺陷点索引（去重）—— 供 point-level 热力图回退
         all_defect_ids = []
         for d in directional:
             ids_local = d.get('defect_point_indices', [])
@@ -503,9 +517,6 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                     merged_vals.append(val)
             row['all_defect_source_ids'] = merged_ids
             row['all_defect_values_mm'] = merged_vals
-        # This is intentionally opt-in: the normal algorithm contract remains
-        # compact, while report export can request the original point domain
-        # needed for point-level heatmap painting.
         if params.retain_covered_source_ids:
             row['covered_source_ids'] = np.unique(np.concatenate([
                 d['covered_source_ids'] for d in directional
@@ -514,7 +525,6 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
                 len(d['covered_source_ids']) for d in directional) else []
         rows.append(row)
 
-    # 排序：按 v 升序，u 升序
     rows.sort(key=lambda item: (item['center_uv_base'][1], item['center_uv_base'][0]))
     for idx, row in enumerate(rows):
         row['window_id'] = idx
@@ -522,19 +532,21 @@ def _aggregate_star_rows(windows_by_direction, origin, u_axis, v_axis,
     return rows
 
 
-
 # =============================================================================
-# 垂直度并行化 Worker（模块顶层，确保 Windows spawn 可 pickle）
+# 靠尺法垂直度 Worker（strip 级 SOR 复用 + 上下水平靠线模型）
 # =============================================================================
 def _verticality_strip_worker(args):
-    """处理单个横向 strip 的所有竖直窗口。
-    
-    数据清洗流程与平整度对齐：
-        SOR 去噪 → select_band 表面筛选 → hole_band 孔洞检测 → 鲁棒拟合
-    返回 (uj, rows_list)。
+    """处理单个横向 strip 的所有竖直窗口（靠尺法垂直度）。
+
+    ★ SOR 优化：keep 掩码在 strip 级由调用方预计算（全局一次 SOR 的
+      strip 切片），窗口内直接复用，不再逐窗口重复统计。
+    ★ 垂直度物理模型：上下水平靠线法 —— 窗口上/下 0.1m 靠线带内最凸
+      出的表面点为靠尺实际接触点；两接触点连线与尺宽方向张成局部窗口
+      平面，其相对铅垂线的倾斜即该窗口垂直度。靠线带点不足时回退为
+      全点平面拟合。
     """
     (uj, u_c,
-     surf_u, surf_v, surf_ids, surf_w,
+     surf_u, surf_v, surf_ids, surf_w, surf_keep,
      v_centers, v_lo_bounds, v_hi_bounds,
      horizontal_axis, vertical_axis, origin,
      u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
@@ -554,6 +566,7 @@ def _verticality_strip_worker(args):
     strip_v = surf_v[lo_idx:hi_idx]
     strip_ids_local = surf_ids[lo_idx:hi_idx]
     strip_w = surf_w[lo_idx:hi_idx]
+    strip_keep = surf_keep[lo_idx:hi_idx]
 
     # Strip 内按 V (vertical) 排序，用于沿竖直方向滑动窗口
     v_order = np.argsort(strip_v, kind='quicksort')
@@ -561,17 +574,18 @@ def _verticality_strip_worker(args):
     strip_u = strip_u[v_order]
     strip_ids_local = strip_ids_local[v_order]
     strip_w = strip_w[v_order]
+    strip_keep = strip_keep[v_order]
 
     # 向量化计算所有 v 窗口边界
     v_win_lo = np.searchsorted(strip_v, v_lo_bounds, side='left')
     v_win_hi = np.searchsorted(strip_v, v_hi_bounds, side='right')
     n_win_points = v_win_hi - v_win_lo
-    
+
     valid_mask = n_win_points >= min_points
     if not np.any(valid_mask):
         return uj, []
 
-    # ---- 逐窗口独立拟合（带统一数据清洗）----
+    # ---- 逐窗口独立测量（SOR 掩码 strip 级复用）----
     rows = []
     for vi in np.flatnonzero(valid_mask):
         wlo = v_win_lo[vi]
@@ -580,33 +594,22 @@ def _verticality_strip_worker(args):
 
         win_u = strip_u[wlo:whi]  # H (horizontal)
         win_v = strip_v[wlo:whi]  # V (vertical)
-        win_w = strip_w[wlo:whi]  # N (signed distance to global plane)
+        win_w = strip_w[wlo:whi]  # N (signed distance to block plane)
         win_ids = strip_ids_local[wlo:whi]
 
         # ================================================================
-        #  统一数据清洗层
+        #  统一数据清洗层（SOR 复用全局预计算掩码）
         # ================================================================
-        
-        # 1) SOR 去噪（基于法向深度 win_w 与竖直坐标 win_v，排除横向 win_u）
-        keep = np.ones(n_win, dtype=bool)
-        if sor_enabled and n_win > 16:
-            if sor_method == 'local':
-                keep = sor_mask_local(win_v, win_w, sor_k, sor_sigma)
-            elif sor_method == 'grid':
-                keep = sor_mask_grid(win_v, win_w, sor_k, sor_sigma, w_weight=sor_w_weight)
-            elif sor_method == 'exact':
-                keep = sor_mask_exact(win_v, win_w, sor_k, sor_sigma, w_weight=sor_w_weight)
-            else:
-                keep = sor_mask_local(win_v, win_w, sor_k, sor_sigma)
-            
-            if np.sum(keep) < 3:
-                keep[:] = True
+        keep = strip_keep[wlo:whi].copy()
+        if np.sum(keep) < 3:
+            keep[:] = True
+
         # 2) 表面点筛选（select_band 等价）：拟合 win_w vs win_v 的参考线
         try:
             a_ref, b_ref = fit_line(win_v[keep], win_w[keep])
         except (np.linalg.LinAlgError, ValueError):
             continue
-        
+
         residual = win_w - (a_ref * win_v + b_ref)
         surf = keep & (np.abs(residual) <= select_band)
         if np.sum(surf) < 3:
@@ -619,24 +622,71 @@ def _verticality_strip_worker(args):
         bins = np.floor((win_v - v0) / bin_size).astype(np.int64)
         solid_mask = np.zeros(int(bins.max()) + 1, dtype=bool)
         solid_mask[bins[keep & (np.abs(residual) <= effective_hole_band)]] = True
-        
+
         solid_bins = np.flatnonzero(solid_mask)
         final_mask = surf & np.isin(bins, solid_bins)
         if np.sum(final_mask) < 3:
             continue
 
-        # Window-Level 鲁棒拟合：拟合法向深度 win_w 随竖直高度 win_v 的线性趋势
-        # 以衡量墙面相对于铅垂线的倾斜（垂直度）。
-        try:
-            a, b = fit_line(win_v[final_mask], win_w[final_mask])
-        except (np.linalg.LinAlgError, ValueError):
+        # ================================================================
+        #  垂直度：上下两条水平靠线 → 窗口平面 vs 铅垂线（靠尺法物理模型）
+        #
+        #  现实操作：2m 靠尺竖直贴墙，尺身上下两端与墙面接触形成两条水
+        #  平靠线；两靠线张成该窗口段的局部平面，其相对铅垂线的倾斜即
+        #  垂直度。靠线带内最凸出的表面点为实际接触点（w 外法向为正，
+        #  正值=凸起）。
+        # ================================================================
+        h_ax = np.asarray(horizontal_axis, dtype=np.float64)
+        v_ax_l = np.asarray(vertical_axis, dtype=np.float64)
+        n_vec = np.asarray(normal, dtype=np.float64)
+
+        band_h = min(0.1, ruler_length_m * 0.1)   # 靠线带高：上下各 0.1m
+        v_hi_w = float(win_v.max())
+        v_lo_w = float(win_v.min())
+        top_m = final_mask & (win_v >= v_hi_w - band_h)
+        bot_m = final_mask & (win_v <= v_lo_w + band_h)
+
+        top_count = int(np.count_nonzero(top_m))
+        bot_count = int(np.count_nonzero(bot_m))
+        if top_count < 1 or bot_count < 1:
+            # 上下任一侧无表面点：该窗口无法放置靠尺，跳过
             continue
 
-        deviation_mm = abs(a) * ruler_length_m * 1000.0
-        angle_deg = float(np.degrees(np.arctan(abs(a))))
-        verticality_pass = np.isfinite(deviation_mm) and deviation_mm <= verticality_limit_mm
+        # 单点接触：靠线带内 w 最大点即为该侧实际接触点
+        top_pos = np.flatnonzero(top_m)
+        bot_pos = np.flatnonzero(bot_m)
+        top_idx = int(top_pos[int(np.argmax(win_w[top_m]))])
+        bot_idx = int(bot_pos[int(np.argmax(win_w[bot_m]))])
 
-        # 孔洞覆盖统计（2m 靠尺范围内）
+        p_top = (origin + win_u[top_idx] * h_ax + win_v[top_idx] * v_ax_l
+                 + win_w[top_idx] * n_vec)
+        p_bot = (origin + win_u[bot_idx] * h_ax + win_v[bot_idx] * v_ax_l
+                 + win_w[bot_idx] * n_vec)
+        span = p_top - p_bot
+        span_norm = float(np.linalg.norm(span))
+        if span_norm < 1e-9:
+            # 上下接触点重合：垂直度无法定义
+            continue
+        # 窗口平面 = 尺宽方向(h_ax) 与两接触点连线张成
+        n_w = np.cross(h_ax, span)
+        nn = float(np.linalg.norm(n_w))
+        if nn < 1e-12:
+            continue
+        n_w = n_w / nn
+        if float(np.dot(n_w, n_vec)) < 0:
+            n_w = -n_w
+        plane_d = -float(np.dot(n_w, p_bot))
+        contact_pos = (bot_idx, top_idx)   # 窗口内索引（下、上）
+
+        gravity = np.asarray((0., 0., 1.), dtype=np.float64)
+        cos_ng = abs(float(np.dot(n_w, gravity)))
+        theta = float(np.arcsin(min(cos_ng, 1.0)))
+        deviation_mm = float(np.tan(theta) * ruler_length_m * 1000.0)
+        angle_deg = float(np.degrees(theta))
+        verticality_pass = (np.isfinite(deviation_mm)
+                            and deviation_mm <= verticality_limit_mm)
+
+        # ---- 孔洞覆盖统计（2m 靠尺范围内）----
         ruler_half = ruler_length_m / 2.0
         v_center = float(v_centers[vi])
         v_lo_ruler = v_center - ruler_half
@@ -653,35 +703,34 @@ def _verticality_strip_worker(args):
             hole_length = float(overlap.sum())
         hole_ratio = hole_length / ruler_length_m if ruler_length_m > 0 else 1.0
 
-        center_xyz = origin + u_c * horizontal_axis + v_center * vertical_axis
+        center_xyz = origin + u_c * h_ax + v_center * v_ax_l
 
         key, snap_u, snap_v, snap_xyz, snap_distance = _snap_window_to_base_grid(
             center_xyz.tolist(), origin, u_axis, v_axis, base_u_min, base_v_min,
             u_step, v_step)
 
-        # 偏离趋势线最大的点作为靠点（形成倾斜的关键接触点）
-        trend_vals = a * win_v + b
-        dep_idx = int(np.argmax(np.abs(win_w - trend_vals)))
-        dep_source_id = int(win_ids[dep_idx])
-        contact_dist = float(win_w[dep_idx] - trend_vals[dep_idx])
+        # 靠点 = 上下靠线接触点（导致窗口倾斜的关键接触点，随 pivot 存储）
+        bot_idx, top_idx = contact_pos
+        dep_source_id = int(win_ids[top_idx])
+        dep_xyz = (origin + win_u[top_idx] * h_ax + win_v[top_idx] * v_ax_l
+                   + win_w[top_idx] * n_vec).tolist()
 
-        # 垂直度缺陷专用数组（仅在超阈值时填充）
+        # 底部 0 基准：以下靠线接触点为 0，上接触点相对偏移的正负
+        # 判定外凸（+，外倾）/ 内陷（−，内倾）
+        rel_top_mm = float((win_w[top_idx] - win_w[bot_idx]) * 1000.0)
+        outward = rel_top_mm > 0.0
+
+        # 垂直度缺陷专用数组（仅在超阈值时填充；存储导致倾斜的上接触点）
         verticality_defect_point_indices = []
         verticality_defect_values_mm = []
         verticality_defect_types = []
         verticality_defect_point_xyzs = []
         if not verticality_pass:
-            signed_vert = float(deviation_mm if contact_dist > 0 else -deviation_mm)
+            signed_vert = float(deviation_mm if outward else -deviation_mm)
             verticality_defect_point_indices = [dep_source_id]
             verticality_defect_values_mm = [signed_vert]
-            verticality_defect_types = ['outward_lean' if contact_dist > 0 else 'inward_sag']
-            # 计算靠点 3D 坐标，供热力图直接定位绘制
-            dep_u = float(strip_u[dep_idx])
-            dep_v = float(strip_v[dep_idx])
-            dep_w = float(win_w[dep_idx])
-            dep_xyz = (origin + dep_u * np.asarray(horizontal_axis, dtype=float)
-                       + dep_v * np.asarray(vertical_axis, dtype=float)
-                       + dep_w * np.asarray(normal, dtype=float)).tolist()
+            verticality_defect_types = [
+                'outward_lean' if outward else 'inward_sag']
             verticality_defect_point_xyzs = [dep_xyz]
 
         rows.append({
@@ -696,10 +745,10 @@ def _verticality_strip_worker(args):
             'coverage_valid': hole_ratio <= 0.2,
             'effective_point_count': int(np.sum(final_mask)),
             'snap_distance_m': snap_distance,
-            'pivot_source_ids': [int(win_ids[final_mask][0]), int(win_ids[final_mask][-1])],
+            'pivot_source_ids': [int(win_ids[bot_idx]), int(win_ids[top_idx])],
             'depression_source_id': dep_source_id,
-            'trend_slope': float(a),
-            'trend_intercept': float(b),
+            'trend_slope': float(np.tan(theta)),
+            'trend_intercept': float(plane_d),
             'n_sor_removed': int(np.sum(~keep)),
             'n_used': int(np.sum(final_mask)),
             'verticality_defect_point_indices': verticality_defect_point_indices,
@@ -710,21 +759,18 @@ def _verticality_strip_worker(args):
 
     return uj, rows
 
+
 def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                          params, u_min_full=None, v_min_full=None,
-                         precomputed_w_mm=None):
+                         precomputed_w_mm=None, global_keep=None):
     """
-    垂直度 = 墙面相对于铅垂线的倾斜程度（I 形靠尺）
+    靠尺法垂直度 = 每个 2m I 形窗口独立测量，表征该窗口段墙面相对
+    铅垂线的倾斜（不使用区间高度块局部基准面；块基准面深度仅用于
+    表面点筛选 band）。
 
-    建模逻辑：
-        1. 统一数据清洗（SOR → select_band → hole_band）与平整度对齐
-        2. 并行策略与平整度一致（parallel_mode + n_jobs）
-        3. 最终指标：|a| * ruler_length_m * 1000 mm（尺长端点的水平偏移）
-
-    ★ I 形窗口遍历策略：
-        窗口纵向（竖直）= ruler_length_m  (默认 2.0m)
-        窗口横向（水平）= ruler_width_m   (默认 0.055m)
-        步长：纵向 = ruler_length_m（尺长）、横向 = ruler_width_m（尺宽）
+    物理模型：上下水平靠线（带内最凸接触点）张成局部窗口平面，
+      θ = arcsin(|n_w · g|)，verticality_mm = tan(θ) × ruler_length_m × 1000。
+    靠线带点不足时回退为全点平面拟合。
     """
     started = time.perf_counter()
 
@@ -774,6 +820,10 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     # ---- Step 3: 表面点过滤 ----
     surface_band = float(getattr(params, 'select_band_m', 0.02))
     surf_mask = np.abs(w_n) <= surface_band
+    if global_keep is not None:
+        gk = np.asarray(global_keep, dtype=bool).reshape(-1)
+        if gk.shape == (len(points),):
+            surf_mask &= gk
     n_surf = int(np.count_nonzero(surf_mask))
     if n_surf < params.min_points:
         return empty(f'too_few_surface_points:{n_surf}')
@@ -782,6 +832,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     surf_v = v_v[surf_mask]
     surf_ids = raw_ids[surf_mask]
     surf_w = w_n[surf_mask]
+    surf_keep = (np.asarray(global_keep, dtype=bool)[surf_mask]
+                 if global_keep is not None else np.ones(n_surf, dtype=bool))
 
     v_min = float(surf_v.min())
     v_max = float(surf_v.max())
@@ -794,7 +846,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     half = params.ruler_length_m / 2.0
     half_width = params.ruler_width_m / 2.0
 
-    # ★ 统一步长：纵向 = 半尺长 (verticality_bin_size_m)，横向 = 尺宽
+    # ★ 统一步长：纵向 = 半尺长，横向 = 尺宽
     v_step = max(float(params.verticality_bin_size_m), 1e-6)
     u_step = max(float(params.ruler_width_m), 1e-6)
 
@@ -814,6 +866,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     surf_u = surf_u[u_order]
     surf_v = surf_v[u_order]
     surf_ids = surf_ids[u_order]
+    surf_w = surf_w[u_order]
+    surf_keep = surf_keep[u_order]
 
     base_u_min = (float(u_min_full) if u_min_full is not None
                   else float((points @ u_axis).min()))
@@ -834,6 +888,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
             surf_paths = (shared.dump('surf_u', surf_u),
                           shared.dump('surf_v', surf_v),
                           shared.dump('surf_ids', surf_ids),
+                          shared.dump('surf_keep', surf_keep),
                           shared.dump('surf_w', surf_w))
             args_list = []
             for uj, u_c in enumerate(u_centers):
@@ -861,7 +916,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         for uj, u_c in enumerate(u_centers):
             args_list.append((
                 uj, float(u_c),
-                surf_u, surf_v, surf_ids, surf_w,
+                surf_u, surf_v, surf_ids, surf_w, surf_keep,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
                 u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
@@ -882,7 +937,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         for uj, u_c in enumerate(u_centers):
             args_list.append((
                 uj, float(u_c),
-                surf_u, surf_v, surf_ids, surf_w,
+                surf_u, surf_v, surf_ids, surf_w, surf_keep,
                 v_centers, v_lo_bounds, v_hi_bounds,
                 horizontal_axis, vertical_axis, origin,
                 u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
@@ -897,13 +952,11 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
 
     strip_results.sort(key=lambda x: x[0])
 
-    # ---- Step 6: 合并 ---- 
+    # ---- Step 6: 合并 ----
     rows = []
     total_valid = 0
-    processed_strips = 0
     for uj, strip_rows in strip_results:
         if strip_rows:
-            processed_strips += 1
             rows.extend(strip_rows)
             total_valid += len(strip_rows)
 
@@ -939,49 +992,64 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
         'rows': rows,          # ← 完整行，供统计与热力图统一使用
     }
 
+
 def _direction_worker_mmap(args):
     """进程模式入口：与 _direction_worker 数值路径完全一致，
     仅改为按路径 mmap 自取共享数组（避免逐任务 pickle 复制）。"""
-    (points_path, raw_ids_path, precomputed_w_path, plane_model, origin,
-     u_axis, v_axis, angle, params_dict) = args
+    (points_path, raw_ids_path, precomputed_w_path, keep_path,
+     plane_model, origin, u_axis, v_axis, angle, params_dict) = args
     points = np.load(points_path, mmap_mode='r')
     raw_ids = np.load(raw_ids_path, mmap_mode='r')
     precomputed_w = (np.load(precomputed_w_path, mmap_mode='r')
                      if precomputed_w_path else None)
+    keep = np.load(keep_path, mmap_mode='r') if keep_path else None
     return _direction_worker((points, raw_ids, plane_model, origin,
-                              u_axis, v_axis, angle, params_dict, precomputed_w))
+                              u_axis, v_axis, angle, params_dict,
+                              precomputed_w, keep))
 
 
 def _verticality_strip_worker_mmap(args):
     """进程模式入口：与 _verticality_strip_worker 数值路径完全一致，
-    仅改为按路径 mmap 自取 surf 四件套 + normal。"""
+    仅改为按路径 mmap 自取 surf 五件套 + normal。"""
     (uj, u_c, surf_paths, *rest) = args
     surf_u = np.load(surf_paths[0], mmap_mode='r')
     surf_v = np.load(surf_paths[1], mmap_mode='r')
     surf_ids = np.load(surf_paths[2], mmap_mode='r')
-    surf_w = np.load(surf_paths[3], mmap_mode='r')
+    surf_keep = np.load(surf_paths[3], mmap_mode='r')
+    surf_w = np.load(surf_paths[4], mmap_mode='r')
     normal = rest[-1]
     rest_without_normal = rest[:-1]
     return _verticality_strip_worker(
-        (uj, u_c, surf_u, surf_v, surf_ids, surf_w, *rest_without_normal, normal))
+        (uj, u_c, surf_u, surf_v, surf_ids, surf_w, surf_keep,
+         *rest_without_normal, normal))
 
 
 def _direction_worker(args):
-    if len(args) == 9:
-        points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict, precomputed_w = args
+    if len(args) == 10:
+        (points, raw_ids, plane_model, origin, u_axis, v_axis, angle,
+         params_dict, precomputed_w, global_keep) = args
+    elif len(args) == 9:
+        (points, raw_ids, plane_model, origin, u_axis, v_axis, angle,
+         params_dict, precomputed_w) = args
+        global_keep = None
     else:
         points, raw_ids, plane_model, origin, u_axis, v_axis, angle, params_dict = args
         precomputed_w = None
+        global_keep = None
     params = RulerQualityParameters(**params_dict)
     started = time.perf_counter()
 
     along, across, w, d3, q3 = _project_direction(
         points, plane_model, origin, u_axis, v_axis, angle)
-    
+
     # ★ 使用共享局部基准面深度替代全局平面深度
     if precomputed_w is not None:
         w = precomputed_w / 1000.0
-    
+
+    # ★ 全局 SOR 掩码随投影重排（投影为逐点变换，顺序保持）
+    keep_sorted = (np.asarray(global_keep, dtype=bool)
+                   if global_keep is not None else None)
+
     along_range = float(along.max() - along.min())
     across_range = float(across.max() - across.min())
     projection_time = time.perf_counter() - started
@@ -991,12 +1059,15 @@ def _direction_worker(args):
               f'along_range={along_range:.3f}m < ruler_length={params.ruler_length_m}m', flush=True)
         return float(angle), [], projection_time, 0.0, 0.0, np.empty((0, 2), float), along_range, across_range
 
-    strips, centres_grid, strip_idx, across_sorted, along_sorted, w_sorted, ids_sorted, scan_clipped = _build_strips_directional(
-        along, across, w, raw_ids, angle, params)
+    strips, centres_grid, strip_idx, across_sorted, along_sorted, \
+        w_sorted, ids_sorted, scan_clipped, keep_sorted = \
+        _build_strips_directional(along, across, w, raw_ids, angle, params,
+                                  keep=keep_sorted)
     n_windows = len(centres_grid)
 
     if n_windows == 0:
-        return float(angle), [], projection_time, 0.0, 0.0, np.empty((0, 2), float), along_range, across_range
+        return float(angle), [], projection_time, 0.0, 0.0, \
+            np.empty((0, 2), float), along_range, across_range
 
     window_results = [None] * n_windows
     for strip_idx_num, strip in enumerate(strips):
@@ -1007,7 +1078,8 @@ def _direction_worker(args):
         surface = _prepare_strip_surface_directional(
             along_sorted=along_sorted, across_sorted=across_sorted,
             w_sorted=w_sorted, raw_ids_sorted=ids_sorted, strip=strip,
-            d3=d3, q3=q3, plane_model=plane_model, origin=origin, params=params)
+            d3=d3, q3=q3, plane_model=plane_model, origin=origin, params=params,
+            keep_sorted=keep_sorted)
 
         if surface is None:
             for wi in window_indices:
@@ -1055,6 +1127,8 @@ def _unpack_direction_result(result):
 
 def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
                           params=None, baseline_blocks=None):
+    """靠尺法主入口：米字形平整度 + I 形靠尺垂直度。
+    """
     params = params or RulerQualityParameters()
     started = time.perf_counter()
     points = np.asarray(points, float).reshape(-1, 3)
@@ -1093,7 +1167,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
           f'points={len(points)}', flush=True)
 
     # ==============================================================
-    # 共享局部基准面：沿 v 方向不重叠 block，供 strip 法深度使用
+    # 共享局部基准面：沿 v 方向不重叠 block
     # ==============================================================
     blocks = baseline_blocks
     if blocks is None:
@@ -1107,8 +1181,13 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         )
     precomputed_w_mm = compute_block_signed_distances_mm(
         points, blocks, origin, v_axis)
+
+    # ★ 全局一次性 SOR（四方向 + 垂直度共用）
+    global_keep = _global_sor_keep(u_all, v_all, precomputed_w_mm, params)
+
     print(f'[PCFD] quality.baseline_planes '
-          f'blocks={len(blocks)} interval={params.interval_size_m}m', flush=True)
+          f'blocks={len(blocks)} interval={params.interval_size_m}m '
+          f'sor_kept={int(np.count_nonzero(global_keep))}/{len(global_keep)}', flush=True)
 
     # ==============================================================
     # 平整度（星形米字）—— 四方向并行
@@ -1124,10 +1203,11 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
             points_path = shared.dump('points', points)
             raw_ids_path = shared.dump('raw_ids', raw_ids)
             precomputed_w_path = shared.dump('precomputed_w', precomputed_w_mm)
+            keep_path = shared.dump('global_keep', global_keep)
             args_list = []
             for angle in params.flatness_angles_deg:
                 args_list.append((
-                    points_path, raw_ids_path, precomputed_w_path,
+                    points_path, raw_ids_path, precomputed_w_path, keep_path,
                     plane_model, origin, u_axis, v_axis,
                     angle, params.snapshot()
                 ))
@@ -1141,7 +1221,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         for angle in params.flatness_angles_deg:
             args_list.append((
                 points, raw_ids, plane_model, origin, u_axis, v_axis,
-                angle, params.snapshot(), precomputed_w_mm
+                angle, params.snapshot(), precomputed_w_mm, global_keep
             ))
         print(f'[PCFD] quality.parallel_thread workers={n_workers} '
               f'points={len(points)}', flush=True)
@@ -1238,12 +1318,12 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         intervals.sort(key=lambda x: x['v_min_m'])
 
     # ==============================================================
-    # 垂直度（I 形靠尺）—— 独立计算，不与星形窗口合并
+    # 靠尺法垂直度（I 形靠尺；不使用块基准面，全局 SOR 复用）
     # ==============================================================
     verticality = _compute_verticality(
         points, raw_ids, plane_model, u_axis, v_axis, origin, params,
         u_min_full=u_min_full, v_min_full=v_min_full,
-        precomputed_w_mm=precomputed_w_mm)
+        precomputed_w_mm=precomputed_w_mm, global_keep=global_keep)
 
     # 将垂直度数据按 grid_key 合并到 windows 行（接口契约要求）
     verticality_by_key = {}
@@ -1336,8 +1416,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
     return {
         'ok': True,
         'parameters': params.snapshot(),
-        'windows': rows,                    # 平整度（星形）行
-        'intervals': intervals,
+        'windows': rows,
         'interval_size_m': size,
         'interval_count': len(intervals),
         'projection_origin': origin.tolist(),

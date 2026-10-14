@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-
 def make_frame(normal, points, ruler_dir=None):
     normal = np.asarray(normal, dtype=float)
     if ruler_dir is None:
@@ -42,7 +41,7 @@ def fit_line(u, w):
 
 
 def sor_mask_local(u, w, k=8, sigma=4.0, subset=None):
-    """Linear-time ordered-profile SOR approximation."""
+    """Linear-time ordered-profile SOR approximation（仅依赖 w 的统计）。"""
     n = len(w)
     if n <= k + 1:
         return np.ones(n, dtype=bool)
@@ -68,10 +67,8 @@ def sor_mask_grid(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
     n = len(w)
     if n <= k + 1:
         return np.ones(n, dtype=bool)
-    
     x = u.astype(np.float64)
     y = (w * w_weight).astype(np.float64)
-    
     xlo, xhi = np.percentile(x, [0.1, 99.9])
     ylo, yhi = np.percentile(y, [0.1, 99.9])
     rx, ry = max(xhi - xlo, 1e-12), max(yhi - ylo, 1e-12)
@@ -79,26 +76,21 @@ def sor_mask_grid(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
     cell = max(cell, max(rx, ry) / 1e6)
     nx = int(rx / cell) + 3
     ny = int(ry / cell) + 3
-    
     ix = np.clip(((x - xlo) / cell).astype(np.int64) + 1, 0, nx - 1)
     iy = np.clip(((y - ylo) / cell).astype(np.int64) + 1, 0, ny - 1)
     cnt = np.bincount(ix * ny + iy, minlength=nx * ny).reshape(nx, ny)
-    
     csx = np.cumsum(np.pad(cnt, ((1, 1), (0, 0))), axis=0)
     sx = csx[2:] - csx[:-2] + cnt
     csy = np.cumsum(np.pad(sx, ((0, 0), (1, 1))), axis=1)
     S = csy[:, 2:] - csy[:, :-2] + sx
-    
     m = S[ix, iy].astype(np.float64)
     rho = np.maximum(m - 1.0, 0.5) / (9.0 * cell * cell)
     md = (2.0 / 3.0) * np.sqrt(k / (np.pi * rho))
-    
     if subset is not None:
         sel = np.asarray(subset)
         mds = md[sel]
     else:
         sel, mds = None, md
-    
     med = np.median(mds)
     threshold = med + sigma * (1.4826 * np.median(np.abs(mds - med)) + 1e-12)
     keep = np.ones(n, dtype=bool)
@@ -146,6 +138,11 @@ def sor_mask_exact(u, w, k=8, sigma=4.0, subset=None, w_weight=50.0):
 
 
 def upper_hull(u, w):
+    """上凸包：w（凸起量）最大点的包络。
+
+    物理意义：刚体靠尺从墙外向内放，最先接触并支撑在凸起量最大的点上，
+    上凸包描述这些凸支点的包络线，靠尺底面架设在相邻凸支点之间。
+    """
     stack = []
     for i in range(len(u)):
         while len(stack) >= 2:
@@ -185,53 +182,58 @@ class Surface:
                 np.asarray(w)[..., None] * self.normal)
 
     def compact(self):
-        """Drop full profile arrays before cross-process transfer."""
         e = np.empty(0)
         return Surface(self.normal, self.centroid, self.e_u, self.e_v,
                        e, e, e.astype(np.int64), e.astype(bool), e.astype(bool),
                        self.bin_size, self.u_span,
-                       self.top_u, self.top_w, self.top_source_ids, 
+                       self.top_u, self.top_w, self.top_source_ids,
                        self.holes, self.ref_line, self.stats)
 
 
 def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
                     select_band=.01, hole_band=.02, bin_size=.04,
                     top_q=1.0, sor=None, plane_model=None,
-                    plane_origin=None, precomputed_w=None):
-    # Validate and filter input
+                    plane_origin=None, precomputed_w=None,
+                    precomputed_keep=None):
+    """构建 Surface。
+
+    precomputed_w: 点相对所属高度块局部基准面的带符号深度（外法向为正），
+                   优先于全局平面距离，保证 mm 级基准一致。
+    precomputed_keep: 全局预计算的 SOR 掩码（与 points 顺序一致），传入后
+                   跳过内部 SOR，消除 strip/方向级重复统计去噪。
+    """
     p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if len(p) < 3:
         raise ValueError("点数不足")
-    
+
     valid_mask = np.all(np.isfinite(p), axis=1)
     if not np.any(valid_mask):
         raise ValueError("所有点坐标均无效（含 nan/inf）")
     p = p[valid_mask]
-    
+
     ids = np.arange(len(p), dtype=np.int64) if source_ids is None else np.asarray(source_ids, dtype=np.int64).reshape(-1)
     if not np.all(valid_mask) and source_ids is not None:
         ids = ids[valid_mask]
     if len(ids) != len(p):
         raise ValueError("source_ids 与 points 长度不一致")
-    
-    # Validate plane_model
+
     model = np.asarray(plane_model, dtype=np.float64).reshape(-1)
     if model.size != 4 or not np.all(np.isfinite(model)):
         raise ValueError("质量靠尺算法必须提供前序立面 plane_model")
-    
+
     norm = np.linalg.norm(model[:3])
     if norm < 1e-12:
         raise ValueError("plane_model 法向长度为零")
     normal = model[:3] / norm
     d = float(model[3]) / norm
-    
+
     if np.dot(normal, np.asarray(outward, dtype=float)) < 0:
         normal, d = -normal, -d
-    
+
     centroid = (-d * normal if plane_origin is None else
                 np.asarray(plane_origin, dtype=np.float64))
     centroid = centroid - (np.dot(centroid, normal) + d) * normal
-    
+
     eu, ev = make_frame(normal, p, ruler_dir)
     local = (p - centroid) @ np.column_stack((eu, ev, normal))
     order = np.argsort(local[:, 0], kind="stable")
@@ -243,24 +245,24 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
         w = precomputed_w[order]
     else:
         w = local[order, 2]
-    
-    # Store full u_span before any filtering
+
     u_min_full = float(u.min())
     u_max_full = float(u.max())
-    
-    a, c = fit_line(u, w)
-    residual = w - (a * u + c)
-    keep = np.ones(len(u), dtype=bool)
-    
+
+    # ---- SOR 去噪 ----
     sp = dict(enable=True, sigma=4.0, method="local", k=8, w_weight=50.0)
     sp.update(sor or {})
-    
-    if sp.get("enable", True) and len(u) > 16:
+    keep = np.ones(len(u), dtype=bool)
+
+    if precomputed_keep is not None:
+        pk = np.asarray(precomputed_keep, dtype=bool).reshape(-1)
+        if pk.shape == (len(u),) and np.any(pk):
+            keep = pk.copy()
+    elif sp.get("enable", True) and len(u) > 16:
         method = sp.get("method", "local")
         k = int(sp.get("k", 8))
         sigma = float(sp["sigma"])
         w_weight = float(sp.get("w_weight", 50.0))
-        
         if method == "local":
             keep = sor_mask_local(u, w, k, sigma)
         elif method == "grid":
@@ -269,17 +271,16 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
             keep = sor_mask_exact(u, w, k, sigma, w_weight=w_weight)
         else:
             keep = sor_mask_local(u, w, k, sigma)
-            
         if np.sum(keep) < 3:
             keep[:] = True
-    
+
     a, c = fit_line(u[keep], w[keep])
     residual = w - (a*u+c)
     surf = keep & (np.abs(residual) <= select_band)
     if np.sum(surf) < 3:
         raise ValueError("表面点不足，请放宽 select_band")
-    
-    # Hole detection with proper hole_band >= select_band check
+
+    # Hole detection
     effective_hole_band = max(hole_band, select_band)
     u0 = float(u[0])
     bins = np.floor((u-u0)/bin_size).astype(np.int64)
@@ -287,26 +288,23 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
     solid_mask[bins[keep & (np.abs(residual) <= effective_hole_band)]] = True
     solid = np.flatnonzero(solid_mask)
     selected = np.flatnonzero(surf & np.isin(bins, solid))
-    
-    # Correct top_q implementation
+
+    # 实区代表点：每 bin 取 w 最大（最凸出）的点 —— 刚体靠尺的支点候选
     if top_q >= 1.0:
-        # argsort+reduceat 分组向量化，与逐 bin 循环 + np.argmax 逐点一致：
-        # stable 排序保持组内原先后顺序，组序按 bin 升序（与 solid 迭代一致），
-        # first-max 语义与 np.argmax 的"组内第一个最大值"相同
         if len(selected):
             sel_bins = bins[selected]
-            order = np.argsort(sel_bins, kind='stable')
-            sorted_bins = sel_bins[order]
+            order_s = np.argsort(sel_bins, kind='stable')
+            sorted_bins = sel_bins[order_s]
             starts = np.flatnonzero(
                 np.r_[True, sorted_bins[1:] != sorted_bins[:-1]])
-            counts = np.diff(np.r_[starts, len(order)])
+            counts = np.diff(np.r_[starts, len(order_s)])
             group_ids = np.repeat(np.arange(len(starts)), counts)
-            w_sorted = w[selected][order]
+            w_sorted = w[selected][order_s]
             seg_max = np.maximum.reduceat(w_sorted, starts)
             first = np.where(w_sorted == seg_max[group_ids],
                              np.arange(len(w_sorted)), len(w_sorted))
             top_rows = np.minimum.reduceat(first, starts)
-            tops = selected[order[top_rows]].astype(np.int64)
+            tops = selected[order_s[top_rows]].astype(np.int64)
         else:
             tops = np.empty(0, dtype=np.int64)
     else:
@@ -321,14 +319,13 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
         tops = np.asarray(tops, dtype=np.int64)
     if len(tops) < 2:
         raise ValueError("实区分段不足以放置靠尺")
-    
-    # Holes
+
     pad = np.r_[True, solid_mask, True]
     hs = np.flatnonzero(~pad[1:-1] & pad[:-2])
     he = np.flatnonzero(~pad[1:-1] & pad[2:]) + 1
     holes = (np.column_stack((u0 + hs * bin_size, u0 + he * bin_size))
              if hs.size else np.empty((0, 2), dtype=float))
-    
+
     stats = {
         "n_points": len(p),
         "n_used": int(np.sum(surf)),
@@ -336,7 +333,7 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
         "n_solid_bins": int(solid_mask.sum()),
         "hole_length": float(np.diff(holes, axis=1).sum()) if holes.size else 0.
     }
-    
+
     return Surface(
         normal, centroid, eu, ev, u, w, ids, keep, surf,
         float(bin_size), (u_min_full, u_max_full),
@@ -345,52 +342,56 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
 
 def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0.2,
              threshold_mm=None):
-    """Compute ruler flatness at given u_center position.
-    
-    Returns cleaned dict with only essential fields for quality aggregation.
-    Includes ruler_defect_grid when threshold_mm is provided.
+    """在 u_center 处放置 2m 刚体靠尺，返回平整度。
+
+    物理过程（对应现实靠尺+塞尺操作）：
+      1. 靠尺底面架设在窗口内最凸支点（上凸包）包含尺心的那条包络边上
+         （重心投影落在两支点的水平跨度内，刚体不倾覆）；
+      2. 塞尺测量靠尺底面与各点的垂直间隙；
+      3. 最大间隙 = 凹陷深度 = 平整度值。
     """
     if u_center is None:
         u_center = float(0.5 * (surface.u_span[0] + surface.u_span[1]))
-    
+
     lo, hi = np.searchsorted(surface.top_u, [u_center-ruler_length/2, u_center+ruler_length/2])
     tu, tw = surface.top_u[lo:hi], surface.top_w[lo:hi]
     ts = surface.top_source_ids[lo:hi]
-    
+
     if len(tu) < 2:
         return {
-            "ok": False, 
-            "reason": "靠尺范围内实区分段不足", 
+            "ok": False,
+            "reason": "靠尺范围内实区分段不足",
             "u_center": float(u_center),
             "coverage_valid": False,
             "hole_ratio": 1.0,
         }
-    
+
     hull = upper_hull(tu, tw)
-    # Center of gravity moment balance: find pivot pair straddling u_center
+    # 重心平衡：靠尺重心投影必须落在两凸支点的水平跨度内（clip），
+    # 支点为包含重心投影的凸包边（刚体绕先接触支点倾覆后的稳定姿态）。
     cg = float(np.clip(u_center, tu[hull[0]], tu[hull[-1]]))
     j = int(np.clip(np.searchsorted(tu[hull], cg, side="right"), 1, len(hull)-1))
     p, q = hull[j-1], hull[j]
     slope = (tw[q]-tw[p])/(tu[q]-tu[p])
     intercept = tw[p]-slope*tu[p]
-    
-    # Gap: positive = depression (ruler above surface), negative = protrusion
-    # Consistent with rulermeasure.txt: (a*u + c - w) / hypot(1, a)
+
+    # gap：靠尺底面到点的垂直间隙；点越凹（w 越小）gap 越大。
+    # gap > 0 = 凹陷（靠尺底面悬空的缝隙）；gap <= 0 = 点凸出顶住靠尺。
     gap = (slope * tu + intercept - tw) / np.hypot(1, slope)
     gi = int(np.argmax(gap))
-    
+
     # ---- 靠尺网格缺陷统计（5cm x 5.5cm 网格，40 格）----
     ruler_defect_grid = None
     defect_point_indices = []
     defect_values_mm = []
     if threshold_mm is not None and len(tu) > 0:
-        gap_mm = gap * 1000.0  # signed
+        gap_mm = gap * 1000.0
         n_grid = 40
-        grid_length = ruler_length / n_grid  # 0.05 m = 5 cm
+        grid_length = ruler_length / n_grid
         u_lo_ruler = u_center - ruler_length / 2.0
         grid_bins = np.floor((tu - u_lo_ruler) / grid_length).astype(np.int64)
         grid_bins = np.clip(grid_bins, 0, n_grid - 1)
-        
+
         grids = []
         for grid_idx in range(n_grid):
             mask = grid_bins == grid_idx
@@ -398,7 +399,7 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
                 continue
             grid_gaps = gap_mm[mask]
             grid_source_ids = ts[mask]
-            max_local_idx = int(np.argmax(np.abs(grid_gaps)))
+            max_local_idx = int(np.argmax(grid_gaps))
             grids.append({
                 'index': grid_idx,
                 'u_start_m': float(u_lo_ruler + grid_idx * grid_length),
@@ -407,34 +408,32 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
                 'max_defect_source_id': int(grid_source_ids[max_local_idx]),
                 'point_count': int(np.sum(mask)),
             })
-        
-        exceed_mask = np.abs(gap_mm) > float(threshold_mm)
+
+        exceed_mask = gap_mm > float(threshold_mm)
         defect_point_indices = np.flatnonzero(exceed_mask).tolist()
         defect_values_mm = gap_mm[exceed_mask].tolist()
-        
+
         ruler_defect_grid = {
             'threshold_mm': float(threshold_mm),
             'grid_count': n_grid,
             'grid_width_mm': float(ruler_length / n_grid * 1000.0),
             'grids': grids,
         }
-    
-    # Hole coverage
+
     overlap = (np.clip(np.minimum(surface.holes[:, 1], u_center+ruler_length/2) -
                        np.maximum(surface.holes[:, 0], u_center-ruler_length/2), 0, None)
                if surface.holes.size else np.empty(0))
     hole_length = float(overlap.sum())
     hole_ratio = hole_length / ruler_length
     coverage_valid = hole_ratio <= max_hole_ratio
-    
+
     signed_gap = float(gap[gi])
-    
-    # Return minimal essential fields only
+
     result = {
         "ok": True,
         "u_center": float(u_center),
-        "gap_mm": float(max(signed_gap, 0.0)) * 1000.0,  # defect value in mm (always >= 0)
-        "signed_gap_mm": signed_gap * 1000.0,  # signed for advanced analysis
+        "gap_mm": float(max(signed_gap, 0.0)) * 1000.0,
+        "signed_gap_mm": signed_gap * 1000.0,
         "depression_u": float(tu[gi]),
         "depression_xyz": surface.to_world(tu[gi], tw[gi]),
         "depression_source_id": int(ts[gi]),

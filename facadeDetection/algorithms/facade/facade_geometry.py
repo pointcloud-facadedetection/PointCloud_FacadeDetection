@@ -50,12 +50,15 @@ def extract_facade_geometry(plane_model, origin, u_axis, v_axis, uv_bounds):
     if u1 <= u0 or v1 <= v0:
         raise ValueError('facade geometry bounds are degenerate')
 
-    # ── 唯一的规范化：重力对齐 ───────────────────────────────────
+    # ──规范化：重力对齐 ───────────────────────────────────
     world_up = np.array([0.0, 0.0, 1.0])
     up_in_plane = world_up - float(world_up @ normal) * normal
     up_norm = float(np.linalg.norm(up_in_plane))
     if up_norm > 1e-6:
         up_in_plane = up_in_plane / up_norm
+    if float(np.dot(np.cross(u, v), normal)) < 0.0:
+        u = -u
+        u0, u1 = -u1, -u0
 
     # ── 固定 UV 角点顺序：BL → BR → TR → TL ─────────────────────
     uv = np.array([[u0, v0], [u1, v0], [u1, v1], [u0, v1]])

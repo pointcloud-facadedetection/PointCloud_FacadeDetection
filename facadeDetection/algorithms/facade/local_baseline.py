@@ -1,11 +1,5 @@
 """Unified local baseline plane fitting for facade quality assessment.
 
-This module provides interval-based robust local plane fitting with
-**non-overlapping blocks** along the facade vertical (v) direction.
-The fitted block planes serve as the shared reference baseline for
-both the ruler method (strip-level) and the simulated wall method
-(window-level), ensuring millimetre-grade consistency.
-
 Key design decisions
 --------------------
 1.  **No overlap** between blocks: each physical point belongs to exactly
@@ -19,11 +13,13 @@ Key design decisions
 4.  **V-direction strip assignment**: strips/windows query the block
     that owns their *centre v-coordinate*, guaranteeing a single,
     deterministic baseline for any given measurement location.
+5.  **Per-point local normals**: each block also stores its fitted plane
+    normal per contained point (模拟墙面法垂直度逐点法向使用）。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 
 
@@ -36,6 +32,8 @@ class BaselineBlock:
     plane_model: np.ndarray       # (4,)  ax+by+cz+d=0, |normal|=1
     point_indices: np.ndarray     # indices of points belonging to this block
     signed_dist_mm: np.ndarray    # pre-computed signed distance (mm) for those points
+    local_normals: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 3)))  # per-point local normals (N,3)
 
 
 # =============================================================================
@@ -68,12 +66,7 @@ def _plane_from_points(points, weights=None):
 
 def _fit_constrained_normal_plane(points, reference_normal, *, delta_m,
                                    max_iterations=50):
-    """以给定法向为硬约束，鲁棒加权估计平面截距。
-
-    立面质量评估中法向来自检测阶段的立面方向先验。最终重拟合只允许
-    调整法向方向上的位置 d，不允许再次通过 PCA 改变法向，从而避免
-    ``IRLS -> unconstrained PCA`` 造成的基准面漂移。
-    """
+    """以给定法向为硬约束，鲁棒加权估计平面截距。"""
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     n = _unit(reference_normal)
     if len(pts) < 3:
@@ -111,7 +104,6 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                      partition_min_points_ratio=0.10,
                      partition_angle_limit_deg=5.0):
     """Huber M-estimator IRLS with prior-normal initialization."""
-    # Lazy import to avoid circular dependency with algorithms.geometry
     from algorithms.geometry import cluster_depth_significant
 
     raw = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -131,7 +123,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     w_init = np.where(np.abs(r0 - med0) <= outlier_sigma * mad0, 1.0, 0.0)
 
     delta = max(float(huber_delta_m), 1e-6)
-    rng = np.random.default_rng(seed)  # noqa: F841  (保留以维持接口)
+    rng = np.random.default_rng(seed)  # noqa: F841
     angle_limit_rad = np.deg2rad(float(angle_limit_deg))
     cos_limit = np.cos(angle_limit_rad)
 
@@ -188,7 +180,6 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     inliers = np.abs(residuals - med_r) <= gate
 
     if inliers.sum() >= 3:
-        # 最终重拟合仍然固定 n0；禁止无约束 PCA 重新旋转基准面。
         plane = _fit_constrained_normal_plane(
             pts[inliers], n0, delta_m=delta,
             max_iterations=min(int(max_iterations), 50))
@@ -251,8 +242,6 @@ def fit_global_plane(points, *, reference_plane, seed=42,
             seg_inlier_ratio = float(seg_inliers.mean())
 
             if seg_inliers.sum() >= 3:
-                # 分区回退同样固定到检测参考法向，避免回退路径重新引入
-                # 无约束 PCA 的角度漂移。
                 part_plane = _fit_constrained_normal_plane(
                     seg_pts[seg_inliers], n0, delta_m=delta,
                     max_iterations=min(int(max_iterations), 50))
@@ -307,7 +296,6 @@ def fit_global_plane(points, *, reference_plane, seed=42,
             inliers[bp['seg_mask']] = bp['inliers']
 
             if inliers.sum() >= 3:
-                # 保持回退后的最终重拟合也服从法向先验。
                 plane = _fit_constrained_normal_plane(
                     pts[inliers], n0, delta_m=delta,
                     max_iterations=min(int(max_iterations), 50))
@@ -378,37 +366,27 @@ def fit_interval_baseline_planes(
     v_axis,
     *,
     seed=42,
-    huber_delta_m=0.005,
+    huber_delta_m=0.002,
     max_iterations=500,
     convergence_tol=1e-7,
-    angle_limit_deg=3.0,
-    outlier_sigma=3.0,
-    final_gate_sigma=3.5,
-    min_inlier_ratio=0.15,
-    max_p95_mm=200.0,
+    angle_limit_deg=2.0,
+    outlier_sigma=2.5,
+    final_gate_sigma=2.5,
+    min_inlier_ratio=0.20,
+    max_p95_mm=50.0,
     enable_partition_fallback=True,
-    partition_depth_gap_m=0.03,
-    partition_min_points_ratio=0.10,
+    partition_depth_gap_m=0.02,
+    partition_min_points_ratio=0.15,
+    continuity_constraint_mm=5.0,
 ) -> list[BaselineBlock]:
     """Fit robust local planes along the v-axis in non-overlapping intervals.
-
-    Parameters
-    ----------
-    points : (N, 3) array
-        Filtered facade points.
-    reference_plane : (4,) array
-        Global fitted plane (used as prior normal + orientation).
-    interval_size_m : float
-        Vertical block height in metres.
-    origin, u_axis, v_axis : (3,) arrays
-        Shared UV frame origin and axes.
-    **kwargs : passed through to fit_global_plane
 
     Returns
     -------
     list[BaselineBlock]
-        Blocks sorted by ascending v0.  Adjacent blocks are gap-free
-        and non-overlapping.
+        Blocks sorted by ascending v0.  Each block additionally stores its
+        fitted plane normal per contained point (local_normals, (N,3)) for
+        the simulated-wall verticality algorithm.
     """
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if len(pts) < 3:
@@ -424,15 +402,16 @@ def fit_interval_baseline_planes(
     v_min, v_max = float(v_all.min()), float(v_all.max())
     size = max(float(interval_size_m), 1e-6)
 
-    # Non-overlapping block count
     n_blocks = max(1, int(np.ceil((v_max - v_min) / size)))
 
     blocks: list[BaselineBlock] = []
+    prev_plane = np.asarray(reference_plane, dtype=np.float64).reshape(4)
+    continuity_m = max(float(continuity_constraint_mm) / 1000.0, 1e-6)
+
     for i in range(n_blocks):
         v0 = v_min + i * size
         v1 = v_max if i == n_blocks - 1 else v_min + (i + 1) * size
 
-        # Hard mask: no overlap extension
         if i < n_blocks - 1:
             mask = (v_all >= v0) & (v_all < v1)
         else:
@@ -440,14 +419,15 @@ def fit_interval_baseline_planes(
 
         indices = np.flatnonzero(mask)
         if len(indices) < 3:
-            # Degenerate block: fall back to reference plane, zero distance
+            ref = np.asarray(reference_plane, dtype=np.float64).reshape(4)
             blocks.append(
                 BaselineBlock(
                     v0=v0,
                     v1=v1,
-                    plane_model=np.asarray(reference_plane, dtype=np.float64).reshape(4),
+                    plane_model=ref,
                     point_indices=indices,
                     signed_dist_mm=np.zeros(len(indices), dtype=np.float64),
+                    local_normals=np.tile(_unit(ref[:3]), (len(indices), 1)),
                 )
             )
             continue
@@ -479,7 +459,38 @@ def fit_interval_baseline_planes(
         plane = np.asarray(fit["plane_model"], dtype=np.float64).reshape(4)
         plane[:3] = _unit(plane[:3])
 
-        # Signed distance in metres, then mm
+        # --- continuity constraint between adjacent blocks ---
+        if i > 0:
+            d_jump = abs(plane[3] - prev_plane[3])
+            if d_jump > continuity_m:
+                blend_plane = prev_plane.copy()
+                blend_plane[:3] = _unit(reference_plane[:3])
+                try:
+                    fit = fit_global_plane(
+                        block_pts,
+                        reference_plane=blend_plane,
+                        seed=seed,
+                        huber_delta_m=huber_delta_m,
+                        max_iterations=max_iterations,
+                        convergence_tol=convergence_tol,
+                        angle_limit_deg=angle_limit_deg,
+                        outlier_sigma=outlier_sigma,
+                        final_gate_sigma=final_gate_sigma,
+                        min_inlier_ratio=min_inlier_ratio,
+                        max_p95_mm=max_p95_mm,
+                        enable_partition_fallback=enable_partition_fallback,
+                        partition_depth_gap_m=partition_depth_gap_m,
+                        partition_min_points_ratio=partition_min_points_ratio,
+                    )
+                    new_plane = np.asarray(fit["plane_model"], dtype=np.float64).reshape(4)
+                    new_plane[:3] = _unit(new_plane[:3])
+                    if abs(new_plane[3] - prev_plane[3]) < d_jump:
+                        plane = new_plane
+                except Exception:
+                    pass
+
+        prev_plane = plane.copy()
+
         dist_m = block_pts @ plane[:3] + plane[3]
         dist_mm = dist_m * 1000.0
 
@@ -490,6 +501,7 @@ def fit_interval_baseline_planes(
                 plane_model=plane,
                 point_indices=indices,
                 signed_dist_mm=dist_mm,
+                local_normals=np.tile(plane[:3], (len(indices), 1)),
             )
         )
 
@@ -516,11 +528,37 @@ def compute_block_signed_distances_mm(points, blocks, origin, v_axis) -> np.ndar
         if not np.any(mask):
             continue
 
-        # Verify ownership by checking point indices intersection
-        # (robust against floating-point edge cases)
         block_pts = pts[mask]
         dist_m = block_pts @ block.plane_model[:3] + block.plane_model[3]
         result[mask] = dist_m * 1000.0
+
+    return result
+
+
+def compute_block_local_normals(points, blocks, origin, v_axis) -> np.ndarray:
+    """Return a full-array (N, 3) per-point local-normal map.
+
+    Each point receives the normal of the block that owns it (by
+    v-coordinate).  Points outside all block ranges receive NaN.
+    Used by the simulated-wall verticality algorithm
+    （逐点法向 vs 铅垂线，global_plane_quality.py 专用）。
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    n = len(pts)
+    result = np.full((n, 3), np.nan, dtype=np.float64)
+
+    origin = np.asarray(origin, dtype=float).reshape(3)
+    v_ax = _unit(v_axis)
+    v_all = (pts - origin) @ v_ax
+
+    for block in blocks:
+        mask = (v_all >= block.v0) & (v_all <= block.v1)
+        if not np.any(mask):
+            continue
+        if len(block.local_normals) == int(mask.sum()):
+            result[mask] = block.local_normals
+        else:
+            result[mask] = block.plane_model[:3]
 
     return result
 
@@ -541,7 +579,6 @@ def find_block_for_v(v_coord: float, blocks: list) -> int | None:
     def _v1(b):
         return b.v1 if hasattr(b, 'v1') else b.get('v1', float('inf'))
 
-    # Binary search on sorted block list
     lo, hi = 0, len(blocks)
     while lo < hi:
         mid = (lo + hi) // 2
@@ -555,7 +592,6 @@ def find_block_for_v(v_coord: float, blocks: list) -> int | None:
         else:
             return mid
 
-    # Edge fallback: clamp to nearest block
     first_v0 = _v0(blocks[0])
     last_v1 = _v1(blocks[-1])
     if v_coord < first_v0:

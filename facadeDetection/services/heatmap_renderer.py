@@ -958,7 +958,7 @@ class FacadeHeatmapTripletRenderer:
             if metric == 'verticality':
                 pos_label, neg_label = '外倾', '内陷'
             else:
-                pos_label, neg_label = '凹陷', '凸起'
+                pos_label, neg_label = '凸起', '凹陷'
             for value_m, y, label in (
                 (max_m, top + 4, pos_label),
                 (0.0, mid_y, ''),

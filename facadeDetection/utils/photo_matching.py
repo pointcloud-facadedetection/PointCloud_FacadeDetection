@@ -298,7 +298,7 @@ def _solve_plane_homography_robust(correspondences, plane_frame,
     # ---- 3. 三路决策 ----
     if H_pose is not None and H_ransac is not None:
         if _homography_consistent(H_pose, H_ransac, correspondences,
-                                   origin, u_axis, v_axis, tol_px=20.0):
+                                   origin, u_axis, v_axis, tol_px=12.0):
             print('[PhotoMatch] homography: pose & ransac consistent → '
                   'prefer RANSAC', flush=True)
             H = H_ransac

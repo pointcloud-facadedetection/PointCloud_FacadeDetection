@@ -140,7 +140,193 @@ def _aabb_gap_m(points_a, points_b):
     return float(np.linalg.norm(gap))
 
 
-def _merge(facades, points, normals=None, gap_m=3.0, angle_deg=5.0, d_thresh=.08, max_plane_dist=0.05):
+def _split_facade_by_depthmap(facade, points, normals, ranges, tol,
+                               depth_bin_m=None, depth_gap_m=None,
+                               min_area_m2=5.0, min_pts=50):
+    """深度图编码：将单个立面按深度不连续分裂为子立面。
+
+    结合 setting 参数 FACADE_DEPTH_LAYER_BIN_M / FACADE_DEPTH_LAYER_GAP_M，
+    在立面局部 UV 空间构建有序深度图，检测深度边缘，解决相邻法向量一致
+    但深度不一致面的切割问题；同时通过边界法向突变检测召回拐角小面。
+    """
+    depth_bin_m = depth_bin_m if depth_bin_m is not None else float(
+        getattr(Config, 'FACADE_DEPTH_LAYER_BIN_M', 0.05))
+    depth_gap_m = depth_gap_m if depth_gap_m is not None else float(
+        getattr(Config, 'FACADE_DEPTH_LAYER_GAP_M', 0.12))
+
+    idx = np.asarray(facade.get('inlier_indices', facade.get('indices', [])), dtype=np.int64)
+    if len(idx) < min_pts:
+        return [facade]
+
+    plane = np.asarray(facade['plane_model'], dtype=np.float64).reshape(4)
+    n_vec = plane[:3] / (np.linalg.norm(plane[:3]) + 1e-12)
+
+    # 局部 UV 坐标系
+    # 选 facade 的 bbox 主轴作为 u/v
+    pts = points[idx]
+    pca = pts - pts.mean(axis=0)
+    cov = pca.T @ pca / len(pts)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # 排序：最大特征值对应主方向
+    order = np.argsort(eigvals)[::-1]
+    u_ax = eigvecs[:, order[0]]
+    v_ax = eigvecs[:, order[1]]
+    # 确保 u/v 与法向成右手系
+    if np.linalg.norm(np.cross(u_ax, v_ax) - n_vec) > np.linalg.norm(np.cross(u_ax, v_ax) + n_vec):
+        v_ax = -v_ax
+
+    # 投影到 UV
+    origin = pts.mean(axis=0)
+    rel = pts - origin
+    u = rel @ u_ax
+    v = rel @ v_ax
+    # 有符号深度（点到平面的距离）
+    signed_depth = pts @ n_vec + plane[3]
+
+    u_min, u_max = float(u.min()), float(u.max())
+    v_min, v_max = float(v.min()), float(v.max())
+    if u_max <= u_min or v_max <= v_min:
+        return [facade]
+
+    # 构建深度图网格
+    nu = max(1, int(np.ceil((u_max - u_min) / depth_bin_m)))
+    nv = max(1, int(np.ceil((v_max - v_min) / depth_bin_m)))
+    # 限制网格数量，避免过大建筑立面爆炸
+    nu = min(nu, 512)
+    nv = min(nv, 512)
+    cell_u = (u_max - u_min) / nu
+    cell_v = (v_max - v_min) / nv
+
+    # 每个网格单元：收集落入该单元的点索引（local）和深度
+    grid_buckets = [[[] for _ in range(nv)] for _ in range(nu)]
+    grid_normals = [[[] for _ in range(nv)] for _ in range(nu)]
+    ui = np.clip(((u - u_min) / cell_u).astype(np.int64), 0, nu - 1)
+    vi = np.clip(((v - v_min) / cell_v).astype(np.int64), 0, nv - 1)
+    for k in range(len(idx)):
+        grid_buckets[ui[k]][vi[k]].append(k)
+        grid_normals[ui[k]][vi[k]].append(normals[idx[k]])
+
+    # 每个单元取中位数深度，空单元标记为 nan
+    depth_map = np.full((nu, nv), np.nan, dtype=np.float64)
+    normal_map = np.full((nu, nv, 3), np.nan, dtype=np.float64)
+    for i in range(nu):
+        for j in range(nv):
+            if grid_buckets[i][j]:
+                depths = [signed_depth[k] for k in grid_buckets[i][j]]
+                depth_map[i, j] = float(np.median(depths))
+                nlist = np.array(grid_normals[i][j])
+                normal_map[i, j] = nlist.mean(axis=0)
+                nm = np.linalg.norm(normal_map[i, j])
+                if nm > 1e-8:
+                    normal_map[i, j] /= nm
+
+    # ---- 深度边缘检测：4-邻域深度差 > depth_gap_m ----
+    edge_mask = np.zeros((nu, nv), dtype=bool)
+    for i in range(nu - 1):
+        for j in range(nv):
+            if np.isfinite(depth_map[i, j]) and np.isfinite(depth_map[i + 1, j]):
+                if abs(depth_map[i, j] - depth_map[i + 1, j]) > depth_gap_m:
+                    edge_mask[i, j] = True
+                    edge_mask[i + 1, j] = True
+    for i in range(nu):
+        for j in range(nv - 1):
+            if np.isfinite(depth_map[i, j]) and np.isfinite(depth_map[i, j + 1]):
+                if abs(depth_map[i, j] - depth_map[i, j + 1]) > depth_gap_m:
+                    edge_mask[i, j] = True
+                    edge_mask[i, j + 1] = True
+
+    # ---- 拐角边缘检测：4-邻域法向突变 > 15° ----
+    corner_mask = np.zeros((nu, nv), dtype=bool)
+    angle_thr = np.deg2rad(float(getattr(Config, 'FACADE_NORMAL_ANGLE_DEG', 8.0)))
+    for i in range(nu - 1):
+        for j in range(nv):
+            if np.all(np.isfinite(normal_map[i, j])) and np.all(np.isfinite(normal_map[i + 1, j])):
+                cos_ang = np.clip(np.dot(normal_map[i, j], normal_map[i + 1, j]), -1, 1)
+                if np.arccos(abs(cos_ang)) > angle_thr:
+                    corner_mask[i, j] = True
+                    corner_mask[i + 1, j] = True
+    for i in range(nu):
+        for j in range(nv - 1):
+            if np.all(np.isfinite(normal_map[i, j])) and np.all(np.isfinite(normal_map[i, j + 1])):
+                cos_ang = np.clip(np.dot(normal_map[i, j], normal_map[i, j + 1]), -1, 1)
+                if np.arccos(abs(cos_ang)) > angle_thr:
+                    corner_mask[i, j] = True
+                    corner_mask[i, j + 1] = True
+
+    combined_edge = edge_mask | corner_mask
+
+    # 如果没有边缘，无需分裂
+    if not np.any(combined_edge):
+        return [facade]
+
+    # ---- 基于边缘的连通域标记（4-连通），边缘作为屏障 ----
+    labels = np.full((nu, nv), -1, dtype=np.int32)
+    label_id = 0
+    for i in range(nu):
+        for j in range(nv):
+            if np.isnan(depth_map[i, j]) or labels[i, j] >= 0 or combined_edge[i, j]:
+                continue
+            # BFS
+            stack = [(i, j)]
+            labels[i, j] = label_id
+            while stack:
+                ci, cj = stack.pop()
+                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ni, nj = ci + di, cj + dj
+                    if 0 <= ni < nu and 0 <= nj < nv:
+                        if labels[ni, nj] < 0 and not combined_edge[ni, nj] and np.isfinite(depth_map[ni, nj]):
+                            labels[ni, nj] = label_id
+                            stack.append((ni, nj))
+            label_id += 1
+
+    if label_id <= 1:
+        return [facade]
+
+    # ---- 将网格连通域映射回原始点，生成子立面 ----
+    sub_facades = []
+    # 建立每个 local 点属于哪个 label
+    point_label = np.full(len(idx), -1, dtype=np.int32)
+    for i in range(nu):
+        for j in range(nv):
+            lab = labels[i, j]
+            if lab < 0:
+                continue
+            for k in grid_buckets[i][j]:
+                point_label[k] = lab
+
+    for lab in range(label_id):
+        local_mask = point_label == lab
+        if np.sum(local_mask) < min_pts:
+            continue
+        sub_idx = idx[local_mask]
+        sub_pts = points[sub_idx]
+        # 局部重新拟合平面
+        try:
+            model = fit_plane_weighted(sub_pts, irls_iters=2)
+        except Exception:
+            model = plane.copy()
+        # 面积校验
+        try:
+            area = estimate_plane_area(sub_pts)
+        except Exception:
+            area = 0.0
+        if area < min_area_m2:
+            continue
+        sub_facades.append(_info(
+            -1, model, sub_pts, sub_idx,
+            ranges[sub_idx] if ranges is not None else np.zeros(len(sub_idx))
+        ))
+
+    if not sub_facades:
+        return [facade]
+
+    # 给新 facade 分配连续 id
+    for i, sf in enumerate(sub_facades):
+        sf['facade_id'] = i
+    return sub_facades
+
+
+def _merge(facades, points, normals=None, gap_m=3.0, angle_deg=5.0, d_thresh=.03, max_plane_dist=0.05):
     """共面且 UV 邻接合并；增加 3D AABB 快速排斥，禁止合并空间分离或深度双峰的立面。"""
     # 每个 facade 只建立一次 KD-tree；合并循环可能反复访问同一 facade。
     spacing_cache = {}
@@ -195,7 +381,11 @@ def _merge(facades, points, normals=None, gap_m=3.0, angle_deg=5.0, d_thresh=.08
                 nb = pb[:3] / (np.linalg.norm(pb[:3]) + 1e-12)
                 dist_b_on_a = np.median(np.abs(points[ib] @ na + pa[3]))
                 dist_a_on_b = np.median(np.abs(points[ia] @ nb + pb[3]))
-                merge_d_thr = max(d_thresh * 1.8, 0.08)
+                # FIX: tightened from max(d_thresh*1.8, 0.08) to d_thresh*1.2.
+                # With d_thresh=.03m, merge_d_thr=.036m.  This prevents merging
+                # parallel facades separated by depth steps (balconies, setbacks,
+                # window reveals) which are typically 5-15 cm apart.
+                merge_d_thr = d_thresh * 1.2
                 # 单向显著即拒（OR 而非 AND）：缺陷 2 中强弱两个平行面点数
                 # 悬殊，主面点落在自身平面上的中位数会被"面厚"稀释到门槛
                 # 以下，AND 门控随即失效并把异面并掉。窄面点落在主面平面上的
@@ -547,9 +737,11 @@ def _weak_boundary_recall(main_facades, points, normals, remaining, ranges,
         return []
 
     band_m = float(getattr(Config, 'FACADE_WEAK_BOUNDARY_BAND_M', 0.50))
-    weak_min_area = float(getattr(Config, 'FACADE_WEAK_MIN_AREA_M2', 20.0))
-    weak_min_pts = int(getattr(Config, 'FACADE_WEAK_MIN_POINTS', 200))
-    weak_min_angle = float(getattr(Config, 'FACADE_WEAK_MIN_ANGLE_DEG', 30.0))
+    # FIX: lowered from 20.0/200 to 8.0/80 to catch corner facets and small
+    # wall segments that were previously discarded.
+    weak_min_area = float(getattr(Config, 'FACADE_WEAK_MIN_AREA_M2', 8.0))
+    weak_min_pts = int(getattr(Config, 'FACADE_WEAK_MIN_POINTS', 80))
+    weak_min_angle = float(getattr(Config, 'FACADE_WEAK_MIN_ANGLE_DEG', 25.0))
     max_per_facade = int(getattr(Config, 'FACADE_WEAK_MAX_PER_FACADE', 4))
     min_density = float(getattr(Config, 'FACADE_WEAK_MIN_DENSITY', 50.0))
     min_compact = float(getattr(Config, 'FACADE_WEAK_MIN_COMPACT_RATIO', 0.60))
@@ -856,9 +1048,10 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
             for cf in coarse_facades:
                 cn = np.asarray(cf['normal'])
                 cd = float(np.asarray(cf['plane_model'])[3])
-                # 粗层容差映射回原始点
-                on_plane = (np.abs(points @ cn + cd) <= tol * 3.0) & \
-                           (np.abs(normals @ cn) >= np.cos(np.deg2rad(10.0)))
+                # FIX: tightened from tol*3.0 + 10deg to tol*1.5 + 5deg.
+                # tol*3.0 was far too loose, merging adjacent depth layers.
+                on_plane = (np.abs(points @ cn + cd) <= tol * 1.5) & \
+                           (np.abs(normals @ cn) >= np.cos(np.deg2rad(5.0)))
                 covered |= on_plane
             
             remaining &= ~covered
@@ -869,7 +1062,10 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                 cd = float(np.asarray(cf['plane_model'])[3])
                 # 在原始 remaining 点中找该平面的精确内点
                 all_signed = points @ cn + cd
-                all_near = np.abs(all_signed) <= tol * 1.2
+                # FIX: tightened from tol*1.2 to tol*0.9.  The coarse facade has
+                # already given us an accurate normal; we now want only the tight
+                # inliers to avoid sucking in adjacent-depth points.
+                all_near = np.abs(all_signed) <= tol * 0.9
                 all_near &= np.abs(normals @ cn) >= cos_tol
                 if all_near.sum() >= min_count:
                     model = fit_plane_weighted(points[all_near], irls_iters=irls_iters)
@@ -900,6 +1096,21 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
         tol, cos_tol, spacing, voxel_size, base,
         min_count, min_facade_area, irls_iters, signed_dist_tolerance)
     
+    # ===== 深度图编码二次分裂：解决相邻法向一致、深度不一致面及拐角面 =====
+    pre_split_count = len(fine_facades)
+    split_facades = []
+    for ff in fine_facades:
+        subs = _split_facade_by_depthmap(
+            ff, points, normals, ranges, tol,
+            min_area_m2=min_facade_area,
+            min_pts=max(min_count // 2, 50))
+        split_facades.extend(subs)
+    fine_facades = split_facades
+    trace("facade.algo.depthmap_split",
+          input=pre_split_count,
+          output=len(fine_facades),
+          seconds=f"{time.perf_counter()-started:.2f}")
+
     facades.extend(fine_facades)
     trace("facade.algo.seeds", hough_seeds=len(hough_seeds),
           facades=len(facades),
@@ -1037,7 +1248,10 @@ def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
             depth_seg_labels, depth_seg_medians = cluster_depth_significant(
                 signed,
                 tolerance=None,
-                min_gap=max(base * 2, 0.06),   # 6cm 起分，匹配抹灰层厚度
+                # FIX: lowered from max(base*2, 0.06) to max(base*1.5, 0.03).
+                # 3cm threshold catches thin finish-layer depth differences
+                # (e.g., plaster vs. bare concrete) that were previously merged.
+                min_gap=max(base * 1.5, 0.03),
                 min_points=max(50, len(sp_ids) // 20))
 
             for seg_idx in range(len(depth_seg_medians)):
