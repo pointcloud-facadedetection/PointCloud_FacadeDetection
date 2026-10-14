@@ -332,7 +332,13 @@ class ViewportRenderService:
                     colors = np.tile(
                         np.asarray(_BASE_GRAY, dtype=np.float32).reshape(1, 3),
                         (len(pos), 1))
-                    self._update_cloud_color(cloud_name, colors)
+                    # 已是恒灰（如二次进入复核页）则跳过上传：array_equal
+                    # 比较 23MB 数组约 10ms，远小于 VTK 整云颜色上传
+                    existing = data.get('color')
+                    if not (existing is not None
+                            and np.shape(existing) == colors.shape
+                            and np.array_equal(existing, colors)):
+                        self._update_cloud_color(cloud_name, colors)
                 self._facade_color_signatures.pop(cloud_name, None)
             except Exception as e:
                 print(f"highlight_facades(review) failed: {e}", flush=True)
@@ -445,7 +451,14 @@ class ViewportRenderService:
         self._remove_focus_bbox()
         if self._review_mode:
             # 复核页整云恒灰（选中期间未改写过颜色），无需恢复配色，
-            # 避免全云颜色数组重建。
+            # 避免全云颜色数组重建；恢复被摘除的立面点。
+            if hasattr(self.viewport, 'set_hidden_rows'):
+                names = ([cloud_name] if cloud_name else
+                         list(self.viewport.get_cloud_names()
+                              if hasattr(self.viewport, 'get_cloud_names')
+                              else []))
+                for name in names:
+                    self.viewport.set_hidden_rows(name, None)
             return
         if cloud_name:
             # 聚焦期改写过颜色，使签名缓存失效以强制恢复正常配色
@@ -475,11 +488,14 @@ class ViewportRenderService:
             return
         if self._review_mode:
             # 复核页：整云恒灰不动（高亮交给热力贴图），只画 AABB 线框。
-            # 选中/取消均零颜色重算。
+            # 选中/取消均零颜色重算。同时把选中立面的点从显示中摘除，
+            # 使热力贴图 quad 在任意视角都不被本立面点云遮挡。
             idx = self._proxy_rows_for_display(
                 cloud_name,
                 target.get('proxy_indices') or target.get('inlier_indices') or [])
             idx = idx[(idx >= 0) & (idx < len(pos))]
+            if hasattr(self.viewport, 'set_hidden_rows'):
+                self.viewport.set_hidden_rows(cloud_name, idx)
             self._remove_focus_bbox()
             if len(idx) and hasattr(self.viewport, 'toggle_bbox'):
                 pts = pos[idx]

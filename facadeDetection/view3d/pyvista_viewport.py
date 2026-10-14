@@ -125,6 +125,7 @@ class PyVistaViewport(BaseViewport):
         self._polys: dict[str, pv.PolyData] = {}
         self._actors: dict[str, object] = {}
         self._bbox_actors: dict[str, object] = {}
+        self._hidden_rows: dict[str, np.ndarray] = {}
         self._active_name = None
 
         self._render_queue = _RenderQueue(self._widget)
@@ -408,23 +409,53 @@ class PyVistaViewport(BaseViewport):
             'has_source_colors': has_source_colors,
             'color_source': 'ply_rgb' if has_source_colors else 'fallback_gray',
         }
+        self._hidden_rows.pop(name, None)
         self._active_name = name
         self._upload_cloud(name, reset_view=first_cloud)
 
+    def _visible_view(self, name):
+        """(pos, color) 的可见视图：set_hidden_rows 摘除的行不进入渲染。
+
+        point_data 始终保存全量数组（拾取/配色口径不变），掩码只在上传
+        PolyData 时应用。
+        """
+        data = self.point_data[name]
+        rows = self._hidden_rows.get(name)
+        if rows is None:
+            return data['pos'], data['color']
+        keep = np.ones(len(data['pos']), dtype=bool)
+        valid = rows[(rows >= 0) & (rows < len(data['pos']))]
+        keep[valid] = False
+        return data['pos'][keep], data['color'][keep]
+
+    def set_hidden_rows(self, name, rows=None):
+        """把指定行从显示中摘除（复核页选中立面：点云让位给热力贴图）。
+
+        rows=None 或空数组恢复完整显示。
+        """
+        if name not in self.point_data:
+            return
+        if rows is None or len(rows) == 0:
+            self._hidden_rows.pop(name, None)
+        else:
+            self._hidden_rows[name] = np.asarray(rows, dtype=np.int64)
+        self._upload_cloud(name)
+
     def _upload_cloud(self, name, reset_view=False):
         data = self.point_data[name]
+        pos_vis, col_vis = self._visible_view(name)
         poly = self._polys.get(name)
-        if poly is None or poly.n_points != len(data['pos']):
-            # 点数变化：PolyData 不能就地改尺寸，重建并换掉 actor
-            poly = pv.PolyData(data['pos'])
+        if poly is None or poly.n_points != len(pos_vis):
+            # 点数变化（含隐藏行切换）：PolyData 不能就地改尺寸，重建并换掉 actor
+            poly = pv.PolyData(pos_vis)
             self._polys[name] = poly
             old = self._actors.pop(name, None)
             if old is not None:
                 self._plotter.remove_actor(old)
             self._actors[name] = None
         else:
-            poly.points[:] = data['pos']
-        poly.point_data['colors'] = (data['color'] * 255).astype(np.uint8)
+            poly.points[:] = pos_vis
+        poly.point_data['colors'] = (col_vis * 255).astype(np.uint8)
         actor = self._actors.get(name)
         if actor is None:
             actor = self._plotter.add_points(
@@ -529,12 +560,13 @@ class PyVistaViewport(BaseViewport):
         data['color'] = np.ascontiguousarray(
             normalize_colors(colors, len(data['pos'])).astype(np.float32))
         data.pop('display_proxy_lookup', None)
+        _, col_vis = self._visible_view(name)
         poly = self._polys.get(name)
-        if poly is None or poly.n_points != len(data['pos']):
-            # 点数已变化（换数据集/去噪后）：整朵重传，避免数组长度不匹配
+        if poly is None or poly.n_points != len(col_vis):
+            # 点数已变化（换数据集/去噪/隐藏行切换后）：整朵重传，避免数组长度不匹配
             self._upload_cloud(name)
             return
-        poly.point_data['colors'][:] = (data['color'] * 255).astype(np.uint8)
+        poly.point_data['colors'][:] = (col_vis * 255).astype(np.uint8)
         poly.Modified()
         self._render()
 
@@ -542,8 +574,12 @@ class PyVistaViewport(BaseViewport):
         data = self.point_data.get(name)
         if data is None:
             return
-        data['pos'] = np.ascontiguousarray(
+        new_pos = np.ascontiguousarray(
             np.asarray(positions, dtype=np.float32).reshape(-1, 3))
+        if len(new_pos) != len(data['pos']):
+            # 点集重排后旧隐藏行号失效，恢复完整显示
+            self._hidden_rows.pop(name, None)
+        data['pos'] = new_pos
         if colors is None:
             colors = data.get('color')
         data['color'] = np.ascontiguousarray(
@@ -587,6 +623,7 @@ class PyVistaViewport(BaseViewport):
             self._plotter.remove_actor(bbox)
         self._polys.pop(name, None)
         self.point_data.pop(name, None)
+        self._hidden_rows.pop(name, None)
         if self._active_name == name:
             self._active_name = next(iter(self.point_data), None)
         self._render()
@@ -605,6 +642,7 @@ class PyVistaViewport(BaseViewport):
         self._bbox_actors.clear()
         self._polys.clear()
         self.point_data.clear()
+        self._hidden_rows.clear()
         self._active_name = None
         self._render()
 
@@ -1024,13 +1062,14 @@ class PyVistaViewport(BaseViewport):
 
     # ---- 热力图贴图 quad（复核页选中立面呈现）----
     def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
-                          normal=None, lift=0.015):
+                          normal=None, lift=None):
         """把透明热力 PNG（RGBA）贴到立面四边面上（逐像素 alpha 镂空）。
 
         image 为检测时导出的 facade_NNN_{mode}_transparent.png（RGBA uint8，
         行 0 = v 最大）；uv_bounds=(u0,v0,u1,v1) 必须与 PNG 内容严格对应
         （见 interactive_ruler.transparent_png_uv_rect）。透明像素 RGB 为黑，
         故 actor 必须进透明通道（ForceTranslucentOn），否则镂空区变黑块。
+        lift 缺省自适应：max(5cm, 跨度×0.1%)，保证贴图浮在残留几何之上。
         """
         self.clear_heatmap_quad()
         try:
@@ -1051,6 +1090,8 @@ class PyVistaViewport(BaseViewport):
                 n = np.asarray(normal, dtype=np.float64).reshape(3)
                 norm = np.linalg.norm(n)
                 n = n / norm if norm > 1e-12 else np.zeros(3)
+            if lift is None:
+                lift = max(0.05, 0.001 * max(u1 - u0, v1 - v0))
             offset = n * float(lift)
             corners = np.array([
                 origin + u0 * u_axis + v0 * v_axis,

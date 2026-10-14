@@ -30,11 +30,12 @@ class InspectionReviewPageMixin:
     """
 
     # 复核页热力贴图的 4 档模式（值与导出 PNG 文件名中的 mode 一致）
+    # 全局平面两档（红蓝渐变热力）优先，默认选中第一档
     REVIEW_HEATMAP_MODES = (
-        ('ruler_flatness_area', '靠尺平整度'),
-        ('ruler_verticality_area', '靠尺垂直度'),
         ('global_plane_flatness_area', '全局平整度'),
         ('global_plane_verticality_area', '全局垂直度'),
+        ('ruler_flatness_area', '靠尺平整度'),
+        ('ruler_verticality_area', '靠尺垂直度'),
     )
 
     def _create_inspection_review_page(self, page_title, page_key):
@@ -249,22 +250,40 @@ class InspectionReviewPageMixin:
         if not isinstance(quality, dict) or not isinstance(geometry, dict):
             hint = '该立面暂无质量结果，无法生成热力图'
         else:
-            png_path = self._review_heatmap_png_path(facade, quality)
-            image = (cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
-                     if png_path else None)
-            if image is None or image.ndim != 3 or image.shape[2] != 4:
+            rgba = self._review_heat_png(facade, quality)
+            if rgba is None:
                 hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
                         '：该立面此模式无热力图')
             else:
-                rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
                 uv_bounds = self._review_heat_uv_bounds(
-                    facade, quality, image.shape[:2])
+                    facade, quality, rgba.shape[:2])
                 viewport.show_heatmap_quad(
                     rgba, geometry['origin'], geometry['u_axis'],
                     geometry['v_axis'], uv_bounds, normal=normal)
                 hint = heatmap_spec(self._review_heatmap_mode)['title']
         if hint_label is not None:
             hint_label.setText(hint)
+
+    def _review_heat_png(self, facade, quality):
+        """加载透明热力 PNG 为 RGBA；按路径+mtime 缓存，切模式/重选秒切。"""
+        png_path = self._review_heatmap_png_path(facade, quality)
+        if not png_path:
+            return None
+        try:
+            mtime = os.path.getmtime(png_path)
+            cache = self.__dict__.setdefault('_review_heat_png_cache', {})
+            cached = cache.get(png_path)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+            image = cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
+            if image is None or image.ndim != 3 or image.shape[2] != 4:
+                return None
+            rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+            cache[png_path] = (mtime, rgba)
+            return rgba
+        except Exception as exc:
+            print(f'[PCFD] review.heat_png_failed: {exc!r}', flush=True)
+            return None
 
     def _review_heatmap_png_path(self, facade, quality):
         """检测时导出的透明热力 PNG 路径（facade_NNN_{mode}_transparent.png）。"""
@@ -289,6 +308,8 @@ class InspectionReviewPageMixin:
 
         重建结果与模式无关（四档共用同一 facade_mask 裁剪），按
         (立面 id, 数据集 revision) 缓存，切换模式/重选不重复计算。
+        优先用 proxy 点（约 1/16 数据量，实测裁剪框逐像素一致）；
+        proxy 结果与 PNG 尺寸不符时再用全量 raw 点复核一次。
         """
         fallback = tuple(np.asarray(quality['facade_geometry']['uv_bounds'],
                                     dtype=np.float64).reshape(4))
@@ -299,26 +320,52 @@ class InspectionReviewPageMixin:
                    str(getattr(dataset, 'revision', None)))
             cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
             if key not in cache:
-                cache[key] = interactive_ruler.transparent_png_uv_rect(
-                    dataset.processed_raw_points, quality)
+                cache[key] = self._reconstruct_heat_rect(dataset, quality,
+                                                         image_hw)
             rect = cache[key]
             if rect:
-                x0, y0, x1, y1 = rect['crop_xy']
-                h, w = int(image_hw[0]), int(image_hw[1])
-                if (x1 - x0 + 1, y1 - y0 + 1) == (w, h):
-                    return rect['uv_bounds']
-                print(f'[PCFD] review.heat_rect_mismatch facade={key[0]} '
-                      f'crop=({x1 - x0 + 1}x{y1 - y0 + 1}) png=({w}x{h})',
-                      flush=True)
+                return rect['uv_bounds']
         except Exception as exc:
             print(f'[PCFD] review.heat_rect_failed: {exc!r}', flush=True)
         return fallback
 
+    @staticmethod
+    def _reconstruct_heat_rect(dataset, quality, image_hw):
+        h, w = int(image_hw[0]), int(image_hw[1])
+
+        def _dims_match(rect):
+            if not rect:
+                return False
+            x0, y0, x1, y1 = rect['crop_xy']
+            return (x1 - x0 + 1, y1 - y0 + 1) == (w, h)
+
+        proxy = getattr(dataset, 'proxy_points', None)
+        if proxy is not None and len(proxy):
+            rect = interactive_ruler.transparent_png_uv_rect(proxy, quality)
+            if _dims_match(rect):
+                return rect
+        # proxy 裁剪框与 PNG 尺寸不符（稀疏代理在 2% 覆盖率规则下可能收缩），
+        # 用导出时同一份全量 raw 点复核
+        rect = interactive_ruler.transparent_png_uv_rect(
+            dataset.processed_raw_points, quality)
+        if _dims_match(rect):
+            return rect
+        if rect:
+            x0, y0, x1, y1 = rect['crop_xy']
+            print(f'[PCFD] review.heat_rect_mismatch '
+                  f'crop=({x1 - x0 + 1}x{y1 - y0 + 1}) png=({w}x{h})',
+                  flush=True)
+        return None
+
     def _review_clear_presentation(self):
-        """清除选中/迁出复核页：摘除贴图并恢复选中前的相机。"""
+        """清除选中/迁出复核页：摘除贴图、恢复被摘除的立面点与相机。"""
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()
+        if viewport is not None and hasattr(viewport, 'set_hidden_rows'):
+            cloud = self.facade_quality_controller.active_cloud_name()
+            if cloud:
+                viewport.set_hidden_rows(cloud, None)
         if self._review_camera_snapshot is not None and viewport is not None \
                 and hasattr(viewport, 'restore_camera'):
             viewport.restore_camera(self._review_camera_snapshot)
