@@ -6,17 +6,60 @@
 （show_measure_line / show_ruler_overlay，仅 PyVista 后端实现，
 其它后端经 hasattr 退化为纯文本结果）。
 
-靠尺分层缓存：方向无关层（质量域立面点集 + 平面参数，激活时一次提取，
-按立面 id + 数据集版本缓存）在 _ruler_base；方向相关层（条带取样 +
-prepare_surface + ruler_at，见 interactive_ruler.place_ruler_on_strip）
-在每次方向确定后同步计算——条带内仅数百至数千点，实测 <100ms。
+靠尺分层缓存：方向无关层（质量域立面点集 + 平面参数，按立面 id +
+数据集版本缓存，后台线程提取不卡 UI）在 _ruler_base；方向相关层
+（条带取样 + prepare_surface + ruler_at，见
+interactive_ruler.place_ruler_on_strip）在每次方向确定后同步计算
+——条带内仅数百至数千点，实测 <100ms。
 """
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from algorithms.facade import interactive_ruler
+
+
+class _RulerBaseWorker(QThread):
+    """后台提取靠尺基础点集（质量域 npz 懒加载 + 全云切片，实测 200ms+）。
+
+    generation 作废机制：换立面/取消后旧 worker 仍跑完，但结果落地时
+    代数不匹配直接丢弃，不会覆盖新状态。
+    """
+
+    done = Signal(int, int, object, object, str)
+    failed = Signal(int, str)
+
+    def __init__(self, generation, facade_id, facade, plane_origin, cloud,
+                 facade_service, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._facade_id = facade_id
+        self._facade = facade
+        self._plane_origin = plane_origin
+        self._cloud = cloud
+        self._facade_service = facade_service
+
+    def run(self):
+        try:
+            dataset = self._facade_service.get_dataset(self._cloud)
+            revision = str(getattr(dataset, 'revision', None))
+            points = None
+            if hasattr(self._facade_service, 'quality_domain_points'):
+                points = self._facade_service.quality_domain_points(
+                    self._cloud, self._facade)
+            if points is None:
+                points = interactive_ruler.extract_facade_points(
+                    self._facade, dataset.processed_raw_points,
+                    index=getattr(dataset, 'index', None))
+            if points is None:
+                self.failed.emit(self._generation,
+                                 '选中立面点数不足，无法放置靠尺。')
+                return
+            self.done.emit(self._generation, self._facade_id, points,
+                           self._plane_origin, revision)
+        except Exception as exc:
+            self.failed.emit(self._generation, str(exc))
 
 
 class ViewportToolsController(QObject):
@@ -47,6 +90,9 @@ class ViewportToolsController(QObject):
         self._ruler_base = None
         self._ruler_facade_id = None
         self._ruler_center = None          # 两点交互态：None=等尺心
+        self._base_gen = 0                 # 基础层构建代数（作废过期结果）
+        self._base_pending = False
+        self._base_worker = None
 
     @property
     def active_tool(self):
@@ -87,7 +133,8 @@ class ViewportToolsController(QObject):
             self.tool_deactivated.emit()
             return
         self._clear_state()
-        if tool == self.TOOL_RULER and not self._prepare_ruler_base(facade):
+        if tool == self.TOOL_RULER \
+                and not self._start_ruler_base_prepare(facade):
             self.tool_deactivated.emit()
             return
         self._tool = tool
@@ -99,7 +146,10 @@ class ViewportToolsController(QObject):
         else:
             viewport.enter_plane_pick_mode(self._plane_model,
                                            callback=self._on_ruler_pick)
-            self.measure_text.emit('靠尺：点击立面确定尺心')
+            # 基础点集缓存未命中时后台提取，就绪前点击给"准备中"提示
+            self.measure_text.emit('靠尺：点击立面确定尺心'
+                                   if self._ruler_base is not None
+                                   else '靠尺：正在准备立面数据…')
             self.status_message.emit(
                 '靠尺模式：第一击定尺心，第二击定方向，Esc 退出', 5000)
         self.tool_activated.emit(tool)
@@ -133,6 +183,8 @@ class ViewportToolsController(QObject):
                 viewport.exit_pick_mode()
             except Exception:
                 pass
+        self._base_gen += 1          # 作废在跑的靠尺基础层提取
+        self._base_pending = False
         if self._tool is not None:
             self._tool = None
             self.measure_text.emit('')
@@ -150,6 +202,8 @@ class ViewportToolsController(QObject):
         """选中立面/点云切换：清空靠尺缓存；工具激活中则以新立面重建。"""
         self._ruler_base = None
         self._ruler_facade_id = None
+        self._base_gen += 1          # 作废在跑的基础层提取
+        self._base_pending = False
         if self._tool is not None:
             tool = self._tool
             self._tool = None
@@ -200,53 +254,73 @@ class ViewportToolsController(QObject):
     # ------------------------------------------------------------------
     # 交互靠尺：第一击定尺心，第二击定方向（两点连线投影到立面平面）
     # ------------------------------------------------------------------
-    def _prepare_ruler_base(self, facade):
-        """方向无关层：立面质量域点集 + 平面原点（按立面 id + 数据集版本缓存）。
+    def _start_ruler_base_prepare(self, facade):
+        """方向无关层：质量域立面点集 + 平面原点。
 
-        点集口径与批量靠尺链路一致：优先 quality_report 的
-        __global_indices（质量域，按需从 npz 懒加载）索引
-        processed_raw_points；缺失时回退立面内点提取。
-        每次方向确定后的条带取样（±尺宽/2）只留数百至数千点，
-        剖面构建实测毫秒级，无需降采样、无需后台线程。
+        缓存命中（同立面同数据集版本）直接就绪；未命中立即进入工具、
+        后台线程提取（npz 懒加载 + 全云切片实测 200ms+，同步会卡 UI）。
+        就绪后提示可点击；就绪前点击给"准备中"提示。
+        点集口径与批量靠尺/导出链路一致（facade_service 包装
+        __global_indices 懒加载，UI 层不直接碰 services.dal）。
         """
         facade_id = int(facade.get('id', -1))
         cloud = self._cloud_provider()
         if not cloud:
             self._hint('当前没有可用点云。')
             return False
-        try:
-            dataset = self._facade_service.get_dataset(cloud)
-            revision = str(getattr(dataset, 'revision', None))
-            if (self._ruler_base is not None
-                    and self._ruler_facade_id == facade_id
-                    and self._ruler_base.get('revision') == revision):
-                return True
-            points = None
-            if hasattr(self._facade_service, 'quality_domain_points'):
-                points = self._facade_service.quality_domain_points(
-                    cloud, facade)
-            if points is None:
-                points = interactive_ruler.extract_facade_points(
-                    facade, dataset.processed_raw_points,
-                    index=getattr(dataset, 'index', None))
-            if points is None:
-                self._hint('选中立面点数不足，无法放置靠尺。')
-                return False
-        except Exception as exc:
-            self._hint(f'立面点数据读取失败：{exc}')
-            return False
+        if self._ruler_base is not None and self._ruler_facade_id == facade_id:
+            try:
+                dataset = self._facade_service.get_dataset(cloud)
+                revision = str(getattr(dataset, 'revision', None))
+                if revision == self._ruler_base.get('revision'):
+                    return True
+            except Exception:
+                pass
         plane_origin = None
         if isinstance(self._plane_geometry, dict):
             plane_origin = self._plane_geometry.get('origin')
         if plane_origin is None:
             plane_origin = facade.get('center')
+        self._base_gen += 1
+        self._base_pending = True
+        worker = _RulerBaseWorker(self._base_gen, facade_id, facade,
+                                  plane_origin, cloud, self._facade_service,
+                                  parent=self)
+        worker.done.connect(self._on_ruler_base_ready)
+        worker.failed.connect(self._on_ruler_base_failed)
+        worker.finished.connect(self._on_ruler_base_thread_finished)
+        self._base_worker = worker
+        worker.start()
+        return True
+
+    def _on_ruler_base_ready(self, generation, facade_id, points,
+                             plane_origin, revision):
+        if generation != self._base_gen:
+            return    # 已取消/换立面，丢弃过期结果
         self._ruler_base = {'points': points, 'plane_origin': plane_origin,
                             'revision': revision}
         self._ruler_facade_id = facade_id
-        return True
+        self._base_pending = False
+        if self._tool == self.TOOL_RULER and self._ruler_center is None:
+            self.measure_text.emit('靠尺：点击立面确定尺心')
+
+    def _on_ruler_base_failed(self, generation, message):
+        if generation != self._base_gen:
+            return
+        self._base_pending = False
+        self._hint(f'靠尺数据准备失败：{message}')
+        if self._tool == self.TOOL_RULER:
+            self.cancel()
+
+    def _on_ruler_base_thread_finished(self):
+        self._base_worker = None
 
     def _on_ruler_pick(self, picked):
-        if not picked or self._ruler_base is None:
+        if not picked:
+            return
+        if self._ruler_base is None:
+            if self._base_pending:
+                self.measure_text.emit('靠尺：正在准备立面数据…')
             return
         point = np.asarray(picked.get('point'), dtype=np.float64)
         viewport = self._viewport
