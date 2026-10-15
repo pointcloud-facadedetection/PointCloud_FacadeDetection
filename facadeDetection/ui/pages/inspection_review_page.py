@@ -261,51 +261,62 @@ class InspectionReviewPageMixin:
                                      (bounds[2] - bounds[0],
                                       bounds[3] - bounds[1]))
 
-        viewport.clear_heatmap_quad()
         hint = ''
         if not isinstance(quality, dict) or not isinstance(geometry, dict):
+            viewport.clear_heatmap_quad()
             hint = '该立面暂无质量结果，无法生成热力图'
         else:
-            rgba = self._review_heat_png(facade, quality)
+            rgba, token = self._review_heat_png(facade, quality)
             if rgba is None:
                 # 无热力 PNG 也要给选中反馈：仅画四边面边缘高亮
                 corners = np.asarray(geometry.get('corners_3d') or [],
                                      dtype=np.float64).reshape(-1, 3)
                 if len(corners) >= 3 and hasattr(viewport,
                                                  'show_heatmap_frame'):
-                    viewport.show_heatmap_frame(corners)
+                    viewport.show_heatmap_frame(
+                        corners,
+                        cache_key=('frame', int(facade.get('id', -1))))
                 hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
                         '：该立面此模式无热力图')
             else:
                 uv_bounds = self._review_heat_uv_bounds(
                     facade, quality, rgba.shape[:2])
+                # 同 key（立面+模式+mtime）重贴在视口层只切可见性，
+                # 不再销毁重建 actor、不重传纹理
                 viewport.show_heatmap_quad(
                     rgba, geometry['origin'], geometry['u_axis'],
-                    geometry['v_axis'], uv_bounds, normal=normal)
+                    geometry['v_axis'], uv_bounds, normal=normal,
+                    cache_key=token)
                 hint = heatmap_spec(self._review_heatmap_mode)['title']
         if hint_label is not None:
             hint_label.setText(hint)
 
     def _review_heat_png(self, facade, quality):
-        """加载透明热力 PNG 为 RGBA；按路径+mtime 缓存，切模式/重选秒切。"""
+        """加载透明热力 PNG 为 RGBA；按路径+mtime 缓存，切模式/重选秒切。
+
+        返回 (rgba, cache_token)；无产出返回 (None, None)。cache_token
+        为 (立面 id, 模式, mtime)，供视口 actor 组缓存复用。
+        """
         png_path = self._review_heatmap_png_path(facade, quality)
         if not png_path:
-            return None
+            return None, None
         try:
             mtime = os.path.getmtime(png_path)
+            token = (int(facade.get('id', -1)),
+                     str(self._review_heatmap_mode), mtime)
             cache = self.__dict__.setdefault('_review_heat_png_cache', {})
             cached = cache.get(png_path)
             if cached is not None and cached[0] == mtime:
-                return cached[1]
+                return cached[1], token
             image = cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
             if image is None or image.ndim != 3 or image.shape[2] != 4:
-                return None
+                return None, None
             rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
             cache[png_path] = (mtime, rgba)
-            return rgba
+            return rgba, token
         except Exception as exc:
             print(f'[PCFD] review.heat_png_failed: {exc!r}', flush=True)
-            return None
+            return None, None
 
     def _review_heatmap_png_path(self, facade, quality):
         """检测时导出的透明热力 PNG 路径（facade_NNN_{mode}_transparent.png）。"""
@@ -451,13 +462,15 @@ class InspectionReviewPageMixin:
         """将 viewport_panel + right_dock 迁回项目操作页。"""
         if not getattr(self, '_workspace_in_review', False):
             return
+        # 先关 review 模式再 cancel 工具：tool_deactivated 触发的
+        # 贴图补画会因 review_mode 守卫短路，避免"先贴一次再摘"
+        self.render_service.set_review_mode(False)
         # 视口迁出复核页前退出测距/靠尺工具，避免拾取回调挂在隐藏页面上
         controller = getattr(self, 'viewport_tools_controller', None)
         if controller is not None:
             controller.cancel()
-        # 摘除热力贴图、恢复相机，再退出灰色呈现模式
+        # 摘除热力贴图、恢复相机
         self._review_clear_presentation()
-        self.render_service.set_review_mode(False)
         self.operation_splitter.insertWidget(1, self.viewport_panel)
         self.operation_splitter.insertWidget(2, self.right_dock)
         # 占位 widget 挂回复核页，保持其默认引导界面可用

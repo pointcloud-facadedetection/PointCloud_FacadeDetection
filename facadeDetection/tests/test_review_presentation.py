@@ -131,3 +131,55 @@ class TestHiddenRowsViewport:
             't', np.random.default_rng(4).random((50, 3)).astype(np.float32))
         assert 't' not in viewport._hidden_rows
         assert viewport._polys['t'].n_points == 50
+
+
+class TestHeatmapQuadCache:
+    """热力贴图 actor 组缓存：同 key 重贴只切可见性，不重建 actor。"""
+
+    @staticmethod
+    def _quad_args():
+        image = np.zeros((8, 8, 4), dtype=np.uint8)
+        image[..., 3] = 255
+        return dict(image=image, origin=[0, 0, 0], u_axis=[0, 1, 0],
+                    v_axis=[0, 0, 1], uv_bounds=(0, 0, 4, 3),
+                    normal=[1, 0, 0])
+
+    def test_same_key_reuses_actors(self, viewport):
+        viewport.show_heatmap_quad(**self._quad_args(), cache_key=('f1', 'm1'))
+        actors_first = list(viewport._heatmap_quad_actors)
+        assert actors_first
+        assert all(a.GetVisibility() for a in actors_first)
+
+        viewport.clear_heatmap_quad()
+        assert viewport._heatmap_quad_actors == []
+        assert all(not a.GetVisibility() for a in actors_first), \
+            'clear 只隐藏不销毁'
+
+        viewport.show_heatmap_quad(**self._quad_args(), cache_key=('f1', 'm1'))
+        assert viewport._heatmap_quad_actors == actors_first, \
+            '同 key 重贴必须复用同一批 actor（不重传纹理）'
+        assert all(a.GetVisibility() for a in actors_first)
+
+    def test_different_key_rebuilds(self, viewport):
+        viewport.show_heatmap_quad(**self._quad_args(), cache_key=('f1', 'm1'))
+        actors_a = list(viewport._heatmap_quad_actors)
+        viewport.show_heatmap_quad(**self._quad_args(), cache_key=('f1', 'm2'))
+        actors_b = list(viewport._heatmap_quad_actors)
+        assert actors_b and actors_b != actors_a
+        assert all(not a.GetVisibility() for a in actors_a)
+        assert all(a.GetVisibility() for a in actors_b)
+
+    def test_lru_eviction(self, viewport):
+        for i in range(viewport._HEATMAP_CACHE_MAX + 2):
+            viewport.show_heatmap_quad(**self._quad_args(),
+                                       cache_key=('f', i))
+        assert len(viewport._heatmap_quad_groups) == viewport._HEATMAP_CACHE_MAX
+
+    def test_frame_only_cached_too(self, viewport):
+        corners = [[0, 0, 0], [0, 4, 0], [0, 4, 3], [0, 0, 3]]
+        viewport.show_heatmap_frame(corners, cache_key=('frame', 1))
+        actors_first = list(viewport._heatmap_quad_actors)
+        assert actors_first
+        viewport.clear_heatmap_quad()
+        viewport.show_heatmap_frame(corners, cache_key=('frame', 1))
+        assert viewport._heatmap_quad_actors == actors_first

@@ -1137,11 +1137,12 @@ class OperationPageMixin:
 
         self.render_facade.select_facade(cloud, int(f.get('id', 0)))
         if getattr(self.render_service, 'review_mode', False):
-            # 复核页模式：选中立面 → 重建工具拾取面 + 热力贴图 + 相机正视
+            # 复核页模式：选中立面 → 热力贴图 + 相机正视（只跑一次），
+            # 然后重建工具拾取面（其激活补画经视口 actor 缓存秒切）
+            self._review_present_facade(f)
             controller = getattr(self, 'viewport_tools_controller', None)
             if controller is not None:
                 controller.invalidate()
-            self._review_present_facade(f)
         self._review_update_tool_buttons()
         self.statusBar().showMessage(f"已选中立面 {int(f.get('display_no', 1))}，请使用“评估”按钮执行质量检测", 3000)
         return

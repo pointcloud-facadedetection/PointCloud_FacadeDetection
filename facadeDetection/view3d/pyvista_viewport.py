@@ -157,6 +157,8 @@ class PyVistaViewport(BaseViewport):
         self._measure_actors = []
         self._ruler_actors = []
         self._heatmap_quad_actors = []
+        self._heatmap_quad_groups = {}     # cache_key -> [actors]（LRU）
+        self._heatmap_quad_key = None      # 当前可见组的 key
         self._overlay_renderer = None
         self._plane_pick_model = None
         self._plane_pick_callback = None
@@ -1130,8 +1132,34 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     # ---- 热力图贴图 quad（复核页选中立面呈现）----
+    # actor 组按 cache_key 缓存：同 key 重贴只切可见性，纹理不重传 GPU。
+    # LRU 上限防止每张 17MB 纹理无限驻留显存。
+    _HEATMAP_CACHE_MAX = 3
+
+    def _hide_heatmap_quad(self):
+        """隐藏当前贴图组（不销毁 actor，纹理保留供同 key 秒切）。"""
+        for actor in self._heatmap_quad_actors:
+            try:
+                actor.SetVisibility(False)
+            except Exception:
+                pass
+        self._heatmap_quad_actors = []
+        self._heatmap_quad_key = None
+
+    def _stash_heatmap_quad(self, cache_key):
+        if cache_key is None:
+            return
+        groups = self._heatmap_quad_groups
+        groups[cache_key] = self._heatmap_quad_actors
+        self._heatmap_quad_key = cache_key
+        while len(groups) > self._HEATMAP_CACHE_MAX:
+            # dict 保持插入序，首个即最旧（命中时已 pop+重插做 LRU touch）
+            evicted = groups.pop(next(iter(groups)))
+            for actor in evicted:
+                self._remove_visual_actor(actor)
+
     def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
-                          normal=None, lift=None):
+                          normal=None, lift=None, cache_key=None):
         """把透明热力 PNG（RGBA）贴到立面四边面上（逐像素 alpha 镂空）。
 
         image 为检测时导出的 facade_NNN_{mode}_transparent.png（RGBA uint8，
@@ -1139,10 +1167,24 @@ class PyVistaViewport(BaseViewport):
         （见 interactive_ruler.transparent_png_uv_rect）。透明像素 RGB 为黑，
         故 actor 必须进透明通道（ForceTranslucentOn），否则镂空区变黑块。
         lift 缺省自适应：max(5cm, 跨度×0.1%)，保证贴图浮在残留几何之上。
+        cache_key 命中缓存时只恢复可见性，不重建 actor、不重传纹理。
         """
         self.set_render_enabled(False)
         try:
-            self.clear_heatmap_quad()
+            self._hide_heatmap_quad()
+            if cache_key is not None \
+                    and cache_key in self._heatmap_quad_groups:
+                actors = self._heatmap_quad_groups.pop(cache_key)
+                self._heatmap_quad_groups[cache_key] = actors
+                for actor in actors:
+                    try:
+                        actor.SetVisibility(True)
+                    except Exception:
+                        pass
+                self._heatmap_quad_actors = list(actors)
+                self._heatmap_quad_key = cache_key
+                return
+            self._heatmap_quad_actors = []
             rgba = np.asarray(image)
             if rgba.ndim != 3 or rgba.shape[2] != 4:
                 return
@@ -1188,6 +1230,7 @@ class PyVistaViewport(BaseViewport):
                 pass
             self._heatmap_quad_actors.append(self._to_overlay(actor))
             self._add_heatmap_frame(corners)
+            self._stash_heatmap_quad(cache_key)
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_quad_failed: {exc!r}',
                   flush=True)
@@ -1211,11 +1254,27 @@ class PyVistaViewport(BaseViewport):
                                       name='heatmap_frame_core')
         self._heatmap_quad_actors.append(self._to_overlay(core))
 
-    def show_heatmap_frame(self, corners_3d, lift=None):
-        """仅画四边面边缘高亮（选中立面无热力 PNG 时的选中反馈）。"""
+    def show_heatmap_frame(self, corners_3d, lift=None, cache_key=None):
+        """仅画四边面边缘高亮（选中立面无热力 PNG 时的选中反馈）。
+
+        cache_key 语义与 show_heatmap_quad 一致：同 key 只切可见性。
+        """
         self.set_render_enabled(False)
         try:
-            self.clear_heatmap_quad()
+            self._hide_heatmap_quad()
+            if cache_key is not None \
+                    and cache_key in self._heatmap_quad_groups:
+                actors = self._heatmap_quad_groups.pop(cache_key)
+                self._heatmap_quad_groups[cache_key] = actors
+                for actor in actors:
+                    try:
+                        actor.SetVisibility(True)
+                    except Exception:
+                        pass
+                self._heatmap_quad_actors = list(actors)
+                self._heatmap_quad_key = cache_key
+                return
+            self._heatmap_quad_actors = []
             corners = np.asarray(corners_3d, dtype=np.float64).reshape(-1, 3)
             if len(corners) < 3:
                 return
@@ -1229,16 +1288,16 @@ class PyVistaViewport(BaseViewport):
             if norm > 1e-12:
                 corners = corners + (n / norm) * float(lift)
             self._add_heatmap_frame(corners)
+            self._stash_heatmap_quad(cache_key)
         except Exception as exc:
             print(f'[PCFD] viewport.heatmap_frame_failed: {exc!r}', flush=True)
         finally:
             self.set_render_enabled(True)
 
     def clear_heatmap_quad(self):
+        """摘除贴图显示（actor 保留在缓存里，同 key 重贴秒切）。"""
         if self._heatmap_quad_actors:
-            for actor in self._heatmap_quad_actors:
-                self._remove_visual_actor(actor)
-            self._heatmap_quad_actors = []
+            self._hide_heatmap_quad()
             self._render()
 
     # ---- 相机：快照/恢复 + 正视平面（复核页贴图呈现配套）----
