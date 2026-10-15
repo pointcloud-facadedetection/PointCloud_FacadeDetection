@@ -278,3 +278,94 @@ class TestTransparentPngUvRect:
             self._wall(), {}) is None
         assert interactive_ruler.transparent_png_uv_rect(
             self._wall(), None) is None
+
+
+class TestRulerDirectionFromPoints:
+    def test_along_u_axis(self):
+        d = interactive_ruler.ruler_direction_from_points(
+            [0.0, 1.0, 1.0], [0.0, 3.0, 1.0], PLANE_MODEL)
+        np.testing.assert_allclose(d, [0.0, 1.0, 0.0], atol=1e-9)
+
+    def test_out_of_plane_component_removed(self):
+        """第二击的射线交点必在平面内；此处直接给带法向分量的点，
+        验证投影仍把方向压回平面。"""
+        d = interactive_ruler.ruler_direction_from_points(
+            [0.0, 1.0, 1.0], [0.4, 1.0, 2.0], PLANE_MODEL)
+        assert abs(float(d @ PLANE_MODEL[:3])) < 1e-9
+        np.testing.assert_allclose(d, [0.0, 0.0, 1.0], atol=1e-9)
+
+    def test_diagonal_normalized(self):
+        d = interactive_ruler.ruler_direction_from_points(
+            [0.0, 0.0, 0.0], [0.0, 1.0, 1.0], PLANE_MODEL)
+        np.testing.assert_allclose(d, [0.0, 1.0, 1.0] / np.sqrt(2.0),
+                                   atol=1e-9)
+
+    def test_degenerate_too_close_returns_none(self):
+        assert interactive_ruler.ruler_direction_from_points(
+            [0.0, 1.0, 1.0], [0.0, 1.0, 1.0], PLANE_MODEL) is None
+        assert interactive_ruler.ruler_direction_from_points(
+            [0.0, 1.0, 1.0], [0.0, 1.0, 1.0001], PLANE_MODEL) is None
+
+
+class TestTwoClickRulerPlacement:
+    """点选方向驱动的端到端：条带取样（与批量靠尺同物理语义）。"""
+
+    @staticmethod
+    def _dense_wall():
+        """u∈[0,4] v∈[0,3] 密墙，局部凹陷补丁（非通长条带）：
+        y∈[1.9,2.1] 且 z∈[1.4,1.6]，深 6mm。"""
+        rng = np.random.default_rng(7)
+        ys = np.arange(0.0, 4.0, 0.02)
+        zs = np.arange(0.0, 3.0, 0.02)
+        y, z = np.meshgrid(ys, zs)
+        x = rng.uniform(-0.0005, 0.0005, size=y.shape)
+        patch = (y >= 1.9) & (y <= 2.1) & (z >= 1.4) & (z <= 1.6)
+        x = np.where(patch, x - 0.006, x)
+        return np.column_stack([x.ravel(), y.ravel(), z.ravel()])
+
+    def test_strip_catches_localized_recess(self):
+        """尺线穿过局部凹陷 → 检出超限；对照：全立面宽剖面（旧交互路径）
+        会把同一缺陷稀释掉（同 bin 被条带外正常点顶掉）。"""
+        points = self._dense_wall()
+        center = np.array([0.0, 2.0, 1.5])
+        direction = np.array([0.0, 1.0, 0.0])
+        result = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, center, direction, threshold_mm=4.0)
+        assert result['ok'] is True
+        assert result['gap_mm'] == pytest.approx(6.0, abs=1.5)
+        assert result['exceeded'] is True
+        assert result['strip_point_count'] > 0
+
+        surface = interactive_ruler.build_interactive_surface(
+            points, PLANE_MODEL, ruler_dir=direction)
+        wide = interactive_ruler.place_ruler(
+            surface, center, threshold_mm=4.0)
+        assert wide['ok'] is True
+        assert wide['gap_mm'] < 4.0, '全宽剖面应稀释局部凹陷'
+
+    def test_body_line_matches_pick_direction(self):
+        points = self._dense_wall()
+        center = np.array([0.0, 2.0, 1.5])
+        second = np.array([0.0, 3.0, 1.5])     # 沿 u 轴
+        direction = interactive_ruler.ruler_direction_from_points(
+            center, second, PLANE_MODEL)
+        result = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, center, direction, ruler_length=2.0,
+            threshold_mm=4.0)
+        assert result['ok'] is True
+        body = np.asarray(result['render']['body_line'])
+        assert body.shape == (2, 3)
+        body_dir = body[1] - body[0]
+        assert np.linalg.norm(body_dir) == pytest.approx(2.0)
+        np.testing.assert_allclose(
+            body_dir / np.linalg.norm(body_dir), direction, atol=1e-4)
+        mid = (body[0] + body[1]) * 0.5
+        assert abs(float((mid - center) @ direction)) < 1e-6
+
+    def test_strip_too_sparse_returns_not_ok(self):
+        points = self._dense_wall()[::2000]      # 抽稀到条带不足 3 点
+        result = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, np.array([0.0, 2.0, 1.5]),
+            np.array([0.0, 1.0, 0.0]), threshold_mm=4.0)
+        assert result['ok'] is False
+        assert result.get('reason')

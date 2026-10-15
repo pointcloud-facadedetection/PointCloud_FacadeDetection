@@ -1066,6 +1066,14 @@ class PyVistaViewport(BaseViewport):
         self.set_render_enabled(False)
         try:
             self.clear_ruler_overlay()
+            body = render.get('body_line')
+            if body is not None:
+                # 尺体粗直线：比测距线（3px）明显粗，醒目琥珀色
+                actor = self._plotter.add_mesh(
+                    pv.Line(tuple(body[0]), tuple(body[1])),
+                    color=(0.98, 0.62, 0.10), line_width=9,
+                    lighting=False, name='ruler_body')
+                self._ruler_actors.append(self._to_overlay(actor))
             corners = np.asarray(render.get('corners'), dtype=np.float64)
             if corners.shape == (4, 3):
                 plate_color = ((0.85, 0.25, 0.22) if exceeded

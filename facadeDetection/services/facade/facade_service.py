@@ -101,3 +101,23 @@ class FacadeService:
     def get_raw_count_for_facade(self, cloud_name: str, facade: dict) -> int:
         """获取立面对应的原始点数量（不分配内存）。"""
         return self._index_service.get_raw_count_for_facade(cloud_name, facade)
+
+    def quality_domain_points(self, cloud_name: str, facade: dict):
+        """立面质量域点集（与批量靠尺/导出链路同一份点）。
+
+        优先 quality_report 的 __global_indices（必要时从 npz 懒加载）索引
+        processed_raw_points；无质量域时回退 None，由调用方走立面内点提取。
+        """
+        quality = (facade or {}).get('quality_report')
+        if not isinstance(quality, dict):
+            return None
+        from services.dal.results_repo import ResultsRepo
+        ids = ResultsRepo.ensure_global_indices(quality)
+        if ids is None or not len(ids):
+            return None
+        dataset = self.get_dataset(cloud_name)
+        all_points = np.asarray(dataset.processed_raw_points)
+        rows = ids[(ids >= 0) & (ids < len(all_points))]
+        if len(rows) < 3:
+            return None
+        return np.asarray(all_points[rows], dtype=np.float64)

@@ -178,6 +178,8 @@ def place_ruler(surface, click_point, ruler_length=2.0, ruler_width=0.055,
         'angle_deg': float(result.get('angle_deg', 0.0)),
         'render': {
             'corners': corners,
+            'body_line': np.vstack((_contact(u0) + lift,
+                                    _contact(u1) + lift)),
             'defect_segments': segments,
             'depression_xyz': np.asarray(result.get('depression_xyz'),
                                          dtype=np.float64),
@@ -258,3 +260,60 @@ def transparent_png_uv_rect(points, quality, pixel_size=0.01, max_size=3200):
         'crop_xy': (x0, y0, x1, y1),
         'pixel_size': float(size),
     }
+
+
+def ruler_direction_from_points(center_point, second_point, plane_model):
+    """两次平面交点推导靠尺方向：差向量投影到立面平面内并单位化。
+
+    两点过近（退化方向，平面内分量 < 1mm）返回 None，由调用方提示重点。
+    """
+    plane = np.asarray(plane_model, dtype=np.float64).reshape(-1)
+    if plane.size != 4 or np.linalg.norm(plane[:3]) < 1e-12:
+        return None
+    normal = plane[:3] / np.linalg.norm(plane[:3])
+    d = (np.asarray(second_point, dtype=np.float64).reshape(3)
+         - np.asarray(center_point, dtype=np.float64).reshape(3))
+    d = d - float(d @ normal) * normal
+    norm = np.linalg.norm(d)
+    if norm < 1e-3:
+        return None
+    return d / norm
+
+def place_ruler_on_strip(points, plane_model, center, direction,
+                         ruler_length=2.0, ruler_width=0.055,
+                         threshold_mm=None, max_hole_ratio=0.2,
+                         select_band=0.01, hole_band=0.02, bin_size=0.04,
+                         top_q=1.0, sor=None):
+    """尺心 + 方向 → 尺宽条带取样 → prepare_surface / ruler_at。
+
+    与批量链路同物理语义：剖面只取尺线两侧 ±ruler_width/2 内的点
+    （全立面宽剖面会把局部缺陷稀释掉——缺陷在条带外方向上被
+    同 bin 的正常点顶掉）。条带方向垂直分量由法向叉乘方向得到。
+    """
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    plane = np.asarray(plane_model, dtype=np.float64).reshape(-1)
+    if plane.size != 4 or np.linalg.norm(plane[:3]) < 1e-12:
+        return {'ok': False, 'reason': '立面平面参数无效'}
+    normal = plane[:3] / np.linalg.norm(plane[:3])
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+    u = np.asarray(direction, dtype=np.float64).reshape(3)
+    u = u - float(u @ normal) * normal
+    if np.linalg.norm(u) < 1e-9:
+        return {'ok': False, 'reason': '靠尺方向与立面法向平行'}
+    u = u / np.linalg.norm(u)
+    across = np.cross(normal, u)
+    dv = (points - center) @ across
+    strip = points[np.abs(dv) <= float(ruler_width) / 2.0]
+    if len(strip) < 3:
+        return {'ok': False, 'reason': '靠尺条带内点数不足，请换个位置'}
+    try:
+        surface = build_interactive_surface(
+            strip, plane_model, plane_origin=center, ruler_dir=u,
+            select_band=select_band, hole_band=hole_band,
+            bin_size=bin_size, top_q=top_q, sor=sor)
+    except ValueError as exc:
+        return {'ok': False, 'reason': str(exc)}
+    result = place_ruler(surface, center, ruler_length, ruler_width,
+                         threshold_mm, max_hole_ratio)
+    result['strip_point_count'] = int(len(strip))
+    return result
