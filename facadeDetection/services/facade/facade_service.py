@@ -44,6 +44,11 @@ class FacadeService:
         """全局立面检测。"""
         return self._detection_service.detect(cloud_name, project_uuid)
 
+    def resize_facade(self, cloud_name: str, facade: dict,
+                      uv_bounds, surface_band_m=0.01) -> dict:
+        return self._detection_service.resize_facade(
+            cloud_name, facade, uv_bounds, surface_band_m)
+
     def detect_on_roi(self, cloud_name: str,
                       roi_indices: list[int] | None = None,
                       roi_bounds: tuple | None = None,

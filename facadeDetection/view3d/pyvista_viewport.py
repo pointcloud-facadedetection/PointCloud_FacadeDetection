@@ -159,6 +159,9 @@ class PyVistaViewport(BaseViewport):
         self._heatmap_quad_actors = []
         self._heatmap_quad_groups = {}     # cache_key -> [actors]（LRU）
         self._heatmap_quad_key = None      # 当前可见组的 key
+        self._quad_resize = None
+        self._quad_resize_drag = None
+        self._quad_resize_actors = []
         self._overlay_renderer = None
         self._tool_overlay_renderer = None
         self._plane_pick_model = None
@@ -249,6 +252,8 @@ class PyVistaViewport(BaseViewport):
         if xy is None:
             return
         if button == 'left':
+            if self._quad_resize_press(xy):
+                return
             if self._mode == self.InteractionMode.PICK:
                 # 拾取模式：左键只做点选，不进入旋转
                 self._pick_press = xy
@@ -260,6 +265,10 @@ class PyVistaViewport(BaseViewport):
 
     def _on_release(self, button, style_obj=None):
         if button == 'left':
+            if style_obj is not None:
+                xy = self._pointer_xy(style_obj)
+                if xy is not None and self._quad_resize_release(xy):
+                    return
             if self._mode == self.InteractionMode.PICK:
                 press, self._pick_press = self._pick_press, None
                 if press is not None and style_obj is not None:
@@ -279,6 +288,8 @@ class PyVistaViewport(BaseViewport):
     def _on_mouse_move(self, style_obj):
         xy = self._pointer_xy(style_obj)
         if xy is None:
+            return
+        if self._quad_resize_move(xy):
             return
         if self._drag_left is not None:
             dx, dy = xy[0] - self._drag_left[0], xy[1] - self._drag_left[1]
@@ -983,6 +994,109 @@ class PyVistaViewport(BaseViewport):
             self._remove_visual_actor(actor)
         self._pick_marker_actors.clear()
         self._render()
+
+    # ---- 复核页四边面边缘拖拽 ----
+    def enter_heatmap_resize(self, geometry, on_complete=None):
+        self.exit_heatmap_resize()
+        self._quad_resize = {
+            'origin': np.asarray(geometry['origin'], dtype=np.float64),
+            'u_axis': np.asarray(geometry['u_axis'], dtype=np.float64),
+            'v_axis': np.asarray(geometry['v_axis'], dtype=np.float64),
+            'plane_model': np.asarray(geometry['plane_model'], dtype=np.float64),
+            'bounds': np.asarray(geometry['uv_bounds'], dtype=np.float64),
+            'on_complete': on_complete,
+        }
+        self._mode = self.InteractionMode.NAVIGATE
+        self._refresh_heatmap_resize()
+
+    def exit_heatmap_resize(self):
+        self._quad_resize = None
+        self._quad_resize_drag = None
+        self.set_render_enabled(False)
+        try:
+            for actor in self._quad_resize_actors:
+                self._remove_visual_actor(actor)
+            self._quad_resize_actors.clear()
+        finally:
+            self.set_render_enabled(True)
+
+    def _refresh_heatmap_resize(self):
+        state = self._quad_resize
+        if state is None:
+            return
+        for actor in self._quad_resize_actors:
+            self._remove_visual_actor(actor)
+        self._quad_resize_actors.clear()
+        u0, v0, u1, v1 = state['bounds']
+        origin, u, v = state['origin'], state['u_axis'], state['v_axis']
+        corners = np.array([
+            origin + u0 * u + v0 * v, origin + u1 * u + v0 * v,
+            origin + u1 * u + v1 * v, origin + u0 * u + v1 * v,
+        ])
+        mids = (corners + np.roll(corners, -1, axis=0)) * 0.5
+        state['midpoints'] = mids
+        loop = np.vstack((corners, corners[0]))
+        actor = self._plotter.add_mesh(
+            pv.lines_from_points(loop), color='#F59E0B', line_width=5,
+            lighting=False, name='quad_resize_frame')
+        self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
+        actor = self._plotter.add_points(
+            pv.PolyData(mids), color='#D97706', point_size=16,
+            render_points_as_spheres=False, lighting=False,
+            name='quad_resize_handles')
+        self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
+        self._render()
+
+    def _quad_resize_press(self, xy):
+        state = self._quad_resize
+        if state is None:
+            return False
+        projected = self.project_points(state['midpoints'])
+        if projected is None:
+            return False
+        screen, valid = projected
+        renderer = self._plotter.renderer
+        fb_h = max(1, int(renderer.GetSize()[1]))
+        dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+        logical = np.array([xy[0] / dpr, fb_h / dpr - xy[1] / dpr])
+        distances = np.where(valid, np.linalg.norm(screen - logical, axis=1),
+                             np.inf)
+        edge_index = int(np.argmin(distances))
+        if not np.isfinite(distances[edge_index]) or distances[edge_index] > 16:
+            return False
+        self._quad_resize_drag = ('bottom', 'right', 'top', 'left')[edge_index]
+        self._drag_left = None
+        return True
+
+    def _quad_resize_move(self, xy):
+        state = self._quad_resize
+        edge = self._quad_resize_drag
+        if state is None or edge is None:
+            return False
+        from PySide6.QtCore import QPoint
+        pos = xy if isinstance(xy, QPoint) else QPoint(*xy)
+        point = self.ray_plane_pick(pos, state['plane_model'])
+        if point is None:
+            return True
+        rel = point - state['origin']
+        from algorithms.facade.boundary_adjustment import resize_uv_bounds
+        state['bounds'] = resize_uv_bounds(
+            state['bounds'], edge, float(rel @ state['u_axis']),
+            float(rel @ state['v_axis']))
+        self._refresh_heatmap_resize()
+        return True
+
+    def _quad_resize_release(self, xy):
+        state = self._quad_resize
+        if state is None or self._quad_resize_drag is None:
+            return False
+        self._quad_resize_move(xy)
+        callback = state.get('on_complete')
+        bounds = state['bounds'].copy()
+        self.exit_heatmap_resize()
+        if callable(callback):
+            callback(bounds)
+        return True
 
     # ---- 覆盖层：layer-1 热力图，layer-2 测距/靠尺/拾取标记 ----
     def _get_overlay_renderer(self):

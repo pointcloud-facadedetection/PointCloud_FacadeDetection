@@ -323,7 +323,8 @@ class ProjectOverviewService:
                                    'plane_model', 'normal', 'center', 'inlier_indices',
                                     'proxy_indices', 'measurement_indices', 'voxel_ids',
                                     'cloud_name', '__index_space', 'review_status',
-                                    'facade_geometry')
+                                    'facade_geometry', 'edit_revision',
+                                    'manually_adjusted')
                                    if key in geometry},
                                 'quality_metrics': [{'name': m.metric_name, 'value': m.value,
                                                     'unit': m.unit, 'pass': m.pass_flag}

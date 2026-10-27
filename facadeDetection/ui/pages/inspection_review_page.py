@@ -128,6 +128,15 @@ class InspectionReviewPageMixin:
         self.btn_review_clear.clicked.connect(self._on_review_clear_clicked)
         row.addWidget(self.btn_review_clear)
 
+        self.btn_review_resize = QPushButton('调整边界')
+        self.btn_review_resize.setObjectName('btn_review_resize')
+        self.btn_review_resize.setProperty('buttonRole', 'secondary')
+        self.btn_review_resize.setToolTip('拖动四边面边中点，松开后增量更新热力图')
+        self.btn_review_resize.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_review_resize.setEnabled(False)
+        self.btn_review_resize.clicked.connect(self._on_review_resize_clicked)
+        row.addWidget(self.btn_review_resize)
+
         mode_label = QLabel('热力图')
         mode_label.setStyleSheet('color:#475569; font-size:12px;')
         row.addWidget(mode_label)
@@ -183,10 +192,50 @@ class InspectionReviewPageMixin:
         self.viewport_tools_controller.clear_visuals()
         self._review_repaint_quad()
 
+    def _on_review_resize_clicked(self):
+        facade = self._selected_review_facade()
+        quality = (facade or {}).get('quality_report') or {}
+        geometry = quality.get('facade_geometry')
+        viewport = getattr(self, 'viewport', None)
+        if not isinstance(geometry, dict) or viewport is None \
+                or not hasattr(viewport, 'enter_heatmap_resize'):
+            self.statusBar().showMessage('当前立面没有可调整的四边面', 4000)
+            return
+        if self.facade_quality_controller.active_quality_worker is not None:
+            self.statusBar().showMessage('质量评估进行中，请完成后再调整边界', 4000)
+            return
+        self.viewport_tools_controller.cancel()
+        self._review_resize_facade_id = int(facade.get('id', -1))
+        viewport.enter_heatmap_resize(
+            geometry, on_complete=self._on_review_resize_complete)
+        self.lbl_review_heatmap_hint.setText('拖动四边面边中点，松开后更新')
+
+    def _on_review_resize_complete(self, uv_bounds):
+        facade = self._selected_review_facade()
+        if not facade or int(facade.get('id', -2)) != getattr(
+                self, '_review_resize_facade_id', -1):
+            return
+        cloud = self.facade_quality_controller.active_cloud_name()
+        if not cloud:
+            return
+        try:
+            profile = getattr(self, '_inspection_profile', None)
+            band = float(getattr(profile, 'select_band_m', 0.01))
+            adjusted = self.project_operation_service.resize_facade(
+                cloud, facade, uv_bounds, surface_band_m=band)
+            adjusted['__suppress_quality_dialog'] = True
+            self.lbl_review_heatmap_hint.setText('正在增量更新热力图…')
+            self.btn_review_resize.setEnabled(False)
+            self.facade_quality_controller.evaluate_facade(adjusted)
+        except Exception as exc:
+            self.statusBar().showMessage(f'边界调整失败：{exc}', 6000)
+            self._review_repaint_quad()
+
     def _review_update_tool_buttons(self):
-        """测距/放靠尺依赖选中立面：无选中时禁用，避免空激活。"""
-        enabled = self._selected_review_facade() is not None
-        for name in ('btn_review_measure', 'btn_review_ruler'):
+        """测距/放靠尺/边界调整依赖选中立面与空闲质量任务。"""
+        enabled = (self._selected_review_facade() is not None
+                   and self.facade_quality_controller.active_quality_worker is None)
+        for name in ('btn_review_measure', 'btn_review_ruler', 'btn_review_resize'):
             button = getattr(self, name, None)
             if button is not None:
                 button.setEnabled(enabled)
@@ -235,6 +284,8 @@ class InspectionReviewPageMixin:
         hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
         if viewport is None or not hasattr(viewport, 'show_heatmap_quad'):
             return
+        if getattr(viewport, '_quad_resize', None) is not None:
+            viewport.exit_heatmap_resize()
         quality = facade.get('quality_report') if isinstance(facade, dict) \
             else None
         geometry = quality.get('facade_geometry') \
@@ -350,7 +401,8 @@ class InspectionReviewPageMixin:
             cloud = self.facade_quality_controller.active_cloud_name()
             dataset = self.facade_service.get_dataset(cloud)
             key = (int(facade.get('id', -1)),
-                   str(getattr(dataset, 'revision', None)))
+                   str(getattr(dataset, 'revision', None)),
+                   int(facade.get('edit_revision', 0) or 0))
             cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
             if key not in cache:
                 cache[key] = self._reconstruct_heat_rect(dataset, quality,

@@ -957,6 +957,9 @@ class OperationPageMixin:
             self._refresh_report_preview)
         controller.heatmap_button_refresh_requested.connect(
             self._refresh_heatmap_button_state)
+        controller.quality_completed.connect(self._review_repaint_quad)
+        controller.quality_completed.connect(self._review_update_tool_buttons)
+        controller.quality_failed.connect(self._review_update_tool_buttons)
         controller.show_dialog_requested.connect(self._show_quality_dialog)
 
     def _show_quality_status(self, message, timeout):

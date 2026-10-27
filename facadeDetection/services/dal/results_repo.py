@@ -266,6 +266,43 @@ class ResultsRepo:
             s.flush()
 
     @staticmethod
+    def update_resized_facade(project_uuid: str, facade_id: int,
+                              facade_data: dict) -> None:
+        """保存复核页边界调整，并使该立面的旧质量结果失效。"""
+        with project_session(project_uuid) as s:
+            row = s.execute(select(Facade).where(
+                Facade.id == int(facade_id),
+                Facade.project_id == select(Project.id).where(
+                    Project.uuid == project_uuid).scalar_subquery(),
+                Facade.is_deleted == 0,
+            )).scalar_one_or_none()
+            if row is None:
+                raise ValueError(f'立面不存在: {facade_id}')
+            payload = dict(row.plane_json or {})
+            for key in ('inlier_indices', 'proxy_indices', 'voxel_ids',
+                        'edit_revision', 'manually_adjusted'):
+                if facade_data.get(key) is not None:
+                    value = facade_data[key]
+                    payload[key] = value.tolist() if isinstance(
+                        value, np.ndarray) else value
+            quality = facade_data.get('quality_report') or {}
+            if isinstance(quality.get('facade_geometry'), dict):
+                payload['facade_geometry'] = quality['facade_geometry']
+            row.plane_json = payload
+            row.bbox_json = facade_data.get('bbox_2d')
+            row.area = float(facade_data.get('area', 0.0) or 0.0)
+            row.point_count = int(facade_data.get('point_count', 0) or 0)
+            row.raw_point_count = int(
+                facade_data.get('raw_point_count', row.point_count) or 0)
+            row.quality_status = 'pending'
+            row.quality_report_json = None
+            row.quality_completed_at = None
+            row.updated_at = datetime.now()
+            for metric in list(row.metrics):
+                s.delete(metric)
+            s.flush()
+
+    @staticmethod
     def save_detected_facades(project_uuid: str, items: Iterable[dict]) -> list[Facade]:
         """将一个检测批次及其基本指标持久化到当前场景中。
 

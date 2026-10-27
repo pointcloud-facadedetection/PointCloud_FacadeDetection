@@ -154,6 +154,23 @@ def test_evaluate_positive_roundtrip(env):
     assert not any(k in ('warn', 'info') for k in kinds)
 
 
+def test_resize_quality_roundtrip_updates_facade_without_dialog(env):
+    controller, facade_service, _, operation, rec, qapp, _ = env
+    operation.last_facade_results = [
+        {'id': 1, 'display_no': 1, 'proxy_indices': [0]}]
+    controller.evaluate_facade({
+        'id': 1, 'display_no': 1, 'proxy_indices': [0, 1, 2],
+        'edit_revision': 1, '__suppress_quality_dialog': True})
+    assert pump_until(qapp, lambda: bool(facade_service.commits))
+    assert pump_until(qapp, lambda: controller.active_quality_worker is None)
+    qapp.processEvents()
+    current = operation.last_facade_results[0]
+    assert current['proxy_indices'] == [0, 1, 2]
+    assert current['edit_revision'] == 1
+    assert current['quality_status'] == 'complete'
+    assert 'dialog' not in rec.kinds()
+
+
 def test_cache_hit_skips_compute(env):
     controller, facade_service, _, operation, rec, qapp, _ = env
     operation.last_facade_results = [{'id': 1, 'display_no': 1}]

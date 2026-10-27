@@ -616,6 +616,8 @@ class FacadeQualityController(QObject):
             f['quality_report'] = quality
             for current in (self.project_operation_service.last_facade_results or []):
                 if int(current.get('id', -1)) == int(f.get('id', -2)):
+                    current.update({key: value for key, value in f.items()
+                                    if not str(key).startswith('__')})
                     current.update({'quality_status': 'complete',
                                     'quality_report': quality,
                                     'dataset_revision': getattr(dataset, 'revision', None)})
@@ -630,7 +632,10 @@ class FacadeQualityController(QObject):
             self.report_preview_refresh_requested.emit()
             self.quality_failed.emit()
             return
+        self.active_quality_worker = None
         self._finish_quality_progress(TASK_QUALITY, True)
         self.report_preview_refresh_requested.emit()
-        QTimer.singleShot(0, lambda: self.show_dialog_requested.emit(cloud, f, quality))
+        if not f.get('__suppress_quality_dialog'):
+            QTimer.singleShot(
+                0, lambda: self.show_dialog_requested.emit(cloud, f, quality))
         self.quality_completed.emit()

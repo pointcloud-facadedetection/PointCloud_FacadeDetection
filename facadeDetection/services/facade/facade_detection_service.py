@@ -13,6 +13,8 @@ import numpy as np
 import open3d as o3d
 
 from algorithms.facade.facade_detection import detect_facades_adaptive
+from algorithms.facade.boundary_adjustment import incremental_proxy_ids
+from algorithms.facade.facade_geometry import extract_facade_geometry
 from config.settings import Config
 from services import proxy_cache
 from services.dal.results_repo import ResultsRepo
@@ -200,6 +202,59 @@ class FacadeDetectionService:
         # Detection is a working-set operation.  It must not create a
         # historical scene before quality evaluation has succeeded.
         return facades
+
+    def resize_facade(self, cloud_name: str, facade: dict,
+                      uv_bounds, surface_band_m=0.01) -> dict:
+        """按复核页 UV 边界增量调整当前立面，不改变其平面参数。"""
+        data, dataset = self._get_dataset(cloud_name)
+        if dataset is None:
+            raise ValueError('当前处理点云不可用')
+        result_revision = facade.get('dataset_revision')
+        if result_revision and result_revision != dataset.revision:
+            raise ValueError('立面结果属于旧处理版本，请重新执行立面检测')
+        quality = facade.get('quality_report')
+        geometry = (quality or {}).get('facade_geometry')
+        if not isinstance(geometry, dict):
+            raise ValueError('该立面缺少可编辑的四边面')
+        old_ids = facade.get('proxy_indices')
+        if old_ids is None:
+            old_ids = facade.get('inlier_indices') or []
+        new_ids = incremental_proxy_ids(
+            dataset.proxy_points, geometry, old_ids, uv_bounds,
+            surface_band_m=surface_band_m)
+        bounds = np.asarray(uv_bounds, dtype=np.float64).reshape(4)
+        new_geometry = extract_facade_geometry(
+            geometry['plane_model'], geometry['origin'], geometry['u_axis'],
+            geometry['v_axis'], bounds)
+
+        adjusted = dict(facade)
+        adjusted.update({
+            'point_count': int(len(new_ids)),
+            'proxy_indices': new_ids.tolist(),
+            'inlier_indices': new_ids.tolist(),
+            'support_indices': new_ids.tolist(),
+            'area': float((bounds[2] - bounds[0]) * (bounds[3] - bounds[1])),
+            'quality_status': 'pending',
+            'quality_ready': False,
+            'edit_revision': int(facade.get('edit_revision', 0) or 0) + 1,
+            'manually_adjusted': True,
+        })
+        bbox = dict(facade.get('bbox_2d') or {})
+        bbox.update({'u_min': float(bounds[0]), 'v_min': float(bounds[1]),
+                     'u_max': float(bounds[2]), 'v_max': float(bounds[3])})
+        adjusted['bbox_2d'] = bbox
+        if quality:
+            new_quality = dict(quality)
+            new_quality['facade_geometry'] = new_geometry
+            adjusted['quality_report'] = new_quality
+        if self._index_service is not None:
+            self._index_service.populate_voxel_ids([adjusted], cloud_name)
+            adjusted['raw_point_count'] = (
+                self._index_service.get_raw_count_for_facade(
+                    cloud_name, adjusted))
+        else:
+            adjusted['raw_point_count'] = int(adjusted['point_count'])
+        return adjusted
 
     def detect_on_roi(self, cloud_name: str,
                       roi_indices: list[int] | None = None,

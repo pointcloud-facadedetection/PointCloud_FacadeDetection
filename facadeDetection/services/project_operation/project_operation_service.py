@@ -656,6 +656,17 @@ class ProjectOperationService:
     def _on_detection_failed(self, message):
         print(f'立面检测失败: {message}', flush=True)
 
+    def resize_facade(self, cloud_name: str, facade: dict,
+                      uv_bounds, surface_band_m=0.01) -> dict:
+        adjusted = self._facade_service.resize_facade(
+            cloud_name, facade, uv_bounds, surface_band_m)
+        facade_id = facade.get('facade_db_id') or facade.get('database_id')
+        if self._project_uuid and facade_id:
+            from services.dal.results_repo import ResultsRepo
+            ResultsRepo.update_resized_facade(
+                self._project_uuid, int(facade_id), adjusted)
+        return adjusted
+
     def quality_inspection(self):
         self._notify('quality_inspection')
         try:
