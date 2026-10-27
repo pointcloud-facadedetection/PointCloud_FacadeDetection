@@ -40,7 +40,7 @@ class ReportPageMixin:
             return
         try:
             # 预览刷新是按节拍合并的，导出前确保拿到最新快照
-            if getattr(self, '_report_preview_pending', False):
+            if getattr(self, '_report_preview_dirty', False):
                 self._rebuild_report_preview()
             PdfReportRenderer.write_pdf(self._report_html, path)
             self.report_export_service.register_pdf(
@@ -54,8 +54,15 @@ class ReportPageMixin:
         except Exception as exc:
             QMessageBox.warning(self, '导出报告', f'报告导出失败：{exc}')
 
+    def _report_page_visible(self):
+        index = self.page_stack.currentIndex()
+        return (0 <= index < len(PAGE_DEFINITIONS)
+                and PAGE_DEFINITIONS[index][1] == 'report_export')
+
     def _refresh_report_preview(self):
-        if not hasattr(self, 'report_preview_browser'):
+        self._report_preview_dirty = True
+        if not hasattr(self, 'report_preview_browser') \
+                or not self._report_page_visible():
             return
         # 一次项目激活会沿多条信号连锁触发刷新（项目切换 / 立面恢复 /
         # 预览请求），合并到同一事件循环节拍内只真正构建一次。
@@ -66,7 +73,8 @@ class ReportPageMixin:
 
     def _rebuild_report_preview(self):
         self._report_preview_pending = False
-        if not hasattr(self, 'report_preview_browser'):
+        if not hasattr(self, 'report_preview_browser') \
+                or not self._report_page_visible():
             return
         # 使用全量聚合数据生成报告，支持多站点增量拓展
         all_facades_by_station = getattr(
@@ -88,6 +96,7 @@ class ReportPageMixin:
         self.report_preview_browser.setVisible(True)
         self.report_webview.setVisible(False)
         self.report_preview_state_stack.setCurrentIndex(1)
+        self._report_preview_dirty = False
         self._set_report_pdf_status('在线报告预览已更新', 'success')
 
     def _create_report_export_page(self, page_title, page_key):

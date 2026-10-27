@@ -535,6 +535,9 @@ class ScaffoldPageMixin:
             self._migrate_workspace_to_operation()
 
         self.page_stack.setCurrentIndex(page_index)
+        if page_key == 'report_export' and getattr(
+                self, '_report_preview_dirty', False):
+            self._refresh_report_preview()
         self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
