@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import re
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +70,7 @@ class TwoDMatchingService:
 
         # ---------- 1b. 按照片宽高比推导映射图尺寸 ----------
         mapping_size = TwoDMatchingService._mapping_size_for_photo(
-            photo_bgr, max_side=1024, min_side=768)
+            photo_bgr, max_side=1600, min_side=768)
         print(f'[PCFD][PhotoMatch] mapping_size={mapping_size} '
               f'(photo={photo_w}x{photo_h})', flush=True)
 
@@ -150,6 +150,7 @@ class TwoDMatchingService:
                 depth_image=mapping.depth_image,
                 pixel_point_index=mapping.pixel_point_index,
                 plane_frame=plane_frame,        # ★ 让 photo_matching 输出 H
+                photo_path=photo_path,          # ★ EXIF 焦距/Orientation
             )
             print(f'[PCFD][PhotoMatch] match_inliers={match_result.inlier_count} '
                   f'rmse={match_result.reprojection_rmse_px:.2f}px '
@@ -157,6 +158,22 @@ class TwoDMatchingService:
                   f'H_inliers={match_result.homography_inlier_count} '
                   f'H_rmse={match_result.homography_rmse_px:.2f}px',
                   flush=True)
+            # ---------- 3b. 对齐质量门禁 ----------
+            try:
+                from utils.photo_matching import _quality_gate_metrics
+                gate = _quality_gate_metrics(match_result, plane_frame)
+                print(f'[PCFD][PhotoMatch] quality_gate inliers={gate["inlier_count"]} '
+                      f'rmse={gate["reprojection_rmse_px"]:.2f}px '
+                      f'H_rmse={gate["homography_rmse_px"]:.2f}px '
+                      f'corner_rmse={gate["corner_reprojection_rmse_px"]}',
+                      flush=True)
+                quality['__alignment_quality'] = gate
+                if (gate['reprojection_rmse_px'] > 20.0
+                        or gate['inlier_count'] < 8):
+                    print('[PCFD][PhotoMatch] WARNING alignment quality low: '
+                          '贴图可能出现偏移', flush=True)
+            except Exception as exc:
+                print(f'[PCFD][PhotoMatch] quality_gate error={exc}', flush=True)
         except Exception as exc:
             print(f'[PCFD][PhotoMatch] fail reason=match_error error={exc}',
                   flush=True)
@@ -341,8 +358,9 @@ class TwoDMatchingService:
     def _extract_plane_frame(facade_data, quality):
         """提取平面参考系 (origin, u_axis, v_axis, plane_model)。
 
-        优先 quality.projection_*（与点云热力图完全同源）；
-        缺失时回退用 facade_data.plane_model 自建坐标系。
+        唯一数据源：quality.projection_*（与点云热力图渲染完全同源）。
+        正交性/共面性校验失败时显式报错并记录，禁止静默重建，
+        防止热力图与单应 H 使用不同平面参考系导致整体偏移。
         """
         origin = quality.get('projection_origin')
         u_axis = quality.get('projection_u_axis')
@@ -351,42 +369,37 @@ class TwoDMatchingService:
         if plane_model is None:
             plane_model = quality.get('plane_model')
 
-        if (origin is not None and u_axis is not None
-                and v_axis is not None and plane_model is not None):
-            try:
-                o = np.asarray(origin, dtype=np.float64).reshape(3)
-                u = np.asarray(u_axis, dtype=np.float64).reshape(3)
-                v = np.asarray(v_axis, dtype=np.float64).reshape(3)
-                pm = np.asarray(plane_model, dtype=np.float64).reshape(4)
-                u = u / max(np.linalg.norm(u), 1e-12)
-                v = v / max(np.linalg.norm(v), 1e-12)
-                n = pm[:3] / max(np.linalg.norm(pm[:3]), 1e-12)
-                # ★ 校验 u/v 正交且都在平面内，否则回退重建
-                if (np.isfinite(o).all() and np.isfinite(u).all()
-                        and np.isfinite(v).all() and np.isfinite(pm).all()
-                        and abs(float(np.dot(u, v))) < 0.02
-                        and abs(float(np.dot(u, n))) < 0.02
-                        and abs(float(np.dot(v, n))) < 0.02):
-                    print(f'[PCFD][PhotoMatch] plane_frame ok '
-                          f'u=({u[0]:.2f},{u[1]:.2f},{u[2]:.2f}) '
-                          f'v=({v[0]:.2f},{v[1]:.2f},{v[2]:.2f})', flush=True)
-                    return o, u, v, pm
-                print('[PCFD][PhotoMatch] plane_frame invalid axes, '
-                      'rebuild from plane_model', flush=True)
-            except Exception:
-                pass
-
-        if plane_model is None:
+        if (origin is None or u_axis is None
+                or v_axis is None or plane_model is None):
+            print('[PCFD][PhotoMatch] plane_frame missing: '
+                  'quality.projection_* 或 plane_model 缺失', flush=True)
             return None
         try:
+            o = np.asarray(origin, dtype=np.float64).reshape(3)
+            u = np.asarray(u_axis, dtype=np.float64).reshape(3)
+            v = np.asarray(v_axis, dtype=np.float64).reshape(3)
             pm = np.asarray(plane_model, dtype=np.float64).reshape(4)
-            normal = pm[:3] / max(np.linalg.norm(pm[:3]), 1e-12)
-            from utils.photo_matching import _plane_axes
-            u, v = _plane_axes(normal)
-            # 平面上离世界原点最近的点作为参考原点
-            o = -float(pm[3]) * normal
+            u = u / max(np.linalg.norm(u), 1e-12)
+            v = v / max(np.linalg.norm(v), 1e-12)
+            n = pm[:3] / max(np.linalg.norm(pm[:3]), 1e-12)
+            if not (np.isfinite(o).all() and np.isfinite(u).all()
+                    and np.isfinite(v).all() and np.isfinite(pm).all()):
+                raise ValueError('plane_frame 包含无效数值')
+            if not (abs(float(np.dot(u, v))) < 0.02
+                    and abs(float(np.dot(u, n))) < 0.02
+                    and abs(float(np.dot(v, n))) < 0.02):
+                raise ValueError(
+                    f'plane_frame 正交/共面校验失败: '
+                    f'|u·v|={abs(float(np.dot(u, v))):.4f} '
+                    f'|u·n|={abs(float(np.dot(u, n))):.4f} '
+                    f'|v·n|={abs(float(np.dot(v, n))):.4f}'
+                )
+            print(f'[PCFD][PhotoMatch] plane_frame ok '
+                  f'u=({u[0]:.2f},{u[1]:.2f},{u[2]:.2f}) '
+                  f'v=({v[0]:.2f},{v[1]:.2f},{v[2]:.2f})', flush=True)
             return o, u, v, pm
-        except Exception:
+        except Exception as exc:
+            print(f'[PCFD][PhotoMatch] plane_frame invalid: {exc}', flush=True)
             return None
 
     # ==================================================================
@@ -463,7 +476,35 @@ class TwoDMatchingService:
               f'uv_bounds={uv_bounds}', flush=True)
 
         # ---- 2. 通过 H 将热力图 warp 到照片 ----
-        H = getattr(match_result, 'homography_uv_to_photo', None)
+        # ★ 平面参考系单源化：优先使用渲染器返回的 projection_*，
+        #    确保 H 与热力图栅格化使用同一 (origin, u, v)。
+        render_origin = transparent.get('projection_origin')
+        render_u = transparent.get('projection_u_axis')
+        render_v = transparent.get('projection_v_axis')
+        if (render_origin is not None and render_u is not None
+                and render_v is not None):
+            try:
+                from utils.photo_matching import _solve_plane_homography_robust
+                H, _h_meta = _solve_plane_homography_robust(
+                    correspondences=list(match_result.correspondences or []),
+                    plane_frame=(render_origin, render_u, render_v,
+                                 facade_data.get('plane_model')),
+                    camera_matrix=np.asarray(match_result.camera_matrix,
+                                             dtype=np.float64).reshape(3, 3),
+                    rotation=np.asarray(match_result.rotation_matrix,
+                                        dtype=np.float64).reshape(3, 3),
+                    translation=np.asarray(match_result.translation_vector,
+                                           dtype=np.float64).reshape(3),
+                )
+                if H is not None:
+                    print(f'[PCFD][PhotoMatch] mode={mode} '
+                          f'H_rebuilt_from_render_frame', flush=True)
+            except Exception as exc:
+                print(f'[PCFD][PhotoMatch] mode={mode} '
+                      f'H_rebuild_failed error={exc}', flush=True)
+                H = getattr(match_result, 'homography_uv_to_photo', None)
+        else:
+            H = getattr(match_result, 'homography_uv_to_photo', None)
         blended = None
         if H is not None:
             try:
@@ -477,6 +518,21 @@ class TwoDMatchingService:
                 )
                 blended = TwoDMatchingService._alpha_blend(
                     photo_bgr, warped_rgba, alpha=0.72)
+                # ---- ★ 在照片上叠加 0.5m 物理网格线 ----
+                try:
+                    blended = TwoDMatchingService._draw_uv_grid_on_photo(
+                        blended,
+                        uv_bounds,
+                        H,
+                        grid_step_m=0.5,
+                        line_color=(180, 190, 205),
+                        thickness=1,
+                    )
+                    print(f'[PCFD][PhotoMatch] mode={mode} photo_grid_drawn',
+                          flush=True)
+                except Exception as exc:
+                    print(f'[PCFD][PhotoMatch] mode={mode} '
+                          f'photo_grid_draw_failed error={exc}', flush=True)
                 print(f'[PCFD][PhotoMatch] mode={mode} basis=heatmap_warp '
                       f'H_inliers={match_result.homography_inlier_count} '
                       f'H_rmse={match_result.homography_rmse_px:.2f}px',
@@ -594,6 +650,68 @@ class TwoDMatchingService:
         return blended.astype(np.uint8)
 
     @staticmethod
+    def _draw_uv_grid_on_photo(
+        image_bgr: np.ndarray,
+        uv_bounds: tuple[float, float, float, float],
+        uv_to_photo: np.ndarray,
+        grid_step_m: float = 0.5,
+        line_color: tuple[int, int, int] = (200, 210, 220),
+        thickness: int = 1,
+    ) -> np.ndarray:
+        """在照片叠加图上绘制 UV 物理网格线。
+
+        利用单应 H_uv_to_photo 将 0.5m 间隔的 UV 直线端点映射到照片像素，
+        由于单应保持直线性，端点映射后直接用 cv2.line 绘制。
+        """
+        from utils.photo_matching import plane_uv_to_photo
+
+        u0, v0, u1, v1 = map(float, uv_bounds)
+        H = np.asarray(uv_to_photo, dtype=np.float64).reshape(3, 3)
+
+        # 生成网格线端点（UV 空间）
+        lines_uv = []
+        # u 方向竖线（固定 u，v 变化）
+        u_start = np.ceil(u0 / grid_step_m) * grid_step_m
+        for u in np.arange(u_start, u1 + 1e-6, grid_step_m):
+            lines_uv.append(((u, v0), (u, v1)))
+        # v 方向横线（固定 v，u 变化）
+        v_start = np.ceil(v0 / grid_step_m) * grid_step_m
+        for v in np.arange(v_start, v1 + 1e-6, grid_step_m):
+            lines_uv.append(((u0, v), (u1, v)))
+
+        if not lines_uv:
+            return image_bgr
+
+        # 批量映射端点到照片像素
+        endpoints = np.asarray(
+            [pt for seg in lines_uv for pt in seg], dtype=np.float64
+        ).reshape(-1, 2)
+        try:
+            pixels = plane_uv_to_photo(endpoints, H)
+        except Exception:
+            return image_bgr
+
+        img = image_bgr.copy()
+        h, w = img.shape[:2]
+        for i, ((u_a, v_a), (u_b, v_b)) in enumerate(lines_uv):
+            p0 = pixels[i * 2]
+            p1 = pixels[i * 2 + 1]
+            # 仅当线段至少部分在图像内时才绘制（简单裁剪判断）
+            x0, y0 = float(p0[0]), float(p0[1])
+            x1, y1 = float(p1[0]), float(p1[1])
+            # Cohen–Sutherland 风格边界框快速拒绝
+            if (max(x0, x1) < 0 or min(x0, x1) >= w or
+                    max(y0, y1) < 0 or min(y0, y1) >= h):
+                continue
+            cv2.line(
+                img,
+                (int(round(x0)), int(round(y0))),
+                (int(round(x1)), int(round(y1))),
+                line_color, thickness, cv2.LINE_AA,
+            )
+        return img
+
+    @staticmethod
     def _resolve_limit_mm(quality, spec):
         profile = quality.get('profile_snapshot', {}) or {}
         return float(profile.get(
@@ -654,14 +772,22 @@ class TwoDMatchingService:
             if candidate.is_file():
                 return candidate
 
-        # 2) 缓存目录已有图片（任意名）→ 返回第一个
+        # 2) 缓存目录已有图片：优先匹配站点名子串，避免多站点时拿错照片
         cached_images = [
             p for p in photo_cache.iterdir()
             if p.is_file() and p.suffix.lower() in (
                 '.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
         ]
         if cached_images:
-            return cached_images[0]
+            name_key = safe_name.strip().lower()
+            if name_key:
+                for candidate in cached_images:
+                    if name_key in candidate.stem.strip().lower():
+                        return candidate
+            print(f'[PCFD][PhotoMatch] photo_cache no station match: '
+                  f'station={safe_name} candidates='
+                  f'{[p.name for p in cached_images]}', flush=True)
+            return None
 
         # 3) 缓存为空：从项目 raw_image 资产自动复制到缓存
         try:
@@ -671,15 +797,35 @@ class TwoDMatchingService:
             if not assets:
                 return None
             import shutil
-            for asset in assets:
-                src = Path(asset.path)
-                if not src.is_file():
-                    continue
-                dst_name = safe_name + src.suffix.lower()
-                dst = photo_cache / dst_name
-                shutil.copy2(str(src), str(dst))
-                if dst.is_file():
-                    return dst
+            # ★ 多站点：按站点名匹配资产原始文件名，并记录文件指纹
+            name_key = safe_name.strip().lower()
+            selected = None
+            if name_key:
+                for asset in assets:
+                    if name_key in Path(str(asset.path)).stem.strip().lower():
+                        selected = asset
+                        break
+            if selected is None and len(assets) == 1:
+                selected = assets[0]
+            if selected is None:
+                print(f'[PCFD][PhotoMatch] raw_image no station match: '
+                      f'station={safe_name} assets='
+                      f'{[Path(str(a.path)).name for a in assets]}', flush=True)
+                return None
+            src = Path(selected.path)
+            if not src.is_file():
+                return None
+            dst_name = safe_name + src.suffix.lower()
+            dst = photo_cache / dst_name
+            shutil.copy2(str(src), str(dst))
+            if dst.is_file():
+                try:
+                    digest = hashlib.sha256(dst.read_bytes()).hexdigest()[:16]
+                    print(f'[PCFD][PhotoMatch] photo_cache_fingerprint '
+                          f'station={safe_name} sha256_16={digest}', flush=True)
+                except Exception:
+                    pass
+                return dst
         except Exception as exc:
             print(f'[PCFD] photo_cache_copy_failed project={project_uuid} '
                   f'error={exc}', flush=True)
@@ -787,29 +933,6 @@ class TwoDMatchingService:
             print(f'[PCFD][PhotoMatch] voxel_downsample_with_values failed: {exc}',
                   flush=True)
             return TwoDMatchingService._voxel_downsample(points, voxel_size), None
-
-    @staticmethod
-    def _voxel_downsample_with_colors(
-        points: np.ndarray, colors: np.ndarray, voxel_size: float = 0.1
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Open3D voxel 下采样，同步下采样颜色（保留旧接口兼容）。"""
-        try:
-            import open3d as o3d
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(
-                np.asarray(points, dtype=np.float64))
-            pcd.colors = o3d.utility.Vector3dVector(
-                np.asarray(colors, dtype=np.float64))
-            down = pcd.voxel_down_sample(voxel_size=float(voxel_size))
-            pts = np.asarray(down.points, dtype=np.float64)
-            cols = np.asarray(down.colors, dtype=np.float64)
-            return pts, cols
-        except Exception as exc:
-            print(f'[PCFD][PhotoMatch] color downsample failed: {exc}', flush=True)
-            return (
-                np.asarray(points, dtype=np.float64),
-                np.asarray(colors, dtype=np.float64),
-            )
 
     @staticmethod
     def _update_export_context(quality: dict, exported: dict[str, str]):

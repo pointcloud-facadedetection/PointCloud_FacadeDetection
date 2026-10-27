@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -106,14 +107,23 @@ def heatmap_pixel_to_photo(shape, uv_bounds, uv_to_photo):
 
 
 def warp_heatmap_rgba_to_photo(heatmap_rgba, valid_mask, uv_bounds, uv_to_photo, photo_size):
-    """通过 pixel -> UV -> photo 的单应映射将透明热力图投到原始照片。"""
+    """通过 pixel -> UV -> photo 的单应映射将透明热力图投到原始照片。
+
+    UV↔像素约定与 rasterize_facade 保持一致：像素 (i, j) 覆盖 UV 区间
+    ``[u0 + i·s, u0 + (i+1)·s) × [v1 - (j+1)·s, v1 - j·s)``，其中
+    ``s = (u1 - u0) / w = (v1 - v0) / h``。因此像素中心对应
+    ``(u0 + (i+0.5)·s, v1 - (j+0.5)·s)``，四角半开区间角点为
+    ``(-0.5, h-0.5) ↔ (u0, v0)`` 等，彻底消除一格尺度偏差。
+    """
     rgba = np.asarray(heatmap_rgba, dtype=np.uint8)
     if rgba.ndim != 3 or rgba.shape[2] != 4:
         raise ValueError('热力图必须为 RGBA')
     h, w = rgba.shape[:2]
-    corners_uv = np.array(((uv_bounds[0], uv_bounds[1]), (uv_bounds[2], uv_bounds[1]),
-                           (uv_bounds[2], uv_bounds[3]), (uv_bounds[0], uv_bounds[3])), dtype=np.float64)
-    src = np.array(((0, h-1), (w-1, h-1), (w-1, 0), (0, 0)), dtype=np.float32)
+    u0, v0, u1, v1 = map(float, uv_bounds)
+    corners_uv = np.array(((u0, v0), (u1, v0),
+                           (u1, v1), (u0, v1)), dtype=np.float64)
+    src = np.array(((-0.5, h - 0.5), (w - 0.5, h - 0.5),
+                    (w - 0.5, -0.5), (-0.5, -0.5)), dtype=np.float32)
     dst = plane_uv_to_photo(corners_uv, uv_to_photo).astype(np.float32)
     hmap = cv2.getPerspectiveTransform(src, dst)
     pw, ph = map(int, photo_size)
@@ -134,12 +144,6 @@ def _as_plane_frame(value):
     u /= max(np.linalg.norm(u), 1e-12); v /= max(np.linalg.norm(v), 1e-12)
     plane = None if len(value) < 4 or value[3] is None else np.asarray(value[3], dtype=np.float64).reshape(4)
     return PlaneFrame(origin, u, v, plane)
-
-
-def _homography_from_pose(K, R, t, frame):
-    f = _as_plane_frame(frame)
-    H = np.asarray(K) @ np.column_stack((np.asarray(R) @ f.u_axis, np.asarray(R) @ f.v_axis, np.asarray(R) @ f.origin + np.asarray(t)))
-    return H / H[2, 2]
 
 
 def _homography_from_pose_with_axes(K, R, t, origin, u_axis, v_axis):
@@ -431,6 +435,224 @@ def generate_cloud_mapping_image_from_input(
     )
 
 
+def _read_exif_focal_35mm(photo_path):
+    """从照片 EXIF 读取 35mm 等效焦距（mm），缺失时返回 None。"""
+    if photo_path is None:
+        return None
+    path = Path(photo_path)
+    if not path.is_file():
+        return None
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        with Image.open(str(path)) as img:
+            exif = img.getexif()
+        if not exif:
+            return None
+        named = {TAGS.get(k, k): v for k, v in exif.items()}
+        focal = named.get('FocalLengthIn35mmFilm') or named.get(
+            'FocalLengthIn35mmFilmFormat')
+        if focal is None:
+            fl = named.get('FocalLength')
+            fl_35 = None
+            if fl is not None:
+                try:
+                    fl_val = float(fl[0]) / float(fl[1]) if isinstance(fl, tuple) else float(fl)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    fl_val = None
+                # 部分设备同时给出 FocalLength 与 FocalLengthIn35mmFilm
+                if fl_val is not None and fl_val > 0:
+                    fl_35 = None  # 无缩放系数时无法换算，放弃
+            focal = fl_35
+        if focal is None:
+            return None
+        focal = float(focal)
+        if not np.isfinite(focal) or focal <= 0:
+            return None
+        return focal
+    except Exception:
+        return None
+
+
+def _apply_exif_orientation(photo_bgr, photo_path):
+    """按 EXIF Orientation 把照片转正到视觉正确方向。"""
+    if photo_bgr is None or photo_path is None:
+        return photo_bgr
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        with Image.open(str(photo_path)) as img:
+            exif = img.getexif()
+        if not exif:
+            return photo_bgr
+        named = {TAGS.get(k, k): v for k, v in exif.items()}
+        orientation = named.get('Orientation')
+        if orientation is None:
+            return photo_bgr
+        rotations = {
+            3: cv2.ROTATE_180,
+            6: cv2.ROTATE_90_CLOCKWISE,
+            8: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }
+        rot = rotations.get(int(orientation))
+        if rot is None:
+            return photo_bgr
+        return cv2.rotate(photo_bgr, rot)
+    except Exception:
+        return photo_bgr
+
+
+def _undistort_photo(photo_bgr, camera_matrix, distortion_coefficients):
+    """若畸变系数非零则整图去畸变，否则原样返回。"""
+    if photo_bgr is None:
+        return photo_bgr
+    if distortion_coefficients is None:
+        return photo_bgr
+    coeffs = np.asarray(distortion_coefficients, dtype=np.float64).reshape(-1)
+    if coeffs.size < 4 or not np.any(np.abs(coeffs) > 1e-12):
+        return photo_bgr
+    K = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    return cv2.undistort(photo_bgr, K, coeffs, None, K)
+
+
+def _read_photo_exif(photo_path):
+    """读取照片 EXIF：35mm 等效焦距（mm）与 Orientation 标签。"""
+    focal_35 = _read_exif_focal_35mm(photo_path)
+    orientation = None
+    if photo_path is not None and Path(str(photo_path)).is_file():
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS
+            with Image.open(str(photo_path)) as img:
+                exif = img.getexif()
+            if exif:
+                named = {TAGS.get(k, k): v for k, v in exif.items()}
+                orientation = named.get('Orientation')
+                if orientation is not None:
+                    orientation = int(orientation)
+        except Exception:
+            orientation = None
+    return focal_35, orientation
+
+
+def _estimate_plumb_line_distortion(photo_bgr, camera_matrix):
+    """立面 plumb-line 法估计 k1/k2：利用竖直消失点与图像中轴的偏移。
+
+    对竖拍/正视立面照片，窗框与棱线丰富，竖直线段在针孔模型下应交于
+    竖直消失点；若消失点 x 坐标偏离主点 cx，说明存在径向畸变。
+    用该偏移反解 k1（k2 固定为 0），作为去畸变的先验。
+    估计失败或不可靠时返回 None。
+    """
+    try:
+        vp = _estimate_vertical_vanishing_point(photo_bgr)
+    except Exception:
+        return None
+    height, width = photo_bgr.shape[:2]
+    K = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    dx = float(vp[0]) - cx
+    dy = float(vp[1]) - cy
+    r2 = (dx * dx + dy * dy) / (float(K[0, 0]) ** 2)
+    if r2 < 1e-8:
+        return None
+    # 针孔下消失点应在主点正上方（dy<0, dx≈0）；
+    # 畸变使 x 偏移 dx ≈ k1 * r2 * fx，据此反解 k1。
+    k1 = dx / (r2 * float(K[0, 0]))
+    if not np.isfinite(k1) or abs(k1) > 1.5 or abs(k1) < 1e-4:
+        return None
+    dist = np.zeros((5, 1), dtype=np.float64)
+    dist[0, 0] = k1
+    return dist
+
+
+def _refine_homography_ecc(photo_gray, view_gray, H, uv_bounds):
+    """图像级 ECC 配准求精单应 H（把映射图灰度对齐到照片灰度）。
+
+    以 H 为初值，把映射图 warp 到照片坐标系，在重叠区域做
+    findTransformECC（单应模式）求精。ECC 收敛时可达亚像素精度。
+    失败或改善不明显时返回原 H。
+    """
+    if H is None or photo_gray is None or view_gray is None:
+        return H, False
+    try:
+        h_photo, w_photo = photo_gray.shape[:2]
+        warped_view = cv2.warpPerspective(
+            view_gray, H, (w_photo, h_photo),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        # 有效区域：warp 后非零且照片非零的交集
+        valid = (warped_view > 0) & (photo_gray > 0)
+        if float(valid.mean()) < 0.05:
+            return H, False
+        H_refined = H.copy().astype(np.float64)
+        criteria = (
+            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-5,
+        )
+        cc, H_refined = cv2.findTransformECC(
+            photo_gray, view_gray, H_refined,
+            cv2.MOTION_HOMOGRAPHY, criteria, None, 5,
+        )
+        if not np.isfinite(H_refined).all() or abs(float(np.linalg.det(H_refined))) < 1e-12:
+            return H, False
+        # 只在改善明显时采纳
+        corners_uv = np.array(((uv_bounds[0], uv_bounds[1]),
+                               (uv_bounds[2], uv_bounds[1]),
+                               (uv_bounds[2], uv_bounds[3]),
+                               (uv_bounds[0], uv_bounds[3])),
+                              dtype=np.float64)
+        p0 = plane_uv_to_photo(corners_uv, H)
+        p1 = plane_uv_to_photo(corners_uv, H_refined)
+        shift = float(np.median(np.linalg.norm(p1 - p0, axis=1)))
+        if shift > 30.0:   # 过大漂移视为误收敛
+            return H, False
+        return H_refined, True
+    except Exception:
+        return H, False
+
+
+def _quality_gate_metrics(match_result, plane_frame):
+    """汇总对齐质量指标：内点数/RMSE/H 中位差/立面角点重投影残差。"""
+    metrics = {
+        'inlier_count': int(getattr(match_result, 'inlier_count', 0)),
+        'reprojection_rmse_px': float(
+            getattr(match_result, 'reprojection_rmse_px', 0.0)),
+        'homography_inlier_count': int(
+            getattr(match_result, 'homography_inlier_count', 0)),
+        'homography_rmse_px': float(
+            getattr(match_result, 'homography_rmse_px', 0.0)),
+        'homography_median_diff_px': None,
+        'corner_reprojection_rmse_px': None,
+    }
+    H = getattr(match_result, 'homography_uv_to_photo', None)
+    if (H is not None and plane_frame is not None
+            and getattr(match_result, 'correspondences', None)):
+        try:
+            origin = np.asarray(plane_frame[0], dtype=np.float64).reshape(3)
+            u_axis = np.asarray(plane_frame[1], dtype=np.float64).reshape(3)
+            v_axis = np.asarray(plane_frame[2], dtype=np.float64).reshape(3)
+            src_uv, dst_xy = [], []
+            for c in match_result.correspondences:
+                op = c.get('object_point')
+                ip = c.get('image_point')
+                if op is None or ip is None:
+                    continue
+                op = np.asarray(op, dtype=np.float64).reshape(-1)
+                if op.size != 3 or not np.isfinite(op).all():
+                    continue
+                d = op - origin
+                src_uv.append([float(d @ u_axis), float(d @ v_axis)])
+                dst_xy.append([float(ip[0]), float(ip[1])])
+            if len(src_uv) >= 4:
+                src_uv = np.asarray(src_uv, dtype=np.float64).reshape(1, -1, 2)
+                proj = cv2.perspectiveTransform(src_uv, np.asarray(H, np.float64))[0]
+                err = np.linalg.norm(proj - np.asarray(dst_xy, dtype=np.float64), axis=1)
+                metrics['corner_reprojection_rmse_px'] = float(np.sqrt(np.mean(err ** 2)))
+        except Exception:
+            pass
+    return metrics
+
+
 def estimate_photo_cloud_match(
     point_cloud,
     photo,
@@ -441,6 +663,7 @@ def estimate_photo_cloud_match(
     depth_image=None,
     pixel_point_index=None,
     plane_frame=None,
+    photo_path=None,
 ) -> PhotoMatchResult:
     """用映射图与照片做 SuperPoint+LightGlue 自动匹配，输出匹配矩阵。
 
@@ -491,6 +714,15 @@ def estimate_photo_cloud_match(
     if depth_image is None:
         raise ValueError('自动匹配需要映射图对应的深度图')
 
+    # ---------- EXIF 解析：Orientation 转正 + 35mm 等效焦距 ----------
+    focal_35mm, exif_orientation = _read_photo_exif(photo_path)
+    if exif_orientation in (3, 6, 8):
+        photo_bgr = _apply_exif_orientation(photo_bgr, photo_path)
+        print(f'[PhotoMatch] EXIF Orientation={exif_orientation} '
+              f'applied shape={photo_bgr.shape}', flush=True)
+    if focal_35mm is not None:
+        print(f'[PhotoMatch] EXIF focal(35mm equiv)={focal_35mm:.1f}mm', flush=True)
+
     matched = _match_photo_to_cloud_view(
         photo_bgr,
         view_bgr,
@@ -499,6 +731,7 @@ def estimate_photo_cloud_match(
         extrinsic,
         cloud_points=points,
         pixel_point_index=pixel_point_index,
+        focal_length_35mm=focal_35mm,
     )
     if not matched.get('pose_estimated'):
         raise ValueError(
@@ -521,6 +754,23 @@ def estimate_photo_cloud_match(
             rotation=np.asarray(matched['rotation_matrix'], dtype=np.float64).reshape(3, 3),
             translation=np.asarray(matched['translation_vector'], dtype=np.float64).reshape(3),
         )
+        # ---------- H 图像级 ECC 求精 ----------
+        if H is not None:
+            try:
+                photo_gray = cv2.cvtColor(photo_bgr, cv2.COLOR_BGR2GRAY)
+                view_gray = cv2.cvtColor(view_bgr, cv2.COLOR_BGR2GRAY)
+                # 用 quality_domain 或 correspondence 的 UV 范围作为初值域
+                uv_b = h_meta.get('plane_uv_bounds')
+                if uv_b is None:
+                    uv_b = _correspondence_uv_bounds(
+                        matched.get('correspondences') or [], plane_frame)
+                if uv_b is not None:
+                    H, refined = _refine_homography_ecc(
+                        photo_gray, view_gray, H, uv_b)
+                    if refined:
+                        print('[PhotoMatch] H refined by ECC', flush=True)
+            except Exception as exc:
+                print(f'[PhotoMatch] H ECC refine skipped: {exc}', flush=True)
 
     return PhotoMatchResult(
         match_matrix=matrix,
@@ -1397,6 +1647,12 @@ MIN_MATCH_PAIRS = 6
 _MAX_PROCESSING_SIDE = 1600
 _MAX_KEYPOINTS = 4096
 _MATCH_CONFIDENCE = 0.10
+# PnP 重投影阈值集合（像素）：收敛到严格档位，避免宽松阈值虚高内点数
+_PNP_REPROJ_THRESHOLDS = (4.0, 8.0, 12.0, 20.0)
+# PnP 选解精度门控（像素）：先在 rmse ≤ 门控的解中选内点最多者，
+# 无满足门控的解再逐级放宽；最终解 rmse 超过硬上限则拒绝输出
+_PNP_RMSE_GATE_PX = 8.0
+_PNP_RMSE_HARD_LIMIT_PX = 20.0
 _LIGHTGLUE_ENGINE = None
 _CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / 'checkpoints'
 _SUPERPOINT_CHECKPOINT = _CHECKPOINT_DIR / 'superpoint_v1.pth'
@@ -1557,28 +1813,19 @@ def _feature_matches(photo_bgr, view_bgr):
         dtype=np.float64,
     ).reshape(-1, 2) / photo_scale
     confident_count = len(pairs)
-
-    if confident_count >= 4:
-        homography, mask = cv2.findHomography(
-            view_xy,
-            photo_xy,
-            cv2.RANSAC,
-            5.0,
-            maxIters=5000,
-            confidence=0.995,
-        )
-        if homography is not None and mask is not None:
-            keep = mask.reshape(-1).astype(bool)
-            return (
-                view_xy[keep],
-                photo_xy[keep],
-                confident_count,
-                str(device),
-            )
+    # ★ 不再做 view↔photo 的全局单应预过滤：映射图含地面/邻楼等非共面
+    #    内容时该假设过强，会误删立面好匹配。保留全部置信匹配，
+    #    由下游 PnP-RANSAC 统一剔除离群点（真正的几何校验）。
     return view_xy, photo_xy, confident_count, str(device)
 
 
-def _depth_at(depth: np.ndarray, x: float, y: float, radius: int = 10):
+def _depth_at(depth: np.ndarray, x: float, y: float, radius: int = 2):
+    """取 (x, y) 附近最近的有效深度。
+
+    半径默认 2px：映射图 1600px 宽对应 30~60m 立面时，10px ≈ 0.3~0.6m
+    横向误差，会把相邻点涂抹的深度串扰进来；2px 在保留容错的同时
+    把 3D 捕捉误差降到厘米级。
+    """
     height, width = depth.shape
     cx, cy = int(round(x)), int(round(y))
     x0, x1 = max(0, cx - radius), min(width, cx + radius + 1)
@@ -1632,7 +1879,8 @@ def _build_pixel_point_index(points, intrinsic, extrinsic, image_shape):
     return index_map.reshape(height, width)
 
 
-def _point_index_at(index_map, x: float, y: float, radius: int = 10):
+def _point_index_at(index_map, x: float, y: float, radius: int = 2):
+    """取 (x, y) 附近最近的有效点云索引，半径 2px 降低 splat 串扰。"""
     height, width = index_map.shape
     cx, cy = int(round(x)), int(round(y))
     x0, x1 = max(0, cx - radius), min(width, cx + radius + 1)
@@ -1852,6 +2100,7 @@ def _collect_intrinsic_candidates(
     image_height,
     horizontal_fov_deg,
     camera_matrix=None,
+    focal_length_35mm=None,
 ):
     width = int(round(float(image_width)))
     height = int(round(float(image_height)))
@@ -1866,6 +2115,28 @@ def _collect_intrinsic_candidates(
             zero_dist,
         ))
         return candidates
+    # ★ EXIF 35mm 等效焦距 → 像素焦距，作为最高优先级内参候选。
+    #    主点锁定在图像中心（手机照片主点偏移通常 <1% 画幅）。
+    if focal_length_35mm is not None and focal_length_35mm > 0:
+        diag_px = float(np.hypot(width, height))
+        diag_35 = float(np.hypot(36.0, 24.0))
+        focal_px = focal_length_35mm * diag_px / diag_35
+        if np.isfinite(focal_px) and focal_px > 0:
+            exif_matrix = np.array(
+                [
+                    [focal_px, 0.0, width / 2.0],
+                    [0.0, focal_px, height / 2.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+            candidates.append((
+                exif_matrix,
+                'exif_focal_35mm',
+                None,
+                None,
+                zero_dist.copy(),
+            ))
     if len(object_points) >= 6:
         try:
             calibration = _estimate_camera_matrix_from_correspondences(
@@ -2031,7 +2302,16 @@ def _search_best_pose(
     iterations,
     confidence,
     use_ransac=True,
+    rmse_gate_px=_PNP_RMSE_GATE_PX,
+    rmse_hard_limit_px=_PNP_RMSE_HARD_LIMIT_PX,
 ):
+    """多候选 PnP 搜索，按“精度门控 + 内点数”字典序选解。
+
+    选解准则：先在 inlier_rmse ≤ rmse_gate_px 的解中取 inlier_count 最大者；
+    若无满足门控的解，再对剩余解按 (inlier_count, -inlier_rmse) 排序取最优，
+    但其 rmse 不得超过 rmse_hard_limit_px，否则返回 (None, None)，
+    由调用方决定显式失败而不是输出错误贴图。
+    """
     best = None
     best_meta = None
     best_score = None
@@ -2079,7 +2359,16 @@ def _search_best_pose(
                 )
                 if evaluated is None:
                     continue
-                score = (evaluated['inlier_count'], -evaluated['inlier_rmse'])
+                rmse = float(evaluated['inlier_rmse'])
+                if rmse > rmse_hard_limit_px:
+                    continue
+                # 门控内：精度达标者优先，再比内点数；门控外：仅作兜底
+                gated = rmse <= rmse_gate_px
+                score = (
+                    1 if gated else 0,
+                    evaluated['inlier_count'],
+                    -rmse,
+                )
                 if best_score is None or score > best_score:
                     best = evaluated
                     best_score = score
@@ -2092,6 +2381,7 @@ def _search_best_pose(
                         'pnp_method': method_name,
                         'pnp_mode': 'ransac' if use_ransac else 'direct',
                         'reprojection_threshold_px': reproj,
+                        'rmse_gated': gated,
                     }
     return best, best_meta
 
@@ -2107,6 +2397,7 @@ def _solve_camera_pose(
     reprojection_error_px=20.0,
     confidence=0.95,
     iterations=500,
+    focal_length_35mm=None,
 ):
     object_points, image_points = _validate_pnp_points(object_points, image_points)
     distortion = (
@@ -2121,11 +2412,11 @@ def _solve_camera_pose(
         image_height,
         horizontal_fov_deg,
         camera_matrix=camera_matrix,
+        focal_length_35mm=focal_length_35mm,
     )
-    reproj_thresholds = sorted(set([
-        float(reprojection_error_px),
-        12.0, 20.0, 30.0, 45.0, 60.0, 80.0,
-    ]))
+    reproj_thresholds = sorted(set(
+        [float(reprojection_error_px)] + list(_PNP_REPROJ_THRESHOLDS)
+    ))
     best, best_meta = _search_best_pose(
         object_points,
         image_points,
@@ -2149,7 +2440,8 @@ def _solve_camera_pose(
         )
     if best is None or best_meta is None:
         raise ValueError(
-            'PnP 求解失败，请检查 2D/3D 对应关系；'
+            'PnP 求解失败或重投影误差超限'
+            f'（>{_PNP_RMSE_HARD_LIMIT_PX:.0f}px），请检查 2D/3D 对应关系；'
             '可尝试增加分布更均匀的匹配点'
         )
     rotation, _ = cv2.Rodrigues(best['rvec'])
@@ -2188,6 +2480,7 @@ def _estimate_match_matrix(
     image_points,
     image_width: int,
     image_height: int,
+    focal_length_35mm=None,
 ) -> dict:
     object_xyz = _as_object_points(object_points)
     image_xy = _as_image_points(image_points)
@@ -2202,6 +2495,7 @@ def _estimate_match_matrix(
         image_points=image_xy,
         image_width=int(image_width),
         image_height=int(image_height),
+        focal_length_35mm=focal_length_35mm,
     )
     camera_matrix = np.asarray(result['camera_matrix'], dtype=np.float64).reshape(3, 3)
     extrinsic = np.asarray(result['extrinsic_matrix'], dtype=np.float64).reshape(3, 4)
@@ -2209,6 +2503,36 @@ def _estimate_match_matrix(
     result['match_matrix'] = match_matrix.tolist()
     result['projection_matrix'] = match_matrix.tolist()
     return result
+
+
+def _correspondence_uv_bounds(correspondences, plane_frame):
+    """从 2D-3D 对应点估计 UV 包围盒，供 ECC 求精初值使用。"""
+    if not correspondences or plane_frame is None or len(plane_frame) < 3:
+        return None
+    try:
+        origin = np.asarray(plane_frame[0], dtype=np.float64).reshape(3)
+        u_axis = np.asarray(plane_frame[1], dtype=np.float64).reshape(3)
+        v_axis = np.asarray(plane_frame[2], dtype=np.float64).reshape(3)
+        uv = []
+        for c in correspondences:
+            op = c.get('object_point')
+            if op is None:
+                continue
+            op = np.asarray(op, dtype=np.float64).reshape(-1)
+            if op.size != 3 or not np.isfinite(op).all():
+                continue
+            d = op - origin
+            uv.append([float(d @ u_axis), float(d @ v_axis)])
+        if len(uv) < 4:
+            return None
+        uv = np.asarray(uv, dtype=np.float64)
+        u0, u1 = np.percentile(uv[:, 0], (1, 99))
+        v0, v1 = np.percentile(uv[:, 1], (1, 99))
+        if u1 <= u0 or v1 <= v0:
+            return None
+        return (float(u0), float(v0), float(u1), float(v1))
+    except Exception:
+        return None
 
 
 def _match_photo_to_cloud_view(
@@ -2219,6 +2543,7 @@ def _match_photo_to_cloud_view(
     view_extrinsic,
     cloud_points=None,
     pixel_point_index=None,
+    focal_length_35mm=None,
 ) -> dict:
     """通过点云映射图生成照片像素与世界三维点对应关系，并估计匹配矩阵。"""
     photo = np.asarray(photo_bgr, dtype=np.uint8)
@@ -2344,6 +2669,7 @@ def _match_photo_to_cloud_view(
             image_points=image_points,
             image_width=photo.shape[1],
             image_height=photo.shape[0],
+            focal_length_35mm=focal_length_35mm,
         )
         result.update(pose)
         result['pose_estimated'] = True
@@ -2911,8 +3237,13 @@ def _overlay_points_on_rectified(
     alpha=0.72,
     point_radius=6,
     heatmap=None,
+    external_colors_bgr=None,
 ):
-    """按当前 UI 按钮效果逐点透明融合，不绘制网格和色标。"""
+    """按当前 UI 按钮效果逐点透明融合，不绘制网格和色标。
+
+    external_colors_bgr: 可选 (N,3) BGR uint8 数组，为每个点指定颜色；
+    传入时跳过内部色带计算（供 K/R/t 回退路径复用渲染器色带）。
+    """
     from utils.heatmap_colors import (
         GRAY_BGR,
         compute_heatmap_scale,
@@ -2943,24 +3274,30 @@ def _overlay_points_on_rectified(
     if not np.any(valid):
         raise ValueError('所选立面不在正视照片范围内')
 
-    source = heatmap if isinstance(heatmap, Mapping) else {}
-    threshold, vmin, vmax = compute_heatmap_scale(values[valid])
-    configured_vmin = source.get('vmin_mm')
-    configured_vmax = source.get('vmax_mm')
-    if configured_vmin is not None and configured_vmax is not None:
-        threshold, vmin, vmax = compute_heatmap_scale(
-            (float(configured_vmin), float(configured_vmax))
+    if external_colors_bgr is not None:
+        supplied = np.asarray(external_colors_bgr, dtype=np.uint8)
+        if supplied.ndim != 2 or supplied.shape[1] != 3 or len(supplied) != len(values):
+            raise ValueError('external_colors_bgr 必须是 (N,3) BGR 数组且与点数一致')
+        colors = supplied
+    else:
+        source = heatmap if isinstance(heatmap, Mapping) else {}
+        threshold, vmin, vmax = compute_heatmap_scale(values[valid])
+        configured_vmin = source.get('vmin_mm')
+        configured_vmax = source.get('vmax_mm')
+        if configured_vmin is not None and configured_vmax is not None:
+            threshold, vmin, vmax = compute_heatmap_scale(
+                (float(configured_vmin), float(configured_vmax))
+            )
+        if source.get('neutral_mm') is not None:
+            threshold = float(source['neutral_mm'])
+        elif source.get('deviation_threshold_mm') is not None:
+            threshold = float(source['deviation_threshold_mm'])
+        colors = signed_deviation_colors_bgr(
+            values,
+            threshold,
+            vmin,
+            vmax,
         )
-    if source.get('neutral_mm') is not None:
-        threshold = float(source['neutral_mm'])
-    elif source.get('deviation_threshold_mm') is not None:
-        threshold = float(source['deviation_threshold_mm'])
-    colors = signed_deviation_colors_bgr(
-        values,
-        threshold,
-        vmin,
-        vmax,
-    )
 
     rendered = np.full_like(photo, GRAY_BGR)
     mask = np.zeros((height, width), dtype=np.uint8)
