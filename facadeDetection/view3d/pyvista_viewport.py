@@ -1111,10 +1111,16 @@ class PyVistaViewport(BaseViewport):
         return True
 
     def _quad_resize_release(self, xy):
-        state = self._quad_resize
-        if state is None or self._quad_resize_drag is None:
+        if self._quad_resize is None or self._quad_resize_drag is None:
             return False
         self._quad_resize_move(xy)
+        self._quad_resize_drag = None
+        return True
+
+    def confirm_heatmap_resize(self):
+        state = self._quad_resize
+        if state is None:
+            return False
         callback = state.get('on_complete')
         bounds = state['bounds'].copy()
         self.exit_heatmap_resize()

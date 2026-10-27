@@ -228,7 +228,66 @@ class InspectionReviewPageMixin:
         self._review_resize_facade_id = int(facade.get('id', -1))
         viewport.enter_heatmap_resize(
             geometry, on_complete=self._on_review_resize_complete)
-        self.lbl_review_heatmap_hint.setText('拖动四边面边中点，松开后更新')
+        self._show_review_resize_confirm_card()
+        self.lbl_review_heatmap_hint.setText('拖动边中点，调整后点击右下角确认')
+
+    def _show_review_resize_confirm_card(self):
+        from PySide6.QtCore import QPoint
+        self._close_review_resize_confirm_card()
+        card = QFrame(
+            self,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        card.setObjectName('roiConfirmCard')
+        card.setFixedSize(190, 96)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        label = QLabel('是否更新立面边界？')
+        label.setStyleSheet('font-size:13px; font-weight:600; color:#0F172A;')
+        layout.addWidget(label)
+        row = QHBoxLayout()
+        cancel = QPushButton('取消')
+        cancel.setProperty('buttonRole', 'secondary')
+        confirm = QPushButton('确认')
+        confirm.setProperty('buttonRole', 'primary')
+        cancel.clicked.connect(
+            lambda: self._on_review_resize_confirm(card, False))
+        confirm.clicked.connect(
+            lambda: self._on_review_resize_confirm(card, True))
+        row.addWidget(cancel)
+        row.addWidget(confirm)
+        layout.addLayout(row)
+        panel = getattr(self, 'viewport_panel', None)
+        if panel is not None:
+            origin = panel.mapToGlobal(QPoint(0, 0))
+            card.move(origin.x() + max(0, panel.width() - 202),
+                      origin.y() + max(0, panel.height() - 108))
+        else:
+            card.move(100, 100)
+        card.show()
+        card.raise_()
+        self._review_resize_confirm_card = card
+
+    def _close_review_resize_confirm_card(self):
+        card = getattr(self, '_review_resize_confirm_card', None)
+        self._review_resize_confirm_card = None
+        if card is not None:
+            card.close()
+            card.deleteLater()
+
+    def _on_review_resize_confirm(self, card, accepted):
+        self._close_review_resize_confirm_card()
+        viewport = getattr(self, 'viewport', None)
+        if viewport is None:
+            return
+        if accepted:
+            viewport.confirm_heatmap_resize()
+        else:
+            viewport.exit_heatmap_resize()
+            self._review_repaint_quad()
 
     def _on_review_resize_complete(self, uv_bounds):
         facade = self._selected_review_facade()
@@ -299,6 +358,7 @@ class InspectionReviewPageMixin:
         """选中立面：检测时导出的热力 PNG 贴到四边面上 + 相机正视。"""
         viewport = getattr(self, 'viewport', None)
         hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
+        self._close_review_resize_confirm_card()
         if viewport is None or not hasattr(viewport, 'show_heatmap_quad'):
             return
         if getattr(viewport, '_quad_resize', None) is not None:

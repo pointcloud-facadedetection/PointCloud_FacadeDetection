@@ -103,6 +103,29 @@ def test_resize_move_updates_live_bounds_without_rebuilding_cloud():
         viewport._quad_resize['bounds'], [0.0, 0.0, 3.0, 2.0])
 
 
+def test_resize_release_waits_for_explicit_confirmation():
+    viewport = PyVistaViewport.__new__(PyVistaViewport)
+    completed = []
+    viewport._quad_resize = {
+        'bounds': np.array([0.0, 0.0, 3.0, 2.0]),
+        'on_complete': completed.append,
+    }
+    viewport._quad_resize_drag = 'right'
+    viewport._quad_resize_move = lambda _xy: True
+
+    for _ in range(4):
+        assert viewport._quad_resize_release(QPoint(10, 10)) is True
+        viewport._quad_resize_drag = 'right'
+    assert completed == []
+    assert viewport._quad_resize is not None
+
+    viewport.exit_heatmap_resize = lambda: setattr(
+        viewport, '_quad_resize', None)
+    assert viewport.confirm_heatmap_resize() is True
+    assert len(completed) == 1
+    np.testing.assert_array_equal(completed[0], [0.0, 0.0, 3.0, 2.0])
+
+
 def test_resized_facade_persistence_invalidates_old_quality(monkeypatch):
     import services.dal.results_repo as repo_module
 
