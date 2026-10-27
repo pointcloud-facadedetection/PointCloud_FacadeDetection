@@ -1062,9 +1062,6 @@ class PyVistaViewport(BaseViewport):
         state = self._quad_resize
         if state is None:
             return
-        for actor in self._quad_resize_actors:
-            self._remove_visual_actor(actor)
-        self._quad_resize_actors.clear()
         u0, v0, u1, v1 = state['bounds']
         origin, u, v = state['origin'], state['u_axis'], state['v_axis']
         corners = np.array([
@@ -1074,15 +1071,24 @@ class PyVistaViewport(BaseViewport):
         mids = (corners + np.roll(corners, -1, axis=0)) * 0.5
         state['midpoints'] = mids
         loop = np.vstack((corners, corners[0]))
-        actor = self._add_mesh(
-            pv.lines_from_points(loop), color='#F59E0B', line_width=5,
-            lighting=False, name='quad_resize_frame')
-        self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
-        actor = self._add_points(
-            pv.PolyData(mids), color='#D97706', point_size=16,
-            render_points_as_spheres=False, lighting=False,
-            name='quad_resize_handles')
-        self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
+        if len(self._quad_resize_actors) != 2:
+            for actor in self._quad_resize_actors:
+                self._remove_visual_actor(actor)
+            self._quad_resize_actors.clear()
+            actor = self._add_mesh(
+                pv.lines_from_points(loop), color='#F59E0B', line_width=5,
+                lighting=False, name='quad_resize_frame')
+            self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
+            actor = self._add_points(
+                pv.PolyData(mids), color='#D97706', point_size=16,
+                render_points_as_spheres=False, lighting=False,
+                name='quad_resize_handles')
+            self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
+        else:
+            for actor, points in zip(self._quad_resize_actors, (loop, mids)):
+                poly = actor.GetMapper().GetInput()
+                poly.points[:] = points
+                poly.Modified()
         self._render()
 
     def _quad_resize_press(self, xy):
@@ -1118,9 +1124,12 @@ class PyVistaViewport(BaseViewport):
             return True
         rel = point - state['origin']
         from algorithms.facade.boundary_adjustment import resize_uv_bounds
-        state['bounds'] = resize_uv_bounds(
+        bounds = resize_uv_bounds(
             state['bounds'], edge, float(rel @ state['u_axis']),
             float(rel @ state['v_axis']))
+        if np.array_equal(bounds, state['bounds']):
+            return True
+        state['bounds'] = bounds
         self._refresh_heatmap_resize()
         return True
 

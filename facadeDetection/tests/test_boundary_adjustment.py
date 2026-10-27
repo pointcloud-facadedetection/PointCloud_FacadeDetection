@@ -126,6 +126,25 @@ def test_resize_release_waits_for_explicit_confirmation():
     np.testing.assert_array_equal(completed[0], [0.0, 0.0, 3.0, 2.0])
 
 
+def test_resize_refresh_reuses_actors_and_skips_unchanged_move(qapp):
+    viewport = PyVistaViewport()
+    try:
+        viewport.enter_heatmap_resize(GEOMETRY)
+        actors = list(viewport._quad_resize_actors)
+        assert len(actors) == 2
+        viewport.ray_plane_pick = lambda *_args: np.array([0.0, 3.0, 1.0])
+        viewport._quad_resize_drag = 'right'
+        viewport._quad_resize_move(QPoint(10, 10))
+        assert viewport._quad_resize_actors == actors
+
+        renders = []
+        viewport._render = lambda: renders.append(1)
+        viewport._quad_resize_move(QPoint(10, 10))
+        assert renders == []
+    finally:
+        viewport.destroy()
+
+
 def test_resized_facade_persistence_invalidates_old_quality(monkeypatch):
     import services.dal.results_repo as repo_module
 
