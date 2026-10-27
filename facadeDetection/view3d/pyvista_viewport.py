@@ -382,6 +382,20 @@ class PyVistaViewport(BaseViewport):
     def frames_rendered(self):
         return self._adapter._frames_rendered
 
+    def _add_mesh(self, *args, **kwargs):
+        kwargs['render'] = False
+        return getattr(self._plotter, 'add_mesh')(*args, **kwargs)
+
+    def _add_points(self, *args, **kwargs):
+        kwargs['render'] = False
+        return getattr(self._plotter, 'add_points')(*args, **kwargs)
+
+    def _remove_actor(self, actor):
+        return getattr(self._plotter, 'remove_actor')(actor, render=False)
+
+    def _reset_camera(self):
+        return getattr(self._plotter, 'reset_camera')(render=False)
+
     def _render(self):
         if self._render_enabled:
             try:
@@ -469,14 +483,14 @@ class PyVistaViewport(BaseViewport):
             self._polys[name] = poly
             old = self._actors.pop(name, None)
             if old is not None:
-                self._plotter.remove_actor(old)
+                self._remove_actor(old)
             self._actors[name] = None
         else:
             poly.points[:] = pos_vis
         poly.point_data['colors'] = (col_vis * 255).astype(np.uint8)
         actor = self._actors.get(name)
         if actor is None:
-            actor = self._plotter.add_points(
+            actor = self._add_points(
                 poly, scalars='colors', rgb=True,
                 point_size=max(1, int(round(data['size'] * 4))),
                 render_points_as_spheres=False, name=f'cloud::{name}')
@@ -498,13 +512,13 @@ class PyVistaViewport(BaseViewport):
             # front=[0,-1,0]（面向建筑正面），up=[0,0,1]（Z 轴屏幕向上）
             self._plotter.view_vector((0.0, -1.0, 0.0),
                                       viewup=(0.0, 0.0, 1.0))
-            self._plotter.reset_camera()
+            self._reset_camera()
             # 与 Config.ORTHO_FOV_DEG≈5° 的 Open3D 正交模式等效
             try:
                 self._plotter.enable_parallel_projection()
             except Exception:
                 pass
-            self._plotter.reset_camera()  # 正交下重取构图
+            self._reset_camera()  # 正交下重取构图
             try:
                 # reset 后再强制一次，防止被构图重置回透视
                 self._plotter.enable_parallel_projection()
@@ -537,7 +551,7 @@ class PyVistaViewport(BaseViewport):
                              direction=(0, 0, 1),
                              i_size=size, j_size=size,
                              i_resolution=1, j_resolution=1)
-            actor = self._plotter.add_mesh(plane, name='ground_grid')
+            actor = self._add_mesh(plane, name='ground_grid')
             # 半透明：alpha 低处透出白底，而非混色
             try:
                 actor.prop.opacity = 0.99
@@ -546,7 +560,7 @@ class PyVistaViewport(BaseViewport):
             # 外围边框：与网格同尺寸的外圈线框
             try:
                 edges = plane.extract_feature_edges()
-                self._grid_border_actor = self._plotter.add_mesh(
+                self._grid_border_actor = self._add_mesh(
                     edges, color=(0.25, 0.25, 0.25), line_width=2,
                     name='ground_grid_border')
             except Exception:
@@ -659,10 +673,10 @@ class PyVistaViewport(BaseViewport):
     def remove_cloud(self, name):
         actor = self._actors.pop(name, None)
         if actor is not None:
-            self._plotter.remove_actor(actor)
+            self._remove_actor(actor)
         bbox = self._bbox_actors.pop(name, None)
         if bbox is not None:
-            self._plotter.remove_actor(bbox)
+            self._remove_actor(bbox)
         self._polys.pop(name, None)
         self.point_data.pop(name, None)
         self._hidden_rows.pop(name, None)
@@ -672,12 +686,12 @@ class PyVistaViewport(BaseViewport):
 
     def clear(self):
         for name in list(self._actors):
-            self._plotter.remove_actor(self._actors[name])
+            self._remove_actor(self._actors[name])
         for name in list(self._bbox_actors):
-            self._plotter.remove_actor(self._bbox_actors[name])
+            self._remove_actor(self._bbox_actors[name])
         for grid in (self._grid_actor, self._grid_border_actor):
             if grid is not None:
-                self._plotter.remove_actor(grid)
+                self._remove_actor(grid)
         self._grid_actor = None
         self._grid_border_actor = None
         self._actors.clear()
@@ -718,13 +732,13 @@ class PyVistaViewport(BaseViewport):
     # ------------------------------------------------------------------
     def toggle_bbox(self, name, min_bound, max_bound):
         if name in self._bbox_actors:
-            self._plotter.remove_actor(self._bbox_actors.pop(name))
+            self._remove_actor(self._bbox_actors.pop(name))
             self._render()
             return False
         bounds = [min_bound[0], max_bound[0],
                   min_bound[1], max_bound[1],
                   min_bound[2], max_bound[2]]
-        actor = self._plotter.add_mesh(
+        actor = self._add_mesh(
             pv.Box(bounds=bounds), style='wireframe',
             color=(0.3, 0.8, 1.0), line_width=3,
             name=f'bbox::{name}')
@@ -735,7 +749,7 @@ class PyVistaViewport(BaseViewport):
     def toggle_normals(self, name, normals, length=0.5, max_lines=8000):
         key = f'{name}__normals'
         if key in self._bbox_actors:
-            self._plotter.remove_actor(self._bbox_actors.pop(key))
+            self._remove_actor(self._bbox_actors.pop(key))
             self._render()
             return False
         data = self.point_data.get(name)
@@ -748,7 +762,7 @@ class PyVistaViewport(BaseViewport):
         cloud = pv.PolyData(pos[sel])
         cloud.point_data['normals'] = normals[sel]
         glyph = cloud.glyph(orient='normals', scale=False, factor=float(length))
-        actor = self._plotter.add_mesh(glyph, color=(0.9, 0.9, 0.4), name=key)
+        actor = self._add_mesh(glyph, color=(0.9, 0.9, 0.4), name=key)
         self._bbox_actors[key] = actor
         self._render()
         return True
@@ -1060,11 +1074,11 @@ class PyVistaViewport(BaseViewport):
         mids = (corners + np.roll(corners, -1, axis=0)) * 0.5
         state['midpoints'] = mids
         loop = np.vstack((corners, corners[0]))
-        actor = self._plotter.add_mesh(
+        actor = self._add_mesh(
             pv.lines_from_points(loop), color='#F59E0B', line_width=5,
             lighting=False, name='quad_resize_frame')
         self._quad_resize_actors.append(self._to_overlay(actor, tool=True))
-        actor = self._plotter.add_points(
+        actor = self._add_points(
             pv.PolyData(mids), color='#D97706', point_size=16,
             render_points_as_spheres=False, lighting=False,
             name='quad_resize_handles')
@@ -1174,7 +1188,7 @@ class PyVistaViewport(BaseViewport):
     def _remove_visual_actor(self, actor):
         """移除可能在主层或任一覆盖层的可视化 actor。"""
         try:
-            self._plotter.remove_actor(actor)
+            self._remove_actor(actor)
         except Exception:
             pass
         for ren in (self._overlay_renderer, self._tool_overlay_renderer):
@@ -1188,7 +1202,7 @@ class PyVistaViewport(BaseViewport):
         """屏幕空间点标记：点精灵（非三维球体），尺寸只随分辨率像素，
         不随相机缩放变化；进最上层工具覆盖层。"""
         poly = pv.PolyData(np.asarray(point, dtype=np.float64).reshape(1, 3))
-        actor = self._plotter.add_points(
+        actor = self._add_points(
             poly, color=color, point_size=int(size_px),
             render_points_as_spheres=False, lighting=False, name=name)
         return self._to_overlay(actor, tool=True)
@@ -1200,7 +1214,7 @@ class PyVistaViewport(BaseViewport):
         try:
             self.clear_measure_visuals()
             try:
-                actor = self._plotter.add_mesh(
+                actor = self._add_mesh(
                     pv.Line(tuple(p1), tuple(p2)), color=color,
                     line_width=3, lighting=False, name='measure_line')
                 self._measure_actors.append(self._to_overlay(actor, tool=True))
@@ -1230,7 +1244,7 @@ class PyVistaViewport(BaseViewport):
             body = render.get('body_line')
             if body is not None:
                 # 尺体粗直线：比测距线（3px）明显粗，醒目琥珀色
-                actor = self._plotter.add_mesh(
+                actor = self._add_mesh(
                     pv.Line(tuple(body[0]), tuple(body[1])),
                     color=(0.98, 0.62, 0.10), line_width=9,
                     lighting=False, name='ruler_body')
@@ -1241,7 +1255,7 @@ class PyVistaViewport(BaseViewport):
                                else (0.30, 0.55, 0.95))
                 plate = pv.PolyData(corners,
                                     faces=np.array([4, 0, 1, 2, 3]))
-                actor = self._plotter.add_mesh(
+                actor = self._add_mesh(
                     plate, color=plate_color, opacity=0.35,
                     lighting=False, name='ruler_plate')
                 try:
@@ -1250,14 +1264,14 @@ class PyVistaViewport(BaseViewport):
                     pass
                 self._ruler_actors.append(self._to_overlay(actor, tool=True))
                 loop = np.vstack([corners, corners[0]])
-                actor = self._plotter.add_mesh(
+                actor = self._add_mesh(
                     pv.lines_from_points(loop), color=plate_color,
                     line_width=3, lighting=False, name='ruler_outline')
                 self._ruler_actors.append(self._to_overlay(actor, tool=True))
             for seg in render.get('defect_segments') or []:
                 color = ((0.86, 0.15, 0.15) if seg.get('exceed')
                          else (0.13, 0.65, 0.35))
-                actor = self._plotter.add_mesh(
+                actor = self._add_mesh(
                     pv.Line(tuple(seg['start']), tuple(seg['end'])),
                     color=color, line_width=6, lighting=False,
                     name='ruler_defect')
@@ -1383,7 +1397,7 @@ class PyVistaViewport(BaseViewport):
                                dtype=np.float32)
             quad.GetPointData().SetTCoords(numpy_to_vtk(tcoords))
             texture = pv.Texture(rgba)
-            actor = self._plotter.add_mesh(quad, texture=texture,
+            actor = self._add_mesh(quad, texture=texture,
                                            lighting=False,
                                            name='heatmap_quad')
             try:
@@ -1434,7 +1448,7 @@ class PyVistaViewport(BaseViewport):
         """四边面边缘高亮：外圈宽线低透明做发光，内圈亮线收边。"""
         loop = np.vstack([corners, corners[0]])
         lines = pv.lines_from_points(loop)
-        glow = self._plotter.add_mesh(lines, color='#38BDF8', opacity=0.30,
+        glow = self._add_mesh(lines, color='#38BDF8', opacity=0.30,
                                       line_width=12, lighting=False,
                                       name='heatmap_frame_glow')
         try:
@@ -1442,7 +1456,7 @@ class PyVistaViewport(BaseViewport):
         except Exception:
             pass
         self._heatmap_quad_actors.append(self._to_overlay(glow))
-        core = self._plotter.add_mesh(lines, color='#0284C7',
+        core = self._add_mesh(lines, color='#0284C7',
                                       line_width=4, lighting=False,
                                       name='heatmap_frame_core')
         self._heatmap_quad_actors.append(self._to_overlay(core))
@@ -1665,7 +1679,7 @@ class PyVistaViewport(BaseViewport):
         bounds = [min_bound[0], max_bound[0],
                   min_bound[1], max_bound[1],
                   min_bound[2], max_bound[2]]
-        self._roi_bbox_actor = self._plotter.add_mesh(
+        self._roi_bbox_actor = self._add_mesh(
             pv.Box(bounds=bounds), style='wireframe',
             color=color, line_width=2, name='roi_bbox')
         self._render()
@@ -1685,14 +1699,14 @@ class PyVistaViewport(BaseViewport):
                 if i < j: edges.append((i, j))
         lines = np.asarray([[2, i, j] for i, j in edges], dtype=np.int64).ravel()
         mesh = pv.PolyData(corners); mesh.lines = lines
-        self._roi_bbox_actor = self._plotter.add_mesh(mesh, color=color,
+        self._roi_bbox_actor = self._add_mesh(mesh, color=color,
                                                        line_width=2, name='roi_bbox')
         self._render()
 
     def _remove_roi_bbox(self):
         if self._roi_bbox_actor is not None:
             try:
-                self._plotter.remove_actor(self._roi_bbox_actor)
+                self._remove_actor(self._roi_bbox_actor)
             except Exception:
                 pass
             self._roi_bbox_actor = None

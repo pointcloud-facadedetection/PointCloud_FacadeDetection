@@ -211,6 +211,31 @@ def test_clear_tool_visuals_keeps_heatmap_visible(viewport):
     assert all(actor.GetVisibility() for actor in actors)
 
 
+def test_heatmap_actor_mutations_disable_implicit_render(viewport):
+    add_calls = []
+    original_add = viewport._plotter.add_mesh
+
+    def spy_add(*args, **kwargs):
+        add_calls.append(kwargs.get('render'))
+        return original_add(*args, **kwargs)
+
+    viewport._plotter.add_mesh = spy_add
+    viewport.show_heatmap_quad(
+        **TestHeatmapQuadCache._quad_args(), cache_key=('f1', 'm1'))
+    assert add_calls == [False, False, False]
+
+    remove_calls = []
+    original_remove = viewport._plotter.remove_actor
+
+    def spy_remove(*args, **kwargs):
+        remove_calls.append(kwargs.get('render'))
+        return original_remove(*args, **kwargs)
+
+    viewport._plotter.remove_actor = spy_remove
+    viewport._remove_visual_actor(viewport._heatmap_quad_actors[0])
+    assert remove_calls == [False]
+
+
 def test_pyvistaqt_auto_render_timer_is_disabled(viewport):
     assert not viewport._widget.render_timer.isActive()
 
