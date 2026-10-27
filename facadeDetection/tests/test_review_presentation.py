@@ -160,6 +160,23 @@ class TestHeatmapQuadCache:
             '同 key 重贴必须复用同一批 actor（不重传纹理）'
         assert all(a.GetVisibility() for a in actors_first)
 
+    def test_precise_uv_updates_existing_geometry_without_new_texture(self, viewport):
+        args = self._quad_args()
+        viewport.show_heatmap_quad(**args, cache_key=('f1', 'm1'))
+        actors = list(viewport._heatmap_quad_actors)
+        quad = next(actor for actor in actors
+                    if actor.GetMapper().GetInput().GetPointData().GetTCoords())
+        texture = quad.GetTexture()
+        args['uv_bounds'] = (0.5, 0.25, 3.5, 2.75)
+        viewport.show_heatmap_quad(
+            **args, cache_key=('f1', 'm1'), geometry_changed=True)
+
+        assert viewport._heatmap_quad_actors == actors
+        assert quad.GetTexture() is texture
+        points = np.asarray(quad.GetMapper().GetInput().points)
+        assert points[:, 1].min() >= 0.5
+        assert points[:, 1].max() <= 3.5 + 0.05
+
     def test_different_key_rebuilds(self, viewport):
         viewport.show_heatmap_quad(**self._quad_args(), cache_key=('f1', 'm1'))
         actors_a = list(viewport._heatmap_quad_actors)
@@ -239,6 +256,7 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
     dataset = SimpleNamespace(
         proxy_points=points, processed_raw_points=points, revision='r1')
     harness = Harness()
+    harness._review_heatmap_mode = 'global_plane_flatness_area'
     harness.facade_quality_controller = SimpleNamespace(
         active_cloud_name=lambda: 'c')
     harness.facade_service = SimpleNamespace(get_dataset=lambda _cloud: dataset)
@@ -253,7 +271,7 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
     facade = {'id': 1, 'edit_revision': 0}
     fallback = harness._review_heat_uv_bounds(facade, quality, (301, 401))
     assert fallback == (-1.0, -1.0, 5.0, 4.0)
-    key = (1, 'r1', 0)
+    key = (1, 'r1', 0, 'global_plane_flatness_area', (301, 401))
     assert key in harness._review_heat_rect_workers
     assert pump_until(qapp, lambda: key in harness._review_heat_rect_cache)
     rect = harness._review_heat_rect_cache[key]

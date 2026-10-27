@@ -414,7 +414,10 @@ class InspectionReviewPageMixin:
                 viewport.show_heatmap_quad(
                     rgba, geometry['origin'], geometry['u_axis'],
                     geometry['v_axis'], uv_bounds, normal=normal,
-                    cache_key=token)
+                    cache_key=token,
+                    geometry_changed=getattr(
+                        self, '_review_heat_rect_geometry_dirty', False))
+                self._review_heat_rect_geometry_dirty = False
                 hint = heatmap_spec(self._review_heatmap_mode)['title']
         if hint_label is not None:
             hint_label.setText(hint)
@@ -473,7 +476,9 @@ class InspectionReviewPageMixin:
             dataset = self.facade_service.get_dataset(cloud)
             key = (int(facade.get('id', -1)),
                    str(getattr(dataset, 'revision', None)),
-                   int(facade.get('edit_revision', 0) or 0))
+                   int(facade.get('edit_revision', 0) or 0),
+                   str(self._review_heatmap_mode),
+                   (int(image_hw[0]), int(image_hw[1])))
             self._review_heat_rect_current_key = key
             cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
             if key in cache:
@@ -498,6 +503,7 @@ class InspectionReviewPageMixin:
         cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
         cache[key] = rect
         if key == getattr(self, '_review_heat_rect_current_key', None):
+            self._review_heat_rect_geometry_dirty = True
             self._review_repaint_quad()
 
     def _on_review_heat_rect_failed(self, key, message):

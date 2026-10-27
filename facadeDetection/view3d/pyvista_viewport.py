@@ -1317,7 +1317,8 @@ class PyVistaViewport(BaseViewport):
                 self._remove_visual_actor(actor)
 
     def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
-                          normal=None, lift=None, cache_key=None):
+                          normal=None, lift=None, cache_key=None,
+                          geometry_changed=False):
         """把透明热力 PNG（RGBA）贴到立面四边面上（逐像素 alpha 镂空）。
 
         image 为检测时导出的 facade_NNN_{mode}_transparent.png（RGBA uint8，
@@ -1341,6 +1342,10 @@ class PyVistaViewport(BaseViewport):
                         pass
                 self._heatmap_quad_actors = list(actors)
                 self._heatmap_quad_key = cache_key
+                if geometry_changed:
+                    self._update_heatmap_geometry(
+                        actors, origin, u_axis, v_axis, uv_bounds,
+                        normal=normal, lift=lift)
                 return
             self._heatmap_quad_actors = []
             rgba = np.asarray(image)
@@ -1394,6 +1399,36 @@ class PyVistaViewport(BaseViewport):
                   flush=True)
         finally:
             self.set_render_enabled(True)
+
+    @staticmethod
+    def _update_heatmap_geometry(actors, origin, u_axis, v_axis, uv_bounds,
+                                 normal=None, lift=None):
+        origin = np.asarray(origin, dtype=np.float64).reshape(3)
+        u_axis = np.asarray(u_axis, dtype=np.float64).reshape(3)
+        v_axis = np.asarray(v_axis, dtype=np.float64).reshape(3)
+        u0, v0, u1, v1 = np.asarray(uv_bounds, dtype=np.float64).reshape(4)
+        if normal is None:
+            normal = np.cross(u_axis, v_axis)
+        normal = np.asarray(normal, dtype=np.float64).reshape(3)
+        norm = np.linalg.norm(normal)
+        normal = normal / norm if norm > 1e-12 else np.zeros(3)
+        if lift is None:
+            lift = max(0.05, 0.001 * max(u1 - u0, v1 - v0))
+        corners = np.array([
+            origin + u0 * u_axis + v0 * v_axis,
+            origin + u1 * u_axis + v0 * v_axis,
+            origin + u1 * u_axis + v1 * v_axis,
+            origin + u0 * u_axis + v1 * v_axis,
+        ]) + normal * float(lift)
+        loop = np.vstack((corners, corners[0]))
+        for actor in actors:
+            try:
+                poly = actor.GetMapper().GetInput()
+                textured = poly.GetPointData().GetTCoords() is not None
+                poly.points[:] = corners if textured else loop
+                poly.Modified()
+            except Exception:
+                pass
 
     def _add_heatmap_frame(self, corners):
         """四边面边缘高亮：外圈宽线低透明做发光，内圈亮线收边。"""
