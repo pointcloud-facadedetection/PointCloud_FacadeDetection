@@ -115,7 +115,7 @@ class InspectionReviewPageMixin:
         self.btn_review_ruler.setCheckable(True)
         self.btn_review_ruler.setEnabled(False)
         self.btn_review_ruler.setToolTip(
-            '先在右侧列表选中立面；第一击定尺心，第二击定方向（尺长 2m）')
+            '先在右侧列表选中立面；第一击定起点，第二击定方向（尺长 2m）')
         self.btn_review_ruler.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_ruler.toggled.connect(self._on_review_ruler_toggled)
         row.addWidget(self.btn_review_ruler)

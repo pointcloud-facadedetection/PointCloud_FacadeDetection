@@ -160,6 +160,7 @@ class PyVistaViewport(BaseViewport):
         self._heatmap_quad_groups = {}     # cache_key -> [actors]（LRU）
         self._heatmap_quad_key = None      # 当前可见组的 key
         self._overlay_renderer = None
+        self._tool_overlay_renderer = None
         self._plane_pick_model = None
         self._plane_pick_callback = None
 
@@ -983,10 +984,8 @@ class PyVistaViewport(BaseViewport):
         self._pick_marker_actors.clear()
         self._render()
 
-    # ---- 覆盖层渲染管线（layer-1）：工具可视化独立管线，永压点云之上 ----
+    # ---- 覆盖层：layer-1 热力图，layer-2 测距/靠尺/拾取标记 ----
     def _get_overlay_renderer(self):
-        """layer-1 覆盖层：共享主相机（自动同步），每帧清深度缓冲，
-        本层内容（热力贴图/边框/测距/靠尺/标记点）不被点云遮挡。"""
         if self._overlay_renderer is None:
             import vtk
             rw = self._plotter.render_window
@@ -1002,10 +1001,26 @@ class PyVistaViewport(BaseViewport):
             self._overlay_renderer = ren
         return self._overlay_renderer
 
-    def _to_overlay(self, actor):
-        """把 add_mesh/add_points 建好的 actor 挪进覆盖层管线。"""
+    def _get_tool_overlay_renderer(self):
+        if self._tool_overlay_renderer is None:
+            import vtk
+            rw = self._plotter.render_window
+            main = self._plotter.renderer
+            if rw.GetNumberOfLayers() < 3:
+                rw.SetNumberOfLayers(3)
+            ren = vtk.vtkRenderer()
+            ren.SetLayer(2)
+            ren.InteractiveOff()
+            ren.SetActiveCamera(main.GetActiveCamera())
+            ren.PreserveDepthBufferOff()
+            rw.AddRenderer(ren)
+            self._tool_overlay_renderer = ren
+        return self._tool_overlay_renderer
+
+    def _to_overlay(self, actor, tool=False):
         try:
-            ren = self._get_overlay_renderer()
+            ren = (self._get_tool_overlay_renderer() if tool
+                   else self._get_overlay_renderer())
             self._plotter.renderer.RemoveActor(actor)
             ren.AddActor(actor)
         except Exception:
@@ -1013,26 +1028,26 @@ class PyVistaViewport(BaseViewport):
         return actor
 
     def _remove_visual_actor(self, actor):
-        """移除可能在主层或覆盖层的可视化 actor。"""
+        """移除可能在主层或任一覆盖层的可视化 actor。"""
         try:
             self._plotter.remove_actor(actor)
         except Exception:
             pass
-        ren = self._overlay_renderer
-        if ren is not None:
-            try:
-                ren.RemoveActor(actor)
-            except Exception:
-                pass
+        for ren in (self._overlay_renderer, self._tool_overlay_renderer):
+            if ren is not None:
+                try:
+                    ren.RemoveActor(actor)
+                except Exception:
+                    pass
 
     def _point_marker_actor(self, point, color, size_px, name):
         """屏幕空间点标记：点精灵（非三维球体），尺寸只随分辨率像素，
-        不随相机缩放变化；进覆盖层。"""
+        不随相机缩放变化；进最上层工具覆盖层。"""
         poly = pv.PolyData(np.asarray(point, dtype=np.float64).reshape(1, 3))
         actor = self._plotter.add_points(
             poly, color=color, point_size=int(size_px),
             render_points_as_spheres=False, lighting=False, name=name)
-        return self._to_overlay(actor)
+        return self._to_overlay(actor, tool=True)
 
     # ---- 复核页工具可视化（测距连线 / 交互靠尺），不入 BaseViewport 契约 ----
     def show_measure_line(self, p1, p2, color=(0.12, 0.39, 0.85)):
@@ -1044,7 +1059,7 @@ class PyVistaViewport(BaseViewport):
                 actor = self._plotter.add_mesh(
                     pv.Line(tuple(p1), tuple(p2)), color=color,
                     line_width=3, lighting=False, name='measure_line')
-                self._measure_actors.append(self._to_overlay(actor))
+                self._measure_actors.append(self._to_overlay(actor, tool=True))
                 for p in (p1, p2):
                     actor = self._point_marker_actor(p, color, 12,
                                                      'measure_point')
@@ -1075,7 +1090,7 @@ class PyVistaViewport(BaseViewport):
                     pv.Line(tuple(body[0]), tuple(body[1])),
                     color=(0.98, 0.62, 0.10), line_width=9,
                     lighting=False, name='ruler_body')
-                self._ruler_actors.append(self._to_overlay(actor))
+                self._ruler_actors.append(self._to_overlay(actor, tool=True))
             corners = np.asarray(render.get('corners'), dtype=np.float64)
             if corners.shape == (4, 3):
                 plate_color = ((0.85, 0.25, 0.22) if exceeded
@@ -1089,12 +1104,12 @@ class PyVistaViewport(BaseViewport):
                     actor.ForceTranslucentOn()
                 except Exception:
                     pass
-                self._ruler_actors.append(self._to_overlay(actor))
+                self._ruler_actors.append(self._to_overlay(actor, tool=True))
                 loop = np.vstack([corners, corners[0]])
                 actor = self._plotter.add_mesh(
                     pv.lines_from_points(loop), color=plate_color,
                     line_width=3, lighting=False, name='ruler_outline')
-                self._ruler_actors.append(self._to_overlay(actor))
+                self._ruler_actors.append(self._to_overlay(actor, tool=True))
             for seg in render.get('defect_segments') or []:
                 color = ((0.86, 0.15, 0.15) if seg.get('exceed')
                          else (0.13, 0.65, 0.35))
@@ -1102,7 +1117,7 @@ class PyVistaViewport(BaseViewport):
                     pv.Line(tuple(seg['start']), tuple(seg['end'])),
                     color=color, line_width=6, lighting=False,
                     name='ruler_defect')
-                self._ruler_actors.append(self._to_overlay(actor))
+                self._ruler_actors.append(self._to_overlay(actor, tool=True))
             depression = render.get('depression_xyz')
             if depression is not None:
                 actor = self._point_marker_actor(

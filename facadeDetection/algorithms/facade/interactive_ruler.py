@@ -116,7 +116,7 @@ def build_interactive_surface(points, plane_model, plane_origin=None,
 
 
 def place_ruler(surface, click_point, ruler_length=2.0, ruler_width=0.055,
-                threshold_mm=None, max_hole_ratio=0.2):
+                threshold_mm=None, max_hole_ratio=0.2, clamp_center=True):
     """以 click_point（世界坐标）在尺方向上的投影为尺心放置靠尺。
 
     返回 dict：ok/reason、gap_mm、exceeded（threshold_mm 给出时）、
@@ -125,9 +125,9 @@ def place_ruler(surface, click_point, ruler_length=2.0, ruler_width=0.055,
     """
     click = np.asarray(click_point, dtype=np.float64).reshape(3)
     u_center = float((click - surface.centroid) @ surface.e_u)
-    # 尺心钳制在实区范围内，拾取偏差落在立面外时贴边放置
     lo, hi = surface.u_span
-    u_center = float(np.clip(u_center, lo + 1e-9, hi - 1e-9))
+    if clamp_center:
+        u_center = float(np.clip(u_center, lo + 1e-9, hi - 1e-9))
 
     result = ruler_at(surface, u_center, ruler_length, max_hole_ratio,
                       threshold_mm=threshold_mm)
@@ -279,11 +279,25 @@ def ruler_direction_from_points(center_point, second_point, plane_model):
         return None
     return d / norm
 
+
+def ruler_center_from_start(start_point, direction, ruler_length):
+    """将首击起点换算为既有放尺算法所需的尺心。"""
+    start = np.asarray(start_point, dtype=np.float64).reshape(3)
+    direction = np.asarray(direction, dtype=np.float64).reshape(3)
+    length = float(ruler_length)
+    if not np.all(np.isfinite(start)) or not np.all(np.isfinite(direction)):
+        raise ValueError('靠尺起点或方向无效')
+    norm = np.linalg.norm(direction)
+    if norm < 1e-12 or length <= 0:
+        raise ValueError('靠尺方向或尺长无效')
+    return start + direction / norm * (length / 2.0)
+
+
 def place_ruler_on_strip(points, plane_model, center, direction,
                          ruler_length=2.0, ruler_width=0.055,
                          threshold_mm=None, max_hole_ratio=0.2,
                          select_band=0.01, hole_band=0.02, bin_size=0.04,
-                         top_q=1.0, sor=None):
+                         top_q=1.0, sor=None, clamp_center=True):
     """尺心 + 方向 → 尺宽条带取样 → prepare_surface / ruler_at。
 
     与批量链路同物理语义：剖面只取尺线两侧 ±ruler_width/2 内的点
@@ -314,6 +328,7 @@ def place_ruler_on_strip(points, plane_model, center, direction,
     except ValueError as exc:
         return {'ok': False, 'reason': str(exc)}
     result = place_ruler(surface, center, ruler_length, ruler_width,
-                         threshold_mm, max_hole_ratio)
+                         threshold_mm, max_hole_ratio, clamp_center=clamp_center)
     result['strip_point_count'] = int(len(strip))
+    result['sor_removed_count'] = int(surface.stats.get('n_sor_removed', 0))
     return result

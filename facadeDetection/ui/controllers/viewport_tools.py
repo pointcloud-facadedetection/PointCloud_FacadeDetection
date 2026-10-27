@@ -7,10 +7,9 @@
 其它后端经 hasattr 退化为纯文本结果）。
 
 靠尺分层缓存：方向无关层（质量域立面点集 + 平面参数，按立面 id +
-数据集版本缓存，后台线程提取不卡 UI）在 _ruler_base；方向相关层
-（条带取样 + prepare_surface + ruler_at，见
-interactive_ruler.place_ruler_on_strip）在每次方向确定后同步计算
-——条带内仅数百至数千点，实测 <100ms。
+数据集版本缓存）在 _ruler_base；方向相关层（条带取样 +
+prepare_surface + ruler_at）在第二击后由后台线程计算，GUI 只提交结果。
+两击交互为首击起点、第二击方向。
 """
 from __future__ import annotations
 
@@ -62,6 +61,39 @@ class _RulerBaseWorker(QThread):
             self.failed.emit(self._generation, str(exc))
 
 
+class _RulerPlacementWorker(QThread):
+    done = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, generation, points, plane_model, center, direction,
+                 params, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._points = points
+        self._plane_model = plane_model
+        self._center = center
+        self._direction = direction
+        self._params = dict(params)
+
+    def run(self):
+        try:
+            params = self._params
+            result = interactive_ruler.place_ruler_on_strip(
+                self._points, self._plane_model, self._center, self._direction,
+                ruler_length=float(params.get('ruler_length', 2.0)),
+                ruler_width=float(params.get('ruler_width', 0.055)),
+                threshold_mm=params.get('threshold_mm'),
+                max_hole_ratio=float(params.get('max_hole_ratio', 0.2)),
+                select_band=float(params.get('select_band', 0.01)),
+                hole_band=float(params.get('hole_band', 0.02)),
+                bin_size=float(params.get('bin_size', 0.04)),
+                top_q=float(params.get('top_q', 1.0)),
+                sor=params.get('sor'), clamp_center=False)
+            self.done.emit(self._generation, result)
+        except Exception as exc:
+            self.failed.emit(self._generation, str(exc))
+
+
 class ViewportToolsController(QObject):
     status_message = Signal(str, int)      # 状态栏文本与超时（毫秒）
     warning_requested = Signal(str)        # QMessageBox.warning 正文
@@ -89,10 +121,13 @@ class ViewportToolsController(QObject):
         # 靠尺：方向无关基础层缓存（points/plane_origin/revision）
         self._ruler_base = None
         self._ruler_facade_id = None
-        self._ruler_center = None          # 两点交互态：None=等尺心
+        self._ruler_start = None          # 两点交互态：None=等待起点
         self._base_gen = 0                 # 基础层构建代数（作废过期结果）
         self._base_pending = False
         self._base_worker = None
+        self._placement_gen = 0
+        self._placement_pending = False
+        self._placement_worker = None
 
     @property
     def active_tool(self):
@@ -147,11 +182,11 @@ class ViewportToolsController(QObject):
             viewport.enter_plane_pick_mode(self._plane_model,
                                            callback=self._on_ruler_pick)
             # 基础点集缓存未命中时后台提取，就绪前点击给"准备中"提示
-            self.measure_text.emit('靠尺：点击立面确定尺心'
+            self.measure_text.emit('靠尺：点击立面确定起点'
                                    if self._ruler_base is not None
                                    else '靠尺：正在准备立面数据…')
             self.status_message.emit(
-                '靠尺模式：第一击定尺心，第二击定方向，Esc 退出', 5000)
+                '靠尺模式：第一击定起点，第二击定方向，Esc 退出', 5000)
         self.tool_activated.emit(tool)
 
     def _prepare_plane(self, facade):
@@ -190,13 +225,19 @@ class ViewportToolsController(QObject):
             self.measure_text.emit('')
             self.tool_deactivated.emit()
 
+    def shutdown(self):
+        self.cancel()
+        for worker in (self._base_worker, self._placement_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait(2000)
+
     def clear_visuals(self):
         """【清除】按钮：清空标记与结果，保持当前工具模式可用。"""
         self._clear_state()
         if self._tool == self.TOOL_MEASURE:
             self.measure_text.emit('测距：在立面上点击第一个点')
         elif self._tool == self.TOOL_RULER:
-            self.measure_text.emit('靠尺：点击立面确定尺心')
+            self.measure_text.emit('靠尺：点击立面确定起点')
 
     def invalidate(self):
         """选中立面/点云切换：清空靠尺缓存；工具激活中则以新立面重建。"""
@@ -211,7 +252,9 @@ class ViewportToolsController(QObject):
 
     def _clear_state(self):
         self._measure_points = []
-        self._ruler_center = None
+        self._ruler_start = None
+        self._placement_gen += 1
+        self._placement_pending = False
         viewport = self._viewport
         if viewport is not None and hasattr(viewport, 'clear_tool_visuals'):
             try:
@@ -252,7 +295,7 @@ class ViewportToolsController(QObject):
         self.status_message.emit(text, 0)
 
     # ------------------------------------------------------------------
-    # 交互靠尺：第一击定尺心，第二击定方向（两点连线投影到立面平面）
+    # 交互靠尺：第一击定起点，第二击定方向（两点连线投影到立面平面）
     # ------------------------------------------------------------------
     def _start_ruler_base_prepare(self, facade):
         """方向无关层：质量域立面点集 + 平面原点。
@@ -301,8 +344,8 @@ class ViewportToolsController(QObject):
                             'revision': revision}
         self._ruler_facade_id = facade_id
         self._base_pending = False
-        if self._tool == self.TOOL_RULER and self._ruler_center is None:
-            self.measure_text.emit('靠尺：点击立面确定尺心')
+        if self._tool == self.TOOL_RULER and self._ruler_start is None:
+            self.measure_text.emit('靠尺：点击立面确定起点')
 
     def _on_ruler_base_failed(self, generation, message):
         if generation != self._base_gen:
@@ -318,6 +361,9 @@ class ViewportToolsController(QObject):
     def _on_ruler_pick(self, picked):
         if not picked:
             return
+        if self._placement_pending:
+            self.measure_text.emit('靠尺：正在计算放置结果…')
+            return
         if self._ruler_base is None:
             if self._base_pending:
                 self.measure_text.emit('靠尺：正在准备立面数据…')
@@ -325,51 +371,61 @@ class ViewportToolsController(QObject):
         point = np.asarray(picked.get('point'), dtype=np.float64)
         viewport = self._viewport
 
-        if self._ruler_center is None:
-            # 第一击：定尺心（须在立面范围内），12px 屏幕空间点标记
+        if self._ruler_start is None:
             _, _, inside = interactive_ruler.point_in_facade_bounds(
                 point, self._plane_geometry)
             if inside is False:
                 self.measure_text.emit('拾取点在立面范围外，请点击立面内部')
                 return
-            self._ruler_center = point
+            self._ruler_start = point
             if hasattr(viewport, 'clear_ruler_overlay'):
-                viewport.clear_ruler_overlay()     # 收起上一轮的尺
+                viewport.clear_ruler_overlay()
             viewport.update_pick_markers(src_points=[point])
             self.measure_text.emit('靠尺：再点击确定靠尺方向')
             return
 
-        # 第二击：两点连线投影到立面平面 = 靠尺方向
-        center = self._ruler_center
+        start = self._ruler_start
         direction = interactive_ruler.ruler_direction_from_points(
-            center, point, self._plane_model)
+            start, point, self._plane_model)
         if direction is None:
-            self.measure_text.emit('方向点与尺心太近，请重新点击方向点')
+            self.measure_text.emit('方向点与起点太近，请重新点击方向点')
             return
         params = dict(self._ruler_params_provider() or {})
-        threshold_mm = params.get('threshold_mm')
-        result = interactive_ruler.place_ruler_on_strip(
-            self._ruler_base['points'], self._plane_model, center, direction,
-            ruler_length=float(params.get('ruler_length', 2.0)),
-            ruler_width=float(params.get('ruler_width', 0.055)),
-            threshold_mm=threshold_mm,
-            max_hole_ratio=float(params.get('max_hole_ratio', 0.2)),
-            select_band=float(params.get('select_band', 0.01)),
-            hole_band=float(params.get('hole_band', 0.02)),
-            bin_size=float(params.get('bin_size', 0.04)),
-            top_q=float(params.get('top_q', 1.0)),
-            sor=params.get('sor'))
-        self._ruler_center = None
+        center = interactive_ruler.ruler_center_from_start(
+            start, direction, float(params.get('ruler_length', 2.0)))
+        self._placement_gen += 1
+        generation = self._placement_gen
+        self._placement_pending = True
+        self._ruler_start = None
         viewport.clear_pick_markers()
+        self.measure_text.emit('靠尺：正在计算放置结果…')
+        worker = _RulerPlacementWorker(
+            generation, self._ruler_base['points'], self._plane_model,
+            center, direction, params, parent=self)
+        worker.done.connect(self._on_ruler_placement_done)
+        worker.failed.connect(self._on_ruler_placement_failed)
+        worker.finished.connect(
+            lambda gen=generation: self._on_ruler_placement_thread_finished(gen))
+        self._placement_worker = worker
+        worker.start()
+
+    def _on_ruler_placement_done(self, generation, result):
+        if generation != self._placement_gen:
+            return
+        self._placement_pending = False
+        if self._tool != self.TOOL_RULER:
+            return
         if not result.get('ok'):
             self.status_message.emit(
                 f"靠尺放置失败：{result.get('reason', '未知原因')}", 5000)
-            self.measure_text.emit('靠尺：点击立面确定尺心')
+            self.measure_text.emit('靠尺：点击立面确定起点')
             return
+        viewport = self._viewport
         if hasattr(viewport, 'show_ruler_overlay'):
             viewport.show_ruler_overlay(
                 result['render'], exceeded=result.get('exceeded', False))
         gap_mm = float(result.get('gap_mm', 0.0))
+        threshold_mm = (self._ruler_params_provider() or {}).get('threshold_mm')
         if threshold_mm is not None:
             verdict = ('超限' if result.get('exceeded') else '合格')
             text = (f"靠尺 gap = {gap_mm:.1f} mm"
@@ -378,5 +434,20 @@ class ViewportToolsController(QObject):
             text = f'靠尺 gap = {gap_mm:.1f} mm'
         if not result.get('coverage_valid', True):
             text += f"；空洞占比 {result.get('hole_ratio', 0.0) * 100:.0f}%，结果仅供参考"
+        removed = int(result.get('sor_removed_count', 0))
+        if removed:
+            text += f'；剔除孤立点 {removed} 个'
         self.measure_text.emit(text)
         self.status_message.emit(text, 0)
+
+    def _on_ruler_placement_failed(self, generation, message):
+        if generation != self._placement_gen:
+            return
+        self._placement_pending = False
+        self._hint(f'靠尺放置失败：{message}')
+        if self._tool == self.TOOL_RULER:
+            self.measure_text.emit('靠尺：点击立面确定起点')
+
+    def _on_ruler_placement_thread_finished(self, generation):
+        if generation == self._placement_gen:
+            self._placement_worker = None

@@ -369,3 +369,31 @@ class TestTwoClickRulerPlacement:
             np.array([0.0, 1.0, 0.0]), threshold_mm=4.0)
         assert result['ok'] is False
         assert result.get('reason')
+
+    def test_first_click_is_body_start_not_center(self):
+        points = self._dense_wall()
+        start = np.array([0.0, 1.0, 1.5])
+        second = np.array([0.0, 3.0, 1.5])
+        direction = interactive_ruler.ruler_direction_from_points(
+            start, second, PLANE_MODEL)
+        center = interactive_ruler.ruler_center_from_start(start, direction, 2.0)
+        result = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, center, direction, ruler_length=2.0,
+            clamp_center=False)
+        assert result['ok'] is True
+        body = np.asarray(result['render']['body_line'])
+        assert float((body[0] - start) @ direction) == pytest.approx(0.0, abs=1e-6)
+        assert float((body[1] - start) @ direction) == pytest.approx(2.0, abs=1e-6)
+
+    def test_isolated_spike_is_removed_before_ruler_placement(self):
+        points = self._dense_wall()
+        center = np.array([0.0, 2.0, 1.5])
+        direction = np.array([0.0, 1.0, 0.0])
+        baseline = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, center, direction, threshold_mm=4.0)
+        points = np.vstack((points, np.array([[0.2, 2.0, 1.5]])))
+        result = interactive_ruler.place_ruler_on_strip(
+            points, PLANE_MODEL, center, direction, threshold_mm=4.0)
+        assert result['ok'] is True
+        assert result['sor_removed_count'] >= 1
+        assert result['gap_mm'] == pytest.approx(baseline['gap_mm'])

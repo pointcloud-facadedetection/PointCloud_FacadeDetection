@@ -625,7 +625,11 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         if quality_dialog is not None:
             quality_dialog.close()
             self._quality_dialog = None
-        # Step 4: 由 runtime 统一清理线程池（不再接受新任务）
+        # Step 4: 停止复核工具并等待其短任务退出，再统一清理线程池
+        tools = getattr(self, 'viewport_tools_controller', None)
+        shutdown = getattr(tools, 'shutdown', None)
+        if callable(shutdown):
+            shutdown()
         runtime = getattr(self, '_runtime', None)
         if runtime is not None:
             runtime.clear()
