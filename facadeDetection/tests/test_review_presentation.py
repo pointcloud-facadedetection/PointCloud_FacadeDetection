@@ -196,3 +196,24 @@ def test_clear_tool_visuals_keeps_heatmap_visible(viewport):
 
 def test_pyvistaqt_auto_render_timer_is_disabled(viewport):
     assert not viewport._widget.render_timer.isActive()
+
+
+def test_review_gray_actor_preserves_color_buffer(viewport, qapp):
+    viewport.point_data['t']['proxy_ids'] = np.arange(100, dtype=np.int32)
+    service = ViewportRenderService(viewport, db=None)
+    facades = [{'id': 1, 'proxy_indices': [0, 1, 2]}]
+    service.highlight_facades('t', facades)
+    qapp.processEvents()
+    colored = viewport.point_data['t']['color'].copy()
+
+    service.set_review_mode(True)
+    service.highlight_facades('t', facades)
+    actor = viewport._actors['t']
+    assert actor.GetMapper().GetScalarVisibility() == 0
+    np.testing.assert_array_equal(viewport.point_data['t']['color'], colored)
+
+    service.set_review_mode(False)
+    service.highlight_facades('t', facades)
+    qapp.processEvents()
+    assert actor.GetMapper().GetScalarVisibility() == 1
+    np.testing.assert_array_equal(viewport.point_data['t']['color'], colored)

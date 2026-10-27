@@ -483,6 +483,10 @@ class PyVistaViewport(BaseViewport):
             self._actors[name] = actor
         else:
             poly.Modified()
+        uniform = data.get('_uniform_color')
+        if uniform is not None:
+            actor.GetMapper().SetScalarVisibility(0)
+            actor.GetProperty().SetColor(*uniform)
         if reset_view:
             self._initialize_scene_view()
         self._render()
@@ -571,10 +575,31 @@ class PyVistaViewport(BaseViewport):
         if self.point_data:
             self._initialize_scene_view()
 
+    def set_cloud_uniform_color(self, name, color=None, render=True):
+        """用 actor 固定色显示，保留点云颜色缓冲供后续恢复。"""
+        data = self.point_data.get(name)
+        if data is None:
+            return
+        normalized = None if color is None else tuple(
+            float(value) for value in color)
+        changed = data.get('_uniform_color') != normalized
+        data['_uniform_color'] = normalized
+        actor = self._actors.get(name)
+        if actor is not None:
+            mapper = actor.GetMapper()
+            mapper.SetScalarVisibility(0 if normalized is not None else 1)
+            if normalized is not None:
+                actor.GetProperty().SetColor(*normalized)
+            else:
+                actor.GetProperty().SetColor(1.0, 1.0, 1.0)
+        if render and changed:
+            self._render()
+
     def update_cloud_color(self, name, colors):
         data = self.point_data.get(name)
         if data is None:
             return
+        self.set_cloud_uniform_color(name, None, render=False)
         data['color'] = np.ascontiguousarray(
             normalize_colors(colors, len(data['pos'])).astype(np.float32))
         _, col_vis = self._visible_view(name)

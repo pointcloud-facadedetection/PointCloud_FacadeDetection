@@ -325,20 +325,22 @@ class ViewportRenderService:
             # 弹出签名缓存，使迁回操作页后正常分色路径强制重刷。
             try:
                 self._facades_cache[cloud_name] = facades or []
-                data = (self.viewport.get_cloud_data(cloud_name)
-                        if hasattr(self.viewport, 'get_cloud_data') else None)
-                pos = data.get('pos') if data is not None else None
-                if pos is not None and len(pos):
-                    colors = np.tile(
-                        np.asarray(_BASE_GRAY, dtype=np.float32).reshape(1, 3),
-                        (len(pos), 1))
-                    # 已是恒灰（如二次进入复核页）则跳过上传：array_equal
-                    # 比较 23MB 数组约 10ms，远小于 VTK 整云颜色上传
-                    existing = data.get('color')
-                    if not (existing is not None
-                            and np.shape(existing) == colors.shape
-                            and np.array_equal(existing, colors)):
-                        self._update_cloud_color(cloud_name, colors)
+                uniform = getattr(self.viewport, 'set_cloud_uniform_color', None)
+                if callable(uniform):
+                    uniform(cloud_name, _BASE_GRAY)
+                else:
+                    data = (self.viewport.get_cloud_data(cloud_name)
+                            if hasattr(self.viewport, 'get_cloud_data') else None)
+                    pos = data.get('pos') if data is not None else None
+                    if pos is not None and len(pos):
+                        colors = np.tile(
+                            np.asarray(_BASE_GRAY, dtype=np.float32).reshape(1, 3),
+                            (len(pos), 1))
+                        existing = data.get('color')
+                        if not (existing is not None
+                                and np.shape(existing) == colors.shape
+                                and np.array_equal(existing, colors)):
+                            self._update_cloud_color(cloud_name, colors)
                 self._facade_color_signatures.pop(cloud_name, None)
             except Exception as e:
                 print(f"highlight_facades(review) failed: {e}", flush=True)

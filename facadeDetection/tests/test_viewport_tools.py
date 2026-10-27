@@ -117,6 +117,7 @@ def test_color_update_preserves_display_proxy_lookup():
         }
     }
     viewport._polys = {'cloud': poly}
+    viewport._actors = {}
     viewport._hidden_rows = {}
     viewport._render = lambda: None
     viewport.update_cloud_color('cloud', np.ones((2, 3), dtype=np.float32))
