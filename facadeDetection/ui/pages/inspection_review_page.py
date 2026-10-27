@@ -43,6 +43,27 @@ class _HeatRectWorker(QThread):
             self.failed.emit(self._key, str(exc))
 
 
+class _HeatPngWorker(QThread):
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, key, parent=None):
+        super().__init__(parent)
+        self._key = key
+
+    def run(self):
+        path, _mtime = self._key
+        try:
+            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if image is None or image.ndim != 3 or image.shape[2] != 4:
+                self.failed.emit(self._key, 'PNG 不存在或不是四通道图像')
+                return
+            rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+            self.done.emit(self._key, rgba)
+        except Exception as exc:
+            self.failed.emit(self._key, str(exc))
+
+
 class InspectionReviewPageMixin:
     """检测复核页 mixin：布局 + 视口迁移 + 复核立面列表。
 
@@ -404,8 +425,10 @@ class InspectionReviewPageMixin:
                     viewport.show_heatmap_frame(
                         corners,
                         cache_key=('frame', int(facade.get('id', -1))))
-                hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}"
-                        '：该立面此模式无热力图')
+                hint = (f"{heatmap_spec(self._review_heatmap_mode)['title']}："
+                        + ('正在加载热力图…' if getattr(
+                            self, '_review_heat_png_pending', False)
+                           else '该立面此模式无热力图'))
             else:
                 uv_bounds = self._review_heat_uv_bounds(
                     facade, quality, rgba.shape[:2])
@@ -423,13 +446,10 @@ class InspectionReviewPageMixin:
             hint_label.setText(hint)
 
     def _review_heat_png(self, facade, quality):
-        """加载透明热力 PNG 为 RGBA；按路径+mtime 缓存，切模式/重选秒切。
-
-        返回 (rgba, cache_token)；无产出返回 (None, None)。cache_token
-        为 (立面 id, 模式, mtime)，供视口 actor 组缓存复用。
-        """
+        """命中缓存直接返回；未命中由后台线程解码 PNG。"""
         png_path = self._review_heatmap_png_path(facade, quality)
         if not png_path:
+            self._review_heat_png_pending = False
             return None, None
         try:
             mtime = os.path.getmtime(png_path)
@@ -438,16 +458,46 @@ class InspectionReviewPageMixin:
             cache = self.__dict__.setdefault('_review_heat_png_cache', {})
             cached = cache.get(png_path)
             if cached is not None and cached[0] == mtime:
+                self._review_heat_png_pending = False
                 return cached[1], token
-            image = cv2.imread(png_path, cv2.IMREAD_UNCHANGED)
-            if image is None or image.ndim != 3 or image.shape[2] != 4:
-                return None, None
-            rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-            cache[png_path] = (mtime, rgba)
-            return rgba, token
+            key = (png_path, mtime)
+            self._review_heat_png_current_key = key
+            workers = self.__dict__.setdefault('_review_heat_png_workers', {})
+            if key not in workers:
+                worker = _HeatPngWorker(key, parent=self)
+                worker.done.connect(self._on_review_heat_png_ready)
+                worker.failed.connect(self._on_review_heat_png_failed)
+                worker.finished.connect(
+                    lambda k=key, w=worker: self._on_review_heat_png_finished(k, w))
+                workers[key] = worker
+                worker.start()
+            self._review_heat_png_pending = True
         except Exception as exc:
+            self._review_heat_png_pending = False
             print(f'[PCFD] review.heat_png_failed: {exc!r}', flush=True)
-            return None, None
+        return None, None
+
+    def _on_review_heat_png_ready(self, key, rgba):
+        path, mtime = key
+        cache = self.__dict__.setdefault('_review_heat_png_cache', {})
+        cache[path] = (mtime, rgba)
+        if key == getattr(self, '_review_heat_png_current_key', None):
+            self._review_heat_png_pending = False
+            self._review_repaint_quad()
+
+    def _on_review_heat_png_failed(self, key, message):
+        path, mtime = key
+        cache = self.__dict__.setdefault('_review_heat_png_cache', {})
+        cache[path] = (mtime, None)
+        print(f'[PCFD] review.heat_png_failed: {message}', flush=True)
+        if key == getattr(self, '_review_heat_png_current_key', None):
+            self._review_heat_png_pending = False
+            self._review_repaint_quad()
+
+    def _on_review_heat_png_finished(self, key, worker):
+        workers = self.__dict__.setdefault('_review_heat_png_workers', {})
+        if workers.get(key) is worker:
+            workers.pop(key, None)
 
     def _review_heatmap_png_path(self, facade, quality):
         """检测时导出的透明热力 PNG 路径（facade_NNN_{mode}_transparent.png）。"""
@@ -547,6 +597,8 @@ class InspectionReviewPageMixin:
     def _review_clear_presentation(self):
         """清除选中/迁出复核页：摘除贴图与边缘高亮、恢复相机。"""
         self._review_heat_rect_current_key = None
+        self._review_heat_png_current_key = None
+        self._review_heat_png_pending = False
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()

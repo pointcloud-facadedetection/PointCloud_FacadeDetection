@@ -306,3 +306,39 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
         pytest.approx((0.0, 0.0, 4.0, 3.0))
     for worker in harness._review_heat_rect_workers.values():
         worker.wait(1000)
+
+
+def test_heat_png_decode_finishes_in_background(qapp, tmp_path):
+    import cv2
+    from PySide6.QtWidgets import QWidget
+    from fakes import pump_until
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    class Harness(QWidget, InspectionReviewPageMixin):
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+            self.repaints = 0
+            self._review_heatmap_mode = 'global_plane_flatness_area'
+
+        def _review_heatmap_png_path(self, _facade, _quality):
+            return self.path
+
+        def _review_repaint_quad(self):
+            self.repaints += 1
+
+    path = str(tmp_path / 'heat.png')
+    assert cv2.imwrite(path, np.zeros((8, 8, 4), dtype=np.uint8))
+    harness = Harness(path)
+    rgba, token = harness._review_heat_png({'id': 1}, {})
+    assert rgba is None and token is None
+    assert harness._review_heat_png_workers
+    assert pump_until(qapp, lambda: bool(harness._review_heat_png_cache))
+    assert harness.repaints == 1
+
+    rgba, token = harness._review_heat_png({'id': 1}, {})
+    assert rgba.shape == (8, 8, 4)
+    assert token[0] == 1
+    assert harness._review_heat_png_pending is False
+    for worker in harness._review_heat_png_workers.values():
+        worker.wait(1000)
