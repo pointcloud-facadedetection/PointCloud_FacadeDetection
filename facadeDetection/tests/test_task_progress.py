@@ -143,3 +143,12 @@ class TestTaskProgressDialog:
         assert dlg.is_finished is False
         assert dlg._reporter.snapshot == ''
         assert '处理中' in dlg._status_label.text()
+
+
+def test_data_processing_progress_title_does_not_rename_command():
+    from ui.controllers.step_navigation import StepNavigationController
+    from ui.controllers.task_progress import TASK_DENOISE
+
+    assert StepNavigationController.STEP_TASK_TITLES[TASK_DENOISE] == '处理中'
+    assert StepNavigationController.STEP_BUTTONS[
+        StepNavigationController.STEP_DATA] == 'btn_denoise'

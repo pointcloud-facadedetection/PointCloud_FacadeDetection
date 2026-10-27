@@ -46,7 +46,7 @@ class StepNavigationController(QObject):
     }
 
     STEP_TASK_TITLES = {
-        TASK_DENOISE: '点云去噪',
+        TASK_DENOISE: '处理中',
         TASK_DETECTION: '立面提取',
         TASK_QUALITY: '质量评估',
         TASK_QUALITY_BATCH: '质量评估',
