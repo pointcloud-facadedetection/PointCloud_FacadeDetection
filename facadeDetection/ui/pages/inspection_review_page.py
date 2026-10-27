@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import Qt, QSize, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
@@ -20,6 +20,27 @@ import numpy as np
 
 from algorithms.facade import interactive_ruler
 from services.heatmap_spec import heatmap_spec
+
+
+class _HeatRectWorker(QThread):
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, key, dataset, quality, image_hw, reconstruct, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self._dataset = dataset
+        self._quality = quality
+        self._image_hw = image_hw
+        self._reconstruct = reconstruct
+
+    def run(self):
+        try:
+            rect = self._reconstruct(
+                self._dataset, self._quality, self._image_hw)
+            self.done.emit(self._key, rect)
+        except Exception as exc:
+            self.failed.emit(self._key, str(exc))
 
 
 class InspectionReviewPageMixin:
@@ -384,13 +405,7 @@ class InspectionReviewPageMixin:
         return path if os.path.isfile(path) else None
 
     def _review_heat_uv_bounds(self, facade, quality, image_hw):
-        """transparent PNG 的 UV 矩形：重建导出裁剪框，尺寸不符回退 domain。
-
-        重建结果与模式无关（四档共用同一 facade_mask 裁剪），按
-        (立面 id, 数据集 revision) 缓存，切换模式/重选不重复计算。
-        优先用 proxy 点（约 1/16 数据量，实测裁剪框逐像素一致）；
-        proxy 结果与 PNG 尺寸不符时再用全量 raw 点复核一次。
-        """
+        """缓存未命中时后台重建裁剪框，GUI 先使用几何边界。"""
         fallback = tuple(np.asarray(quality['facade_geometry']['uv_bounds'],
                                     dtype=np.float64).reshape(4))
         try:
@@ -399,16 +414,41 @@ class InspectionReviewPageMixin:
             key = (int(facade.get('id', -1)),
                    str(getattr(dataset, 'revision', None)),
                    int(facade.get('edit_revision', 0) or 0))
+            self._review_heat_rect_current_key = key
             cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
-            if key not in cache:
-                cache[key] = self._reconstruct_heat_rect(dataset, quality,
-                                                         image_hw)
-            rect = cache[key]
-            if rect:
-                return rect['uv_bounds']
+            if key in cache:
+                rect = cache[key]
+                return rect['uv_bounds'] if rect else fallback
+            workers = self.__dict__.setdefault('_review_heat_rect_workers', {})
+            if key not in workers:
+                worker = _HeatRectWorker(
+                    key, dataset, quality, image_hw,
+                    self._reconstruct_heat_rect, parent=self)
+                worker.done.connect(self._on_review_heat_rect_ready)
+                worker.failed.connect(self._on_review_heat_rect_failed)
+                worker.finished.connect(
+                    lambda k=key, w=worker: self._on_review_heat_rect_finished(k, w))
+                workers[key] = worker
+                worker.start()
         except Exception as exc:
             print(f'[PCFD] review.heat_rect_failed: {exc!r}', flush=True)
         return fallback
+
+    def _on_review_heat_rect_ready(self, key, rect):
+        cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
+        cache[key] = rect
+        if key == getattr(self, '_review_heat_rect_current_key', None):
+            self._review_repaint_quad()
+
+    def _on_review_heat_rect_failed(self, key, message):
+        cache = self.__dict__.setdefault('_review_heat_rect_cache', {})
+        cache[key] = None
+        print(f'[PCFD] review.heat_rect_failed: {message}', flush=True)
+
+    def _on_review_heat_rect_finished(self, key, worker):
+        workers = self.__dict__.setdefault('_review_heat_rect_workers', {})
+        if workers.get(key) is worker:
+            workers.pop(key, None)
 
     @staticmethod
     def _reconstruct_heat_rect(dataset, quality, image_hw):
@@ -440,6 +480,7 @@ class InspectionReviewPageMixin:
 
     def _review_clear_presentation(self):
         """清除选中/迁出复核页：摘除贴图与边缘高亮、恢复相机。"""
+        self._review_heat_rect_current_key = None
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()

@@ -217,3 +217,49 @@ def test_review_gray_actor_preserves_color_buffer(viewport, qapp):
     qapp.processEvents()
     assert actor.GetMapper().GetScalarVisibility() == 1
     np.testing.assert_array_equal(viewport.point_data['t']['color'], colored)
+
+
+def test_heat_rect_rebuild_finishes_in_background(qapp):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QWidget
+    from fakes import pump_until
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    class Harness(QWidget, InspectionReviewPageMixin):
+        def __init__(self):
+            super().__init__()
+            self.repaints = 0
+
+        def _review_repaint_quad(self):
+            self.repaints += 1
+
+    y, z = np.meshgrid(
+        np.arange(0, 4 + 1e-9, 0.05), np.arange(0, 3 + 1e-9, 0.05))
+    points = np.column_stack((np.zeros(y.size), y.ravel(), z.ravel()))
+    dataset = SimpleNamespace(
+        proxy_points=points, processed_raw_points=points, revision='r1')
+    harness = Harness()
+    harness.facade_quality_controller = SimpleNamespace(
+        active_cloud_name=lambda: 'c')
+    harness.facade_service = SimpleNamespace(get_dataset=lambda _cloud: dataset)
+    quality = {
+        'facade_geometry': {'uv_bounds': [-1.0, -1.0, 5.0, 4.0]},
+        'quality_comparison': {'domain': {
+            'u_min_m': 0.0, 'v_min_m': 0.0, 'u_max_m': 4.0, 'v_max_m': 3.0}},
+        'projection_origin': [0.0, 0.0, 0.0],
+        'projection_u_axis': [0.0, 1.0, 0.0],
+        'projection_v_axis': [0.0, 0.0, 1.0],
+    }
+    facade = {'id': 1, 'edit_revision': 0}
+    fallback = harness._review_heat_uv_bounds(facade, quality, (301, 401))
+    assert fallback == (-1.0, -1.0, 5.0, 4.0)
+    key = (1, 'r1', 0)
+    assert key in harness._review_heat_rect_workers
+    assert pump_until(qapp, lambda: key in harness._review_heat_rect_cache)
+    rect = harness._review_heat_rect_cache[key]
+    assert rect['uv_bounds'] == pytest.approx((0.0, 0.0, 4.0, 3.0))
+    assert harness.repaints == 1
+    assert harness._review_heat_uv_bounds(facade, quality, (301, 401)) == \
+        pytest.approx((0.0, 0.0, 4.0, 3.0))
+    for worker in harness._review_heat_rect_workers.values():
+        worker.wait(1000)
