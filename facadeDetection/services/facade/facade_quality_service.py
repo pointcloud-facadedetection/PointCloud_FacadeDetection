@@ -67,10 +67,14 @@ class FacadeQualityService:
                         verticality_limit_mm: float = 4.0,
                         ruler_size: float | None = None,
                         ruler_step: float | None = None,
-                        profile=None, results_dir=None) -> Optional[dict]:
+                        profile=None, results_dir=None, progress_cb=None) -> Optional[dict]:
         """质量评估计算,仅返回计算结果，不执行任何文件导出。"""
         started = time.perf_counter()
         facade_no = int(facade.get('display_no', facade.get('id', 0)))
+
+        def _progress(percent, text):
+            if progress_cb is not None:
+                progress_cb(percent, text)
 
         trace("quality.begin", cloud=cloud_name, facade_no=facade_no,
               proxy=len(facade.get('proxy_indices', facade.get('inlier_indices', [])) or []))
@@ -99,6 +103,7 @@ class FacadeQualityService:
                 return {'ok': False, 'reason': 'stale_facade_result',
                         'message': '立面结果属于旧处理版本，请重新执行立面检测。'}
 
+            _progress(5, '正在准备质量检测点集')
             quality_indices, domain_stats = self._index_service.build_quality_domain(facade, cloud_name)
 
             if len(quality_indices) == 0:
@@ -302,6 +307,7 @@ class FacadeQualityService:
 
             # 同一质量域只生成一次不重叠局部基准面；靠尺法与模拟墙面法
             # 必须共享该对象，避免二次拟合造成基准漂移。
+            _progress(20, '正在拟合立面基准')
             baseline_blocks = fit_interval_baseline_planes(
                 filtered_pts,
                 reference_plane=plane_model,
@@ -325,6 +331,7 @@ class FacadeQualityService:
             trace("quality.baseline_planes", facade_no=facade_no,
                   blocks=len(baseline_blocks), interval=gsize)
 
+            _progress(35, '正在计算靠尺质量')
             result = compute_ruler_quality(
                 filtered_pts, quality_indices, plane_model,
                 np.asarray(facade_ref['center'], dtype=float), 
@@ -388,6 +395,8 @@ class FacadeQualityService:
             # ★ 模拟墙面法：透传预处理参数（SOR + select_band 与靠尺法对齐）
             global_result = compute_block_plane_quality(
                 filtered_pts, baseline_blocks, origin_on_plane, u_axis, v_axis,
+                progress_cb=(lambda percent, text: _progress(
+                    60 + int(percent * 0.3), text)) if progress_cb else None,
                 flatness_limit_mm=float(params.flatness_limit_mm),
                 verticality_limit_mm=float(params.verticality_limit_mm),
                 raw_ids=quality_indices,
@@ -430,6 +439,32 @@ class FacadeQualityService:
                     return (cu - hl, cv - hl, cu + hl, cv + hl)
                 return (cu - hw, cv - hl, cu + hw, cv + hl)
 
+            _progress(90, '正在统计质量覆盖率')
+            quality_u = (filtered_pts - origin_on_plane) @ u_axis
+            quality_v = (filtered_pts - origin_on_plane) @ v_axis
+            domain_cache = {}
+
+            def _domain_stats(bounds):
+                key = tuple(float(value) for value in bounds)
+                if key in domain_cache:
+                    return domain_cache[key]
+                bu0, bv0, bu1, bv1 = key
+                support = CoverageMask(bu0, bv0, bu1, bv1, resolution=_DOMAIN_RES)
+                in_domain = ((quality_u >= bu0) & (quality_u <= bu1) &
+                             (quality_v >= bv0) & (quality_v <= bv1))
+                u_domain, v_domain = quality_u[in_domain], quality_v[in_domain]
+                support.mark_pts(u_domain, v_domain)
+                cell_u = np.clip(((u_domain - bu0) / _DOMAIN_RES).astype(np.int64),
+                                 0, support.nu - 1)
+                cell_v = np.clip(((v_domain - bv0) / _DOMAIN_RES).astype(np.int64),
+                                 0, support.nv - 1)
+                cell_id = cell_u * support.nv + cell_v
+                cell_counts = np.bincount(
+                    cell_id, minlength=support.nu * support.nv)
+                stats = (support, cell_counts, int(len(u_domain)))
+                domain_cache[key] = stats
+                return stats
+
             def _coverage_rates(windows_list, pass_key, length_m, width_m,
                                 bounds=None):
                 if not windows_list:
@@ -439,24 +474,11 @@ class FacadeQualityService:
                             'pass_points': 0, 'total_points': 0,
                             'fail_points': 0,
                             'pass_windows': 0, 'total_windows': 0}
-                res = _DOMAIN_RES
                 bu0, bv0, bu1, bv1 = bounds or (q_u0, q_v0, q_u1, q_v1)
-                support = CoverageMask(bu0, bv0, bu1, bv1, resolution=res)
-                rel_pts = filtered_pts - origin_on_plane
-                u_pts = rel_pts @ u_axis
-                v_pts = rel_pts @ v_axis
-                in_domain = ((u_pts >= bu0) & (u_pts <= bu1) &
-                             (v_pts >= bv0) & (v_pts <= bv1))
-                u_domain, v_domain = u_pts[in_domain], v_pts[in_domain]
-                support.mark_pts(u_domain, v_domain)
+                support, cell_counts, total_points = _domain_stats(
+                    (bu0, bv0, bu1, bv1))
                 total_area = support.area_m2()
-                cell_u = np.clip(((u_domain - bu0) / res).astype(np.int64), 0, support.nu - 1)
-                cell_v = np.clip(((v_domain - bv0) / res).astype(np.int64), 0, support.nv - 1)
-                cell_id = cell_u * support.nv + cell_v
-                cell_counts = np.bincount(cell_id, minlength=support.nu * support.nv)
-                total_points = int(len(u_domain))
-
-                pass_mask = CoverageMask(bu0, bv0, bu1, bv1, resolution=res)
+                pass_mask = CoverageMask(bu0, bv0, bu1, bv1, resolution=_DOMAIN_RES)
                 for w in windows_list:
                     if not w.get(pass_key, False):
                         continue
@@ -465,8 +487,7 @@ class FacadeQualityService:
                         pass_mask.mark_rect(*rect)
 
                 pass_cells = pass_mask.mask.reshape(-1) & (cell_counts > 0)
-                pass_area = float(np.sum(pass_cells)) * res * res
-                detection_area = total_area
+                pass_area = float(np.sum(pass_cells)) * _DOMAIN_RES * _DOMAIN_RES
                 fail_area = max(total_area - pass_area, 0.0)
                 pass_points = int(np.sum(cell_counts[pass_cells]))
                 fail_points = max(total_points - pass_points, 0)
@@ -476,7 +497,7 @@ class FacadeQualityService:
                     'point_rate': (pass_points / total_points) if total_points > 0 else 0.0,
                     'pass_area_m2': pass_area,
                     'total_area_m2': total_area,
-                    'detection_area_m2': detection_area,
+                    'detection_area_m2': total_area,
                     'fail_area_m2': fail_area,
                     'pass_points': pass_points,
                     'total_points': total_points,
@@ -485,10 +506,8 @@ class FacadeQualityService:
                     'total_windows': len(windows_list),
                 }
 
-            _support = CoverageMask(q_u0, q_v0, q_u1, q_v1, resolution=_DOMAIN_RES)
-            _rel_all = filtered_pts - origin_on_plane
-            _support.mark_pts(_rel_all @ u_axis, _rel_all @ v_axis)
-            valid_facade_area = _support.area_m2()
+            valid_facade_area = _domain_stats(
+                (q_u0, q_v0, q_u1, q_v1))[0].area_m2()
             global_overall = global_result.get('overall') or {}
             ruler_length = float(params.ruler_length_m)
             ruler_width = float(params.ruler_width_m)

@@ -230,7 +230,10 @@ class FacadeQualityController(QObject):
         self._quality_request_cache_key = cache_key
         self.status_message.emit(f'正在计算立面 #{facade_no} 质量指标...', 0)
         self._begin_quality_progress(TASK_QUALITY)
-        worker = QualityWorker(self.facade_service, cloud, facade_copy, kwargs)
+        worker = QualityWorker(
+            self.facade_service, cloud, facade_copy, kwargs,
+            postprocess=lambda quality: self._export_batch_heatmaps(
+                cloud, facade_copy, quality))
         self.active_quality_worker = worker
         worker.signals.finished.connect(
             lambda facade, quality: self._on_quality_finished(
@@ -305,11 +308,17 @@ class FacadeQualityController(QObject):
         self.status_message.emit(
             f'[{self._batch_current}/{self._batch_total}] 正在检测立面 '
             f'#{facade.get("display_no", facade.get("id", 0))}...', 0)
-        worker = QualityWorker(self.facade_service, cloud, facade, kwargs)
+        worker = QualityWorker(
+            self.facade_service, cloud, facade, kwargs,
+            postprocess=lambda quality: self._export_batch_heatmaps(
+                cloud, facade, quality))
         self.active_quality_worker = worker
         worker.signals.finished.connect(
             lambda f, q: self._on_batch_finished(cloud, f, q))
-        # 注意：批量时不转发 worker.signals.progress —— 见上方注释。
+        worker.signals.progress.connect(
+            lambda _percent, text='': self._report_quality_progress(
+                TASK_QUALITY_BATCH, percent,
+                f'[{self._batch_current}/{self._batch_total}] {text}'))
         self._pool.start(worker)
 
     def _upsert_facade_to_aggregated(self, facade):
@@ -341,7 +350,6 @@ class FacadeQualityController(QObject):
                 (quality.get('overall') or {})
                 .get('quality_valid_window_count', 0) or 0) > 0
             if valid:
-                self._export_batch_heatmaps(cloud, facade, quality)
                 dataset = self.facade_service.get_dataset(cloud)
                 project_uuid, _ = self._context_provider()
                 self.facade_service.commit_quality_success(
@@ -451,11 +459,15 @@ class FacadeQualityController(QObject):
         runtime_profile = self._profile_provider()
         parameter_snapshot = (runtime_profile.snapshot()
                               if runtime_profile is not None else {})
+        dataset = self.facade_service.get_dataset(cloud)
         return (
             str(cloud or ''), facade_id, standard_id,
             float(grid_size), flatness_limit_mm, verticality_limit_mm,
             window_size_m, step_size_m, measure_height_m,
             tuple(sorted(parameter_snapshot.items())),
+            str(getattr(dataset, 'revision', '') or ''),
+            str(facade.get('dataset_revision', '') or ''),
+            int(facade.get('edit_revision', 0) or 0),
             len(domain), hash(tuple(domain[:32])),
         )
 
@@ -609,13 +621,6 @@ class FacadeQualityController(QObject):
                                     'dataset_revision': getattr(dataset, 'revision', None)})
                     break
             self.heatmap_button_refresh_requested.emit()
-            # 热力图 PNG 导出为尽力而为：导出失败不得把已成功的
-            # 评估与持久化翻转成"结果保存失败"
-            try:
-                self._export_batch_heatmaps(cloud, f, quality)
-            except Exception as exc:
-                print(f'[PCFD] quality.heatmap_export_failed '
-                      f'facade_id={facade_no} error={exc!r}', flush=True)
             # 同步到项目级聚合存储，确保 PDF 报告预览即时刷新
             self._upsert_facade_to_aggregated(f)
         except Exception as exc:

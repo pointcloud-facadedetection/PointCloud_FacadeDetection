@@ -205,15 +205,7 @@ class ResultExportService:
                 # ---- 透明热力图（仅热力层，用于照片叠加） ----
                 transparent_path = root / f'{prefix}_transparent.png'
                 try:
-                    transparent = self._renderer.render_transparent_heatmap(
-                        mode=mode,
-                        points=points,
-                        colors=colors,
-                        windows=windows,
-                        plane_model=plane_model,
-                        quality=temp_quality,
-                        pixel_size=0.01,
-                    )
+                    transparent = triplet.get('transparent')
                     if transparent is not None:
                         self._safe_imwrite(transparent_path, transparent)
                         paths['transparent'] = str(transparent_path)

@@ -176,7 +176,7 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
                                 raw_ids=None, grid_res=0.05,
                                 ruler_length_m=2.0, ruler_width_m=0.055,
                                 select_band_m=0.01, sor_enabled=True,
-                                sor_k=8, sor_sigma=4.0):
+                                sor_k=8, sor_sigma=4.0, progress_cb=None):
     """模拟墙面法：2m×5.5cm I 形窗口逐点测量，每点使用所属 block 局部平面。
 
     ★ 修正（不改变任何返回字段）：
@@ -209,9 +209,6 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
     # ---- 预计算每个点在各自 block 局部平面上的 signed distance (mm) ----
     all_dist_mm = compute_block_signed_distances_mm(pts, blocks, origin, v_ax)
 
-    # ---- 预计算每个点的局部法向量（垂直度法向 180° 歧义消除用）----
-    all_local_normals = compute_block_local_normals(pts, blocks, origin, v_ax)
-
     # ---- 预处理：SOR 统计去噪（与靠尺法对齐，全局一次）----
     finite_dist = np.isfinite(all_dist_mm)
     if sor_enabled and len(pts) > 16:
@@ -232,14 +229,25 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
     v_centers = _window_centers(v0, v1, length_m, v_step)
 
     gravity = np.asarray((0., 0., 1.), dtype=np.float64)
+    u_order = np.argsort(u_all, kind='stable')
+    u_sorted = u_all[u_order]
 
     windows = []
     for a, uc in enumerate(u_centers):
+        u_lo, u_hi = uc - width_m / 2.0, uc + width_m / 2.0
+        u_start = np.searchsorted(u_sorted, u_lo, side='left')
+        u_stop = np.searchsorted(u_sorted, u_hi, side='right')
+        strip_rows = u_order[u_start:u_stop]
+        if len(strip_rows) >= 3:
+            strip_rows = strip_rows[np.argsort(v_all[strip_rows], kind='stable')]
+            v_sorted = v_all[strip_rows]
+        else:
+            v_sorted = np.empty(0, dtype=np.float64)
         for b, vc in enumerate(v_centers):
-            u_lo, u_hi = uc - width_m / 2.0, uc + width_m / 2.0
             v_lo, v_hi = vc - length_m / 2.0, vc + length_m / 2.0
-            ix = np.flatnonzero((u_all >= u_lo) & (u_all <= u_hi) &
-                                (v_all >= v_lo) & (v_all <= v_hi))
+            v_start = np.searchsorted(v_sorted, v_lo, side='left')
+            v_stop = np.searchsorted(v_sorted, v_hi, side='right')
+            ix = np.sort(strip_rows[v_start:v_stop])
             if len(ix) < 3:
                 continue
 
@@ -381,6 +389,9 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
                 'verticality_defect_values_mm': verticality_defect_values_mm,
                 'verticality_defect_types': verticality_defect_types,
             })
+        if progress_cb is not None:
+            progress_cb(int(100 * (a + 1) / len(u_centers)),
+                        '正在计算模拟墙面质量')
 
     total_pts = len(pts)
 
@@ -477,8 +488,7 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
 
     若传入 local_normals（(N,3) 点级局部法向量，通常来自
     compute_block_local_normals），垂直度按模拟墙面法语义计算
-    （窗口内全部点拟合局部窗口平面）；否则 verticality 为 NaN，调用方
-    应改用 compute_block_plane_quality。返回字段与原版一致。
+    （窗口内全部点拟合局部窗口平面）；否则使用全局平面倾角。返回字段与原版一致。
     """
     source = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     valid = np.all(np.isfinite(source), axis=1)
@@ -564,8 +574,8 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 defect_rows, defect_point_indices = [], []
                 defect_values_mm, defect_types = [], []
 
-            # 垂直度：窗口内全部点拟合局部窗口平面（模拟墙面法语义）
-            verticality_mm = np.nan
+            # 垂直度：无局部法向时使用全局倾角，否则拟合局部窗口平面。
+            verticality_mm = plane_verticality_mm if ln is None else np.nan
             if ln is not None:
                 win_n3 = ln[ix]
                 finite_n3 = np.all(np.isfinite(win_n3), axis=1)

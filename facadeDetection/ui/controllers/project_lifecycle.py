@@ -356,8 +356,18 @@ class ProjectLifecycleController(QObject):
             self.project_operation_service.invalidate_async_jobs()
         except Exception:
             pass
-        self.facade_quality_controller.active_quality_worker = None
-        self.facade_quality_controller.quality_result_cache.clear()
+        quality_controller = self.facade_quality_controller
+        cancel = getattr(quality_controller, 'cancel_active_batch', None)
+        if callable(cancel):
+            cancel()
+        else:
+            quality_worker = getattr(quality_controller, 'active_quality_worker', None)
+            if quality_worker is not None and hasattr(quality_worker, 'cancel'):
+                quality_worker.cancel()
+            quality_controller.active_quality_worker = None
+        quality_controller._quality_request_token = getattr(
+            quality_controller, '_quality_request_token', 0) + 1
+        quality_controller.quality_result_cache.clear()
         self.facade_quality_controller.quality_reports.clear()
         try:
             self.project_operation_service.clear_processing_state()

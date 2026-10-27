@@ -64,7 +64,7 @@ class FacadeService:
                         verticality_limit_mm: float = 4.0,
                         ruler_size: float | None = None,
                         ruler_step: float | None = None,
-                        profile=None, results_dir=None) -> Optional[dict]:
+                        profile=None, results_dir=None, progress_cb=None) -> Optional[dict]:
         """质量评估计算。"""
         return self._quality_service.compute_quality(
             cloud_name, facade,
@@ -74,7 +74,8 @@ class FacadeService:
             ruler_size=ruler_size,
             ruler_step=ruler_step,
             profile=profile,
-            results_dir=results_dir)
+            results_dir=results_dir,
+            progress_cb=progress_cb)
 
     def commit_quality_success(self, project_uuid: str, facade_id: int, quality: dict,
                                *, display_no=None, facade_data=None, color=None,

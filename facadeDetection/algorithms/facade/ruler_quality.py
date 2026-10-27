@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, asdict, field
 import atexit
@@ -927,7 +927,7 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                 params.select_band_m, params.hole_band_m,
                 normal,
             ))
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_verticality_strip_worker, args)
                        for args in args_list]
             strip_results = [f.result() for f in futures]
@@ -1225,7 +1225,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
             ))
         print(f'[PCFD] quality.parallel_thread workers={n_workers} '
               f'points={len(points)}', flush=True)
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = [pool.submit(_direction_worker, args) for args in args_list]
             results = [f.result() for f in futures]
 
@@ -1417,6 +1417,7 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         'ok': True,
         'parameters': params.snapshot(),
         'windows': rows,
+        'intervals': intervals,
         'interval_size_m': size,
         'interval_count': len(intervals),
         'projection_origin': origin.tolist(),

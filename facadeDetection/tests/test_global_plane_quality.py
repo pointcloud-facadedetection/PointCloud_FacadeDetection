@@ -115,3 +115,42 @@ def test_global_plane_fit_rejects_with_low_inlier_ratio():
     )
     # Random points should not pass the 75% inlier threshold
     assert result['fit_accepted'] is False
+
+
+def test_block_window_indices_match_brute_force_and_report_progress():
+    from algorithms.facade.global_plane_quality import (
+        _window_centers, compute_block_plane_quality)
+    from algorithms.facade.local_baseline import BaselineBlock
+
+    rng = np.random.default_rng(2026)
+    y, z = np.meshgrid(np.linspace(0, 4, 25), np.linspace(0, 4, 25))
+    points = np.column_stack((np.zeros(y.size), y.ravel(), z.ravel()))
+    raw_ids = np.arange(points.shape[0], dtype=np.int64) * 3 + 7
+    order = rng.permutation(len(points))
+    points, raw_ids = points[order], raw_ids[order]
+    blocks = [BaselineBlock(
+        v0=-1.0, v1=5.0, plane_model=np.array([1.0, 0, 0, 0]),
+        point_indices=np.arange(len(points)),
+        signed_dist_mm=np.zeros(len(points)))]
+    progress = []
+    result = compute_block_plane_quality(
+        points, blocks, np.zeros(3), [0, 1, 0], [0, 0, 1],
+        raw_ids=raw_ids, ruler_length_m=2.0, ruler_width_m=0.5,
+        sor_enabled=False, progress_cb=lambda p, text: progress.append((p, text)))
+
+    u = points[:, 1]
+    v = points[:, 2]
+    u_centers = _window_centers(u.min(), u.max(), 0.5, 0.5)
+    v_centers = _window_centers(v.min(), v.max(), 2.0, 1.0)
+    assert result['windows']
+    for window in result['windows']:
+        uc = u_centers[window['grid_u']]
+        vc = v_centers[window['grid_v']]
+        expected = np.flatnonzero(
+            (u >= uc - 0.25) & (u <= uc + 0.25) &
+            (v >= vc - 1.0) & (v <= vc + 1.0))
+        np.testing.assert_array_equal(
+            window['covered_source_ids'], raw_ids[expected])
+    assert len(progress) == len(u_centers)
+    assert progress[-1][0] == 100
+    assert '模拟墙面' in progress[-1][1]

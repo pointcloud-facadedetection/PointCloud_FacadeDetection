@@ -94,7 +94,7 @@ class QualityWorkerSignals(QObject):
 class QualityWorker(QRunnable):
     """Worker for facade quality computation in QThreadPool."""
 
-    def __init__(self, facade_service, cloud_name, facade, kwargs):
+    def __init__(self, facade_service, cloud_name, facade, kwargs, postprocess=None):
         super().__init__()
         self.facade_service = facade_service
         self.cloud_name = cloud_name
@@ -102,6 +102,7 @@ class QualityWorker(QRunnable):
         self.facade = dict(facade)
         self.facade_no = int(self.facade.get('display_no', self.facade.get('id', 0)))
         self.kwargs = kwargs
+        self.postprocess = postprocess
         self.signals = QualityWorkerSignals()
         # 中止标志：GUI 线程置位，工作线程在进度检查点读取（与模型导出 worker
         # 一致，bool 赋值在 CPython 下原子可见，无需额外同步对象）。
@@ -123,12 +124,12 @@ class QualityWorker(QRunnable):
         质量评估的窗口/条带总数是已知量，因此这里传出的就是真实百分比。
         该回调同时充当中止检查点——算法每隔若干窗口上报一次，
         借此抛出 QualityCancelled 让计算尽早收束，避免任务被中止后
-        后台仍在空转。文案保持极简，阶段细节由状态栏承载。
+        后台仍在空转。
         """
         if self._cancelled:
             raise QualityCancelled('质量评估已取消')
         try:
-            self.signals.progress.emit(int(percent), '任务处理中')
+            self.signals.progress.emit(int(percent), text or '任务处理中')
         except Exception:
             pass
 
@@ -170,6 +171,17 @@ class QualityWorker(QRunnable):
             else:
                 # Ensure facade info is in result for diagnostics
                 result['facade_no'] = facade_no
+
+            if self.postprocess is not None and result.get('ok', True):
+                self._report_progress(95, '正在生成热力图')
+                try:
+                    self.postprocess(result)
+                except QualityCancelled:
+                    raise
+                except Exception as exc:
+                    print(f'[PCFD] quality.heatmap_export_failed '
+                          f'facade_no={facade_no} error={exc!r}', flush=True)
+                self._report_progress(98, '正在提交质量结果')
 
             print(f'[PCFD] quality.worker_done facade_no={facade_no} ok={result.get("ok", False)}', flush=True)
 
