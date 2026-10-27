@@ -183,3 +183,12 @@ class TestHeatmapQuadCache:
         viewport.clear_heatmap_quad()
         viewport.show_heatmap_frame(corners, cache_key=('frame', 1))
         assert viewport._heatmap_quad_actors == actors_first
+
+
+def test_clear_tool_visuals_keeps_heatmap_visible(viewport):
+    viewport.show_heatmap_quad(
+        **TestHeatmapQuadCache._quad_args(), cache_key=('f1', 'm1'))
+    actors = list(viewport._heatmap_quad_actors)
+    viewport.clear_tool_visuals()
+    assert viewport._heatmap_quad_actors == actors
+    assert all(actor.GetVisibility() for actor in actors)

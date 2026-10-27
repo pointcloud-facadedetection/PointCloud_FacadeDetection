@@ -190,7 +190,6 @@ class InspectionReviewPageMixin:
 
     def _on_review_clear_clicked(self):
         self.viewport_tools_controller.clear_visuals()
-        self._review_repaint_quad()
 
     def _on_review_resize_clicked(self):
         facade = self._selected_review_facade()
@@ -247,15 +246,12 @@ class InspectionReviewPageMixin:
             button.blockSignals(True)
             button.setChecked(name == tool)
             button.blockSignals(False)
-        # 工具激活清过一轮工具可视化，热力贴图需补回
-        self._review_repaint_quad()
 
     def _on_review_tool_deactivated(self):
         for button in (self.btn_review_measure, self.btn_review_ruler):
             button.blockSignals(True)
             button.setChecked(False)
             button.blockSignals(False)
-        self._review_repaint_quad()
 
     def _selected_review_facade(self):
         """靠尺交互与热力贴图的立面来源：右侧立面列表当前选中行。"""

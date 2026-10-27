@@ -1249,12 +1249,11 @@ class PyVistaViewport(BaseViewport):
         self._render()
 
     def clear_tool_visuals(self):
-        # 合并渲染：四个 clear 各自会补帧，挂起后统一渲染一次
+        # 只清工具 actor；热力图由立面、模式和质量结果独立管理。
         self.set_render_enabled(False)
         try:
             self.clear_measure_visuals()
             self.clear_ruler_overlay()
-            self.clear_heatmap_quad()
             self.clear_pick_markers()
         finally:
             self.set_render_enabled(True)
