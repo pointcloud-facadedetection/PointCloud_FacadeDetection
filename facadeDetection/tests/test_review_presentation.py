@@ -192,3 +192,7 @@ def test_clear_tool_visuals_keeps_heatmap_visible(viewport):
     viewport.clear_tool_visuals()
     assert viewport._heatmap_quad_actors == actors
     assert all(actor.GetVisibility() for actor in actors)
+
+
+def test_pyvistaqt_auto_render_timer_is_disabled(viewport):
+    assert not viewport._widget.render_timer.isActive()

@@ -110,7 +110,7 @@ class PyVistaViewport(BaseViewport):
     def __init__(self, parent=None):
         from pyvistaqt import QtInteractor
 
-        self._widget = QtInteractor(parent)
+        self._widget = QtInteractor(parent, auto_update=False)
         self._widget.setObjectName('pyvistaViewport')
         self._plotter = self._widget  # QtInteractor 本身即 Plotter API
         self._plotter.set_background(BACKGROUND)
