@@ -5,6 +5,7 @@ import hashlib
 from typing import Optional, Callable, Tuple, Dict
 
 import numpy as np
+from PySide6.QtCore import QCoreApplication, QThread
 from config.settings import Config
 
 _BASE_GRAY = tuple(Config.FACADE_BASE_COLOR)
@@ -605,11 +606,13 @@ class ViewportRenderService:
             print(f"colorize_by_scalar failed: {e}", flush=True)
 
     def _update_cloud_color(self, cloud_name: str, colors: np.ndarray) -> None:
+        app = QCoreApplication.instance()
+        on_gui_thread = app is not None and app.thread() == QThread.currentThread()
         queue = getattr(self.viewport, 'queue_update_cloud_color', None)
-        if callable(queue):
-            queue(cloud_name, colors)
-        else:
+        if on_gui_thread or not callable(queue):
             self.viewport.update_cloud_color(cloud_name, colors)
+        else:
+            queue(cloud_name, colors)
 
     @staticmethod
     def _colormap(t: np.ndarray, cmap: str = 'turbo') -> np.ndarray:

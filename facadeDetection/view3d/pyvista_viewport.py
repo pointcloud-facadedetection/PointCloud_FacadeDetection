@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyvista as pv
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget
 
@@ -135,6 +135,7 @@ class PyVistaViewport(BaseViewport):
             self.update_cloud_points, Qt.QueuedConnection)
         self._adapter = _RenderCounterShim()  # 首帧等待兼容垫片
         self._render_enabled = True
+        self._render_pending = False
         self._scene_view_initialized = False
         self._grid_actor = None
         self._grid_border_actor = None
@@ -397,6 +398,13 @@ class PyVistaViewport(BaseViewport):
         return getattr(self._plotter, 'reset_camera')(render=False)
 
     def _render(self):
+        if not self._render_enabled or self._render_pending:
+            return
+        self._render_pending = True
+        QTimer.singleShot(0, self._flush_render)
+
+    def _flush_render(self):
+        self._render_pending = False
         if self._render_enabled:
             try:
                 self._plotter.update()
@@ -410,7 +418,7 @@ class PyVistaViewport(BaseViewport):
         return self._widget
 
     def set_render_enabled(self, enabled):
-        """页面切换门控：VTK 按需渲染，这里只记录标志并立即补一帧。"""
+        """页面切换门控；恢复时合并补一帧，关闭时丢弃待渲染请求。"""
         self._render_enabled = bool(enabled)
         if enabled:
             self._render()
@@ -1741,6 +1749,7 @@ class PyVistaViewport(BaseViewport):
                        colors, point_size=point_size)
 
     def destroy(self):
+        self._render_enabled = False
         self.clear()
         try:
             self._widget.close()

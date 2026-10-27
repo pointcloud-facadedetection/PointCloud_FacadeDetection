@@ -124,3 +124,20 @@ def test_color_update_preserves_display_proxy_lookup():
 
     assert viewport.point_data['cloud']['display_proxy_lookup'] is lookup
     np.testing.assert_array_equal(poly.point_data['colors'], 255)
+
+
+def test_render_requests_coalesce_into_one_update(qapp):
+    from types import SimpleNamespace
+
+    updates = []
+    viewport = PyVistaViewport.__new__(PyVistaViewport)
+    viewport._render_enabled = True
+    viewport._render_pending = False
+    viewport._plotter = SimpleNamespace(update=lambda: updates.append(1))
+    viewport._render()
+    viewport._render()
+    assert updates == []
+    assert viewport._render_pending is True
+    qapp.processEvents()
+    assert updates == [1]
+    assert viewport._render_pending is False

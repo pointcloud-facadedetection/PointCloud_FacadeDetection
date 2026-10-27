@@ -342,3 +342,22 @@ def test_heat_png_decode_finishes_in_background(qapp, tmp_path):
     assert harness._review_heat_png_pending is False
     for worker in harness._review_heat_png_workers.values():
         worker.wait(1000)
+
+
+def test_gui_color_update_does_not_use_queued_connection(qapp):
+    class Viewport:
+        def __init__(self):
+            self.direct = 0
+            self.queued = 0
+
+        def update_cloud_color(self, *_args):
+            self.direct += 1
+
+        def queue_update_cloud_color(self, *_args):
+            self.queued += 1
+
+    viewport = Viewport()
+    service = ViewportRenderService(viewport, db=None)
+    service._update_cloud_color('c', np.zeros((1, 3), dtype=np.float32))
+    assert viewport.direct == 1
+    assert viewport.queued == 0

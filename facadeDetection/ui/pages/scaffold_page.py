@@ -519,16 +519,20 @@ class ScaffoldPageMixin:
         if button is not None and not button.isEnabled():
             return
 
-        # 切换期间弹忙碌条阻挡操作，防止视口迁移/首帧渲染等开销被并发点击
-        # 放大。仅覆盖带 Open3D 视口的两个页面；加载忙碌条已在时由它覆盖
-        # 本次切换，不再叠第二个弹窗；启动期（窗口尚未显示）不弹。
         load_active = self.task_progress.is_active(TASK_LOAD)
         show_busy = (not load_active and self.isVisible()
                      and page_key in ('project_operation', 'inspection_review'))
         if show_busy:
             self.task_progress.begin(TASK_PAGE_SWITCH, '页面切换', '正在切换页面...')
+            QTimer.singleShot(0, lambda: self._set_current_page_ready(
+                page_index, page_title, page_key, button, True))
+            return
+        self._set_current_page_ready(
+            page_index, page_title, page_key, button, False)
 
-        # ===== 视口迁移：检测复核页 ↔ 项目操作页 =====
+    def _set_current_page_ready(self, page_index, page_title, page_key,
+                                button, show_busy):
+        # 先让忙碌窗完成首次上屏，再执行视口迁移和渲染。
         if page_key == 'inspection_review':
             self._migrate_workspace_to_review()
         elif page_key == 'project_operation':
@@ -541,7 +545,6 @@ class ScaffoldPageMixin:
         self.application_page_title.setText(page_title)
         if button is not None:
             button.setChecked(True)
-        # 项目操作页和检测复核页都需要渲染
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'set_render_enabled'):
             viewport.set_render_enabled(page_key in ('project_operation', 'inspection_review'))
