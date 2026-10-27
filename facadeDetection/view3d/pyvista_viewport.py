@@ -577,7 +577,6 @@ class PyVistaViewport(BaseViewport):
             return
         data['color'] = np.ascontiguousarray(
             normalize_colors(colors, len(data['pos'])).astype(np.float32))
-        data.pop('display_proxy_lookup', None)
         _, col_vis = self._visible_view(name)
         poly = self._polys.get(name)
         if poly is None or poly.n_points != len(col_vis):

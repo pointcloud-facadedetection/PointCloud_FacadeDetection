@@ -99,3 +99,27 @@ def test_tool_renderer_is_above_heatmap_renderer():
     viewport._to_overlay(actor, tool=True)
     assert tools.GetActors().GetNumberOfItems() == 1
     assert heatmap.GetActors().GetNumberOfItems() == 0
+
+
+def test_color_update_preserves_display_proxy_lookup():
+    import pyvista as pv
+
+    viewport = PyVistaViewport.__new__(PyVistaViewport)
+    poly = pv.PolyData(np.zeros((2, 3)))
+    poly.point_data['colors'] = np.zeros((2, 3), dtype=np.uint8)
+    lookup = {10: 0, 20: 1}
+    viewport.point_data = {
+        'cloud': {
+            'pos': np.zeros((2, 3), dtype=np.float32),
+            'color': np.zeros((2, 3), dtype=np.float32),
+            'proxy_ids': np.array([10, 20]),
+            'display_proxy_lookup': lookup,
+        }
+    }
+    viewport._polys = {'cloud': poly}
+    viewport._hidden_rows = {}
+    viewport._render = lambda: None
+    viewport.update_cloud_color('cloud', np.ones((2, 3), dtype=np.float32))
+
+    assert viewport.point_data['cloud']['display_proxy_lookup'] is lookup
+    np.testing.assert_array_equal(poly.point_data['colors'], 255)
