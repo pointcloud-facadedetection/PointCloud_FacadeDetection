@@ -72,7 +72,7 @@ class FacadeHeatmapTripletRenderer:
       - photo:        2D 照片对齐叠加（预留接口，无照片时返回 None）
     """
 
-    GRID_STEP_M = 1.0
+    GRID_STEP_M = 0.5
     _OVERLAY_BASE_COLOR = np.array([230, 232, 235], dtype=np.uint8)
     _OVERLAY_FILL_COLOR = (238, 240, 243)
     _HEATMAP_BG_COLOR = 248
@@ -202,7 +202,9 @@ class FacadeHeatmapTripletRenderer:
                                               is_cold=is_cold, metric=metric)
 
         if photo_path and Path(photo_path).is_file():
-            photo = self._build_photo_overlay(raster, photo_path)
+            # 照片对齐输出由 TwoDMatchingService 负责；此处不再生成
+            # 误导性的 resize 占位图。
+            photo = None
         else:
             overlay_rgba = self._compose_rgba_layers(
                 raster["overlay_rgba"], raster.get("ruler_overlay_rgba"))
@@ -707,53 +709,6 @@ class FacadeHeatmapTripletRenderer:
         )
         return centers, sel_values, bipolar_colormap(sel_values, limit)
 
-    @staticmethod
-    def _prepare_point_samples(points, windows, spec, quality):
-        """备选：把窗口值贴回原始点云（依赖 covered_source_ids）。"""
-        source = np.asarray(points, dtype=float).reshape(-1, 3)
-        from services.dal.results_repo import ResultsRepo
-        ResultsRepo.ensure_global_indices(quality)
-        raw_ids = np.asarray(quality.get('__global_indices', []), dtype=np.int64)
-        if len(raw_ids) != len(source):
-            raw_ids = np.arange(len(source), dtype=np.int64)
-        id_to_row = {int(value): i for i, value in enumerate(raw_ids.tolist())}
-        point_values = np.full(len(source), -np.inf, dtype=float)
-        profile = quality.get('profile_snapshot', {}) or {}
-        limit = float(profile.get(
-            spec['limit_key'],
-            (quality.get('thresholds') or {}).get(
-                spec['limit_key'],
-                (quality.get('parameters') or {}).get(spec['limit_key'], 4.0))))
-        for window in windows or []:
-            if bool(window.get(spec['pass_key'], True)):
-                continue
-            try:
-                value = float(window.get(spec['value_key'], np.nan))
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(value) or abs(value) <= limit:
-                continue
-            ids = np.asarray(window.get('covered_source_ids', []),
-                             dtype=np.int64).reshape(-1)
-            for source_id in ids.tolist():
-                row = id_to_row.get(int(source_id))
-                if row is not None and abs(value) > point_values[row]:
-                    point_values[row] = value
-
-        selected = np.isfinite(point_values)
-        if not np.any(selected):
-            return FacadeHeatmapTripletRenderer._prepare_windows(
-                windows, spec, quality)
-        selected_values = point_values[selected]
-        excess = np.maximum(np.abs(selected_values) - limit, 0.0)
-        finite = excess[np.isfinite(excess)]
-        scale = max(
-            float(np.percentile(finite, 98)) if finite.size else limit * .15,
-            limit * .15, 1e-6,
-        )
-        return source[selected], selected_values, defect_colormap(
-            np.clip(excess / scale, 0.0, 1.0))
-
     # ------------------------------------------------------------------
     # Overlay（点云底图 + 热力）
     # ------------------------------------------------------------------
@@ -839,12 +794,16 @@ class FacadeHeatmapTripletRenderer:
         line_color = (150, 160, 175, 170)
         border_color = (95, 105, 120, 220)
 
+        # 虚线长度自适应网格像素间隔，避免过密网格上线条重叠
+        dash_len = max(3, min(6, grid_px // 4))
+        gap_len = dash_len
+
         for x in range(grid_px, w, grid_px):
             self._draw_dashed_line(overlay_rgba, (x, 0), (x, h - 1),
-                                   line_color, 1, dash_len=6, gap_len=6)
+                                   line_color, 1, dash_len=dash_len, gap_len=gap_len)
         for y in range(grid_px, h, grid_px):
             self._draw_dashed_line(overlay_rgba, (0, y), (w - 1, y),
-                                   line_color, 1, dash_len=6, gap_len=6)
+                                   line_color, 1, dash_len=dash_len, gap_len=gap_len)
 
         cv2.rectangle(overlay_rgba, (0, 0), (w - 1, h - 1), border_color, 1)
 
@@ -898,15 +857,6 @@ class FacadeHeatmapTripletRenderer:
         else:
             cropped = image[y0:y1 + 1, x0:x1 + 1]
         return cropped.copy()
-
-    def _build_photo_overlay(
-        self, raster: dict, photo_path: str
-    ) -> Optional[np.ndarray]:
-        photo = cv2.imread(str(photo_path), cv2.IMREAD_COLOR)
-        if photo is None:
-            return None
-        h, w = raster["overlay_rgba"].shape[:2]
-        return cv2.resize(photo, (w, h), interpolation=cv2.INTER_AREA)
 
     # ------------------------------------------------------------------
     # Legend
@@ -1047,9 +997,15 @@ class FacadeHeatmapTripletRenderer:
             domain = _resolve_domain_uv_range(quality)
             if domain is None:
                 return {'image': image, 'uv_bounds': (0., 0., 0., 0.),
-                        'pixel_size': pixel_size}
+                        'pixel_size': pixel_size,
+                        'projection_origin': quality.get("projection_origin"),
+                        'projection_u_axis': quality.get("projection_u_axis"),
+                        'projection_v_axis': quality.get("projection_v_axis")}
             return {'image': image, 'uv_bounds': tuple(map(float, domain)),
-                    'pixel_size': pixel_size}
+                    'pixel_size': pixel_size,
+                    'projection_origin': quality.get("projection_origin"),
+                    'projection_u_axis': quality.get("projection_u_axis"),
+                    'projection_v_axis': quality.get("projection_v_axis")}
 
         physical_cell_m = None
         if method == "global_plane" and metric == "flatness":
@@ -1147,19 +1103,29 @@ class FacadeHeatmapTripletRenderer:
         x0, x1 = int(cols[0]), int(cols[-1])
         y0, y1 = int(rows[0]), int(rows[-1])
 
+        # ---- 半像素修正的 uv_bounds 回推 ----
+        # raster 约定：像素 (i, j) 覆盖 UV 区间
+        #   [bounds[0]+i·s, bounds[0]+(i+1)·s) × [bounds[3]-(j+1)·s, bounds[3]-j·s)
+        # 裁剪列 [x0, x1]、行 [y0, y1]（含端点）对应的半开 UV 区间为
+        #   u ∈ [bounds[0]+x0·s, bounds[0]+(x1+1)·s)
+        #   v ∈ [bounds[3]-(y1+1)·s, bounds[3]-y0·s)
+        # 与 warp_heatmap_rgba_to_photo 的半开角点约定一致。
         bounds = np.asarray(raster['bounds'], dtype=float)
         size = float(raster['pixel_size'])
 
         u_min_prime = bounds[0] + x0 * size
-        u_max_prime = bounds[0] + x1 * size
+        u_max_prime = bounds[0] + (x1 + 1) * size
         v_max_prime = bounds[3] - y0 * size
-        v_min_prime = bounds[3] - y1 * size
+        v_min_prime = bounds[3] - (y1 + 1) * size
 
         return {
             'image': cropped,
             'uv_bounds': (float(u_min_prime), float(v_min_prime),
                           float(u_max_prime), float(v_max_prime)),
             'pixel_size': size,
+            'projection_origin': quality.get("projection_origin"),
+            'projection_u_axis': quality.get("projection_u_axis"),
+            'projection_v_axis': quality.get("projection_v_axis"),
         }
 
     @staticmethod

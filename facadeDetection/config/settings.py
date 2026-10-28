@@ -28,20 +28,63 @@ class Config:
     FACADE_SPHERE_GRID_RES: float = 5.0
     FACADE_NORMAL_ANGLE_DEG: float = 8.0
     FACADE_DETECT_METHOD = 'hybrid'
+
+    # ============================================
+    # 新增：种子生成模式切换（bucket / hough / hybrid）
+    # ============================================
+    # 'bucket' ：方向桶 × 深度桶确定性枚举 
+    # 'hough'  ：保留原有空间化 Hough 投票路径 
+    # 'hybrid' ：BOTH bucket + Hough, deduplicated (recommended)
+    FACADE_SEED_MODE: str = 'hybrid'
+
+    # 方向桶量化步长（用于 fallback 均匀桶，主桶用弧形半宽）
+    FACADE_DIR_BIN_DEG: float = 5.0
+    # 每个主方向桶的弧形半宽（°）；窗口不重叠，同一物理面只落进一个桶
+    FACADE_DIR_ARC_HALF_DEG: float = 28.0
+    FACADE_DIR_BIN_OVERLAP_RATIO = 0.25
+    # 方向桶退化兜底：主朝向估计失败时的固定方位桶数量
+    FACADE_FALLBACK_BUCKETS: int = 8
+
+    # 深度桶硬间距（米）：同向异层在候选生成阶段就物理隔离
+    FACADE_DEPTH_LAYER_HARD_M: float = 0.05
+    # 去重深度差阈值严格 < 5cm
+    FACADE_DEDUP_DEPTH_THRESH_M: float = 0.045
+    # 桶边界双归属模糊带（米）：ρ mod 5cm 在 [0, ε] ∪ [5cm-ε, 5cm] 内双归属
+    # 仅用于候选召回的边界模糊带；最终归属必须唯一，且不应覆盖半个硬层间距。
+    FACADE_LAYER_BOUNDARY_EPS_M: float = 0.012
+    # bucket 路径内启用 Hough ρ 投票校验层中心 + 稀疏层补种
+    FACADE_BUCKET_HOUGH_FUSION: bool = True
+    # 候选扩张可放宽，但最终 facade 深度门控仍固定为 5cm。
+    FACADE_FINAL_DEPTH_RESIDUAL_M: float = 0.03
+    FACADE_FINAL_DEPTH_MAD_SCALE: float = 3.0
+    FACADE_FINAL_IRLS_ITERS: int = 6
+
+    # 同层合并 UV 桥接距离（米）：同层合并时桥接距离容差
+    # 收紧到洞口尺度，防止退台相邻面被误桥接
+    FACADE_MERGE_SAME_LAYER_GAP_M: float = 5.0
+    # UV morphological closing radius during single-seed expansion
+    FACADE_EXPAND_CLOSE_RADIUS_M = 0.50
+
+    # IRLS 迭代次数（逐片精化）
+    IRLS_MAX_ITER : int = 10
+
+    # 完形回收容差倍数（相对 tol）：桶化后错误吸附入口减少，可收紧
+    FACADE_RECLAIM_TOL_MULT: float = 1.5
+
     # 是否启用粗层快速版图提取（大数据集建议开启）
     FACADE_ENABLE_COARSE_LAYER: bool = True
-    
+
     # 粗层体素倍数（相对 base voxel_size，默认 4x = 20cm）
     FACADE_COARSE_VOXEL_MULT: float = 4.0
-    
+
     # 建筑外窗洞口最小跨越宽度（米），用于自适应孔洞闭合
     FACADE_MIN_OPENING_M: float = 0.50
-    
+
     # UV 网格闭合半径上限（防止网格过密时爆炸）
     FACADE_UV_CLOSE_MAX_CELLS: int = 12
     # UV+Depth 三维分层连通：同一 UV 格中深度不同的面不得被孔洞闭合桥接。
     FACADE_DEPTH_LAYER_BIN_M: float = 0.05
-    FACADE_DEPTH_LAYER_GAP_M: float = 0.12
+    FACADE_DEPTH_LAYER_GAP_M: float = 0.05
 
     # 主立面边界弱面召回（仅在局部边界带运行，避免全场景二次扫描）。
     FACADE_ENABLE_WEAK_BOUNDARY_RECALL: bool = True
@@ -55,27 +98,29 @@ class Config:
     FACADE_WEAK_MAX_PER_FACADE: int = 4            # 每个主立面最多召回数
     FACADE_WEAK_EXTEND_TOL_MULT: float = 0.8       # 扩展时距离容差乘数
     FACADE_WEAK_EXTEND_ANGLE_DEG: float = 5.0      # 扩展点法向与弱平面法向最大夹角
-    
+
     # 粗层 signed 距离容差倍数（相对 base）
     FACADE_COARSE_SIGNED_MULT: float = 2.0
-    
+
     # 细层 signed 距离容差
     FACADE_SIGNED_DIST_TOL: float = 1.0
-    
-    # Hough 参数调优
-    HOUGH_MAX_VOTE_POINTS: int = 100000     
-    HOUGH_MAX_DIRECTION_PEAKS: int = 8       
-    HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4  
-    HOUGH_MAX_CANDIDATES: int = 24          
-    HOUGH_RHO_MIN_PROMINENCE: float = 0.08   
-    # Hough 密度自适应参数
+
+    # Hough 参数调优（保留旧路径兼容）
+    HOUGH_MAX_VOTE_POINTS: int = 100000
+    HOUGH_MAX_DIRECTION_PEAKS: int = 8
+    HOUGH_MAX_RHO_PEAKS_PER_DIRECTION: int = 4
+    HOUGH_MAX_CANDIDATES: int = 24
+    HOUGH_RHO_MIN_PROMINENCE: float = 0.08
     HOUGH_DENSITY_ADAPTIVE: bool = True
     HOUGH_LOW_DENSITY_THRESH: float = 5.0        # 点/立方米
     HOUGH_LOW_DENSITY_BIN_MULT: float = 2.0      # bin_size = base * mult
     HOUGH_LOW_DENSITY_MIN_SUPPORT_RATIO: float = 0.2  # 相对 min_count
     HOUGH_LOW_DENSITY_MIN_PEAK_DIST_M: float = 0.10
     HOUGH_LOW_DENSITY_PROMINENCE_RATIO: float = 0.10
-    
+    HOUGH_PEAK_MERGE_VALLEY_RATIO: float = 0.30
+    HOUGH_MAX_WEAK_SEEDS: int = 16
+    HOUGH_WEAK_SUPPORT_RATIO: float = 0.20
+
     # 平面拟合参数
     RANSAC_ITERATIONS: int = 50            # RANSAC 迭代次数
     RANSAC_THRESHOLD_RATIO: float = 1.5     # 阈值 = voxel_size * ratio
@@ -101,53 +146,62 @@ class Config:
     FACADE_QUALITY_DEPTH_MIN_M: float = 0.02
     FACADE_QUALITY_DEPTH_MAX_M: float = 0.50
 
+    # ============ 新增：密度估计模块 ============
+    # 距离壳层（与 stratified_proxy_build 保持一致）
+    DENSITY_SHELLS = ((10., .10), (20., .08), (35., .06),
+                      (50., .05), (80., .045), (100., .04))
+    # 高/低层分界高度角（度）；高处扫描线更稀疏，单独设阈值
+    DENSITY_ELEV_SPLIT_DEG: float = 30.0
+    # 面密度阈值（pts/m²）：>= DENSE 正常；[SPARSE, DENSE) 降阈值继续；< SPARSE 跳过
+    DENSITY_DENSE_PTS_M2: float = 200.0
+    DENSITY_SPARSE_PTS_M2: float = 25.0
+    # 局部体素填充率阈值（相对密度，只降不升地覆盖单元级判定）
+    DENSITY_LOCAL_SPARSE_FILL: float = 0.05
+    DENSITY_LOCAL_SKIP_FILL: float = 0.01
+    # 区域门控比例：skip 占比 > 50% 跳过整个区域；skip+sparse > 35% 降级 sparse
+    DENSITY_GATE_SKIP_RATIO: float = 0.50
+    DENSITY_GATE_SPARSE_RATIO: float = 0.35
+    # SPARSE 区域最小点数门槛倍率（召回稀疏窗台立面）
+    DENSITY_SPARSE_MIN_COUNT_MULT: float = 0.40
+    # 容差膨胀上限（密度越低 tol 越大，但不得超过此倍数——保证不突破 5cm 硬约束）
+    DENSITY_TOL_MAX_SCALE: float = 1.6
 
     # --- Viewport interaction & camera settings ---
     ORTHO_FOV_DEG = 5.0
-    # 默认沿 +Y 轴观察，Z 轴向上（正面向上）；仅保留兼容配置项。
     ORTHO_DEFAULT_VIEW = 'neg_y'
-    # Mouse wheel zoom scaling factor (>1). Higher means stronger zoom per notch
     ZOOM_WHEEL_SCALE = 1.6
-    # Base panning speed scaling (tuned in interactor with scene/zoom factors)
     PAN_BASE_SPEED = 0.06
-    # Left-drag rotate sensitivity
     ROTATE_SPEED = 1.0
-    # Ortho projection screen mapping tuning (multiplier on world_per_pixel)
     ORTHO_WPP_SCALE = 1.0
-    # Enable verbose debug for selection when empty results occur
     DEBUG_SELECTION = True
 
     # --- Selection overlay style ---
-    SELECT_BORDER_RGBA = (255, 0, 0, 240)  # red opaque border
-    SELECT_FILL_RGBA = (255, 0, 0, 25)     # light red fill
+    SELECT_BORDER_RGBA = (255, 0, 0, 240)
+    SELECT_FILL_RGBA = (255, 0, 0, 25)
     SELECT_BORDER_WIDTH = 2
 
-
-    # 立面实例颜色：按检测结果 id 循环使用，保证相邻立面易于区分。
+    # 立面实例颜色
     FACADE_INSTANCE_COLORS = [
-    # ===== 高饱和组 =====
-    [0.50, 0.05, 0.85],   # 1  紫
-    [0.05, 0.55, 0.10],   # 2  绿
-    [0.10, 0.05, 0.80],   # 3  蓝紫
-    [0.80, 0.05, 0.55],   # 4  品红
-    [0.05, 0.40, 0.45],   # 5  蓝绿
-    [0.55, 0.35, 0.15],   # 6  土棕
-    [0.65, 0.10, 0.75],   # 7  紫2
-    [0.08, 0.70, 0.12],   # 8  绿2
-    [0.10, 0.20, 0.75],   # 9  蓝
-    [0.85, 0.15, 0.80],   # 10 粉紫
-
-    # ===== 低饱和组 =====
-    [0.15, 0.35, 0.18],   # 11 低绿1
-    [0.50, 0.15, 0.35],   # 12 低品红
-    [0.40, 0.28, 0.18],   # 13 低土棕
-    [0.25, 0.08, 0.45],   # 14 低紫1
-    [0.15, 0.25, 0.30],   # 15 低蓝绿
-    [0.35, 0.12, 0.55],   # 16 低紫2
-    [0.20, 0.18, 0.50],   # 17 低蓝紫
-    [0.55, 0.20, 0.45],   # 18 低粉紫
-    [0.20, 0.30, 0.55],   # 19 低蓝
-    [0.30, 0.45, 0.20],   # 20 低绿2
+        [0.50, 0.05, 0.85],
+        [0.05, 0.55, 0.10],
+        [0.10, 0.05, 0.80],
+        [0.80, 0.05, 0.55],
+        [0.05, 0.40, 0.45],
+        [0.55, 0.35, 0.15],
+        [0.65, 0.10, 0.75],
+        [0.08, 0.70, 0.12],
+        [0.10, 0.20, 0.75],
+        [0.85, 0.15, 0.80],
+        [0.15, 0.35, 0.18],
+        [0.50, 0.15, 0.35],
+        [0.40, 0.28, 0.18],
+        [0.25, 0.08, 0.45],
+        [0.15, 0.25, 0.30],
+        [0.35, 0.12, 0.55],
+        [0.20, 0.18, 0.50],
+        [0.55, 0.20, 0.45],
+        [0.20, 0.30, 0.55],
+        [0.30, 0.45, 0.20],
     ]
 
     FACADE_TYPE_COLORS = {
@@ -160,40 +214,28 @@ class Config:
     FACADE_BASE_COLOR = [0.55, 0.55, 0.55]
     QUALITY_HEATMAP_BASE_COLOR = [0.72, 0.78, 0.86]
 
-    # --- Viewport appearance (both backends read these) ---
     VIEWPORT_BACKGROUND = '#FFFFFF'
     DEFAULT_CLOUD_GRAY = 0.45
 
-    # --- Quality evaluation constants ---
     QUALITY_PASS = 0
     QUALITY_WARN = 1
     QUALITY_FAIL = 2
 
-    # Categorical colors for quality levels (RGB in [0,1])
     QUALITY_COLORS = {
-        QUALITY_PASS: [0.20, 0.80, 0.20],  # green
-        QUALITY_WARN: [0.95, 0.85, 0.20],  # yellow
-        QUALITY_FAIL: [0.95, 0.35, 0.35],  # red
+        QUALITY_PASS: [0.20, 0.80, 0.20],
+        QUALITY_WARN: [0.95, 0.85, 0.20],
+        QUALITY_FAIL: [0.95, 0.35, 0.35],
     }
 
-    # 质量评估：是否采用“垂直约束参考面”用于平整度（不影响垂直度计算）
     QUALITY_VERTICAL_REF_PLANE = False
 
-    # --- Robust global plane fitting fallback constants ---
-    # huber_delta 降至 5mm，匹配 TLS 噪声级，避免将 5-10mm 真实 bulge 拉平
     GLOBAL_PLANE_HUBER_DELTA_M: float = 0.005
     GLOBAL_PLANE_MAX_ITERATIONS: int = 500
     GLOBAL_PLANE_ANGLE_LIMIT_DEG: float = 3.0
-    # 宽容化：允许阳台/雨棚等附属结构导致 inlier 偏低
     GLOBAL_PLANE_MIN_INLIER_RATIO: float = 0.15
     GLOBAL_PLANE_MAX_P95_MM: float = 200.0
     GLOBAL_PLANE_ENABLE_PARTITION_FALLBACK: bool = True
-    # 分区深度段最小间隔降至 3cm，避免合并不同抹灰层
     GLOBAL_PLANE_PARTITION_DEPTH_GAP_M: float = 0.03
     GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO: float = 0.10
     GLOBAL_PLANE_OUTLIER_SIGMA: float = 3.0
-    # 放宽 final gate，避免过度剔除真实 bulge 点
     GLOBAL_PLANE_FINAL_GATE_SIGMA: float = 3.5
-
-    # 分块局部平面拟合：已从 local_baseline.py 统一管理，块间无重叠
-    # LOCAL_PLANE_BLOCK_OVERLAP_RATIO 已废弃，保留注释以提示迁移完成
