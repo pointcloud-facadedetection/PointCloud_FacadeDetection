@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import os
 import time
 
 from PySide6.QtCore import QTimer, Qt
@@ -76,6 +77,14 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         # 视口后端：优先 PyVista/VTK（Qt 原生、宽线/材质生效），
         # pyvista 不可用时回退 Open3D。FACD_VIEWPORT=open3d 可强制旧后端。
         self.viewport = _create_viewport()
+        if os.getenv('FACD_VIEWPORT_PROBE') == '1':
+            from config.storage import Storage
+            from utils.viewport_probe import ViewportProbe
+            output = os.getenv(
+                'FACD_VIEWPORT_PROBE_PATH',
+                str(Storage.DATA_DIR / 'diagnostics' / 'viewport_probe_app.jsonl'))
+            self._viewport_probe = ViewportProbe(self.viewport, output)
+            self._viewport_probe.start()
         # Unified render service for business modules
         self.render_service = ViewportRenderService(self.viewport, db=None)
         self.render_facade = ViewportRenderFacade(self.render_service)
@@ -638,6 +647,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self.lifecycle_controller.dispose_project_runtime()
 
         # Step 6: 销毁 viewport（关键：在 Qt 窗口销毁前完成）
+        probe = getattr(self, '_viewport_probe', None)
+        if probe is not None:
+            probe.close()
         try:
             if hasattr(self, 'viewport') and self.viewport is not None:
                 self.viewport.destroy()
