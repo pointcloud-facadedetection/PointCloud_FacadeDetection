@@ -77,7 +77,13 @@ def floor_height(floor_no: int, data: dict) -> float:
 
 
 def floor_elevations(data: dict) -> list[dict]:
-    """返回每层起始标高、层高和顶部标高；特殊层高度归属于该层。"""
+    """返回每层起始标高、层高和顶部标高；特殊层高度归属于该层。
+
+    ``base_elevation_m`` 与 ``base_floor_no`` 是同一个工程基准锚点：
+    基准标高对应的楼层号由配置直接指定，后续楼层只按实际层高累加。
+    本函数有意不接收点云坐标，也不根据世界 Z 推断楼层号；点云世界坐标
+    与工程标高的转换属于几何投影边界，不能改变这里的楼层编号语义。
+    """
     current = float(data.get("base_elevation_m", 0.0))
     rows = []
     start = int(data.get("base_floor_no", 1))

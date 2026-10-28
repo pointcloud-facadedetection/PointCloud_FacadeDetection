@@ -38,9 +38,6 @@ class FloorAnnotationService:
             cv2.line(img, p0, p1, (40, 220, 255), 2, cv2.LINE_AA)
             text = f"{row['floor_no']}F  ±{z:.3f}m" if abs(z) < 1e-9 else f"{row['floor_no']}F  {z:.3f}m"
             cv2.putText(img, text, (p0[0] + 5, p0[1] - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 40, 40), 2,
-                        cv2.LINE_AA)
-            cv2.putText(img, text, (p0[0] + 5, p0[1] - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
                         cv2.LINE_AA)
         return img
