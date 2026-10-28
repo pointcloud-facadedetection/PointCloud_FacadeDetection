@@ -1036,6 +1036,8 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     def clear_pick_markers(self):
+        if not self._pick_marker_actors:
+            return
         for actor in self._pick_marker_actors:
             self._remove_visual_actor(actor)
         self._pick_marker_actors.clear()
@@ -1174,6 +1176,8 @@ class PyVistaViewport(BaseViewport):
             ren.PreserveDepthBufferOff()
             rw.AddRenderer(ren)
             self._overlay_renderer = ren
+            # 热力展示时同步准备工具层，避免第一次拾取再改变渲染结构。
+            self._get_tool_overlay_renderer()
         return self._overlay_renderer
 
     def _get_tool_overlay_renderer(self):
@@ -1245,6 +1249,8 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     def clear_measure_visuals(self):
+        if not self._measure_actors:
+            return
         for actor in self._measure_actors:
             self._remove_visual_actor(actor)
         self._measure_actors.clear()
@@ -1305,13 +1311,18 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     def clear_ruler_overlay(self):
+        if not self._ruler_actors:
+            return
         for actor in self._ruler_actors:
             self._remove_visual_actor(actor)
         self._ruler_actors.clear()
         self._render()
 
     def clear_tool_visuals(self):
-        # 只清工具 actor；热力图由立面、模式和质量结果独立管理。
+        # 没有任何工具 actor 时，模式切换不触发场景渲染。
+        if not (self._measure_actors or self._ruler_actors
+                or self._pick_marker_actors):
+            return
         self.set_render_enabled(False)
         try:
             self.clear_measure_visuals()

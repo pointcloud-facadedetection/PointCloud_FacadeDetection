@@ -88,6 +88,7 @@ def test_tool_renderer_is_above_heatmap_renderer():
     viewport._tool_overlay_renderer = None
 
     heatmap = viewport._get_overlay_renderer()
+    assert viewport._tool_overlay_renderer is not None
     tools = viewport._get_tool_overlay_renderer()
     assert heatmap is not tools
     assert heatmap.GetLayer() == 1
@@ -141,3 +142,17 @@ def test_render_requests_coalesce_into_one_update(qapp):
     qapp.processEvents()
     assert updates == [1]
     assert viewport._render_pending is False
+
+
+def test_empty_tool_clear_does_not_request_render():
+    viewport = PyVistaViewport.__new__(PyVistaViewport)
+    viewport._measure_actors = []
+    viewport._ruler_actors = []
+    viewport._pick_marker_actors = []
+    renders = []
+    viewport._render = lambda: renders.append(1)
+    viewport.clear_tool_visuals()
+    viewport.clear_measure_visuals()
+    viewport.clear_ruler_overlay()
+    viewport.clear_pick_markers()
+    assert renders == []
