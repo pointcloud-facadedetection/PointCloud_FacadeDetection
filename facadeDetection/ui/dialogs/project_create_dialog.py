@@ -35,6 +35,9 @@ from PySide6.QtWidgets import (
 )
 
 from services.inspection_profile import InspectionProfile, InspectionProfileService
+from services.building_info_service import (
+    default_building_info, parse_building_info, validate_building_info,
+)
 
 
 class RegionSelector(QWidget):
@@ -228,6 +231,7 @@ class ProjectCreateDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.setObjectName('formTabs')
         self.tabs.addTab(self._build_basic_tab(), "基础信息")
+        self.tabs.addTab(self._build_building_tab(), "楼宇信息")
         self.tabs.addTab(self._build_report_tab(), "报告信息")
         self.tabs.addTab(self._build_inspection_tab(), "检测参数")
         self.tabs.addTab(self._build_import_tab(), "文件导入")
@@ -336,6 +340,91 @@ class ProjectCreateDialog(QDialog):
         layout.addWidget(label)
         layout.addWidget(mark)
         return holder
+
+    def _build_building_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        form.setContentsMargins(14, 14, 14, 8)
+        self.spin_base_elevation = QDoubleSpinBox()
+        self.spin_base_elevation.setRange(-1000.0, 10000.0)
+        self.spin_base_elevation.setDecimals(3)
+        self.spin_base_elevation.setSuffix(" m")
+        form.addRow("楼层基准标高（±0.000）：", self.spin_base_elevation)
+        self.spin_base_floor_no = QSpinBox()
+        self.spin_base_floor_no.setRange(-20, 300)
+        self.spin_base_floor_no.setValue(1)
+        self.spin_base_floor_no.setSuffix(" F")
+        form.addRow("基准标高对应楼层号：", self.spin_base_floor_no)
+        self.spin_standard_floor_height = QDoubleSpinBox()
+        self.spin_standard_floor_height.setRange(0.1, 100.0)
+        self.spin_standard_floor_height.setDecimals(3)
+        self.spin_standard_floor_height.setValue(3.0)
+        self.spin_standard_floor_height.setSuffix(" m")
+        form.addRow("标准楼层层高：", self.spin_standard_floor_height)
+        self.spin_total_floor_count = QSpinBox()
+        self.spin_total_floor_count.setRange(1, 300)
+        self.spin_total_floor_count.setValue(1)
+        self.spin_total_floor_count.setSuffix(" 层")
+        form.addRow("楼宇总层数：", self.spin_total_floor_count)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("特殊楼层配置（该层高度覆盖标准层高）："))
+        self.special_floor_table = QListWidget()
+        self.special_floor_table.setMinimumHeight(120)
+        layout.addWidget(self.special_floor_table, 1)
+        buttons = QHBoxLayout()
+        add = QPushButton("新增特殊楼层")
+        remove = QPushButton("删除选中")
+        add.clicked.connect(self._add_special_floor)
+        remove.clicked.connect(self._remove_special_floor)
+        buttons.addWidget(add)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        hint = QLabel("标高按楼层底标高计算；特殊层高度会影响其以上楼层标高。")
+        hint.setProperty('uiRole', 'fieldHint')
+        layout.addWidget(hint)
+        return page
+
+    def _add_special_floor(self, floor_no=1, height=4.8, label=""):
+        row = QWidget()
+        line = QHBoxLayout(row)
+        line.setContentsMargins(4, 2, 4, 2)
+        floor = QSpinBox(); floor.setRange(1, 300); floor.setValue(int(floor_no))
+        height_box = QDoubleSpinBox(); height_box.setRange(0.1, 100.0); height_box.setDecimals(3); height_box.setValue(float(height)); height_box.setSuffix(" m")
+        note = QLineEdit(str(label)); note.setPlaceholderText("备注，如首层/设备层")
+        line.addWidget(QLabel("楼层")); line.addWidget(floor)
+        line.addWidget(QLabel("层高")); line.addWidget(height_box, 1)
+        line.addWidget(note, 1)
+        item = QListWidgetItem(self.special_floor_table); item.setSizeHint(row.sizeHint())
+        item.setData(Qt.ItemDataRole.UserRole, (floor, height_box, note))
+        self.special_floor_table.setItemWidget(item, row)
+
+    def _remove_special_floor(self):
+        row = self.special_floor_table.currentRow()
+        if row >= 0:
+            self.special_floor_table.takeItem(row)
+
+    def _building_info_values(self) -> dict:
+        specials = []
+        for i in range(self.special_floor_table.count()):
+            item = self.special_floor_table.item(i)
+            floor, height, note = item.data(Qt.ItemDataRole.UserRole)
+            specials.append({"floor_no": floor.value(), "height_m": height.value(), "label": note.text().strip()})
+        return {"schema_version": 2, "base_elevation_m": self.spin_base_elevation.value(),
+                "base_floor_no": self.spin_base_floor_no.value(),
+                "standard_floor_height_m": self.spin_standard_floor_height.value(),
+                "total_floor_count": self.spin_total_floor_count.value(), "special_floors": specials}
+
+    def _load_building_info(self, params):
+        data = parse_building_info(params)
+        self.spin_base_elevation.setValue(float(data["base_elevation_m"]))
+        self.spin_base_floor_no.setValue(int(data.get("base_floor_no", 1)))
+        self.spin_standard_floor_height.setValue(float(data["standard_floor_height_m"]))
+        self.spin_total_floor_count.setValue(int(data["total_floor_count"]))
+        self.special_floor_table.clear()
+        for item in data.get("special_floors", []):
+            self._add_special_floor(item.get("floor_no", 1), item.get("height_m", 3.0), item.get("label", ""))
 
     @staticmethod
     def _repolish(widget: QWidget):
@@ -893,6 +982,7 @@ class ProjectCreateDialog(QDialog):
             return
 
     def _load_inspection_params(self, p: dict):
+        self._load_building_info(p)
         std_id = p.get("standard_id")
         if std_id:
             idx = self.cb_standard.findData(std_id)
@@ -938,6 +1028,12 @@ class ProjectCreateDialog(QDialog):
             self.tabs.setCurrentIndex(0)
             self.edt_name.setFocus()
             return
+        building = self._building_info_values()
+        ok, message = validate_building_info(building)
+        if not ok:
+            self.tabs.setCurrentIndex(1)
+            QMessageBox.warning(self, "楼宇信息校验", message)
+            return
         self.accept()
 
     def values(self) -> dict:
@@ -951,6 +1047,7 @@ class ProjectCreateDialog(QDialog):
         full_address = full_address.strip() or None
 
         inspection_params = {
+            "schema_version": 2,
             "standard_id": self.cb_standard.currentData(),
             "interval_size_m": self.cb_interval.currentData(),
             "ruler_length_m": self.cb_ruler_length.currentData(),
@@ -966,6 +1063,7 @@ class ProjectCreateDialog(QDialog):
             "sor_k": self.spin_sor_k.value(),
             "sor_method": self.cb_sor_method.currentData(),
             "sor_w_weight": self.spin_sor_w_weight.value(),
+            "building_info": self._building_info_values(),
         }
 
         return {

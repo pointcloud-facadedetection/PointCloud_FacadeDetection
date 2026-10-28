@@ -365,6 +365,19 @@ class PdfReportRenderer:
             ("施工阶段", "外立面工程"),
             ("报告日期", rdate),
         ]
+        building = project.get("building_info") or {}
+        special = building.get("special_floors") or []
+        floor_text = (
+            f"±{float(building.get('base_elevation_m', 0.0)):.3f} m / "
+            f"对应 {int(building.get('base_floor_no', 1))}F / "
+            f"标准层高 {float(building.get('standard_floor_height_m', 0.0)):.3f} m / "
+            f"总层数 {int(building.get('total_floor_count', 0))} 层"
+        )
+        if special:
+            floor_text += " / 特殊层：" + "、".join(
+                f"{int(x.get('floor_no'))}F={float(x.get('height_m')):.3f}m"
+                for x in special)
+        pairs.append(("楼宇层高配置", floor_text))
         for label, value in pairs:
             info_rows += (
                 f"<tr><td class='ci-label'>{escape(label)}</td>"

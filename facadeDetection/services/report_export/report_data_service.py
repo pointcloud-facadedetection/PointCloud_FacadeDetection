@@ -75,6 +75,9 @@ class ReportDataService:
     @staticmethod
     def _project_meta(project) -> dict:
         """Extract project metadata for report cover."""
+        from services.building_info_service import parse_building_info
+        params = getattr(project, "inspection_params_json", None) if project else None
+        building_info = parse_building_info(params)
         return {
             "name": getattr(project, "name", "") if project else "未选择项目",
             "org_unit": getattr(project, "org_unit", None) if project else None,
@@ -90,6 +93,7 @@ class ReportDataService:
             "report_no": getattr(project, "report_no", None) if project else None,
             "inspection_date": getattr(project, "inspection_date", None) if project else None,
             "report_date": getattr(project, "report_date", None) if project else None,
+            "building_info": building_info,
         }
 
     @staticmethod

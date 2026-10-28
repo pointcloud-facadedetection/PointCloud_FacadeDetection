@@ -209,8 +209,7 @@ def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
 
     ids = np.asarray(seed_spatial_ids, dtype=int)
     signed = points[ids] @ sn + seed_plane[3]
-    candidate = np.abs(signed) <= np.minimum(tol[ids] * 1.5,
-                                             DEPTH_HARD_M * 0.5)
+    candidate = np.abs(signed) <= tol[ids] * 1.5
     candidate &= np.abs(normals[ids] @ sn) >= cos_tol[ids]
     cids = ids[candidate]
     if len(cids) < min_count:
@@ -279,8 +278,7 @@ def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
             continue
         model = fit_plane_weighted(points[comp], irls_iters=irls_iters)
         dist = np.abs(points[comp] @ model[:3] + model[3])
-        keep = dist <= np.minimum(tol[comp] * 1.8,
-                                  DEPTH_HARD_M * 0.8)
+        keep = dist <= tol[comp] * 1.8
         comp = comp[keep]
         if len(comp) < min_count:
             continue
@@ -619,48 +617,6 @@ def _cross_layer_arbitration(facades, points, d_thresh=0.03, angle_deg=5.0,
 
 # ==================== F2. 深度硬隔离终审（v3 新增）====================
 
-def _split_facade_internal_depth_peaks(facades, points, hard_m=DEPTH_HARD_M):
-    """拆分单个 facade 内部的显著深度层，并对每层重新稳健拟合。
-
-    这是最终归属阶段，不使用距离自适应 tol 作桥接条件：候选召回可以宽，
-    输出层之间的硬分割只允许 5cm。小于 5% 的片段视为噪声，不生成 facade。
-    """
-    result, violations = [], 0
-    for facade in facades:
-        ids = np.asarray(facade.get('inlier_indices', []), dtype=int)
-        if len(ids) < 100:
-            result.append(facade)
-            continue
-        n = np.asarray(facade['normal'], dtype=float)
-        n /= np.linalg.norm(n) + 1e-12
-        depth = points[ids] @ n
-        order = np.argsort(depth, kind='stable')
-        cuts = np.flatnonzero(np.diff(depth[order]) > float(hard_m)) + 1
-        groups = [g for g in np.split(order, cuts)
-                  if len(g) >= max(50, int(len(ids) * 0.05))]
-        if len(groups) <= 1:
-            result.append(facade)
-            continue
-        violations += 1
-        for group in groups:
-            sub_ids = ids[group]
-            model = fit_plane_weighted(
-                points[sub_ids],
-                irls_iters=int(getattr(Config, 'FACADE_FINAL_IRLS_ITERS', 6)))
-            # 最终重拟合只保留稳健残差内点，避免邻近退台面再次污染平面。
-            residual = np.abs(points[sub_ids] @ model[:3] + model[3])
-            gate = float(getattr(Config, 'FACADE_FINAL_DEPTH_RESIDUAL_M', 0.03))
-            keep = sub_ids[residual <= min(gate, hard_m * 0.8)]
-            if len(keep) < max(50, int(len(ids) * 0.03)):
-                continue
-            child = _info(facade.get('id', 0), model, points[keep], keep,
-                          np.zeros(len(keep)))
-            for key in ('dir_bin', 'layer', 'density_level', 'weak'):
-                if key in facade:
-                    child[key] = facade[key]
-            result.append(child)
-    return result, violations
-
 def _enforce_depth_hard_split(facades, points, angle_deg=5.0,
                               hard_m=DEPTH_HARD_M):
     """终审防御：同方向候选按 ρ 排序，凡相邻深度差 > hard_m 者不得共享
@@ -668,10 +624,8 @@ def _enforce_depth_hard_split(facades, points, angle_deg=5.0,
 
     返回 (facades, n_violations)。
     """
-    facades, internal_violations = _split_facade_internal_depth_peaks(
-        facades, points, hard_m=hard_m)
     if len(facades) < 2:
-        return facades, internal_violations
+        return facades, 0
 
     groups = {}
     for i, f in enumerate(facades):
@@ -679,7 +633,7 @@ def _enforce_depth_hard_split(facades, points, angle_deg=5.0,
         key = int(round(np.degrees(np.arctan2(na[1], na[0])))) % 180
         groups.setdefault(key, []).append(i)
 
-    n_violations = internal_violations
+    n_violations = 0
     cos_lim = np.cos(np.deg2rad(angle_deg))
     for gidxs in groups.values():
         if len(gidxs) < 2:
@@ -766,11 +720,7 @@ def _postprocess_v2(facades, points, normals, tol, cos_tol, spacing, voxel_size,
 
         cand = np.where(~assigned)[0]
         d = np.abs(points[cand] @ n + f['plane_model'][3])
-        # 回收只能填补同一深度层的平面内孔洞；自适应容差不得越过 5cm
-        # 契约边界，否则回收阶段会重新吸入相邻退台面。
-        reclaim_gate = np.minimum(tol[cand] * reclaim_mult,
-                                  DEPTH_HARD_M * 0.5)
-        ok = (d <= reclaim_gate) & (np.abs(normals[cand] @ n) >= cos_tol[cand])
+        ok = (d <= tol[cand] * reclaim_mult) & (np.abs(normals[cand] @ n) >= cos_tol[cand])
         add = cand[ok]
 
         if len(add):
@@ -1081,8 +1031,7 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
             sn = seed[:3] / (np.linalg.norm(seed[:3]) + 1e-12)
 
         signed = points[ids] @ sn + seed[3]
-        candidate = np.abs(signed) <= np.minimum(
-            tol[ids] * 1.5, DEPTH_HARD_M * 0.5)
+        candidate = np.abs(signed) <= tol[ids] * 1.5
         candidate &= np.abs(normals[ids] @ sn) >= cos_tol[ids]
         cids = ids[candidate]
         if len(cids) < min_count:
@@ -1155,7 +1104,7 @@ def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
                 continue
             model = fit_plane_weighted(points[comp], irls_iters=irls_iters)
             dist = np.abs(points[comp] @ model[:3] + model[3])
-            keep = dist <= np.minimum(tol[comp] * 1.8, DEPTH_HARD_M * 0.8)
+            keep = dist <= tol[comp] * 1.8
             comp = comp[keep]
             if len(comp) < min_count:
                 continue
@@ -1515,10 +1464,7 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                 for cf in coarse_facades:
                     cn = np.asarray(cf['normal'])
                     cd = float(np.asarray(cf['plane_model'])[3])
-                    # 粗层仅用于召回覆盖；其回映射必须仍处于最终单层门控内，
-                    # 不能用远距自适应 tol*1.5 吸入相邻退台面。
-                    coarse_gate = np.minimum(tol * 1.5, DEPTH_HARD_M * 0.5)
-                    on_plane = (np.abs(points @ cn + cd) <= coarse_gate) & \
+                    on_plane = (np.abs(points @ cn + cd) <= tol * 1.5) & \
                                (np.abs(normals @ cn) >= np.cos(np.deg2rad(5.0)))
                     covered |= on_plane
 
@@ -1527,8 +1473,7 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                     cn = np.asarray(cf['normal'])
                     cd = float(np.asarray(cf['plane_model'])[3])
                     all_signed = points @ cn + cd
-                    all_near = np.abs(all_signed) <= np.minimum(
-                        tol * 0.9, DEPTH_HARD_M * 0.5)
+                    all_near = np.abs(all_signed) <= tol * 0.9
                     all_near &= np.abs(normals @ cn) >= cos_tol
                     if all_near.sum() >= min_count:
                         model = fit_plane_weighted(points[all_near], irls_iters=irls_iters)
