@@ -470,19 +470,60 @@ class TwoDMatchingService:
                   flush=True)
             return None
 
-        heatmap_rgba = transparent['image']
-        uv_bounds = transparent['uv_bounds']
+        heatmap_rgba = np.ascontiguousarray(transparent['image'])
+        uv_bounds = tuple(float(v) for v in transparent['uv_bounds'])
+        # shape 应为 (height, width, 4)：ndim 是 3，不是 4。
+        if (heatmap_rgba.ndim != 3 or heatmap_rgba.shape[2] != 4
+                or len(uv_bounds) != 4
+                or not np.all(np.isfinite(uv_bounds))):
+            print(f'[PCFD][PhotoMatch] mode={mode} invalid_heatmap_metadata '
+                  f'shape={getattr(heatmap_rgba, "shape", None)} '
+                  f'uv_bounds={uv_bounds}', flush=True)
+            return None
         print(f'[PCFD][PhotoMatch] mode={mode} heatmap_shape={heatmap_rgba.shape} '
               f'uv_bounds={uv_bounds}', flush=True)
 
-        # ---- 2. 通过 H 将热力图 warp 到照片 ----
-        # ★ 平面参考系单源化：优先使用渲染器返回的 projection_*，
-        #    确保 H 与热力图栅格化使用同一 (origin, u, v)。
+        # ---- 2. 将“热力图 UV 系”安全变换到“配准 UV 系”，再 warp 到照片 ----
+        # 根因修复：estimate_photo_cloud_match() 输出的 homography_uv_to_photo
+        # 属于 match 阶段的平面参考系；而 transparent 热力图使用 renderer 返回的
+        # projection_*。两套 (origin, u, v) 在方法级数据中可能仅 u 轴反向，
+        # 旧代码直接用 renderer 参考系重解 H，会把 u 反向解释为 UV 反向，
+        # 最终造成照片叠加热力图左右镜像。这里必须保留配准 H，只做两个正交
+        # 平面坐标系之间的 2D 刚体/镜像变换，不能对同一批 correspondences
+        # 换一套坐标系重新估计。
         render_origin = transparent.get('projection_origin')
         render_u = transparent.get('projection_u_axis')
         render_v = transparent.get('projection_v_axis')
-        if (render_origin is not None and render_u is not None
-                and render_v is not None):
+        H_match = getattr(match_result, 'homography_uv_to_photo', None)
+        H = None
+        if H_match is not None:
+            H = np.asarray(H_match, dtype=np.float64).reshape(3, 3)
+            if (render_origin is not None and render_u is not None
+                    and render_v is not None):
+                try:
+                    match_frame = TwoDMatchingService._extract_plane_frame(
+                        facade_data, quality)
+                    render_frame = (np.asarray(render_origin, dtype=np.float64),
+                                    np.asarray(render_u, dtype=np.float64),
+                                    np.asarray(render_v, dtype=np.float64),
+                                    np.asarray(facade_data.get('plane_model'),
+                                               dtype=np.float64))
+                    T_render_to_match = TwoDMatchingService._uv_frame_change_matrix(
+                        src_frame=render_frame,
+                        dst_frame=match_frame,
+                    )
+                    H = H @ T_render_to_match
+                    print(f'[PCFD][PhotoMatch] mode={mode} '
+                          f'H_frame_composed det_T={np.linalg.det(T_render_to_match):.3f}',
+                          flush=True)
+                except Exception as exc:
+                    # 不静默退回未变换的 H_match：两套 UV 系一旦不一致，
+                    # 退回旧 H 恰好会复现左右镜像。交由 K/R/t 逐点投影兜底。
+                    print(f'[PCFD][PhotoMatch] mode={mode} '
+                          f'H_frame_compose_failed error={exc}', flush=True)
+                    H = None
+        elif render_origin is not None and render_u is not None and render_v is not None:
+            # 极少见的无配准 H 路径：保持旧的重估能力。
             try:
                 from utils.photo_matching import _solve_plane_homography_robust
                 H, _h_meta = _solve_plane_homography_robust(
@@ -496,22 +537,16 @@ class TwoDMatchingService:
                     translation=np.asarray(match_result.translation_vector,
                                            dtype=np.float64).reshape(3),
                 )
-                if H is not None:
-                    print(f'[PCFD][PhotoMatch] mode={mode} '
-                          f'H_rebuilt_from_render_frame', flush=True)
             except Exception as exc:
                 print(f'[PCFD][PhotoMatch] mode={mode} '
                       f'H_rebuild_failed error={exc}', flush=True)
-                H = getattr(match_result, 'homography_uv_to_photo', None)
-        else:
-            H = getattr(match_result, 'homography_uv_to_photo', None)
+                H = None
+
         blended = None
-        if H is not None:
+        if H is not None and np.all(np.isfinite(H)):
             try:
-                from utils.photo_matching import warp_heatmap_rgba_to_photo
-                warped_rgba = warp_heatmap_rgba_to_photo(
+                warped_rgba = TwoDMatchingService._warp_heatmap_rgba_to_photo(
                     heatmap_rgba=heatmap_rgba,
-                    valid_mask=heatmap_rgba[:, :, 3],
                     uv_bounds=uv_bounds,
                     uv_to_photo=H,
                     photo_size=(photo_bgr.shape[1], photo_bgr.shape[0]),
@@ -562,6 +597,104 @@ class TwoDMatchingService:
             overlay_path.write_bytes(encoded.tobytes())
             return overlay_path
         return None
+
+    # ==================================================================
+    # 平面 UV 参考系变换与热力图 warp（镜像修复）
+    # ==================================================================
+    @staticmethod
+    def _uv_frame_change_matrix(src_frame, dst_frame) -> np.ndarray:
+        """返回 src UV 坐标 → dst UV 坐标的 3×3 变换。
+
+        src/dst frame 均为 (origin, u_axis, v_axis, plane_model)。只利用
+        origin/u/v；不要求两个系的 handedness 相同，因此能正确表达方法级
+        projection_* 中可能出现的 u 轴反向（图像左右镜像），而不是静默重估 H。
+        """
+        src_origin, src_u, src_v, _ = src_frame
+        dst_origin, dst_u, dst_v, _ = dst_frame
+        so = np.asarray(src_origin, dtype=np.float64).reshape(3)
+        do = np.asarray(dst_origin, dtype=np.float64).reshape(3)
+        su = np.asarray(src_u, dtype=np.float64).reshape(3)
+        sv = np.asarray(src_v, dtype=np.float64).reshape(3)
+        du = np.asarray(dst_u, dtype=np.float64).reshape(3)
+        dv = np.asarray(dst_v, dtype=np.float64).reshape(3)
+
+        su /= max(np.linalg.norm(su), 1e-12)
+        sv /= max(np.linalg.norm(sv), 1e-12)
+        du /= max(np.linalg.norm(du), 1e-12)
+        dv /= max(np.linalg.norm(dv), 1e-12)
+
+        src_basis = np.column_stack((su, sv))
+        dst_basis = np.column_stack((du, dv))
+        if (not np.all(np.isfinite(src_basis))
+                or not np.all(np.isfinite(dst_basis))):
+            raise ValueError('plane basis contains non-finite values')
+        if (not np.allclose(src_basis.T @ src_basis, np.eye(2), atol=1e-3)
+                or not np.allclose(dst_basis.T @ dst_basis, np.eye(2),
+                                   atol=1e-3)):
+            raise ValueError('plane basis is not orthonormal')
+
+        T = np.eye(3, dtype=np.float64)
+        T[:2, :2] = dst_basis.T @ src_basis
+        T[:2, 2] = dst_basis.T @ (so - do)
+        if not np.all(np.isfinite(T)):
+            raise ValueError('uv frame transform contains non-finite values')
+        return T
+
+    @staticmethod
+    def _warp_heatmap_rgba_to_photo(heatmap_rgba: np.ndarray,
+                                    uv_bounds: tuple[float, float, float, float],
+                                    uv_to_photo: np.ndarray,
+                                    photo_size: tuple[int, int]) -> np.ndarray:
+        """按 rasterize_facade 的真实像素→UV 约定，将透明热力图 warp 到照片。
+
+        rasterize_facade() 中：
+            col ↑  => u 增大
+            row ↓  => v 减小（第 0 行是 v_hi，最后一行是 v_lo）
+        因此不能只把 uv_bounds 当作“左上=(u0,v0)”交给通用 warp。这里显式
+        使用四个像素角点建立映射，避免参考系 handedness 或 v 轴约定变化时
+        再次发生镜像/上下翻转。
+        """
+        from utils.photo_matching import plane_uv_to_photo
+
+        h, w = heatmap_rgba.shape[:2]
+        if h < 2 or w < 2:
+            raise ValueError(f'heatmap too small: {w}x{h}')
+        u0, v0, u1, v1 = (float(v) for v in uv_bounds)
+        if not (np.isfinite([u0, v0, u1, v1]).all() and u1 > u0 and v1 > v0):
+            raise ValueError(f'invalid uv_bounds={uv_bounds}')
+
+        # 源图角点：左上、右上、右下、左下。
+        src_px = np.array([[0.0, 0.0],
+                           [w - 1.0, 0.0],
+                           [w - 1.0, h - 1.0],
+                           [0.0, h - 1.0]], dtype=np.float32)
+
+        # 与 rasterize_facade 的列/行公式严格对应（第 0 行为 v_hi）。
+        uv_corners = np.array([[u0, v1],
+                               [u1, v1],
+                               [u1, v0],
+                               [u0, v0]], dtype=np.float64)
+        dst_px = np.asarray(
+            plane_uv_to_photo(uv_corners,
+                              np.asarray(uv_to_photo, dtype=np.float64).reshape(3, 3)),
+            dtype=np.float32,
+        )
+        if not np.all(np.isfinite(dst_px)):
+            raise ValueError('uv corners map to non-finite photo pixels')
+
+        warp_matrix = cv2.getPerspectiveTransform(src_px, dst_px)
+        warped = cv2.warpPerspective(
+            heatmap_rgba,
+            warp_matrix,
+            (int(photo_size[0]), int(photo_size[1])),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0),
+        )
+        if warped.shape[2] == 4:
+            # warp 后清除完全不可见像素，避免半透明杂边进入 alpha blend。
+            warped[warped[:, :, 3] < 4] = 0
+        return warped
 
     # ==================================================================
     # K/R/t 回退：逐点画圆（保留旧路径）
