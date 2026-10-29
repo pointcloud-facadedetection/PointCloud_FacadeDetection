@@ -197,6 +197,8 @@ class TwoDMatchingService:
                     quality=quality,
                     results_dir=results_dir,
                     dataset=dataset,
+                    building_info=__import__('services.floor_annotation_service',
+                                             fromlist=['FloorAnnotationService']).FloorAnnotationService.from_project(project),
                 )
                 if overlay_path:
                     exported[mode] = str(overlay_path)
@@ -407,7 +409,8 @@ class TwoDMatchingService:
     # ==================================================================
     @staticmethod
     def _generate_matched_overlay(mode, facade_no, photo_bgr, match_result,
-                                   facade_data, quality, results_dir, dataset):
+                                   facade_data, quality, results_dir, dataset,
+                                   building_info=None):
         """四组模式统一路径：透明热力图 warp 到原始照片。"""
         from services.heatmap_spec import heatmap_spec
         from services.heatmap_renderer import FacadeHeatmapTripletRenderer
@@ -496,6 +499,7 @@ class TwoDMatchingService:
         render_v = transparent.get('projection_v_axis')
         H_match = getattr(match_result, 'homography_uv_to_photo', None)
         H = None
+        render_frame = None
         if H_match is not None:
             H = np.asarray(H_match, dtype=np.float64).reshape(3, 3)
             if (render_origin is not None and render_u is not None
@@ -568,6 +572,14 @@ class TwoDMatchingService:
                 except Exception as exc:
                     print(f'[PCFD][PhotoMatch] mode={mode} '
                           f'photo_grid_draw_failed error={exc}', flush=True)
+                if building_info and render_frame is not None:
+                    try:
+                        from services.floor_annotation_service import FloorAnnotationService
+                        blended = FloorAnnotationService.annotate(
+                            blended, building_info, uv_bounds, H, render_frame)
+                    except Exception as exc:
+                        print(f'[PCFD][PhotoMatch] mode={mode} '
+                              f'floor_annotation_failed error={exc}', flush=True)
                 print(f'[PCFD][PhotoMatch] mode={mode} basis=heatmap_warp '
                       f'H_inliers={match_result.homography_inlier_count} '
                       f'H_rmse={match_result.homography_rmse_px:.2f}px',
