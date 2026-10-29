@@ -47,6 +47,31 @@ class ViewportProbe:
             context.aboutToBeDestroyed.connect(self._on_context_destroyed)
         self.mark('probe.start')
 
+    def attach_window(self, window):
+        if getattr(self, '_window_attached', False):
+            return
+        self._window_attached = True
+        for name in ('_on_facade_item_clicked', '_review_present_facade',
+                     '_review_heat_png', '_review_heat_uv_bounds',
+                     '_on_review_heat_png_ready', '_on_review_heat_rect_ready',
+                     '_activate', '_clear_state', '_start_ruler_base_prepare',
+                     '_on_ruler_base_ready', '_on_ruler_placement_done'):
+            self._wrap(window, name, name)
+        for obj, name in (
+                (window.viewport, 'focus_plane'),
+                (window.viewport, 'get_cloud_data'),
+                (window.facade_service, 'get_dataset'),
+                (window.facade_service, 'quality_domain_points')):
+            self._wrap(obj, name, name)
+        import cv2
+        self._wrap(cv2, 'imread', 'cv2.imread')
+        self._wrap(cv2, 'cvtColor', 'cv2.cvtColor')
+        from ui.pages.inspection_review_page import _HeatPngWorker, _HeatRectWorker
+        from ui.controllers.viewport_tools import _RulerBaseWorker, _RulerPlacementWorker
+        for cls in (_HeatPngWorker, _HeatRectWorker,
+                    _RulerBaseWorker, _RulerPlacementWorker):
+            self._wrap(cls, 'run', f'{cls.__name__}.run')
+
     def _wrap(self, obj, name, event):
         original = getattr(obj, name, None)
         if original is None:
@@ -67,9 +92,11 @@ class ViewportProbe:
     def _event(self, kind, **details):
         if self._file.closed:
             return
+        import threading
         record = {
             't': round(time.perf_counter() - self._started, 6),
             'event': kind,
+            'thread_id': threading.get_ident(),
             **details,
         }
         self._file.write(json.dumps(record, ensure_ascii=False) + '\n')

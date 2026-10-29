@@ -90,6 +90,8 @@ FACADE_DICT_KEYS = {
     'point_count', 'inlier_indices', 'support_indices', 'verticality',
     'horizontality', 'flatness', 'flatness_mean', 'flatness_max',
     'bbox_2d', 'mean_range', 'max_range', 'fill_ratio', 'wall_kind',
+    # ruiqi 复杂立面分层、方向桶、邻接与附属面元数据
+    'layer', 'dir_bin', 'adjacency', 'attachments',
 }
 
 FACADE_BBOX_2D_KEYS = {'u_min', 'u_max', 'v_min', 'v_max', 'u_axis', 'v_axis'}

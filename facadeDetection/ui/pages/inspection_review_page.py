@@ -54,11 +54,16 @@ class _HeatPngWorker(QThread):
     def run(self):
         path, _mtime = self._key
         try:
-            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if image is None or image.ndim != 3 or image.shape[2] != 4:
-                self.failed.emit(self._key, 'PNG 不存在或不是四通道图像')
+            from PySide6.QtGui import QImage
+            image = QImage(path)
+            if image.isNull():
+                self.failed.emit(self._key, 'PNG 读取失败')
                 return
-            rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+            image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+            width, height = image.width(), image.height()
+            rgba = np.frombuffer(image.bits(), dtype=np.uint8).reshape(
+                height, image.bytesPerLine())[:, :width * 4].reshape(
+                    height, width, 4).copy()
             self.done.emit(self._key, rgba)
         except Exception as exc:
             self.failed.emit(self._key, str(exc))
@@ -354,6 +359,21 @@ class InspectionReviewPageMixin:
             button.setChecked(False)
             button.blockSignals(False)
 
+    def _store_facade_list_item(self, item, facade):
+        facade_id = int(facade.get('id', -1))
+        registry = self.__dict__.setdefault('_facade_payloads', {})
+        registry[facade_id] = facade
+        item.setData(Qt.ItemDataRole.UserRole, facade_id)
+
+    def _facade_from_item(self, item):
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(value, dict):
+            return value
+        try:
+            return self.__dict__.get('_facade_payloads', {}).get(int(value))
+        except (TypeError, ValueError):
+            return None
+
     def _selected_review_facade(self):
         """靠尺交互与热力贴图的立面来源：右侧立面列表当前选中行。"""
         if not hasattr(self, 'list_facades'):
@@ -361,7 +381,7 @@ class InspectionReviewPageMixin:
         items = self.list_facades.selectedItems()
         if not items:
             return None
-        facade = items[0].data(Qt.ItemDataRole.UserRole)
+        facade = self._facade_from_item(items[0])
         print(f'[PCFD] review.selected_facade -> '
               f'{None if not facade else facade.get("id")}', flush=True)
         return facade
@@ -718,6 +738,7 @@ class InspectionReviewPageMixin:
     def _show_facade_results_review(self, results: list[dict]):
         """检测复核页：只显示 complete 立面，隐藏点数，【图片匹配】按钮。"""
         results = self.facade_quality_controller.process_facade_results(results)
+        self._facade_payloads = {}
         complete_results = [
             f for f in results
             if self._facade_review_status(f) == 'complete'
@@ -732,7 +753,7 @@ class InspectionReviewPageMixin:
             display_no = int(f.get('display_no') or index)
             f['display_no'] = display_no
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, f)
+            self._store_facade_list_item(item, f)
             item.setSizeHint(QSize(0, 40))
             self.list_facades.addItem(item)
             row = self._create_facade_list_row(f, display_no, review_mode=True)

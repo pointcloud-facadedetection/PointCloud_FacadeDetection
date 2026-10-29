@@ -361,3 +361,19 @@ def test_gui_color_update_does_not_use_queued_connection(qapp):
     service._update_cloud_color('c', np.zeros((1, 3), dtype=np.float32))
     assert viewport.direct == 1
     assert viewport.queued == 0
+
+
+def test_facade_list_item_stores_id_and_resolves_python_payload(qapp):
+    from PySide6.QtWidgets import QListWidgetItem
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    harness = InspectionReviewPageMixin()
+    facade = {'id': 145, 'quality_report': {'large': [1, 2, 3]}}
+    item = QListWidgetItem()
+    harness._store_facade_list_item(item, facade)
+    assert item.data(256) == 145
+    assert harness._facade_from_item(item) is facade
+
+    legacy = QListWidgetItem()
+    legacy.setData(256, facade)
+    assert harness._facade_from_item(legacy) == facade

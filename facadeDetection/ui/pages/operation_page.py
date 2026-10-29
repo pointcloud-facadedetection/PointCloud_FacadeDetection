@@ -1027,6 +1027,7 @@ class OperationPageMixin:
     def _show_facade_results(self, results: list[dict]):
         """项目操作页：显示全部立面，保留【标记处理】按钮（传统模式）。"""
         results = self.facade_quality_controller.process_facade_results(results)
+        self._facade_payloads = {}
         count = len(results)
         self.lbl_facade_summary.setText(f'检测立面数量：{count}')
         if not results:
@@ -1040,7 +1041,7 @@ class OperationPageMixin:
             display_no = int(f.get('display_no') or index)
             f['display_no'] = display_no
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, f)
+            self._store_facade_list_item(item, f)
             item.setSizeHint(QSize(0, 40))
             self.list_facades.addItem(item)
             row = self._create_facade_list_row(f, display_no, review_mode=False)
@@ -1065,19 +1066,15 @@ class OperationPageMixin:
         facade['review_status'] = status
         for row in range(self.list_facades.count()):
             item = self.list_facades.item(row)
-            payload = item.data(Qt.ItemDataRole.UserRole) or {}
+            payload = self._facade_from_item(item) or {}
             if int(payload.get('id', -1)) == int(facade.get('id', -2)):
                 self.list_facades.setCurrentItem(item)
-                item.setData(Qt.ItemDataRole.UserRole, facade)
                 break
         for current in (self.project_operation_service.last_facade_results or []):
             if int(current.get('id', -1)) == int(facade.get('id', -2)):
                 current['review_status'] = status
                 facade = current
                 break
-        item = self.list_facades.currentItem()
-        if item is not None and int((item.data(Qt.ItemDataRole.UserRole) or {}).get('id', -1)) == int(facade.get('id', -2)):
-            item.setData(Qt.ItemDataRole.UserRole, facade)
         button.setText('处理' if status == 'complete' else '不处理')
         if hasattr(self.project_operation_service, 'persist_facade_review_status'):
             self.project_operation_service.persist_facade_review_status(facade)
@@ -1131,7 +1128,7 @@ class OperationPageMixin:
             self.facade_quality_controller.evaluate_facades_batch(facades)
 
     def _on_facade_item_clicked(self, item):
-        f = item.data(Qt.ItemDataRole.UserRole)
+        f = self._facade_from_item(item)
         if not f:
             return
         cloud = self.facade_quality_controller.active_cloud_name()
