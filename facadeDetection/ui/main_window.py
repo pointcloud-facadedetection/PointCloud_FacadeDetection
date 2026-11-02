@@ -475,17 +475,18 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             self.station_list.blockSignals(False)
 
     def _start_load(self, operation, project_id, *, file_paths=None,
-                    directory=None, directories=None, project=None):
+                    directory=None, directories=None, project=None,
+                    assets=None):
         self.lifecycle_controller.start_load(
             operation, project_id,
             file_paths=file_paths, directory=directory, directories=directories,
-            project=project)
+            project=project, assets=assets)
 
     def _prepare_project_activation(self, project_id):
         self.lifecycle_controller.prepare_project_activation(project_id)
 
-    def _activate_project(self, project):
-        self.lifecycle_controller.activate_project(project)
+    def _activate_project(self, project, assets=None):
+        self.lifecycle_controller.activate_project(project, assets=assets)
 
     def _show_operation_info(self, title, message):
         QMessageBox.information(self, title, message)

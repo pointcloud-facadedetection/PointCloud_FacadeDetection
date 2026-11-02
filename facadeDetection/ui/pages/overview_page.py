@@ -181,6 +181,13 @@ class OverviewPageMixin:
             return
         self._prepare_project_activation(None)
         payload = dlg.values()
+        # 先只建项目记录并刷新列表，让新项目立即出现；资源绑定（FLS 转换、
+        # E57 生成 cache PLY）耗时可达数分钟，放进激活 worker 后台执行，
+        # 期间由加载窗口显示进度，不再卡住 GUI 线程。
+        assets = {
+            key: list(payload.get(key) or [])
+            for key in ('fls_directories', 'pointcloud_files', 'photo_files')
+        }
         project = self.project_overview_service.create_project(
             name=payload.get('name', ''),
             org_unit=payload.get('org_unit'),
@@ -196,18 +203,11 @@ class OverviewPageMixin:
             inspection_date=payload.get('inspection_date'),
             report_date=payload.get('report_date'),
             inspection_params_json=payload.get('inspection_params_json'),
-            fls_directories=payload.get('fls_directories'),
-            pointcloud_files=payload.get('pointcloud_files'),
-            photo_files=payload.get('photo_files'),
         )
         self._refresh_project_list()
-        self._activate_project(project)
-        # 资源已在项目保存时完成绑定。点云不再重复走 upload：激活流程会
-        # 从刚写入的 FileAsset 恢复首站，避免首次创建被误判为恢复已有站点。
-        # FLS 仍需转换并增量导入，沿用现有后台处理管线。
-        if payload.get('fls_directories'):
-            for directory in payload['fls_directories']:
-                self._start_load('fls', project.project_id, directory=directory)
+        # 资源在激活 worker 中先绑定再恢复首站（FLS 也在此转换导入），
+        # 不再另起 fls 加载：激活进行中时它会被"已有加载任务"拦下。
+        self._activate_project(project, assets=assets)
 
     def _prompt_project_name(self, title, initial_text=''):
         """使用可容纳真实工程长名称的项目名称输入框。"""
@@ -384,6 +384,12 @@ class OverviewPageMixin:
             return
 
         values = dlg.values()
+        # 项目信息同步保存；资源同步（FLS 转换、E57 生成 cache PLY）耗时可达
+        # 数分钟，走后台 'assets' 加载，完成回调里再刷新当前项目的站点视图。
+        assets = {
+            key: list(values.pop(key, None) or [])
+            for key in ('fls_directories', 'pointcloud_files', 'photo_files')
+        }
 
         try:
             updated_project = self.project_overview_service.update_project(
@@ -393,35 +399,15 @@ class OverviewPageMixin:
             QMessageBox.warning(self, '编辑项目', str(error))
             return
 
-        is_current = (
+        if (
             self.current_project is not None
             and self.current_project.project_id == project_id
-        )
-
-        if is_current:
+        ):
             self._set_current_project(updated_project)
-
-        # update_project 内部已调用 update_project_assets 同步完成资源导入
-        # （包括 FLS 转换、E57 cache 生成、站点同步），因此无需再走 _start_load
-        # 异步链路。直接在当前线程刷新 UI，避免 before_ids 已包含新站点导致
-        # on_load_finished 找不到"新"站点而跳过视口刷新。
-        if is_current:
-            try:
-                self.station_service.refresh()
-                stations = self.station_service.list_stations()
-                if stations:
-                    active_id = getattr(self.station_service, '_active_station_id', None)
-                    active_exists = any(
-                        int(s.id) == int(active_id) for s in stations
-                        if active_id is not None)
-                    if not active_exists:
-                        self.station_service.show_single(stations[0])
-                else:
-                    self.render_service.clear_scene_display()
-                self._refresh_station_panel()
-            except Exception as error:
-                QMessageBox.warning(self, '编辑项目', f'资源已保存，但站点视图刷新失败：{error}')
         self._refresh_project_list()
+        # 弹窗总是给出完整的三类列表（空列表即清空），每次保存都同步一遍，
+        # 与原同步实现一致（含已有 E57 缓存失效时的重建）。
+        self._start_load('assets', project_id, assets=assets)
 
     def _delete_project(self, project_id):
         project = self.project_overview_service.get_project(project_id)

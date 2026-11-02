@@ -47,7 +47,8 @@ class ProjectLifecycleController(QObject):
         self._active_load_worker = None
 
     def start_load(self, operation, project_id, *, file_paths=None,
-                   directory=None, directories=None, project=None):
+                   directory=None, directories=None, project=None,
+                   assets=None):
         """upload/fls/activate：计算段后台执行，Open3D 提交段回 GUI。
 
         worker 只做准备段；完成信号经队列投递回 GUI 线程后，由
@@ -75,7 +76,8 @@ class ProjectLifecycleController(QObject):
                 self.status_cleared.emit()
                 self.on_load_failed(generation, '项目标识为空，无法恢复项目')
                 return
-            worker = self._create_activate_worker(project, project_uuid)
+            worker = self._create_activate_worker(project, project_uuid,
+                                                  assets=assets)
             self._active_load_worker = worker
             worker.signals.progress.connect(
                 lambda pct, text: (
@@ -96,9 +98,11 @@ class ProjectLifecycleController(QObject):
 
         before_ids = {row.id for row in self.station_service.list_stations()}
         try:
+            extra = {'assets': assets} if operation == 'assets' else {}
             worker = self.project_overview_service.create_load_worker(
                 operation, project_id,
-                file_paths=file_paths, directory=directory, directories=directories)
+                file_paths=file_paths, directory=directory, directories=directories,
+                **extra)
         except Exception as exc:
             self._load_in_progress = False
             self.on_load_failed(generation, str(exc))
@@ -120,14 +124,18 @@ class ProjectLifecycleController(QObject):
         else:
             self.load_pool.start(worker)
 
-    def _create_activate_worker(self, project, project_uuid):
-        """activate 计算段 worker：DB 激活 + set_project + 站点视图数据准备。
+    def _create_activate_worker(self, project, project_uuid, assets=None):
+        """activate 计算段 worker：[资源绑定] + DB 激活 + set_project + 站点视图数据准备。
 
+        资源绑定失败原样抛出：项目已建好并在列表中，可经"编辑"重新绑定。
         DB 激活失败原样抛出（GUI 侧不得改动 UI/渲染状态）；set_project 与
         站点准备失败包装为“站点恢复失败”，GUI 失败回调据此清空场景。
         """
         def run(worker):
             worker.check_cancelled()
+            if assets and any(assets.values()):
+                self.project_overview_service.import_project_assets(
+                    project_uuid, assets, worker)
             worker.signals.progress.emit(-1, '正在激活项目数据')
             self.project_overview_service.activate_project(project_uuid)
             try:
@@ -302,12 +310,36 @@ class ProjectLifecycleController(QObject):
                     self.warning_requested.emit('FLS 导入', payload.get('message', '导入失败'))
             elif operation == 'activate':
                 self._commit_activate(result)
+            elif operation == 'assets':
+                _, current_id = self._context_provider()
+                if current_id == project_id:
+                    self._refresh_edited_project_stations()
             self.project_list_refresh_requested.emit()
         except Exception as exc:
             self.on_load_failed(generation, str(exc))
             return
         self.load_finished.emit(True, '处理完成')
         self.status_cleared.emit()
+
+    def _refresh_edited_project_stations(self):
+        """编辑当前项目资源后（GUI 线程）：同步站点列表，活动站点被移除时
+        改显示首站。不走 _find_new_station：编辑可能只删不增。"""
+        try:
+            self.station_service.refresh()
+            stations = self.station_service.list_stations()
+            if stations:
+                active_id = getattr(self.station_service, '_active_station_id', None)
+                active_exists = any(
+                    int(s.id) == int(active_id) for s in stations
+                    if active_id is not None)
+                if not active_exists:
+                    self.station_service.show_single(stations[0])
+            else:
+                self.render_service.clear_scene_display()
+            self.station_panel_refresh_requested.emit(None)
+        except Exception as exc:
+            self.warning_requested.emit(
+                '编辑项目', f'资源已保存，但站点视图刷新失败：{exc}')
 
     def _find_new_station(self, before_ids):
         stations = self.station_service.list_stations()
@@ -317,15 +349,16 @@ class ProjectLifecycleController(QObject):
             None,
         )
 
-    def activate_project(self, project):
+    def activate_project(self, project, assets=None):
         """打开项目的统一入口：与 start_load('activate') 同一 worker 事务。
 
         所有入口（打开目录、项目选择器、项目卡片）共享同一条后台激活
         管道：计算段（DB 激活/站点域准备）离开 GUI 线程，渲染提交与
         项目级 UI 状态切换在 GUI 完成回调执行，并显示加载窗口。
+        assets 仅新建项目时传入：先在 worker 中绑定资源再激活。
         """
         self.start_load('activate', getattr(project, 'project_id', None),
-                        project=project)
+                        project=project, assets=assets)
 
     def prepare_project_activation(self, project_id):
         # TODO(生命周期): _prepare_project_activation：需要统一旧项目异步任务取消、等待和资源释放顺序，核查重复分支及切换竞态。
