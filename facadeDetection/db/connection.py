@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import os
-from functools import lru_cache
+import threading
 from datetime import datetime
 from sqlalchemy import create_engine, event, select, Column, Integer, String, DateTime, UniqueConstraint, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -89,8 +89,32 @@ def list_index_projects() -> list[IndexProject]:  # type: ignore
 
 # ---------------- Per-project DB (by project UUID) ----------------
 
-@lru_cache(maxsize=256)
+# 按项目显式缓存引擎（不用 lru_cache）：删除项目时必须只关闭并移出该项目的
+# 引擎。lru_cache 只能整体 cache_clear，会把其他项目的引擎连同仍打开的
+# SQLite 连接一起丢掉而不 dispose，之后删除那些项目时 project.db 仍被占用
+# （Windows 下 WinError 32）。
+_PROJECT_ENGINES: dict = {}
+_PROJECT_ENGINES_LOCK = threading.Lock()
+
+
 def _project_engine(project_uuid: str):
+    with _PROJECT_ENGINES_LOCK:
+        engine = _PROJECT_ENGINES.get(project_uuid)
+        if engine is None:
+            engine = _create_project_engine(project_uuid)
+            _PROJECT_ENGINES[project_uuid] = engine
+        return engine
+
+
+def dispose_project_engine(project_uuid: str) -> None:
+    """关闭该项目的连接池并移出缓存；未打开过的项目不新建引擎。"""
+    with _PROJECT_ENGINES_LOCK:
+        engine = _PROJECT_ENGINES.pop(project_uuid, None)
+    if engine is not None:
+        engine.dispose()
+
+
+def _create_project_engine(project_uuid: str):
     db_path = Storage.project_db_path(project_uuid)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite:///{db_path}"
