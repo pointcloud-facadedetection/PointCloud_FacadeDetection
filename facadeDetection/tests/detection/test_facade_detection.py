@@ -120,6 +120,7 @@ def orient_spy(monkeypatch):
     return calls
 
 
+@pytest.mark.slow  # 为验证优化放大到 10 万～100 万点，单个十几秒到两分钟
 class TestInplaceDetectEquivalence:
     @pytest.mark.parametrize('seed', (3, 17))
     def test_output_identical_to_reference(self, monkeypatch, orient_spy,

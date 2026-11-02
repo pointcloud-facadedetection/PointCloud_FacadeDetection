@@ -1,4 +1,4 @@
-"""B4：service 弹窗上移回归——ProjectOperationService 的对话框类已全部移除，
+"""服务层不弹窗回归——ProjectOperationService 的对话框类已全部移除，
 交互改经 info_requested / color_pick_requested 信号与 apply_global_color 回调。
 """
 from types import SimpleNamespace

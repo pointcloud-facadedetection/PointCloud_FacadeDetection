@@ -1,4 +1,4 @@
-"""B2：FacadeQualityController offscreen 编排测试（mock service + 真 QThreadPool）。
+"""FacadeQualityController 编排测试（offscreen，mock service + 真 QThreadPool）。
 
 Storage 在 fixture 中打桩，测试不会创建真实项目目录。
 """
@@ -6,7 +6,7 @@ import pytest
 from PySide6.QtCore import QThreadPool, SignalInstance
 
 import ui.controllers.facade_quality as fq
-from fakes import SignalRecorder, pump_until
+from support.fakes import SignalRecorder, pump_until
 from ui.controllers.facade_quality import FacadeQualityController
 
 

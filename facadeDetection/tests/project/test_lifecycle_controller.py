@@ -1,11 +1,11 @@
-"""B3：ProjectLifecycleController offscreen 编排测试（mock service）。"""
+"""ProjectLifecycleController 编排测试（offscreen，mock service）。"""
 import threading
 from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QThreadPool, SignalInstance
 
-from fakes import Row, SignalRecorder, pump_until
+from support.fakes import Row, SignalRecorder, pump_until
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from ui.main_window_config import PAGE_DEFINITIONS
 from utils.workers import PointCloudLoadWorker

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import Qt
 
-from fakes import Row, SignalRecorder
+from support.fakes import Row, SignalRecorder
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from ui.dialogs.task_progress_dialog import TaskProgressDialog
 from utils.workers import PointCloudLoadWorker

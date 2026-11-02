@@ -1,8 +1,8 @@
-"""B1：RegistrationController offscreen 编排测试（mock service + 真 QThreadPool）。"""
+"""RegistrationController 编排测试（offscreen，mock service + 真 QThreadPool）。"""
 import pytest
 from PySide6.QtCore import QThreadPool, SignalInstance
 
-from fakes import Row, SignalRecorder, pump_until
+from support.fakes import Row, SignalRecorder, pump_until
 from ui.controllers.registration import RegistrationController
 
 
