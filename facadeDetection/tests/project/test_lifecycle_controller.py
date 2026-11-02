@@ -1,11 +1,11 @@
-"""B3：ProjectLifecycleController offscreen 编排测试（mock service）。"""
+"""ProjectLifecycleController 编排测试（offscreen，mock service）。"""
 import threading
 from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QThreadPool, SignalInstance
 
-from fakes import Row, SignalRecorder, pump_until
+from support.fakes import Row, SignalRecorder, pump_until
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from ui.main_window_config import PAGE_DEFINITIONS
 from utils.workers import PointCloudLoadWorker
@@ -34,14 +34,24 @@ class FakeOverviewService:
         self.log.append(('overview.fls', pid))
         return self.fls_payload
 
+    def import_project_assets(self, pid, assets, worker):
+        self.log.append(('overview.assets', pid,
+                         tuple(assets.get('fls_directories') or []),
+                         tuple(assets.get('pointcloud_files') or []),
+                         tuple(assets.get('photo_files') or [])))
+
     def commit_prepared_uploads(self, prepared):
         self.log.append(('overview.commit', len(prepared or [])))
 
     def create_load_worker(self, operation, project_uuid, *,
-                           file_paths=None, directory=None, directories=None):
+                           file_paths=None, directory=None, directories=None,
+                           assets=None):
         """与真实 ProjectOverviewService 相同的 worker 契约：计算段在
         worker.run() 内执行，结果携带 prepared/uploaded 供 GUI 回调提交。"""
         def run(worker):
+            if operation == 'assets':
+                self.import_project_assets(project_uuid, assets or {}, worker)
+                return {'operation': operation, 'project_uuid': project_uuid}
             if operation == 'upload':
                 return {'operation': operation,
                         'uploaded': self.upload_files(file_paths, project_uuid),
@@ -247,6 +257,58 @@ def test_activate_full_sequence(env):
     assert ('status', '正在加载点云，请稍候...', 0) in rec.events
     assert controller._load_in_progress is False
     assert controller.project_operation_service.last_facade_results == [{'id': 1}]
+
+
+def test_activate_binds_new_project_assets_before_activation(env):
+    """新建项目：资源绑定（E57/FLS 转换）在激活 worker 内、DB 激活之前执行。"""
+    controller, _, rec, log, project, _ = env
+    assets = {'fls_directories': ['D:/fls'], 'pointcloud_files': ['D:/a.e57'],
+              'photo_files': []}
+    controller.activate_project(project, assets=assets)
+    assert log[:2] == [
+        ('overview.assets', 'uuid-1', ('D:/fls',), ('D:/a.e57',), ()),
+        ('overview.activate', 'uuid-1'),
+    ]
+    assert ('page', OPERATION_INDEX) in rec.events
+    assert controller._load_in_progress is False
+
+
+def test_activate_without_assets_skips_binding(env):
+    controller, _, _, log, project, _ = env
+    controller.activate_project(project, assets={'fls_directories': [],
+                                                 'pointcloud_files': [],
+                                                 'photo_files': []})
+    assert not any(entry[0] == 'overview.assets' for entry in log)
+    assert log[0] == ('overview.activate', 'uuid-1')
+
+
+EDIT_ASSETS = {'fls_directories': [], 'pointcloud_files': ['D:/b.e57'],
+               'photo_files': []}
+
+
+def test_edit_assets_of_current_project_refreshes_stations(env):
+    """编辑当前项目资源：后台导入，完成后刷新站点；活动站点被移除则改显首站。"""
+    controller, _, rec, log, _, context = env
+    context['current_id'] = 'uuid-1'
+    controller.station_service._active_station_id = 99
+    controller.start_load('assets', 'uuid-1', assets=EDIT_ASSETS)
+    assert log == [
+        ('overview.assets', 'uuid-1', (), ('D:/b.e57',), ()),
+        ('station.refresh',),
+        ('station.show_single', 1),
+    ]
+    assert ('station_panel', None) in rec.events
+    assert ('proj_list',) in rec.events and ('cleared',) in rec.events
+    assert controller._load_in_progress is False
+
+
+def test_edit_assets_of_other_project_leaves_viewport(env):
+    controller, _, rec, log, _, context = env
+    context['current_id'] = 'uuid-other'
+    controller.start_load('assets', 'uuid-1', assets=EDIT_ASSETS)
+    assert log == [('overview.assets', 'uuid-1', (), ('D:/b.e57',), ())]
+    assert not any(e[0] == 'station_panel' for e in rec.events)
+    assert ('proj_list',) in rec.events
 
 
 def test_activate_empty_stations_branch(env):

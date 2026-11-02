@@ -1,4 +1,4 @@
-"""A 组：2a 接口公开化回归（services 层纯 Python 委托链）。"""
+"""服务层公开接口回归（services 层纯 Python 委托链）。"""
 from unittest import mock
 
 from services.project_operation.project_operation_service import ProjectOperationService

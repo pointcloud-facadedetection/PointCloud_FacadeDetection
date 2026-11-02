@@ -264,7 +264,7 @@ def test_review_gray_actor_preserves_color_buffer(viewport, qapp):
 def test_heat_rect_rebuild_finishes_in_background(qapp):
     from types import SimpleNamespace
     from PySide6.QtWidgets import QWidget
-    from fakes import pump_until
+    from support.fakes import pump_until
     from ui.pages.inspection_review_page import InspectionReviewPageMixin
 
     class Harness(QWidget, InspectionReviewPageMixin):
@@ -311,7 +311,7 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
 def test_heat_png_decode_finishes_in_background(qapp, tmp_path):
     import cv2
     from PySide6.QtWidgets import QWidget
-    from fakes import pump_until
+    from support.fakes import pump_until
     from ui.pages.inspection_review_page import InspectionReviewPageMixin
 
     class Harness(QWidget, InspectionReviewPageMixin):

@@ -212,7 +212,6 @@ class ProjectRepo:
     @staticmethod
     def delete_project(project_uuid: str, hard: bool = False) -> bool:
         from pathlib import Path
-        import shutil
 
         # Resolve and validate the authoritative root before removing any row.
         init_index_db()
@@ -228,22 +227,40 @@ class ProjectRepo:
 
         # Project deletion is intentionally always hard: the project database
         # and all generated/raw assets must not survive a UI delete operation.
-        engine = None
-        try:
-            from db.connection import _project_engine
-            engine = _project_engine(project_uuid)
-            engine.dispose()
-            _project_engine.cache_clear()
-        except Exception:
-            pass
+        from db.connection import dispose_project_engine
+        dispose_project_engine(project_uuid)
         if root.exists():
-            shutil.rmtree(root, ignore_errors=False)
+            ProjectRepo._rmtree_with_retry(root)
         with index_session() as isess:
             row = isess.execute(select(IndexProject).where(IndexProject.project_uuid == project_uuid)).scalar_one_or_none()
             if row:
                 isess.delete(row)
         Storage._uuid_root_cache.pop(project_uuid, None)
         return True
+
+    @staticmethod
+    def _rmtree_with_retry(root, attempts: int = 5, delay_s: float = 0.4) -> None:
+        """Windows 下文件被占用时短暂重试。
+
+        刚取消的后台任务可能还要片刻才走到检查点、归还数据库连接；
+        已脱离连接池的旧连接要等垃圾回收才真正关闭，故每次重试前先 gc。
+        """
+        import gc
+        import shutil
+        import time
+
+        for attempt in range(attempts):
+            try:
+                shutil.rmtree(root, ignore_errors=False)
+                return
+            except PermissionError as exc:
+                if attempt == attempts - 1:
+                    raise RuntimeError(
+                        f'项目文件仍被占用，暂时无法删除：{exc.filename}\n'
+                        '请等待后台任务结束后重试；若仍失败，请关闭其他打开该项目'
+                        '文件的程序，或重启软件后再删除。') from exc
+                gc.collect()
+                time.sleep(delay_s)
 
     @staticmethod
     def list_projects(limit: int | None = None) -> list[dict]:

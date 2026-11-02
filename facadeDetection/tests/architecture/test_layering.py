@@ -1,7 +1,8 @@
-"""C 组：结构回归扫描（防重构回潮）。"""
+"""分层约定扫描：UI 层不碰服务私有字段、服务层不弹窗、主窗口只由页面 mixin
+组成并暴露各控制器（防重构回潮）。"""
 from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 DIALOG_CLASSES = ('QMessageBox', 'QColorDialog', 'QFileDialog', 'QInputDialog')
 PRIVATE_SERVICE_FIELDS = ('_index_service', '_last_facade_results',

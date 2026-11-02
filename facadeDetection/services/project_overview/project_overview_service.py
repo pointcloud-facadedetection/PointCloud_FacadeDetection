@@ -53,7 +53,8 @@ class ProjectOverviewService:
         self._file_service: Optional[FileService] = None
 
     def create_load_worker(self, operation: str, project_uuid: str,
-                           *, file_paths=None, directory=None, directories=None):
+                           *, file_paths=None, directory=None, directories=None,
+                           assets=None):
         """构建后台加载 worker：计算段（解析/注册/转换）在池线程执行。
 
         结果中的 prepared 对象携带全部待提交数组，Open3D 提交段由 GUI
@@ -99,7 +100,28 @@ class ProjectOverviewService:
                 return {'operation': operation, 'project_uuid': project_uuid,
                         'result': merged, 'results': all_results}
             return PointCloudLoadWorker(run)
+        if operation == 'assets':
+            resources = dict(assets or {})
+            def run(worker):
+                self.import_project_assets(project_uuid, resources, worker)
+                return {'operation': operation, 'project_uuid': project_uuid}
+            return PointCloudLoadWorker(run)
         raise ValueError(f'未知加载操作: {operation}')
+
+    def import_project_assets(self, project_uuid: str, assets: dict, worker) -> None:
+        """在加载 worker 中按弹窗列表同步资源（FLS 转换、E57 生成 cache PLY）。"""
+        worker.check_cancelled()
+        worker.signals.progress.emit(
+            -1, '正在导入项目数据（E57/FLS 转换可能需要几分钟）')
+        self.update_project_assets(
+            project_uuid,
+            assets.get('fls_directories') or [],
+            assets.get('pointcloud_files') or [],
+            assets.get('photo_files') or [],
+            progress_cb=lambda done, total, name: worker.signals.progress.emit(
+                int(80 * done / max(total, 1)),
+                f'正在导入站点 {name} ({done}/{total})'))
+        worker.check_cancelled()
 
     # -------------- 项目管理 --------------
     def list_projects(self) -> list[ProjectCard]:
@@ -430,7 +452,8 @@ class ProjectOverviewService:
         }
 
     def update_project_assets(self, project_uuid: str, fls_directories: list[str],
-                              pointcloud_files: list[str], photo_files: list[str]) -> None:
+                              pointcloud_files: list[str], photo_files: list[str],
+                              *, progress_cb=None) -> None:
         """以弹窗列表为事实来源同步资源，支持新增、删除、清空后保存。
 
         FLS 目录会被实际转换并导入；E57 生成 cache PLY 后统一按 PLY 处理；
@@ -483,7 +506,7 @@ class ProjectOverviewService:
         # 1) FLS 目录（实际转换 → PLY → 注册）
         new_fls = [d for d in fls if d not in old_fls]
         for d in new_fls:
-            res = self.import_fls_directory(d, project_uuid)
+            res = self.import_fls_directory(d, project_uuid, progress_cb=progress_cb)
             if not res.get('success'):
                 raise RuntimeError(f"FLS 导入失败：{res.get('message', d)}")
 

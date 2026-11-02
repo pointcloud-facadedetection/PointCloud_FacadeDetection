@@ -1,7 +1,7 @@
 import numpy as np
 
 from algorithms.facade import interactive_ruler
-from fakes import pump_until
+from support.fakes import pump_until
 from ui.controllers.viewport_tools import ViewportToolsController
 from view3d.pyvista_viewport import PyVistaViewport
 

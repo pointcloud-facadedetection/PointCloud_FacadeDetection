@@ -290,6 +290,7 @@ class TestProxyBuildEquivalence:
 # ---------------------------------------------------------------------------
 # 3. 大点云提速实测（>=500 万点）
 # ---------------------------------------------------------------------------
+@pytest.mark.slow  # 500 万点计时对比
 class TestProxyBuildSpeed:
     def test_large_cloud_faster_and_identical(self):
         n = 5_000_000

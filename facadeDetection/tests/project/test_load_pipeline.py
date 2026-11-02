@@ -450,7 +450,7 @@ class TestOverviewPrepareCommitSplit:
 # ---------------------------------------------------------------------------
 from PySide6.QtCore import QThreadPool
 
-from fakes import Row, pump_until
+from support.fakes import Row, pump_until
 from ui.controllers.project_lifecycle import ProjectLifecycleController
 from utils.workers import PointCloudLoadWorker
 
