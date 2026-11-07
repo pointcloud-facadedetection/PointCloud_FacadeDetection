@@ -30,6 +30,7 @@ class Facade(Base):
     # 持久的决策元数据和可序列化的质量报告。
     quality_status = Column(String, default="pending", nullable=False)
     quality_report_json = Column(JSON, nullable=True)
+    inspection_params_json = Column(String, nullable=True)
     color_json = Column(JSON, nullable=True)
     dataset_revision = Column(String, nullable=True)
     # 检测结果的所有权明确归属。

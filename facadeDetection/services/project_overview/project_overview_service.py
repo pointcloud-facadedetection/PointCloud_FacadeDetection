@@ -331,6 +331,7 @@ class ProjectOverviewService:
                                                     for m in metrics],
                                'quality_status': row.quality_status,
                                'quality_report': row.quality_report_json,
+                               'inspection_params_json': row.inspection_params_json,
                                'color': row.color_json,
                                 'dataset_revision': row.dataset_revision,
                                 'dataset_id': row.dataset_id,          # 新增

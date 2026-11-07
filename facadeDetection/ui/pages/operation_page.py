@@ -74,9 +74,8 @@ class OperationPageMixin:
         viewport_state.setVisible(False)
         viewport_layout.addLayout(viewport_heading_row)
 
-        # 检测标准与区间不再在项目操作页暴露编辑入口：统一由【创建/编辑项目】
-        # 表单下发（main_window 会同步这两个控件），此处仅作为隐藏数据载体
-        # 保留，_on_standard_changed 继续据此解析 _inspection_profile。
+        # 标准与区间在楼宇参数弹窗中编辑，这两个隐藏控件保留给
+        # 既有标准联动及区间读取逻辑使用。
         self.standard_combo = QComboBox()
         for profile in InspectionProfileService.all():
             self.standard_combo.addItem(
@@ -164,6 +163,36 @@ class OperationPageMixin:
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(10)
         
+        # ── 楼宇与检测参数 ──
+        parameter_panel = QFrame()
+        parameter_panel.setObjectName('inspectionParameterSummary')
+        parameter_layout = QVBoxLayout(parameter_panel)
+        parameter_layout.setContentsMargins(0, 0, 0, 0)
+        parameter_layout.setSpacing(6)
+        parameter_title = QLabel('楼宇与检测参数')
+        parameter_title.setStyleSheet('font-weight:700; color:#1e293b; font-size:13px;')
+        parameter_layout.addWidget(parameter_title)
+        self.lbl_inspection_params = QLabel('尚未配置项目参数')
+        self.lbl_inspection_params.setWordWrap(True)
+        self.lbl_inspection_params.setStyleSheet('color:#475569; font-size:11px;')
+        parameter_layout.addWidget(self.lbl_inspection_params)
+        self.btn_inspection_params = QPushButton('设置楼宇参数')
+        self.btn_inspection_params.setProperty('buttonRole', 'primary')
+        self.btn_inspection_params.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_inspection_params.clicked.connect(self._edit_inspection_parameters)
+        parameter_layout.addWidget(self.btn_inspection_params)
+        self.lbl_inspection_params_source = QLabel()
+        self.lbl_inspection_params_source.setWordWrap(True)
+        self.lbl_inspection_params_source.setStyleSheet('color:#64748b; font-size:11px;')
+        parameter_layout.addWidget(self.lbl_inspection_params_source)
+        self.btn_use_default_inspection_params = QPushButton('本立面改用项目默认参数')
+        self.btn_use_default_inspection_params.setProperty('buttonRole', 'secondary')
+        self.btn_use_default_inspection_params.clicked.connect(
+            self._use_default_inspection_parameters)
+        self.btn_use_default_inspection_params.hide()
+        parameter_layout.addWidget(self.btn_use_default_inspection_params)
+        lay.addWidget(parameter_panel)
+
         # ── 检测结果 ──
         title = QLabel('检测结果')
         title.setStyleSheet('font-weight:700; color:#1e293b; font-size:14px;')
@@ -359,8 +388,8 @@ class OperationPageMixin:
         reset.clicked.connect(self._reset_quality_parameters)
         config_layout.addWidget(reset)
         
-        # 检测参数不再在项目操作页暴露编辑入口：统一由【创建/编辑项目】表单下发。
-        # 控件保留为不可见的数据载体，供质量控制器与"恢复标准参数"读取默认值。
+        # 详细编辑由上方的楼宇参数弹窗完成；这些隐藏控件同步当前立面的
+        # 有效参数，供复核靠尺及既有控制器读取。
         config.setVisible(False)
         lay.addWidget(config, 0)
         lay.addStretch(0)
@@ -879,38 +908,130 @@ class OperationPageMixin:
             self._project_generation,
         )
 
+    def _inspection_profile_for_facade(self, facade):
+        from services.inspection_parameters import InspectionParametersService
+        values, _ = InspectionParametersService.resolve(
+            getattr(self.current_project, 'inspection_params_json', None),
+            (facade or {}).get('inspection_params_json'))
+        return InspectionProfileService.from_snapshot(
+            values, getattr(self, '_inspection_profile', None))
+
     def _quality_profile_provider(self):
-        """质量算子的唯一参数来源：当前项目持久化快照。"""
-        import json
-        from services.inspection_profile import InspectionProfileService
-        project = getattr(self, 'current_project', None)
-        raw = getattr(project, 'inspection_params_json', None)
-        if raw:
-            try:
-                values = json.loads(raw) if isinstance(raw, str) else dict(raw)
-                standard_id = values.get('standard_id')
-                profile = InspectionProfileService.get(standard_id)
-                if profile is not None:
-                    aliases = {
-                        'ruler_length_m': 'measure_height_m',
-                        'step_longitudinal_m': 'scan_step_m',
-                        'step_transverse_m': 'step_size_m',
-                    }
-                    snapshot = {}
-                    for key in (
-                        'interval_size_m', 'window_size_m', 'step_size_m',
-                        'measure_height_m', 'min_points', 'flatness_limit_mm',
-                        'verticality_limit_mm', 'ruler_width_m', 'select_band_m',
-                        'hole_band_m', 'bin_size_m', 'top_q', 'sor_enabled',
-                        'sor_sigma', 'sor_k', 'sor_method', 'sor_w_weight',
-                        'scan_step_m', 'max_hole_ratio'):
-                        source = next((name for name, target in aliases.items() if target == key), key)
-                        if source in values:
-                            snapshot[key] = values[source]
-                    return replace(profile, **snapshot)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
+        values = getattr(self, '_active_inspection_params', None)
+        if values is None:
+            from services.inspection_parameters import InspectionParametersService
+            values, _ = InspectionParametersService.resolve(
+                getattr(self.current_project, 'inspection_params_json', None))
+        if values:
+            return InspectionProfileService.from_snapshot(
+                values, getattr(self, '_inspection_profile', None))
         return getattr(self, '_inspection_profile', None)
+
+    def _current_inspection_facade(self):
+        listing = getattr(self, 'list_facades', None)
+        item = listing.currentItem() if listing is not None else None
+        return self._facade_from_item(item) if item is not None else None
+
+    def _select_facade_inspection_params(self, facade):
+        from services.inspection_parameters import InspectionParametersService
+        values, source = InspectionParametersService.resolve(
+            getattr(self.current_project, 'inspection_params_json', None),
+            (facade or {}).get('inspection_params_json'))
+        self._selected_inspection_facade_id = (
+            int(facade.get('id', 0)) if facade is not None else None)
+        self._inspection_params_source = source
+        self._apply_project_inspection_params(self.current_project, values)
+
+    def _edit_inspection_parameters(self):
+        import json
+        from services.inspection_parameters import InspectionParametersService
+        from ui.dialogs.inspection_parameters_dialog import InspectionParametersDialog
+        if self.current_project is None:
+            QMessageBox.information(self, '楼宇参数', '请先选择项目。')
+            return
+        facade = self._current_inspection_facade()
+        values, _ = InspectionParametersService.resolve(
+            getattr(self.current_project, 'inspection_params_json', None),
+            (facade or {}).get('inspection_params_json'))
+        project = replace(
+            self.current_project,
+            inspection_params_json=json.dumps(values, ensure_ascii=False))
+        dialog = InspectionParametersDialog(
+            project, facade_no=(facade or {}).get('display_no'), parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        values = dialog.inspection_values()
+        facade_id = int(facade['id']) if facade is not None else None
+        try:
+            InspectionParametersService.save(
+                self.current_project.project_id, values, facade_id)
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, '楼宇参数', str(error))
+            return
+        raw = json.dumps(values, ensure_ascii=False)
+        self.current_project = replace(
+            self.current_project, inspection_params_json=raw)
+        if facade is not None:
+            facade['inspection_params_json'] = raw
+        self._select_facade_inspection_params(facade)
+        self._review_update_tool_buttons()
+        self.statusBar().showMessage(
+            '参数已保存并同步为项目默认，将在后续检测和靠尺测量中使用。', 5000)
+
+    def _use_default_inspection_parameters(self):
+        from services.inspection_parameters import InspectionParametersService
+        facade = self._current_inspection_facade()
+        if facade is None or self.current_project is None:
+            return
+        try:
+            InspectionParametersService.use_project_default(
+                self.current_project.project_id, int(facade['id']))
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, '楼宇参数', str(error))
+            return
+        facade.pop('inspection_params_json', None)
+        self._select_facade_inspection_params(facade)
+        self.statusBar().showMessage('本立面已改为沿用项目默认参数。', 3000)
+
+    def _refresh_inspection_parameter_summary(self):
+        if not hasattr(self, 'lbl_inspection_params'):
+            return
+        if self.current_project is None:
+            self.lbl_inspection_params.setText('请先选择项目')
+            self.lbl_inspection_params_source.clear()
+            self.btn_inspection_params.setEnabled(False)
+            self.btn_use_default_inspection_params.hide()
+            return
+        facade = self._current_inspection_facade()
+        if (facade is not None and
+                getattr(self, '_selected_inspection_facade_id', None) != int(facade.get('id', 0))):
+            self._select_facade_inspection_params(facade)
+            return
+        values = getattr(self, '_active_inspection_params', {})
+        profile = InspectionProfileService.from_snapshot(values)
+        building = values.get('building_info') or {}
+        self.lbl_inspection_params.setText(
+            f"{profile.standard_name} · {profile.version}\n"
+            f"靠尺 {profile.measure_height_m:g} m  |  "
+            f"平整度 ≤ {profile.flatness_limit_mm:g} mm  |  "
+            f"垂直度 ≤ {profile.verticality_limit_mm:g} mm\n"
+            f"标准层高 {float(building.get('standard_floor_height_m', 3.0)):g} m  |  "
+            f"共 {int(building.get('total_floor_count', 1))} 层")
+        facade = self._current_inspection_facade()
+        source = getattr(self, '_inspection_params_source', 'default')
+        if facade is None:
+            self.lbl_inspection_params_source.setText(
+                '当前编辑项目默认参数；选择立面后可单独微调。')
+            self.btn_inspection_params.setText('设置项目默认参数')
+        else:
+            self.lbl_inspection_params_source.setText(
+                f"立面 {int(facade.get('display_no', 1))}："
+                + ('已单独设置' if source == 'facade' else '沿用项目最近一次设置的参数'))
+            self.btn_inspection_params.setText(
+                f"设置立面 {int(facade.get('display_no', 1))} 参数")
+        self.btn_inspection_params.setEnabled(True)
+        self.btn_use_default_inspection_params.setVisible(
+            facade is not None and source == 'facade')
 
     def _quality_grid_size(self):
         profile = self._quality_profile_provider()
@@ -1131,6 +1252,7 @@ class OperationPageMixin:
         f = self._facade_from_item(item)
         if not f:
             return
+        self._select_facade_inspection_params(f)
         cloud = self.facade_quality_controller.active_cloud_name()
         if not cloud:
             return
@@ -1149,6 +1271,7 @@ class OperationPageMixin:
 
     def _clear_facade_selection(self):
         """清除立面选中：列表取消选择 + 视口恢复正常配色并摘除聚焦线框。"""
+        self._select_facade_inspection_params(None)
         self.list_facades.clearSelection()
         self.list_facades.setCurrentItem(None)
         cloud = self.facade_quality_controller.active_cloud_name()

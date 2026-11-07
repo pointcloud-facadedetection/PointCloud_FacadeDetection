@@ -114,3 +114,28 @@ class InspectionProfileService:
     @classmethod
     def get(cls, standard_id: str):
         return next((p for p in cls.PRESETS if p.standard_id == standard_id), None)
+
+    @classmethod
+    def from_snapshot(cls, values: dict, fallback=None):
+        values = values if isinstance(values, dict) else {}
+        profile = cls.get(values.get('standard_id')) or fallback or cls.PRESETS[0]
+        aliases = {
+            'ruler_length_m': 'measure_height_m',
+            'step_longitudinal_m': 'scan_step_m',
+            'step_transverse_m': 'step_size_m',
+        }
+        snapshot = {}
+        for source, target in aliases.items():
+            if values.get(source) is not None:
+                snapshot[target] = values[source]
+        for key in (
+                'interval_size_m', 'window_size_m', 'step_size_m',
+                'measure_height_m', 'min_points', 'flatness_limit_mm',
+                'verticality_limit_mm', 'ruler_width_m', 'select_band_m',
+                'hole_band_m', 'bin_size_m', 'top_q', 'sor_enabled',
+                'sor_sigma', 'sor_k', 'sor_method', 'sor_w_weight',
+                'scan_step_m', 'max_hole_ratio'):
+            if values.get(key) is not None and hasattr(profile, key):
+                snapshot[key] = values[key]
+        from dataclasses import replace
+        return replace(profile, **snapshot)

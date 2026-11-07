@@ -171,6 +171,24 @@ def test_resize_quality_roundtrip_updates_facade_without_dialog(env):
     assert 'dialog' not in rec.kinds()
 
 
+def test_evaluate_uses_facade_specific_profile(env):
+    controller, facade_service, _, operation, _, qapp, _ = env
+    from services.inspection_profile import InspectionProfileService
+    operation.last_facade_results = [{'id': 1, 'display_no': 1}]
+    profiles = []
+    def profile_for(facade):
+        profile = InspectionProfileService.from_snapshot(facade['inspection_params'])
+        profiles.append(profile)
+        return profile
+    controller._facade_profile_provider = profile_for
+    controller.evaluate_facade({
+        'id': 1, 'display_no': 1,
+        'inspection_params': {'ruler_length_m': 3.0, 'flatness_limit_mm': 2.0}})
+    assert pump_until(qapp, lambda: bool(facade_service.commits))
+    profile = profiles[0]
+    assert (profile.measure_height_m, profile.flatness_limit_mm) == (3.0, 2.0)
+
+
 def test_cache_hit_skips_compute(env):
     controller, facade_service, _, operation, rec, qapp, _ = env
     operation.last_facade_results = [{'id': 1, 'display_no': 1}]

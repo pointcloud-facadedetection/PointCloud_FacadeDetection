@@ -205,6 +205,7 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
             context_provider=self._quality_context,
             profile_provider=self._quality_profile_provider,
             grid_size_provider=self._quality_grid_size,
+            facade_profile_provider=self._inspection_profile_for_facade,
             progress=self.task_progress,
             parent=self,
         )
@@ -509,6 +510,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         for page_key, button in self.page_buttons.items():
             button.setEnabled(page_key == 'project_overview' or has_project)
 
+        self._selected_inspection_facade_id = None
+        self._inspection_params_source = 'default'
         if has_project:
             self.current_project_label.setText(f'当前项目：{project.name}')
             self.current_project_label.setToolTip(
@@ -517,23 +520,28 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         else:
             self.current_project_label.setText('当前项目：未选择')
             self.current_project_label.setToolTip('')
+            self._active_inspection_params = {}
+            self._refresh_inspection_parameter_summary()
             self.set_current_page(0)
         self._update_overview_workspace()
         self._refresh_report_preview()
         self._update_window_title()
 
-    def _apply_project_inspection_params(self, project):
-        """当项目被激活时，将创建项目时录入的检测参数恢复到 UI 控件。"""
+    def _apply_project_inspection_params(self, project, params=None):
+        """将项目默认参数或选中立面的有效参数同步到交互控件。"""
         import json
         from services.inspection_profile import InspectionProfileService
 
-        raw = getattr(project, 'inspection_params_json', None)
+        raw = getattr(project, 'inspection_params_json', None) if params is None else params
         if not raw:
+            self._active_inspection_params = {}
+            self._refresh_inspection_parameter_summary()
             return
         try:
-            p = json.loads(raw) if isinstance(raw, str) else raw
-        except Exception:
+            p = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
             return
+        self._active_inspection_params = p
 
         # 标准
         std_id = p.get('standard_id')
@@ -592,26 +600,9 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
                 self.quality_sor_method_combo.setCurrentIndex(idx)
                 self.quality_sor_method_combo.blockSignals(False)
 
-        # 同步 _inspection_profile 到项目参数快照
-        profile = InspectionProfileService.get(std_id) if std_id else None
-        if profile is not None:
-            aliases = {
-                'ruler_length_m': 'measure_height_m',
-                'step_longitudinal_m': 'scan_step_m',
-                'step_transverse_m': 'step_size_m',
-            }
-            snapshot = {}
-            for source, target in aliases.items():
-                if p.get(source) is not None:
-                    snapshot[target] = p[source]
-            for key in (
-                    'interval_size_m', 'ruler_width_m', 'select_band_m',
-                    'hole_band_m', 'flatness_limit_mm',
-                    'verticality_limit_mm', 'sor_enabled', 'sor_sigma',
-                    'sor_k', 'sor_method', 'sor_w_weight'):
-                if p.get(key) is not None and hasattr(profile, key):
-                    snapshot[key] = p[key]
-            self._inspection_profile = replace(profile, **snapshot)
+        self._inspection_profile = InspectionProfileService.from_snapshot(
+            p, getattr(self, '_inspection_profile', None))
+        self._refresh_inspection_parameter_summary()
 
     def closeEvent(self, event):
         # TODO(生命周期/稳定性): closeEvent：核查关闭期间线程池短超时、原生窗口销毁和 Qt 退出顺序，避免后台任务继续访问已销毁视口导致未响应。

@@ -38,7 +38,8 @@ class FacadeQualityController(QObject):
                  pointcloud_service, project_operation_service,
                  station_service, pool, context_provider, profile_provider,
                  grid_size_provider, parent=None,
-                 progress: Optional[TaskProgressController] = None):
+                 progress: Optional[TaskProgressController] = None,
+                 facade_profile_provider=None):
         super().__init__(parent)
         self.facade_service = facade_service
         self.render_facade = render_facade
@@ -53,6 +54,8 @@ class FacadeQualityController(QObject):
         # profile_provider() -> 当前质量参数快照；grid_size_provider() -> 当前
         # 采样间距。两者都依赖 UI 控件读数，由窗口以可调用对象注入。
         self._profile_provider = profile_provider
+        self._facade_profile_provider = (
+            facade_profile_provider or (lambda _facade: profile_provider()))
         self._grid_size_provider = grid_size_provider
         # 统一进度控制器：本控制器自行驱动进度窗的 begin / report / finish。
         self.progress = progress
@@ -213,8 +216,9 @@ class FacadeQualityController(QObject):
         print(f'[PCFD] ui.evaluate_start facade_id={facade_id} facade_no={facade_no} '
               f'cloud={cloud}', flush=True)
 
-        profile = self._profile_provider()
-        grid_size = float(self._grid_size_provider())
+        profile = self._facade_profile_provider(facade_copy)
+        grid_size = float(getattr(
+            profile, 'interval_size_m', self._grid_size_provider()))
         cache_key = self._quality_cache_key(cloud, facade_copy, profile, grid_size)
         cached_quality = self.quality_result_cache.get(cache_key)
         if cached_quality:
@@ -257,8 +261,6 @@ class FacadeQualityController(QObject):
         project_uuid, generation = self._context_provider()
         if not cloud or not project_uuid or not facades:
             return
-        profile = self._profile_provider()
-        grid_size = float(self._grid_size_provider())
         self._batch_results = []
         self._batch_current = 0
         self._batch_total = len(facades)
@@ -275,8 +277,11 @@ class FacadeQualityController(QObject):
                 'dataset_revision': getattr(dataset, 'revision', None),
                 'cloud_name': cloud,
             }
+            profile = self._facade_profile_provider(item)
             self._batch_queue.append((cloud, item, {
-                'profile': profile, 'grid_size': grid_size,
+                'profile': profile,
+                'grid_size': float(getattr(
+                    profile, 'interval_size_m', self._grid_size_provider())),
                 'results_dir': self._quality_results_dir(project_uuid, item),
             }))
 

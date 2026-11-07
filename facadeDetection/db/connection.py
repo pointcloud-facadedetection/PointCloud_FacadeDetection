@@ -122,6 +122,7 @@ def _project_engine(project_uuid: str):
         additions = {
             'quality_status': 'TEXT NOT NULL DEFAULT \'pending\'',
             'quality_report_json': 'JSON',
+            'inspection_params_json': 'TEXT',
             'color_json': 'JSON',
             'dataset_revision': 'TEXT',
             'quality_completed_at': 'DATETIME',
