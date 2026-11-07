@@ -137,6 +137,13 @@ class InspectionReviewPageMixin:
                 border: 1px solid #e2e8f0;
                 border-radius: 8px;
             }
+            #btn_review_measure[toolActive="true"],
+            #btn_review_ruler[toolActive="true"] {
+                background: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1d4ed8;
+                font-weight: 600;
+            }
         """)
         row = QHBoxLayout(bar)
         row.setContentsMargins(10, 6, 10, 6)
@@ -345,19 +352,24 @@ class InspectionReviewPageMixin:
             if button is not None:
                 button.setEnabled(enabled)
 
-    def _on_review_tool_activated(self, tool):
+    def _sync_review_tool_active(self, active_tool=None):
         buttons = {'measure': self.btn_review_measure,
                    'ruler': self.btn_review_ruler}
         for name, button in buttons.items():
+            active = name == active_tool
             button.blockSignals(True)
-            button.setChecked(name == tool)
+            button.setChecked(active)
             button.blockSignals(False)
+            button.setProperty('toolActive', active)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
+    def _on_review_tool_activated(self, tool):
+        self._sync_review_tool_active(tool)
 
     def _on_review_tool_deactivated(self):
-        for button in (self.btn_review_measure, self.btn_review_ruler):
-            button.blockSignals(True)
-            button.setChecked(False)
-            button.blockSignals(False)
+        self._sync_review_tool_active()
 
     def _store_facade_list_item(self, item, facade):
         facade_id = int(facade.get('id', -1))

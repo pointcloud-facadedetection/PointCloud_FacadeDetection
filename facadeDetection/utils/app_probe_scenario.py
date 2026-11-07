@@ -105,17 +105,31 @@ def run(project_id=None):
         mark('facade.select.return')
         QTimer.singleShot(2500, toggle_measure)
 
+    def expect(condition, message):
+        if not condition:
+            print(f'[scenario] FAILED: {message}', flush=True)
+            finish(2)
+
     def toggle_measure():
         win = window()
         mark('measure.activate.start')
         measured('measure_activate', lambda: win.btn_review_measure.click())
         mark('measure.activate.return')
+        QApplication.processEvents()
+        button = win.btn_review_measure
+        expect(button.isChecked() and button.property('toolActive'),
+               'measure active state')
+        color = button.grab().toImage().pixelColor(6, 6)
+        expect(color.blue() > color.red() and color.blue() > 150,
+               f'measure active color {color.name()}')
         QTimer.singleShot(1200, deactivate_measure)
 
     def deactivate_measure():
         win = window()
         win.btn_review_measure.click()
         mark('measure.deactivate')
+        expect(not win.btn_review_measure.property('toolActive'),
+               'measure state was not restored')
         QTimer.singleShot(800, toggle_ruler)
 
     def toggle_ruler():
@@ -123,16 +137,22 @@ def run(project_id=None):
         mark('ruler.activate.start')
         measured('ruler_activate', lambda: win.btn_review_ruler.click())
         mark('ruler.activate.return')
+        expect(win.btn_review_ruler.property('toolActive') and
+               not win.btn_review_measure.property('toolActive'),
+               'ruler/measure active states are not exclusive')
         QTimer.singleShot(2500, finish)
 
-    def finish():
+    def finish(code=0):
         win = window()
-        if win is not None:
+        if win is not None and code == 0 and win.btn_review_ruler.isChecked():
             win.btn_review_ruler.click()
+        if code == 0:
+            expect(win is not None and not win.btn_review_ruler.property('toolActive'),
+                   'ruler state was not restored')
         mark('scenario.finish')
         if win is not None:
             win.close()
-        QApplication.instance().quit()
+        QApplication.instance().exit(code)
 
     original_exec = QApplication.exec
 

@@ -363,6 +363,32 @@ def test_gui_color_update_does_not_use_queued_connection(qapp):
     assert viewport.queued == 0
 
 
+def test_review_tool_active_state_is_exclusive_and_restored(qapp):
+    from PySide6.QtWidgets import QPushButton
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    harness = InspectionReviewPageMixin()
+    harness.btn_review_measure = QPushButton('测距')
+    harness.btn_review_measure.setCheckable(True)
+    harness.btn_review_ruler = QPushButton('放靠尺')
+    harness.btn_review_ruler.setCheckable(True)
+    harness._on_review_tool_activated('measure')
+    assert harness.btn_review_measure.isChecked()
+    assert harness.btn_review_measure.property('toolActive') is True
+    assert not harness.btn_review_ruler.property('toolActive')
+
+    harness._on_review_tool_activated('ruler')
+    assert not harness.btn_review_measure.isChecked()
+    assert not harness.btn_review_measure.property('toolActive')
+    assert harness.btn_review_ruler.isChecked()
+    assert harness.btn_review_ruler.property('toolActive') is True
+
+    harness._on_review_tool_deactivated()
+    for button in (harness.btn_review_measure, harness.btn_review_ruler):
+        assert not button.isChecked()
+        assert button.property('toolActive') is False
+
+
 def test_facade_list_item_stores_id_and_resolves_python_payload(qapp):
     from PySide6.QtWidgets import QListWidgetItem
     from ui.pages.inspection_review_page import InspectionReviewPageMixin
