@@ -214,9 +214,10 @@ def compute_block_plane_quality(points, blocks, origin, u_axis, v_axis,
 
     # ---- 预处理：SOR 统计去噪（与靠尺法对齐，全局一次）----
     finite_dist = np.isfinite(all_dist_mm)
-    if sor_enabled and len(pts) > 16:
-        keep = _sor_mask_local(u_all, all_dist_mm, sor_k, sor_sigma)
-        all_dist_mm[keep & finite_dist] = all_dist_mm[keep & finite_dist]
+    if sor_enabled and len(pts) > 16 and np.any(finite_dist):
+        keep_finite = _sor_mask_local(u_all[finite_dist], all_dist_mm[finite_dist], sor_k, sor_sigma)
+        keep = np.zeros(len(pts), dtype=bool)
+        keep[finite_dist] = keep_finite
         all_dist_mm[~keep] = np.nan
 
     # ---- 预处理：select_band 表面筛选 ----
@@ -565,7 +566,7 @@ def compute_global_plane_quality(points, plane_model, origin, u_axis, v_axis,
                 defect_values_mm, defect_types = [], []
 
             # 垂直度：窗口内全部点拟合局部窗口平面（模拟墙面法语义）
-            verticality_mm = np.nan
+            verticality_mm = plane_verticality_mm
             if ln is not None:
                 win_n3 = ln[ix]
                 finite_n3 = np.all(np.isfinite(win_n3), axis=1)

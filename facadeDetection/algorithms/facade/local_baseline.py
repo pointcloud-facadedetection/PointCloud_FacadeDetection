@@ -456,6 +456,15 @@ def fit_interval_baseline_planes(
 
     n_blocks = max(1, int(np.ceil((v_max - v_min) / size)))
 
+    # v 只排序一次；各 block 通过 searchsorted 取得连续区间，避免每个
+    # block 都构造一个 N 长布尔掩码（原实现为 O(blocks * N) 扫描）。
+    v_order = np.argsort(v_all, kind='stable')
+    v_sorted = v_all[v_order]
+    edges = v_min + np.arange(n_blocks + 1, dtype=np.float64) * size
+    edges[-1] = v_max
+    edge_pos = np.searchsorted(v_sorted, edges, side='left')
+    edge_pos[-1] = len(v_sorted)
+
     blocks: list[BaselineBlock] = []
     prev_plane = np.asarray(reference_plane, dtype=np.float64).reshape(4)
     continuity_m = max(float(continuity_constraint_mm) / 1000.0, 1e-6)
@@ -464,12 +473,7 @@ def fit_interval_baseline_planes(
         v0 = v_min + i * size
         v1 = v_max if i == n_blocks - 1 else v_min + (i + 1) * size
 
-        if i < n_blocks - 1:
-            mask = (v_all >= v0) & (v_all < v1)
-        else:
-            mask = (v_all >= v0) & (v_all <= v1)
-
-        indices = np.flatnonzero(mask)
+        indices = v_order[edge_pos[i]:edge_pos[i + 1]]
         if len(indices) < 3:
             ref = np.asarray(reference_plane, dtype=np.float64).reshape(4)
             blocks.append(
@@ -573,18 +577,16 @@ def compute_block_signed_distances_mm(points, blocks, origin, v_axis) -> np.ndar
     n = len(pts)
     result = np.full(n, np.nan, dtype=np.float64)
 
-    origin = np.asarray(origin, dtype=float).reshape(3)
-    v_ax = _unit(v_axis)
-    v_all = (pts - origin) @ v_ax
-
+    # fit_interval_baseline_planes 已经保存每个 block 的精确 owner 索引和
+    # 对应距离。直接散写缓存即可，避免再次投影以及 blocks 次全量扫描。
     for block in blocks:
-        mask = (v_all >= block.v0) & (v_all <= block.v1)
-        if not np.any(mask):
+        indices = np.asarray(block.point_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
             continue
-
-        block_pts = pts[mask]
-        dist_m = block_pts @ block.plane_model[:3] + block.plane_model[3]
-        result[mask] = dist_m * 1000.0
+        cached = np.asarray(block.signed_dist_mm, dtype=np.float64).reshape(-1)
+        if cached.size != indices.size:
+            raise ValueError('BaselineBlock signed_dist_mm 与 point_indices 长度不一致')
+        result[indices] = cached
 
     return result
 
@@ -601,18 +603,14 @@ def compute_block_local_normals(points, blocks, origin, v_axis) -> np.ndarray:
     n = len(pts)
     result = np.full((n, 3), np.nan, dtype=np.float64)
 
-    origin = np.asarray(origin, dtype=float).reshape(3)
-    v_ax = _unit(v_axis)
-    v_all = (pts - origin) @ v_ax
-
     for block in blocks:
-        mask = (v_all >= block.v0) & (v_all <= block.v1)
-        if not np.any(mask):
+        indices = np.asarray(block.point_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
             continue
-        if len(block.local_normals) == int(mask.sum()):
-            result[mask] = block.local_normals
+        if len(block.local_normals) == len(indices):
+            result[indices] = block.local_normals
         else:
-            result[mask] = block.plane_model[:3]
+            result[indices] = block.plane_model[:3]
 
     return result
 
@@ -620,25 +618,18 @@ def compute_block_local_normals(points, blocks, origin, v_axis) -> np.ndarray:
 def find_block_for_v(v_coord: float, blocks: list) -> int | None:
     """Return the index of the block that owns *v_coord*.
 
-    Compatible with both BaselineBlock dataclass and legacy dict blocks.
     Because blocks are non-overlapping and gap-free, this is O(log N)
     in the number of blocks (blocks are kept sorted).
     """
     if not blocks:
         return None
 
-    def _v0(b):
-        return b.v0 if hasattr(b, 'v0') else b.get('v0', float('-inf'))
-
-    def _v1(b):
-        return b.v1 if hasattr(b, 'v1') else b.get('v1', float('inf'))
-
     lo, hi = 0, len(blocks)
     while lo < hi:
         mid = (lo + hi) // 2
         b = blocks[mid]
-        bv0 = _v0(b)
-        bv1 = _v1(b)
+        bv0 = b.v0
+        bv1 = b.v1
         if v_coord < bv0:
             hi = mid
         elif v_coord > bv1:
@@ -646,8 +637,8 @@ def find_block_for_v(v_coord: float, blocks: list) -> int | None:
         else:
             return mid
 
-    first_v0 = _v0(blocks[0])
-    last_v1 = _v1(blocks[-1])
+    first_v0 = blocks[0].v0
+    last_v1 = blocks[-1].v1
     if v_coord < first_v0:
         return 0
     if v_coord > last_v1:
