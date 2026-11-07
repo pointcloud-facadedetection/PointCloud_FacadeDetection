@@ -1,14 +1,16 @@
-"""距离自适应立面检测 v3：5cm 深度硬隔离收口 + 密度门控 + 深度种子×Hough 融合。
+"""距离自适应立面检测 v4：5cm 深度硬隔离收口 + 密度门控 + 深度种子×Hough 校验
++ 双通道全域非竞争提取 + 同层跨洞合并（楼层尺度桥接）。
 
 
 1. 【硬性约束】全局唯一深度硬隔离常量 DEPTH_HARD_M（= 5cm）。所有深度方向
    的桥接/合并/去重/回收容差一律不得超过它.
 2. 【密度门控】接入 density_estimator.DensityField：桶级/层级/连通域级
    'skip' 区域直接跳过；'sparse' 区域放宽最小点数（召回稀疏窗台立面）。
-3. 【种子融合】build_bucket_seeds v2：深度层由「排序+间隙切割」产生（无
+3. build_bucket_seeds：深度层由「排序+间隙切割」产生（无
    箱界漂移），层内 2cm 细箱双峰切割（解决噪声带重叠漏切），边界 ε 双
-   归属真正生效；Hough ρ 投票校验层中心并对断裂丢失的稀疏层补种。
-4. 合并调用收口：detect_facades_adaptive 末尾跨层裁决后执行深度硬隔离
+   归属真正生效；ρ-Hough 校验层中心；残余方向（bin_idx=-2）补充通道。
+4. precluster 与 bucket 两个种子通道都在完整 active 域上运行。
+5. 合并调用收口：detect_facades_adaptive 末尾跨层裁决后执行深度硬隔离
    终审，再走完形回收。
 """
 from __future__ import annotations
@@ -19,14 +21,14 @@ import open3d as o3d
 
 from algorithms.geometry import (
     ensure_normals, classify_plane, project_to_uv,
-    cluster_normals_direction, connected_components_3d_grid, connected_components_uv_depth_grid,
-    cluster_depth_significant,
-    estimate_plane_area, plane_axes,
+    connected_components_uv_depth_grid,
+    estimate_plane_area, plane_axes, cluster_depth_significant,
     estimate_point_ranges, adaptive_plane_tolerance, fit_plane_weighted
 )
 from config.settings import Config
-from algorithms.facade.hough_facade import normal_hough_peaks, rho_hough_peaks
 from algorithms.facade.direction_depth_cluster import build_bucket_seeds
+from algorithms.facade.facade_precluster import build_depth_normal_patch_seeds
+from algorithms.preprocess import finite_sparse_keep_indices
 
 try:
     from algorithms.facade.density_estimator import (
@@ -137,7 +139,7 @@ def _check_depth_single_peak(points, plane_model, max_plane_dist, tolerance=None
     pts = np.asarray(points, dtype=np.float64)
     if len(pts) < 100:
         return True
-    pm = np.asarray(plane_model, dtype=float)
+    pm = np.asarray(plane_model, dtype=np.float64)
     n = pm[:3] / (np.linalg.norm(pm[:3]) + 1e-12)
     d = float(pm[3]) / (np.linalg.norm(pm[:3]) + 1e-12)
     signed = pts @ n + d
@@ -190,18 +192,22 @@ def _aabb_gap_m(points_a, points_b):
 def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
                         tol, cos_tol, spacing, voxel_size, base, min_count,
                         min_facade_area, irls_iters, signed_dist_tolerance,
-                        fid_start=0):
+                        fid_start=0, stats=None):
     """从单个种子扩展立面。扩展逻辑与 Hough 路径完全一致。
 
     只在 seed_spatial_ids 范围内做初始筛选，然后 UV 连通域扩展。
     不修改任何全局状态。
-    【v3】UV+Depth 连通域深度方向零容忍桥接：depth_bin = depth_gap =
+    UV+Depth 连通域深度方向零容忍桥接：depth_bin = depth_gap =
     DEPTH_HARD_M（旧 depth_gap=0.12 会把深度差 12cm 的两个面闭运算桥接）。
+
+    stats: 可选 dict，记录各拒绝原因的计数（facade.seed.rejected 观测）。
     """
     facades = []
     fid = fid_start
 
     if len(seed_spatial_ids) < min_count:
+        if stats is not None:
+            stats['below_min'] += 1
         return facades, fid
 
     seed_plane = np.asarray(seed_plane, dtype=np.float64)
@@ -213,11 +219,15 @@ def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
     candidate &= np.abs(normals[ids] @ sn) >= cos_tol[ids]
     cids = ids[candidate]
     if len(cids) < min_count:
+        if stats is not None:
+            stats['below_min'] += 1
         return facades, fid
 
     tight = np.abs(points[cids] @ sn + seed_plane[3]) <= tol[cids] * signed_dist_tolerance
     cids = cids[tight]
     if len(cids) < min_count:
+        if stats is not None:
+            stats['below_min'] += 1
         return facades, fid
 
     ftype, _, _, _ = classify_plane(sn)
@@ -262,6 +272,8 @@ def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
     # Do not fall back to the entire candidate set: that bypasses depth-layer
     # separation and can merge parallel facade planes.
     if not comps:
+        if stats is not None:
+            stats['no_comp'] += 1
         return facades, fid
 
     def _comp_rank(m):
@@ -275,28 +287,45 @@ def _expand_single_seed(seed_plane, seed_spatial_ids, points, normals, ranges,
     for mask in sorted(comps, key=_comp_rank, reverse=True):
         comp = cids[mask]
         if len(comp) < min_count:
+            if stats is not None:
+                stats['below_min'] += 1
             continue
         model = fit_plane_weighted(points[comp], irls_iters=irls_iters)
         dist = np.abs(points[comp] @ model[:3] + model[3])
         keep = dist <= tol[comp] * 1.8
         comp = comp[keep]
         if len(comp) < min_count:
+            if stats is not None:
+                stats['below_min'] += 1
             continue
         info = _info(fid, model, points[comp], comp, ranges[comp])
         if info['type'] == 'vertical_facade' and info['area'] >= min_facade_area:
             facades.append(info)
             fid += 1
+        elif stats is not None:
+            if info['type'] != 'vertical_facade':
+                stats['bad_type'] += 1
+            else:
+                stats['small_area'] += 1
 
     return facades, fid
 
 
 def _deduplicate_facades(facades, points, iou_thresh=0.5,
                          depth_diff_thresh=None, angle_deg=5.0):
-    """按 inlier 集合 IoU + 法向/深度差异去重。保留大的。
+    """按 inlier 集合 IoU / 包含率 + 法向/深度差异去重。保留大的。
 
     【v3】depth_diff_thresh 默认收紧为 DEDUP_DEPTH_THR_M（<5cm）：
     两个真实平行立面（如窗台内凹 6cm）若 IoU 高，旧值 0.08 会把它们
     当重复面删除其一，违反深度硬隔离要求。
+
+    【优化1】新增包含率规则：同面（深度差 < 4.5cm）且小片段 inlier 的
+    ≥90% 已落在大片段内时，无论 IoU 是否过半都判重。修复同一面墙被两个
+    种子（含边界 ε 双归属）各拟合一次、小片落入大片洞内区域时 IoU 低
+    导致去重漏杀的问题。
+
+    【优化2】inlier 集合改用排序 int64 数组 + intersect1d（O(k log k)），
+    替代原来的 O(F×N) 全点布尔掩码（120 万点 × 276 面）。
     """
     if not facades:
         return facades
@@ -304,42 +333,40 @@ def _deduplicate_facades(facades, points, iou_thresh=0.5,
         depth_diff_thresh = DEDUP_DEPTH_THR_M
 
     facades.sort(key=lambda f: -f['point_count'])
-    kept = []
-    kept_masks = []
-    n = len(points)
+    kept = []          # facade dicts
+    kept_ids = []      # sorted int64 arrays，与 kept 对齐
 
     for f in facades:
-        mask = np.zeros(n, bool)
-        inliers = np.asarray(f['inlier_indices'], dtype=int)
-        mask[inliers] = True
-
+        ids = np.sort(np.asarray(f['inlier_indices'], dtype=np.int64))
         fn = np.asarray(f['normal'])
         fm = np.asarray(f['plane_model'])
         fd = float(fm[3]) / (np.linalg.norm(fm[:3]) + 1e-12)
 
         duplicate = False
-        for i, km in enumerate(kept_masks):
-            inter = np.count_nonzero(mask & km)
-            if inter == 0:
+        for i in range(len(kept)):
+            inter = np.intersect1d(ids, kept_ids[i])   # 输入已排序
+            if len(inter) == 0:
                 continue
-            union = np.count_nonzero(mask | km)
-            iou = inter / union if union > 0 else 0.0
+            union = len(ids) + len(kept_ids[i]) - len(inter)
+            iou = len(inter) / union if union > 0 else 0.0
+            contain = len(inter) / max(1, min(len(ids), len(kept_ids[i])))
 
             kn = np.asarray(kept[i]['normal'])
             if abs(fn @ kn) < np.cos(np.deg2rad(angle_deg)):
                 continue
 
-            km_model = np.asarray(kept[i]['plane_model'])
-            kd = float(km_model[3]) / (np.linalg.norm(km_model[:3]) + 1e-12)
-            depth_diff = abs(fd - kd)
+            km = np.asarray(kept[i]['plane_model'])
+            kd = float(km[3]) / (np.linalg.norm(km[:3]) + 1e-12)
+            if abs(fd - kd) >= depth_diff_thresh:
+                continue
 
-            if iou > iou_thresh and depth_diff < depth_diff_thresh:
+            if iou > iou_thresh or contain >= 0.90:
                 duplicate = True
                 break
 
         if not duplicate:
             kept.append(f)
-            kept_masks.append(mask)
+            kept_ids.append(ids)
 
     return kept
 
@@ -348,27 +375,37 @@ def _extract_bucket_to_facades(bucket_seeds, points, normals, ranges, tol, cos_t
                                spacing, voxel_size, base, min_count, min_facade_area,
                                irls_iters, signed_dist_tolerance,
                                density_field=None):
-    """非竞争提取：每个 bucket 种子独立扩展，最后全局去重。
+    """非竞争提取：每个种子独立扩展，最后全局去重。
 
     【v3】密度门控：种子 spatial_ids 内 skip 占比过半的点集直接跳过
     （过稀疏区域不产生立面，也防止 SVD 拟合出伪平面）。
+    【三期】扩展最小点数密度自适应：dense = max(min_count//4, 50)，
+    sparse ×0.4（窗台等稀疏立面碎片可成活，交给后续合并与裁决）。
     """
     all_facades = []
     fid = 0
     seed_min_pts = max(50, min_count // 10)
+    expand_min_base = max(min_count // 4, 50)
+    stats = {'below_min': 0, 'no_comp': 0, 'bad_type': 0, 'small_area': 0}
 
     for seed in bucket_seeds:
         spatial_ids = np.asarray(seed.get('spatial_ids', []), dtype=int)
         if len(spatial_ids) < seed_min_pts:
             continue
 
-        # 【v3】密度门控：过于稀疏的种子区域直接跳过
+        # 密度门控：过于稀疏的种子区域直接跳过；等级复用给 min_count
+        seed_level = 'dense'
         if density_field is not None and _HAS_DENSITY:
-            if density_field.gate_indices(spatial_ids) == 'skip':
+            seed_level = density_field.gate_indices(spatial_ids)
+            if seed_level == 'skip':
                 trace('facade.bucket.skip_sparse_seed',
                       n=int(len(spatial_ids)),
                       seed_rho=round(float(seed.get('rho', 0)), 3))
                 continue
+        if _HAS_DENSITY:
+            eff_expand_min = adaptive_min_count(expand_min_base, seed_level)
+        else:
+            eff_expand_min = expand_min_base
 
         # 构造归一化 seed plane
         if 'plane_model' in seed:
@@ -384,9 +421,12 @@ def _extract_bucket_to_facades(bucket_seeds, points, normals, ranges, tol, cos_t
         facades, fid = _expand_single_seed(
             seed_plane, spatial_ids, points, normals, ranges,
             tol, cos_tol, spacing, voxel_size, base,
-            max(min_count // 4, 50), min_facade_area, irls_iters,
-            signed_dist_tolerance, fid_start=fid)
+            eff_expand_min, min_facade_area, irls_iters,
+            signed_dist_tolerance, fid_start=fid, stats=stats)
         all_facades.extend(facades)
+
+    if any(stats.values()):
+        trace('facade.seed.rejected', **stats)
 
     if len(all_facades) > 1:
         all_facades = _deduplicate_facades(all_facades, points)
@@ -397,113 +437,239 @@ def _extract_bucket_to_facades(bucket_seeds, points, normals, ranges, tol, cos_t
 # ==================== E. 同层合并 ====================
 
 def _merge_same_layer(facades, points, normals, d_thresh=0.03, angle_deg=5.0,
-                      max_plane_dist=0.05, layer_hard_m=None):
-    """同方向 + 同深度层 + 仅合并"大间隙"段（被门窗孔洞打断的同一面）。
+                      max_plane_dist=0.05, layer_hard_m=None,
+                      intensities=None):
+    """用确定性候选图合并被门窗/楼层空洞切开的同层片段。
 
-    只对 gap ∈ [min_merge_gap, merge_gap_uv] 的配对尝试合并：
-      - gap 过小（贴合）：说明并不被门窗打断，或已由扩展阶段归并；
-      - gap 过大：本就属于两个独立立面，不合并。
-
-    【v3】深度合并容差 = DEPTH_HARD_M（原 layer_hard_m + d_thresh = 0.08，
-    会桥接深度差 8cm 的退台立面）。传入 layer_hard_m 参数仅作兼容，
-    内部一律以 DEPTH_HARD_M 为准。
+    候选边沿用双向平面偏移、法向、UV/AABB、强度和深度单峰门控；每次
+    union 前对整个拟议组件重新拟合，并复验 P95、MAD、5cm 深度跨度和
+    单峰性，防止 A-B、B-C 的传递闭包错误地把 A-C 合并。
     """
     if not facades:
         return facades
 
     min_opening = float(getattr(Config, 'FACADE_MIN_OPENING_M', 0.5))
-    merge_gap_uv = float(getattr(Config, 'FACADE_MERGE_SAME_LAYER_GAP_M', 1.0))
+    merge_gap_uv = float(getattr(Config, 'FACADE_MERGE_SAME_LAYER_GAP_M', 3.0))
     min_merge_gap = float(getattr(
         Config, 'FACADE_MERGE_SAME_LAYER_MIN_GAP_M',
-        max(min_opening * 0.4, 0.20)))
+        max(min_opening * 0.2, 0.10)))
 
-    # 【v3】硬约束：两段平面互嵌深度差上限 = 5cm，不加 d_thresh 裕量
+    # 桥接窗自适应参数
+    gap_span_ratio = float(getattr(Config, 'FACADE_MERGE_GAP_SPAN_RATIO', 0.5))
+    gap_max_m = float(getattr(Config, 'FACADE_MERGE_GAP_MAX_M', 12.0))
+    confident_cos = np.cos(np.deg2rad(float(getattr(
+        Config, 'FACADE_MERGE_CONFIDENT_ANGLE_DEG', 2.0))))
+    confident_fill_slack = float(getattr(
+        Config, 'FACADE_MERGE_CONFIDENT_FILL_SLACK', 0.15))
+    opening_overlap_min_m = float(getattr(
+        Config, 'FACADE_MERGE_OPENING_MIN_OVERLAP_M', 0.30))
+    opening_overlap_ratio = float(getattr(
+        Config, 'FACADE_MERGE_OPENING_MIN_OVERLAP_RATIO', 0.08))
+
+    # 硬约束：两段平面互嵌深度差上限 = 5cm，不加 d_thresh 裕量
     layer_hard_eff = DEPTH_HARD_M
+    intensity = None
+    if intensities is not None:
+        candidate_intensity = np.asarray(intensities, dtype=float).reshape(-1)
+        if len(candidate_intensity) == len(points):
+            intensity = candidate_intensity
+    intensity_delta = float(getattr(
+        Config, 'FACADE_MERGE_INTENSITY_DELTA', 0.10))
+    use_intensity = bool(getattr(
+        Config, 'FACADE_ENABLE_INTENSITY_FEATURE', True)) and intensity is not None
 
-    changed = True
-    iter_count = 0
-    max_iter = len(facades)
+    def _span2d(f):
+        """立面自身 UV 外接框长边（米），作桥接窗的自适应基准。"""
+        bb = f.get('bbox_2d') or {}
+        u = max(float(bb.get('u_max', 0.0)) - float(bb.get('u_min', 0.0)), 0.0)
+        v = max(float(bb.get('v_max', 0.0)) - float(bb.get('v_min', 0.0)), 0.0)
+        return max(u, v)
 
-    while changed and iter_count < max_iter:
-        changed = False
-        iter_count += 1
-        facades.sort(key=lambda f: (-f.get('area', 0), -f['point_count']))
+    ordered = sorted(
+        facades,
+        key=lambda f: (int(f.get('id', 0)),
+                       min(f.get('inlier_indices', [0])),
+                       -int(f.get('point_count', 0))))
+    count = len(ordered)
+    parent = list(range(count))
+    members = {i: [i] for i in range(count)}
 
-        for i in range(len(facades)):
-            if i >= len(facades):
-                break
-            a = facades[i]
-            na = np.asarray(a['normal'])
-            pa = np.asarray(a['plane_model'])
-            ia = np.asarray(a['inlier_indices'], dtype=int)
-            layer_a = a.get('layer', -1)
-            dir_bin_a = a.get('dir_bin', -1)
+    def find(item):
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
 
-            for j in range(i + 1, len(facades)):
-                if j >= len(facades):
-                    break
-                b = facades[j]
-                nb = np.asarray(b['normal'])
+    def pair_candidate(i, j):
+        a = ordered[i]
+        na = np.asarray(a['normal'])
+        pa = np.asarray(a['plane_model'])
+        ia = np.asarray(a['inlier_indices'], dtype=int)
+        b = ordered[j]
+        nb = np.asarray(b['normal'])
+        if a['type'] != b['type'] or abs(na @ nb) < np.cos(np.deg2rad(angle_deg)):
+            return None
+        pb = np.asarray(b['plane_model'])
+        ca, cb = np.asarray(a['center']), np.asarray(b['center'])
+        off_a = abs(cb @ pa[:3] + pa[3]) / (np.linalg.norm(pa[:3]) + 1e-12)
+        off_b = abs(ca @ pb[:3] + pb[3]) / (np.linalg.norm(pb[:3]) + 1e-12)
+        if max(off_a, off_b) > layer_hard_eff:
+            return None
+        ib = np.asarray(b['inlier_indices'], dtype=int)
 
-                if a['type'] != b['type'] or abs(na @ nb) < np.cos(np.deg2rad(angle_deg)):
-                    continue
+        # 桥接窗按立面尺度自适应；AABB 窗随动（AABB 间隙 ≥ UV 间隙）
+        pair_gap_cap = min(max(merge_gap_uv,
+                               gap_span_ratio * max(_span2d(a), _span2d(b))),
+                           gap_max_m)
+        aabb_gap = _aabb_gap_m(points[ia], points[ib])
+        if aabb_gap > pair_gap_cap * 2.0:
+            return None
 
-                dir_bin_b = b.get('dir_bin', -1)
-                if dir_bin_a >= 0 and dir_bin_b >= 0 and dir_bin_a != dir_bin_b:
-                    if abs(na @ nb) < np.cos(np.deg2rad(2.0)):
-                        continue
+        spacing_a = (max(0.05, float(np.median(np.linalg.norm(
+            points[ia][1:] - points[ia][:-1], axis=1)))) if len(ia) > 1 else 0.05)
+        grid = max(0.10, spacing_a * 2.0)
+        common_n = na + np.sign(float(na @ nb) or 1.0) * nb
+        common_n /= np.linalg.norm(common_n) + 1e-12
+        _, box_a = _uv_descriptor(a, points, grid, common_n)
+        _, box_b = _uv_descriptor(b, points, grid, common_n)
+        gap_u = max(box_a[0] - box_b[1], box_b[0] - box_a[1], 0.0)
+        gap_v = max(box_a[2] - box_b[3], box_b[2] - box_a[3], 0.0)
+        gap_uv = float(np.hypot(gap_u, gap_v))
+        if gap_uv < min_merge_gap or gap_uv > pair_gap_cap:
+            return None
 
-                pb = np.asarray(b['plane_model'])
-                ca, cb = np.asarray(a['center']), np.asarray(b['center'])
-                off_a = abs(cb @ pa[:3] + pa[3]) / (np.linalg.norm(pa[:3]) + 1e-12)
-                off_b = abs(ca @ pb[:3] + pb[3]) / (np.linalg.norm(pb[:3]) + 1e-12)
-                if max(off_a, off_b) > layer_hard_eff:
-                    continue
+        # 门窗洞口通常只在一个 UV 方向形成间隙，另一方向仍有明显投影重叠。
+        # 若两个方向都分离，仅凭“共面 + 距离近”容易把相邻楼栋/转角外的独立
+        # 墙片误并。这里要求至少一个方向具备与较小片段尺度相称的重叠证据。
+        span_au, span_av = box_a[1] - box_a[0], box_a[3] - box_a[2]
+        span_bu, span_bv = box_b[1] - box_b[0], box_b[3] - box_b[2]
+        overlap_u = max(min(box_a[1], box_b[1]) - max(box_a[0], box_b[0]), 0.0)
+        overlap_v = max(min(box_a[3], box_b[3]) - max(box_a[2], box_b[2]), 0.0)
+        required_u = min(opening_overlap_min_m,
+                         opening_overlap_ratio * max(min(span_au, span_bu), 0.0))
+        required_v = min(opening_overlap_min_m,
+                         opening_overlap_ratio * max(min(span_av, span_bv), 0.0))
+        opening_bridge = ((gap_u > 0.0 and gap_v == 0.0 and overlap_v >= required_v)
+                          or (gap_v > 0.0 and gap_u == 0.0 and overlap_u >= required_u))
+        if not opening_bridge:
+            return None
 
-                ib = np.asarray(b['inlier_indices'], dtype=int)
-                if _aabb_gap_m(points[ia], points[ib]) > merge_gap_uv * 2.0:
-                    continue
+        # 【优化】高置信判定：共面证据极强时对填充率跌幅放宽
+        confident = (abs(float(na @ nb)) >= confident_cos and
+                     max(off_a, off_b) <= max(max_plane_dist * 0.5, 0.02))
 
-                spacing_a = max(0.05, float(np.percentile(
-                    np.linalg.norm(points[ia][1:] - points[ia][:-1], axis=1), 50))) if len(ia) > 1 else 0.05
-                grid = max(0.10, spacing_a * 2.0)
-                common_n = na + nb
-                common_n /= np.linalg.norm(common_n) + 1e-12
-                cells_a, box_a = _uv_descriptor(a, points, grid, common_n)
-                cells_b, box_b = _uv_descriptor(b, points, grid, common_n)
-                gap_u = max(box_a[0] - box_b[1], box_b[0] - box_a[1], 0.0)
-                gap_v = max(box_a[2] - box_b[3], box_b[2] - box_a[3], 0.0)
-                gap_uv_val = float(np.hypot(gap_u, gap_v))
-                # 仅合并"大间隙"段：门/窗/孔洞造成的断裂。
-                if gap_uv_val < min_merge_gap or gap_uv_val > merge_gap_uv:
-                    continue
+        intensity_penalty = 0.0
+        if use_intensity:
+            va, vb = intensity[ia], intensity[ib]
+            va, vb = va[np.isfinite(va)], vb[np.isfinite(vb)]
+            if len(va) >= 20 and len(vb) >= 20:
+                med_delta = abs(float(np.median(va) - np.median(vb)))
+                spread = max(float(np.ptp(np.percentile(va, [25, 75]))),
+                             float(np.ptp(np.percentile(vb, [25, 75]))), 0.02)
+                intensity_penalty = min(
+                    med_delta / max(intensity_delta, 1.5 * spread, 1e-6),
+                    4.0)
+        ids = np.unique(np.r_[ia, ib])
+        model = fit_plane_weighted(points[ids], irls_iters=2)
+        if not _check_depth_single_peak(points[ids], model, max_plane_dist):
+            return None
+        score = (intensity_penalty, gap_uv, max(off_a, off_b), aabb_gap,
+                 min(int(a.get('id', i)), int(b.get('id', j))), i, j)
+        return score, gap_u, gap_v, confident
 
-                merged_pts = points[np.unique(np.r_[ia, ib])]
-                avg_d = (off_a + off_b) / 2.0
-                test_model = np.array([na[0], na[1], na[2], avg_d])
-                if not _check_depth_single_peak(merged_pts, test_model, max_plane_dist):
-                    continue
+    edges = []
+    for i in range(count):
+        for j in range(i + 1, count):
+            candidate = pair_candidate(i, j)
+            if candidate is not None:
+                edges.append((candidate[0], i, j, candidate[1], candidate[2],
+                              candidate[3]))
+    edges.sort(key=lambda edge: edge[0])
+    trace('facade.merge_same_layer.candidates',
+          pairs=len(edges), fragments=count)
 
-                ids = np.unique(np.r_[ia, ib])
-                model = fit_plane_weighted(points[ids], irls_iters=2)
-                merged = _info(a['id'], model, points[ids], ids, np.zeros(len(ids)))
-                if _fill_ratio(merged) < min(_fill_ratio(a), _fill_ratio(b)) - 0.08:
-                    continue
+    def component_fit(component):
+        # 在重新拟合前先用各源片段的共同法向复验层深跨度。仅检查拟合后残差
+        # 不足以阻止 A-B-C 阶梯链：最小二乘可把空间上依次升高的片段拟合成
+        # 一张倾斜平面，从而掩盖首尾超过 5cm 的真实深度差。
+        reference = np.asarray(ordered[component[0]]['normal'], dtype=float)
+        reference /= np.linalg.norm(reference) + 1e-12
+        aligned_normals = []
+        component_rhos = []
+        for k in component:
+            source_normal = np.asarray(ordered[k]['normal'], dtype=float)
+            source_normal /= np.linalg.norm(source_normal) + 1e-12
+            if float(source_normal @ reference) < 0.0:
+                source_normal = -source_normal
+            aligned_normals.append(source_normal)
+        shared_normal = np.mean(aligned_normals, axis=0)
+        shared_normal /= np.linalg.norm(shared_normal) + 1e-12
+        for k in component:
+            source_ids = np.asarray(ordered[k]['inlier_indices'], dtype=int)
+            component_rhos.append(float(np.median(points[source_ids] @ shared_normal)))
+        if (max(component_rhos) - min(component_rhos)) > DEPTH_HARD_M:
+            return None
 
-                merged['dir_bin'] = dir_bin_a
-                merged['layer'] = layer_a
-                merged['attachments'] = []
-                for src in (a, b):
-                    merged['attachments'].extend(src.get('attachments', []))
+        ids = np.unique(np.concatenate([
+            np.asarray(ordered[k]['inlier_indices'], dtype=int) for k in component]))
+        model = fit_plane_weighted(points[ids], irls_iters=3)
+        model = _canonicalize_plane(model)
+        residual = np.abs(points[ids] @ model[:3] + model[3])
+        median = float(np.median(residual))
+        mad = float(np.median(np.abs(residual - median)))
+        p95 = float(np.percentile(residual, 95))
+        # Robust whole-component validation. The absolute hard bound remains 5cm.
+        if p95 > min(DEPTH_HARD_M, max(max_plane_dist * 1.5, 0.02)):
+            return None
+        if mad > min(DEPTH_HARD_M / 3.0, max(max_plane_dist * 0.75, 0.008)):
+            return None
+        signed = points[ids] @ model[:3] + model[3]
+        if float(np.percentile(signed, 95) - np.percentile(signed, 5)) > 2.0 * DEPTH_HARD_M:
+            return None
+        if not _check_depth_single_peak(points[ids], model, max_plane_dist):
+            return None
+        return ids, model
 
-                facades[i] = merged
-                del facades[j]
-                changed = True
-                break
-            if changed:
-                break
+    for _, left, right, gap_u, gap_v, confident in edges:
+        root_l, root_r = find(left), find(right)
+        if root_l == root_r:
+            continue
+        proposed = sorted(members[root_l] + members[root_r])
+        fit = component_fit(proposed)
+        if fit is None:
+            continue
+        if gap_u > 0.0 and gap_v > 0.0:
+            ids, model = fit
+            merged_info = _info(ordered[proposed[0]]['id'], model, points[ids], ids,
+                                np.zeros(len(ids)))
+            # 【优化】跨大洞合并联合 bbox 必然变大、填充率下跌；
+            # 高置信共面对只放宽跌幅，非高置信对保留原严格门槛。
+            slack = confident_fill_slack if confident else 0.08
+            if _fill_ratio(merged_info) < min(_fill_ratio(ordered[k]) for k in proposed) - slack:
+                continue
+        keep, drop = (root_l, root_r) if root_l < root_r else (root_r, root_l)
+        parent[drop] = keep
+        members[keep] = proposed
+        del members[drop]
 
-    return facades
+    result = []
+    for component in sorted(members.values(), key=lambda group: group[0]):
+        fit = component_fit(component) if len(component) > 1 else None
+        if fit is None:
+            if len(component) == 1:
+                result.append(ordered[component[0]])
+            else:  # Defensive: never discard source fragments on a failed final fit.
+                result.extend(ordered[k] for k in component)
+            continue
+        ids, model = fit
+        sources = [ordered[k] for k in component]
+        merged = _info(min(int(f.get('id', 0)) for f in sources), model,
+                       points[ids], ids, np.zeros(len(ids)))
+        merged['dir_bin'] = sources[0].get('dir_bin', -1)
+        merged['layer'] = min(f.get('layer', -1) for f in sources)
+        merged['attachments'] = [item for f in sources for item in f.get('attachments', [])]
+        result.append(merged)
+    return result
 
 
 # ==================== F. 跨层裁决 ====================
@@ -519,6 +685,8 @@ def _cross_layer_arbitration(facades, points, d_thresh=0.03, angle_deg=5.0,
     """
     if not facades:
         return facades, []
+
+    cross_aabb_max = float(getattr(Config, 'FACADE_CROSS_LAYER_MAX_AABB_GAP_M', 3.0))
 
     adjacency = []
     n = len(facades)
@@ -578,7 +746,7 @@ def _cross_layer_arbitration(facades, points, d_thresh=0.03, angle_deg=5.0,
                     'aabb_gap_m': round(_aabb_gap_m(points[ia], points[ib]), 3),
                 })
             else:
-                if _aabb_gap_m(points[ia], points[ib]) > 1.5:
+                if _aabb_gap_m(points[ia], points[ib]) > cross_aabb_max:
                     continue
                 merged_pts = points[np.unique(np.r_[ia, ib])]
                 avg_d = (rho_a + rho_b) / 2.0
@@ -683,20 +851,14 @@ def _enforce_depth_hard_split(facades, points, angle_deg=5.0,
     return facades, n_violations
 
 
-# ==================== G. 水平面挂靠 — 已彻底删除 ====================
-# v4：_attach_horizontal_patches 函数本体已删除（此前保留兼容旧调用）。
-# 水平片（窗台/雨棚/檐口）注入竖立面会污染 depth/平整度/面积统计，
-# 并干扰 5cm 深度硬隔离的 ρ 中位数估计，新流程任何路径不得启用。
-
-
-# ==================== H. 完形回收（简化版）====================
-
+# ==================== H. 完形回收====================
 def _postprocess_v2(facades, points, normals, tol, cos_tol, spacing, voxel_size,
-                    min_opening=.5):
-    """完形回收简化版：保留 UV/AABB/连通域/深度段/fill_ratio 门控。
+                    min_opening=.5, intensities=None):
+    """以标准化联合代价对未归属点执行一次全局唯一归属。
 
-    【v3】回收阶段深度段 min_gap 收紧到 DEPTH_HARD_M（原 0.12，会把
-    深度差 12cm 内的退台点吸附回主立面，违反 5cm 硬约束）。
+    每个点先收集通过 UV 膨胀、AABB、平面残差和法向门控的所有立面，
+    intensity 存在时仅增加软代价。最优与次优过近的点保持未归属，避免
+    facade 遍历顺序决定结果；最终仍对每个拟议立面重新拟合并复验形状。
     """
     if not facades:
         return facades
@@ -706,589 +868,121 @@ def _postprocess_v2(facades, points, normals, tol, cos_tol, spacing, voxel_size,
         assigned[np.asarray(f['inlier_indices'], dtype=int)] = True
 
     reclaim_mult = float(getattr(Config, 'FACADE_RECLAIM_TOL_MULT', 1.2))
+    ambiguity_margin = float(getattr(Config, 'FACADE_RECLAIM_AMBIGUITY_MARGIN', 0.12))
+    reclaim_dilate_m = float(getattr(Config, 'FACADE_RECLAIM_UV_DILATE_M', 0.30))
+    intensity_arr = None
+    if intensities is not None:
+        candidate = np.asarray(intensities, dtype=float).reshape(-1)
+        if len(candidate) == len(points):
+            intensity_arr = candidate
 
-    for f in facades:
+    unassigned = np.flatnonzero(~assigned)
+    candidates = [[] for _ in range(len(points))]
+    facade_context = []
+
+    for facade_idx, f in enumerate(facades):
         ids = np.asarray(f['inlier_indices'], dtype=int)
         if not len(ids):
+            facade_context.append(None)
             continue
         n = np.asarray(f['normal'], dtype=float)
+        n /= np.linalg.norm(n) + 1e-12
 
         spacing_m = max(0.05, float(np.median(spacing[ids])))
         grid = max(0.10, spacing_m * 2.0)
-        cells = _uv_cells_for_facade(f, points, grid)
-        dilated = _dilate_cells(cells, min(2, max(1, int(round(0.20 / grid)))))
+        cells, _ = _uv_descriptor(f, points, grid, normal=n)
+        dilated = _dilate_cells(cells, min(2, max(1, int(round(reclaim_dilate_m / grid)))))
+        pad = max(1.5 * float(np.median(spacing[ids])), .2)
+        lo, hi = points[ids].min(0) - pad, points[ids].max(0) + pad
+        pm = _canonicalize_plane(f['plane_model'])
+        u, v = plane_axes(n, f['type'])
+        intensity_med = np.nan
+        intensity_scale = 0.02
+        if intensity_arr is not None:
+            values = intensity_arr[ids]
+            values = values[np.isfinite(values)]
+            if len(values) >= 20:
+                intensity_med = float(np.median(values))
+                intensity_scale = max(float(np.subtract(*np.percentile(values, [75, 25]))), 0.02)
+        facade_context.append((ids, pm, intensity_med, intensity_scale))
 
-        cand = np.where(~assigned)[0]
-        d = np.abs(points[cand] @ n + f['plane_model'][3])
-        ok = (d <= tol[cand] * reclaim_mult) & (np.abs(normals[cand] @ n) >= cos_tol[cand])
-        add = cand[ok]
+        cand = unassigned[np.all((points[unassigned] >= lo) &
+                                 (points[unassigned] <= hi), axis=1)]
+        if not len(cand):
+            continue
+        residual = np.abs(points[cand] @ pm[:3] + pm[3])
+        agreement = np.abs(normals[cand] @ n)
+        ok = ((residual <= np.minimum(tol[cand] * reclaim_mult, DEPTH_HARD_M)) &
+              (agreement >= cos_tol[cand]))
+        cand, residual, agreement = cand[ok], residual[ok], agreement[ok]
+        if not len(cand):
+            continue
+        uv = np.column_stack((points[cand] @ u, points[cand] @ v))
+        uv_cells = list(zip(np.floor(uv[:, 0] / grid).astype(np.int64),
+                            np.floor(uv[:, 1] / grid).astype(np.int64)))
+        uv_ok = np.asarray([cell in dilated for cell in uv_cells], dtype=bool)
+        cand, residual, agreement = cand[uv_ok], residual[uv_ok], agreement[uv_ok]
+        for point_idx, dist, normal_cos in zip(cand, residual, agreement):
+            dist_cost = float(dist / max(min(tol[point_idx] * reclaim_mult,
+                                             DEPTH_HARD_M), 1e-6))
+            normal_cost = float((1.0 - normal_cos) /
+                                max(1.0 - cos_tol[point_idx], 1e-6))
+            cost = 0.70 * dist_cost + 0.30 * normal_cost
+            if intensity_arr is not None and np.isfinite(intensity_med):
+                value = intensity_arr[point_idx]
+                if np.isfinite(value):
+                    # Soft evidence only: geometry can still win when intensity differs.
+                    cost += 0.10 * min(abs(float(value) - intensity_med) /
+                                       max(3.0 * intensity_scale, 0.05), 1.0)
+            candidates[int(point_idx)].append((cost, facade_idx))
 
-        if len(add):
-            lo = points[ids].min(0) - max(1.5 * np.median(spacing[ids]), .2)
-            hi = points[ids].max(0) + max(1.5 * np.median(spacing[ids]), .2)
-            add = add[np.all((points[add] >= lo) & (points[add] <= hi), axis=1)]
+    additions = [[] for _ in facades]
+    ambiguous_count = 0
+    no_candidate_count = 0
+    for point_idx in unassigned:
+        choices = sorted(candidates[int(point_idx)], key=lambda item: (item[0], item[1]))
+        if not choices:
+            no_candidate_count += 1
+            continue
+        if len(choices) > 1 and choices[1][0] - choices[0][0] < ambiguity_margin:
+            ambiguous_count += 1
+            continue
+        additions[choices[0][1]].append(int(point_idx))
 
-            if len(add):
-                pm = np.asarray(f['plane_model'], dtype=float)
-                typ, _, _, _ = classify_plane(n)
-                uv_add, _, _, _ = project_to_uv(points[add], pm, typ)
-                cells_add = list(zip(np.floor(uv_add[:, 0] / grid).astype(np.int64),
-                                     np.floor(uv_add[:, 1] / grid).astype(np.int64)))
-                add = add[np.asarray([c in dilated for c in cells_add], dtype=bool)]
-
-            if len(add) >= 10:
-                test_pts = np.vstack([points[ids], points[add]])
-                test_comp = connected_components_3d_grid(
-                    test_pts, grid_size=max(0.3, voxel_size * 6), min_points=10)
-                if len(test_comp) > 1:
-                    facade_label = None
-                    for ci, mask in enumerate(test_comp):
-                        if np.any(mask[:len(ids)]):
-                            facade_label = ci
-                            break
-                    if facade_label is not None:
-                        add_mask = test_comp[facade_label][len(ids):]
-                        add = add[add_mask]
-                    else:
-                        add = np.array([], dtype=int)
-
-        if len(add):
-            base_signed = points[ids] @ n + f['plane_model'][3]
-            add_signed = points[add] @ n + f['plane_model'][3]
-            # 【v4】tol 截断到 gap/2，保证有效切层阈值 = 5cm
-            tol_seg = min(max(float(np.median(tol[add])), 0.01),
-                          DEPTH_HARD_M / 2.0)
-            seg_labels, seg_medians = cluster_depth_significant(
-                np.r_[base_signed, add_signed], tol_seg,
-                # 【v3】回收深度段间距 = 5cm 硬约束
-                min_gap=DEPTH_HARD_M,
-                min_points=max(20, len(ids) // 50))
-            if len(seg_medians) > 1:
-                main_seg = int(np.argmin(np.abs(seg_medians)))
-                add = add[seg_labels[len(ids):] == main_seg]
-
+    for facade_idx, f in enumerate(facades):
+        ids = np.asarray(f['inlier_indices'], dtype=int)
+        add = np.asarray(additions[facade_idx], dtype=int)
         max_add = max(len(ids) // 3, 5000)
         if len(add) > max_add:
-            add = add[np.argsort(np.abs(points[add] @ n + f['plane_model'][3]))[:max_add]]
-
+            pm = np.asarray(f['plane_model'], dtype=float)
+            add = add[np.argsort(np.abs(points[add] @ pm[:3] + pm[3]))[:max_add]]
         if len(add) >= max(10, len(ids) // 50):
             all_ids = np.unique(np.r_[ids, add])
             new_model = fit_plane_weighted(points[all_ids], irls_iters=2)
+            residual = np.abs(points[all_ids] @ new_model[:3] + new_model[3])
             new_n = new_model[:3] / (np.linalg.norm(new_model[:3]) + 1e-12)
-            if abs(new_n @ n) >= np.cos(np.deg2rad(5.0)):
+            old_n = np.asarray(f['normal'], dtype=float)
+            if (abs(new_n @ old_n) >= np.cos(np.deg2rad(5.0)) and
+                    float(np.percentile(residual, 95)) <= DEPTH_HARD_M and
+                    _check_depth_single_peak(points[all_ids], new_model, DEPTH_HARD_M)):
                 new_info = _info(f['id'], new_model, points[all_ids], all_ids,
                                  np.zeros(len(all_ids)))
                 slack = float(getattr(Config, 'FACADE_RECLAIM_FILL_SLACK', 0.05))
                 if _fill_ratio(new_info) >= _fill_ratio(f) - slack:
                     f.update(new_info)
-                    assigned[add] = True
 
     for f in facades:
         fill = _fill_ratio(f)
         f['fill_ratio'] = round(float(fill), 3)
         f['wall_kind'] = 'fragment' if fill < .25 else ('fenestrated' if fill < .55 else 'solid')
 
+    proposed_count = int(sum(len(ids) for ids in additions))
+    trace('facade.assignment', input_points=len(points),
+          seed_assigned=int(np.count_nonzero(assigned)),
+          unassigned_input=int(len(unassigned)), proposed=proposed_count,
+          ambiguous=int(ambiguous_count), no_candidate=int(no_candidate_count))
+
     return facades
-
-
-# ==================== 旧版兼容：Hough 种子路径 ====================
-
-def _build_spatial_hough_seeds(points, normals, mask, ranges, tol, base,
-                               min_count, voxel_size):
-    """阶段 1：空间化 Hough 投票（保留旧路径做 A/B 回退）。"""
-    valid = np.flatnonzero(mask)
-    if len(valid) < min_count:
-        return []
-
-    max_vote = int(getattr(Config, 'HOUGH_MAX_VOTE_POINTS', 100000))
-    hough_valid = valid[::max(1, len(valid) // max_vote)] if len(valid) > max_vote else valid
-
-    peaks = normal_hough_peaks(
-        normals[hough_valid],
-        min_support=max(80, int(len(hough_valid) * 0.002)),
-        bin_deg=float(getattr(Config, 'HOUGH_NORMAL_BIN_DEG', 2.0)),
-        merge_deg=float(getattr(Config, 'HOUGH_NORMAL_SUPPORT_DEG', 6.0)) - 2.0,
-        max_peaks=int(getattr(Config, 'HOUGH_MAX_DIRECTION_PEAKS', 8)),
-        vertical_nz=float(getattr(Config, 'VERTICAL_NZ_THR', 0.30)) + 0.05)
-
-    hough_seeds = []
-    support_deg = float(getattr(Config, 'HOUGH_NORMAL_SUPPORT_DEG', 6.0))
-    cos_support = np.cos(np.deg2rad(support_deg))
-
-    density_adaptive = getattr(Config, 'HOUGH_DENSITY_ADAPTIVE', True)
-    low_density_thresh = float(getattr(Config, 'HOUGH_LOW_DENSITY_THRESH', 5.0))
-    low_density_bin_mult = float(getattr(Config, 'HOUGH_LOW_DENSITY_BIN_MULT', 2.0))
-    low_density_min_support_ratio = float(getattr(Config, 'HOUGH_LOW_DENSITY_MIN_SUPPORT_RATIO', 0.2))
-    low_density_min_peak_dist = float(getattr(Config, 'HOUGH_LOW_DENSITY_MIN_PEAK_DIST_M', 0.10))
-    low_density_prominence_ratio = float(getattr(Config, 'HOUGH_LOW_DENSITY_PROMINENCE_RATIO', 0.10))
-
-    for peak in peaks:
-        direction = np.asarray(peak['normal'], dtype=float)
-        direction_mask = np.abs(normals[valid] @ direction) >= cos_support
-        direction_ids = valid[direction_mask]
-        if len(direction_ids) < min_count:
-            continue
-
-        coarse_grid = max(2.0, voxel_size * 40)
-        spatial_comps = connected_components_3d_grid(
-            points[direction_ids],
-            grid_size=coarse_grid,
-            min_points=max(min_count // 2, 50))
-
-        for sp_mask in spatial_comps:
-            sp_ids = direction_ids[sp_mask]
-            if len(sp_ids) < min_count // 2:
-                continue
-
-            if density_adaptive:
-                block_pts = points[sp_ids]
-                bbox_vol = np.ptp(block_pts, axis=0).prod() if len(block_pts) >= 3 else 0.0
-                density = len(sp_ids) / max(bbox_vol, 1e-6)
-                is_low_density = density < low_density_thresh
-                if is_low_density:
-                    adaptive_bin = max(base * low_density_bin_mult, 0.05)
-                    min_support = max(20, int(min_count * low_density_min_support_ratio))
-                    min_peak_dist = low_density_min_peak_dist
-                    prominence_ratio = low_density_prominence_ratio
-                else:
-                    adaptive_bin = max(float(voxel_size), float(np.median(tol[sp_ids])) * 0.8)
-                    min_support = max(50, min_count // 3)
-                    min_peak_dist = max(0.30, base * 3)
-                    prominence_ratio = 0.08
-            else:
-                adaptive_bin = max(float(voxel_size), float(np.median(tol[sp_ids])) * 0.8)
-                min_support = max(50, min_count // 3)
-                min_peak_dist = max(0.30, base * 3)
-                prominence_ratio = 0.08
-
-            signed = points[sp_ids] @ direction
-            depth_seg_labels, depth_seg_medians = cluster_depth_significant(
-                signed, tolerance=None,
-                min_gap=max(base * 1.5, 0.03),
-                min_points=max(50, len(sp_ids) // 20))
-
-            for seg_idx in range(len(depth_seg_medians)):
-                seg_mask = depth_seg_labels == seg_idx
-                seg_ids = sp_ids[seg_mask]
-                if len(seg_ids) < max(min_support, min_count // 4):
-                    continue
-
-                if density_adaptive and (not is_low_density or density >= low_density_thresh):
-                    seg_peak_dist = max(0.08, base * 1.5)
-                else:
-                    seg_peak_dist = max(0.15, base * 2)
-
-                seg_rho_peaks = rho_hough_peaks(
-                    points[seg_ids], direction,
-                    bin_size=adaptive_bin,
-                    min_support=max(min_support // 2, 20),
-                    min_peak_distance=seg_peak_dist,
-                    prominence_ratio=prominence_ratio,
-                    max_peaks=int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 24)))
-
-                block_key = (tuple(np.round(direction, 3)),
-                             int(np.floor(float(np.median(points[seg_ids] @ direction)) /
-                                          max(adaptive_bin, 1e-6))),
-                             seg_idx)
-                for rho_peak in seg_rho_peaks:
-                    hough_seeds.append({
-                        'direction': direction,
-                        'rho': rho_peak.value,
-                        'spatial_ids': seg_ids,
-                        'support': rho_peak.support,
-                        'block': block_key,
-                        'bin': float(adaptive_bin),
-                        'depth_seg': seg_idx,
-                    })
-
-    if not hough_seeds:
-        return []
-    max_candidates = int(getattr(Config, 'HOUGH_MAX_CANDIDATES', 16))
-    per_block = max(1, int(getattr(Config, 'HOUGH_MAX_RHO_PEAKS_PER_DIRECTION', 4)))
-
-    groups = {}
-    for s in hough_seeds:
-        groups.setdefault(s['block'], []).append(s)
-    quota = []
-    for members in groups.values():
-        members.sort(key=lambda s: -s['support'])
-        quota.extend(members[:per_block])
-
-    quota.sort(key=lambda s: -s['support'])
-    kept = []
-    for s in quota:
-        duplicate = False
-        for t in kept:
-            if t['block'] != s['block']:
-                continue
-            gap = abs(float(s['rho']) - float(t['rho']))
-            if gap > max(4.0 * float(s['bin']), 0.06):
-                continue
-            smaller = min(float(s['support']), float(t['support']))
-            larger = max(float(s['support']), float(t['support']))
-            if larger > 0 and smaller / larger >= float(
-                    getattr(Config, 'HOUGH_PEAK_MERGE_VALLEY_RATIO', 0.30)):
-                continue
-            duplicate = True
-            break
-        if not duplicate:
-            kept.append(s)
-
-    kept.sort(key=lambda s: -s['support'])
-    selected = list(kept[:max_candidates])
-    selected_ids = {id(s) for s in selected}
-    weak_floor = int(getattr(Config, 'HOUGH_MAX_WEAK_SEEDS', 16))
-    weak_min_support = max(20, int(min_count *
-                                   float(getattr(Config, 'HOUGH_WEAK_SUPPORT_RATIO', 0.20))))
-    if weak_floor > 0:
-        rest = [s for s in kept if id(s) not in selected_ids]
-        rest.sort(key=lambda s: -s['support'])
-        added = 0
-        for s in rest:
-            if added >= weak_floor or s['support'] < weak_min_support:
-                break
-            isolated = True
-            for t in kept:
-                if t is s or t['block'] != s['block']:
-                    continue
-                if abs(float(t['rho']) - float(s['rho'])) < 1.5:
-                    isolated = False
-                    break
-            if isolated:
-                selected.append(s)
-                added += 1
-    return selected
-
-
-def _extract_facades_from_seeds(seed_iter, points, normals, remaining, ranges,
-                                tol, cos_tol, spacing, voxel_size, base,
-                                min_count, min_facade_area, irls_iters,
-                                signed_dist_tolerance):
-    """核心提取循环（Hough/RANSAC 种子 → 立面）。保留旧路径兼容。
-
-    【v3】depth_bin/depth_gap 同样收口到 DEPTH_HARD_M。
-    """
-    facades = []
-    fid = 0
-    consumed_global = set()
-
-    for seed_kind, seed_info in seed_iter:
-        ids = np.flatnonzero(remaining)
-        if len(ids) < min_count:
-            break
-
-        if seed_kind == 'hough':
-            sn = np.asarray(seed_info['direction'], dtype=float)
-            rho = float(seed_info['rho'])
-            spatial_ids = seed_info.get('spatial_ids', ids)
-
-            seed = np.r_[sn, -rho]
-            signed_sp = points[spatial_ids] @ sn - rho
-            near_mask = np.abs(signed_sp) <= max(base * 3, 0.15)
-            local_ids = spatial_ids[near_mask]
-
-            if (getattr(Config, 'FACADE_RANSAC_DEPTH_ISOLATE', True)
-                    and len(local_ids) >= 200):
-                seg_labels, seg_medians = cluster_depth_significant(
-                    signed_sp[near_mask], tol[local_ids],
-                    min_gap=float(getattr(Config, 'FACADE_RANSAC_DEPTH_MIN_GAP_M', 0.04)),
-                    min_points=max(50, len(local_ids) // 20))
-                if len(seg_medians) > 1:
-                    keep_seg = int(np.argmin(np.abs(seg_medians)))
-                    seg_sel = seg_labels == keep_seg
-                    if np.count_nonzero(seg_sel) >= max(150, min_count // 3):
-                        local_ids = local_ids[seg_sel]
-
-            if len(local_ids) >= 200:
-                sub_pcd = o3d.geometry.PointCloud()
-                sub_pcd.points = o3d.utility.Vector3dVector(points[local_ids])
-                local_model, local_inl = sub_pcd.segment_plane(
-                    distance_threshold=base * 0.6,
-                    ransac_n=3,
-                    num_iterations=500)
-                if len(local_inl) >= max(150, min_count // 3):
-                    seed = np.asarray(local_model, float)
-                    sn = seed[:3] / (np.linalg.norm(seed[:3]) + 1e-12)
-
-            effective_ids = np.intersect1d(ids, spatial_ids, assume_unique=True)
-            if len(effective_ids) < min_count:
-                continue
-            ids = effective_ids
-
-        else:  # ransac fallback
-            ransac_ids = ids
-            max_ransac = int(getattr(Config, 'HOUGH_MAX_VOTE_POINTS', 100000))
-            if len(ransac_ids) > max_ransac:
-                stride = max(1, len(ransac_ids) // max_ransac)
-                ransac_ids = ransac_ids[::stride]
-            sub = o3d.geometry.PointCloud()
-            sub.points = o3d.utility.Vector3dVector(points[ransac_ids])
-            seed_model, seed_local = sub.segment_plane(
-                float(np.median(tol[ransac_ids])), 3, 500)
-            if len(seed_local) < max(100, min_count // 10):
-                break
-            seed = np.asarray(seed_model, float)
-            sn = seed[:3] / (np.linalg.norm(seed[:3]) + 1e-12)
-
-        signed = points[ids] @ sn + seed[3]
-        candidate = np.abs(signed) <= tol[ids] * 1.5
-        candidate &= np.abs(normals[ids] @ sn) >= cos_tol[ids]
-        cids = ids[candidate]
-        if len(cids) < min_count:
-            if seed_kind == 'hough':
-                continue
-            break
-
-        tight = np.abs(points[cids] @ sn + seed[3]) <= tol[cids] * signed_dist_tolerance
-        cids = cids[tight]
-        if len(cids) < min_count:
-            if seed_kind == 'hough':
-                continue
-            break
-
-        ftype, _, _, _ = classify_plane(sn)
-        uv, _, _, _ = project_to_uv(points[cids], seed, ftype)
-
-        local_spacing = float(np.median(spacing[cids])) if len(cids) else voxel_size
-        uv_grid = max(float(voxel_size) * 2.0, local_spacing * 1.5, 0.05)
-
-        is_major = (seed_kind == 'hough' and
-                    seed_info.get('support', 0) > min_count * 2)
-        min_opening_m = float(getattr(Config, 'FACADE_MIN_OPENING_M', 0.5))
-        big_radius = max(3, int(np.ceil(min_opening_m * 2.5 / uv_grid)))
-        small_radius = max(2, int(np.ceil(min_opening_m / uv_grid)))
-
-        if getattr(Config, 'FACADE_CLOSE_RADIUS_BY_SPAN', True) and len(uv):
-            span = max(float(np.ptp(uv[:, 0])), float(np.ptp(uv[:, 1])))
-            close_radius = big_radius if span >= min_opening_m * 4.0 else small_radius
-        else:
-            close_radius = big_radius if is_major else small_radius
-        close_radius = min(close_radius,
-                           int(getattr(Config, 'FACADE_UV_CLOSE_MAX_CELLS', 12)))
-
-        seed_norm = np.linalg.norm(seed[:3]) + 1e-12
-        n_seed = seed[:3] / seed_norm
-        d_seed = float(seed[3]) / seed_norm
-        depths = points[cids] @ n_seed + d_seed
-
-        # 【v3/v4】深度方向桥接 = 0；tol 截断到 gap/2（同 _expand_single_seed）
-        depth_bin = DEPTH_HARD_M
-        depth_gap = DEPTH_HARD_M
-        tol_hard = np.minimum(tol[cids], depth_gap / 2.0)
-
-        comps = connected_components_uv_depth_grid(
-            uv, depths, grid_size=uv_grid,
-            depth_bin=depth_bin,
-            min_cells=max(2, int(min_count * .01)),
-            close_radius_cells=close_radius,
-            depth_gap=depth_gap,
-            connectivity=8,
-            tolerances=tol_hard)
-        # 不能以整组点作为兜底：该路径会绕过深度层隔离，把多个退台面
-        # 重新混成一个候选。无法证明单层时宁可交给其它种子召回。
-        if not comps:
-            continue
-
-        def _comp_rank(m):
-            n_pts = int(m.sum())
-            if n_pts <= 0:
-                return (0, 0)
-            sub = uv[np.asarray(m, dtype=bool)]
-            cells = np.unique(np.floor(sub / uv_grid).astype(np.int64), axis=0)
-            return (int(len(cells)), n_pts)
-
-        consumed = set()
-        for mask in sorted(comps, key=_comp_rank, reverse=True):
-            comp = cids[mask]
-            if len(comp) < min_count:
-                continue
-            model = fit_plane_weighted(points[comp], irls_iters=irls_iters)
-            dist = np.abs(points[comp] @ model[:3] + model[3])
-            keep = dist <= tol[comp] * 1.8
-            comp = comp[keep]
-            if len(comp) < min_count:
-                continue
-            info = _info(fid, model, points[comp], comp, ranges[comp])
-            if info['type'] == 'vertical_facade' and info['area'] >= min_facade_area:
-                facades.append(info)
-                fid += 1
-                consumed.update(comp.tolist())
-
-        if not consumed:
-            if seed_kind == 'hough':
-                continue
-            break
-        remaining[list(consumed)] = False
-        consumed_global.update(consumed)
-
-    return facades, remaining
-
-
-def _weak_boundary_recall(main_facades, points, normals, remaining, ranges,
-                          tol, cos_tol, spacing, voxel_size, base,
-                          min_count, min_facade_area, irls_iters,
-                          signed_dist_tolerance):
-    """弱边界召回（保留旧逻辑，新流程下触发量大幅减少）。"""
-    if not main_facades or not getattr(Config, 'FACADE_ENABLE_WEAK_BOUNDARY_RECALL', False):
-        return []
-
-    band_m = float(getattr(Config, 'FACADE_WEAK_BOUNDARY_BAND_M', 0.50))
-    weak_min_area = float(getattr(Config, 'FACADE_WEAK_MIN_AREA_M2', 8.0))
-    weak_min_pts = int(getattr(Config, 'FACADE_WEAK_MIN_POINTS', 80))
-    weak_min_angle = float(getattr(Config, 'FACADE_WEAK_MIN_ANGLE_DEG', 25.0))
-    max_per_facade = int(getattr(Config, 'FACADE_WEAK_MAX_PER_FACADE', 4))
-    min_density = float(getattr(Config, 'FACADE_WEAK_MIN_DENSITY', 50.0))
-    min_compact = float(getattr(Config, 'FACADE_WEAK_MIN_COMPACT_RATIO', 0.60))
-    max_components = int(getattr(Config, 'FACADE_WEAK_MAX_COMPONENTS', 3))
-    extend_tol_mult = float(getattr(Config, 'FACADE_WEAK_EXTEND_TOL_MULT', 0.8))
-    extend_angle_deg = float(getattr(Config, 'FACADE_WEAK_EXTEND_ANGLE_DEG', 5.0))
-    corner_area_thr = float(getattr(Config, 'FACADE_WEAK_CORNER_AREA_M2', 5.0))
-
-    recalled = []
-    fid = len(main_facades)
-    used = np.zeros(len(points), dtype=bool)
-    for f in main_facades:
-        used[np.asarray(f.get('inlier_indices', []), dtype=int)] = True
-
-    for f in main_facades:
-        if f.get('type') != 'vertical_facade':
-            continue
-
-        pm = np.asarray(f['plane_model'], dtype=float)
-        n = np.asarray(f['normal'], dtype=float)
-        center = np.asarray(f['center'], dtype=float)
-        u, v = plane_axes(n, 'vertical_facade')
-
-        main_ids = np.asarray(f.get('inlier_indices', []), dtype=int)
-        if len(main_ids) == 0:
-            continue
-
-        local = np.column_stack([
-            (points[main_ids] - center) @ u,
-            (points[main_ids] - center) @ v
-        ])
-        u_min, u_max = float(local[:, 0].min()), float(local[:, 0].max())
-        v_min, v_max = float(local[:, 1].min()), float(local[:, 1].max())
-
-        rem_ids = np.flatnonzero(remaining & ~used)
-        if len(rem_ids) < weak_min_pts:
-            continue
-
-        rem_local = np.column_stack([
-            (points[rem_ids] - center) @ u,
-            (points[rem_ids] - center) @ v
-        ])
-        in_band = (
-            (rem_local[:, 0] >= u_min - band_m) & (rem_local[:, 0] <= u_max + band_m) &
-            (rem_local[:, 1] >= v_min - band_m) & (rem_local[:, 1] <= v_max + band_m)
-        )
-        band_ids = rem_ids[in_band]
-        if len(band_ids) < weak_min_pts:
-            continue
-
-        band_normals = normals[band_ids]
-        cos_main = np.abs(band_normals @ n)
-        cos_weak_thr = np.cos(np.deg2rad(weak_min_angle))
-        weak_mask = cos_main <= cos_weak_thr
-        weak_ids = band_ids[weak_mask]
-
-        if len(weak_ids) < weak_min_pts:
-            continue
-
-        clusters = cluster_normals_direction(normals[weak_ids], angle_threshold_deg=weak_min_angle)
-        candidate_list = []
-
-        for mask in clusters:
-            cands = weak_ids[mask]
-            if len(cands) < weak_min_pts:
-                continue
-
-            sub_pcd = o3d.geometry.PointCloud()
-            sub_pcd.points = o3d.utility.Vector3dVector(points[cands].astype(float))
-            local_tol = max(float(np.median(tol[cands])) * 0.6, base * 0.3)
-            local_model, local_inl = sub_pcd.segment_plane(
-                distance_threshold=local_tol,
-                ransac_n=3,
-                num_iterations=200
-            )
-            if len(local_inl) < weak_min_pts:
-                continue
-
-            seed = np.asarray(local_model, float)
-            sn = seed[:3] / (np.linalg.norm(seed[:3]) + 1e-12)
-
-            band_signed = points[band_ids] @ sn + float(seed[3]) / (np.linalg.norm(seed[:3]) + 1e-12)
-            band_cos = np.abs(normals[band_ids] @ sn)
-            tol_band = tol[band_ids] * extend_tol_mult
-            cos_band = np.cos(np.deg2rad(extend_angle_deg))
-            band_ok = (
-                (np.abs(band_signed) <= tol_band) &
-                (band_cos >= cos_band)
-            )
-            ext_ids = band_ids[band_ok]
-
-            if len(ext_ids) < weak_min_pts:
-                continue
-
-            info_temp = _info(0, seed, points[ext_ids], ext_ids, ranges[ext_ids])
-            area = info_temp.get('area', 0.0)
-            is_corner_candidate = False
-            cos_sn_n = abs(float(sn @ n))
-            if cos_sn_n < 0.3:
-                ext_local = np.column_stack([
-                    (points[ext_ids] - center) @ u,
-                    (points[ext_ids] - center) @ v
-                ])
-                near_edge = (
-                    (np.any(ext_local[:, 0] < u_min + 0.5) or
-                     np.any(ext_local[:, 0] > u_max - 0.5)) or
-                    (np.any(ext_local[:, 1] < v_min + 0.5) or
-                     np.any(ext_local[:, 1] > v_max - 0.5))
-                )
-                if near_edge:
-                    is_corner_candidate = True
-
-            effective_min_area = corner_area_thr if is_corner_candidate else weak_min_area
-            if area < effective_min_area:
-                continue
-
-            density = len(ext_ids) / area if area > 0 else 0.0
-            effective_min_density = min_density * 0.5 if is_corner_candidate else min_density
-            if density < effective_min_density:
-                continue
-
-            grid_size = max(voxel_size * 2, 0.1)
-            comps = connected_components_3d_grid(
-                points[ext_ids],
-                grid_size=grid_size,
-                min_points=max(weak_min_pts // 5, 5)
-            )
-            if not comps:
-                continue
-            sizes = [np.sum(c) for c in comps]
-            total = len(ext_ids)
-            largest_ratio = max(sizes) / total if total > 0 else 0.0
-            if largest_ratio < min_compact or len(comps) > max_components:
-                continue
-
-            final_model = fit_plane_weighted(points[ext_ids], irls_iters=irls_iters)
-            final_dist = np.abs(points[ext_ids] @ final_model[:3] + final_model[3])
-            final_keep = final_dist <= tol[ext_ids] * 0.9
-            final_ids = ext_ids[final_keep]
-            if len(final_ids) < weak_min_pts:
-                continue
-
-            info = _info(fid, final_model, points[final_ids], final_ids, ranges[final_ids])
-            info['weak'] = True
-            candidate_list.append((info, len(final_ids), area))
-
-        candidate_list.sort(key=lambda x: (x[2], x[1]), reverse=True)
-        for info, _, _ in candidate_list[:max_per_facade]:
-            recalled.append(info)
-            fid += 1
-            used[np.asarray(info['inlier_indices'], dtype=int)] = True
-
-    return recalled
 
 
 # ==================== 主入口 ====================
@@ -1299,17 +993,18 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
                             range_adaptive=True, scan_origin=None, range_coeff=.0012,
                             normal_relax_deg_per_m=.15, normal_angle_max_deg=15.,
                             irls_iters=2, metadata=None, normals=None, elevations=None,
+                            intensities=None,
                             **_kwargs):
-    """主入口：多分辨率立面检测，支持 Hough / Bucket 双种子模式切换。
+    """主入口：多分辨率立面检测，支持 precluster / bucket / hybrid 种子模式。
 
     当传入 ``normals``（Nx3 ndarray，长度与 pcd 一致且全部有限）时，
     直接复用该法向量，完全跳过内部 ``ensure_normals`` 的 KD-tree 估计。
     若 ``pcd`` 本身已带法向量，也优先复用；代理点直接使用 ``pcd.points``。
 
     FACADE_SEED_MODE 配置：
+      - 'precluster'：空间邻接 × 法向一致 × 共享深度一致局部图预聚类。
       - 'bucket'（默认）：方向桶 × 深度层确定性枚举 + 非竞争扩展 + 全局去重。
-      - 'hough'  ：保留原有空间化 Hough 投票路径（回退兼容）。
-      - 'hybrid' ：先 bucket，若输出为空则 fallback 到 hough。
+      - 'hybrid'     ：precluster + bucket 双通道。
 
     【v3 新增】elevations 参数：高度角数组（度），供密度场高/低分层；
     None 时密度模块以 z 中位数近似分层。
@@ -1319,6 +1014,46 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     n = len(points)
     if not n:
         return {'facades': [], 'remaining': pcd, 'total_points': 0}
+
+    # Remove non-finite samples and isolated ROI noise before normal estimation.
+    # All point-aligned inputs are sliced together, while returned facade indices
+    # are mapped back to the original detection-input index space.
+    input_count = n
+    meta = metadata or {}
+    # PointCloudService adaptive denoise already rebuilt every point-aligned
+    # proxy array.  Repeating radius filtering inside detection is redundant
+    # and used to scan million-point ROIs a second time.  Non-finite samples
+    # are still removed unconditionally by finite_sparse_keep_indices.
+    already_denoised = bool(meta.get('denoise_history'))
+    finite_sparse_keep = finite_sparse_keep_indices(
+        points, voxel_size=float(voxel_size),
+        radius=float(getattr(Config, 'FACADE_OUTLIER_RADIUS_M',
+                             max(float(voxel_size) * 2.5, 0.08))),
+        min_neighbors=int(getattr(Config, 'FACADE_OUTLIER_MIN_NEIGHBORS', 2)),
+        enabled=(bool(getattr(Config, 'FACADE_ENABLE_SPARSE_OUTLIER_FILTER', True))
+                 and not already_denoised))
+    source_indices = np.flatnonzero(finite_sparse_keep)
+    if len(source_indices) != n:
+        points = points[source_indices]
+        n = len(points)
+        if normals is not None and len(normals) == input_count:
+            normals = np.asarray(normals)[source_indices]
+        if intensities is not None and len(intensities) == input_count:
+            intensities = np.asarray(intensities)[source_indices]
+        if elevations is not None and len(elevations) == input_count:
+            elevations = np.asarray(elevations)[source_indices]
+        if roi_indices is not None:
+            inverse = np.full(input_count, -1, dtype=np.int64)
+            inverse[source_indices] = np.arange(n)
+            roi_indices = inverse[np.asarray(roi_indices, dtype=np.int64)]
+            roi_indices = roi_indices[roi_indices >= 0]
+        filtered_pcd = o3d.geometry.PointCloud()
+        filtered_pcd.points = o3d.utility.Vector3dVector(points)
+        pcd = filtered_pcd
+        trace('facade.algo.preprocess', input_points=input_count,
+              retained_points=n, removed_points=input_count - n)
+    else:
+        source_indices = np.arange(n, dtype=np.int64)
 
     # 读取预存法向量：外部 normals > pcd 自带 normals > 重新估计
     work = pcd
@@ -1353,14 +1088,15 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
 
     normals = normals_arr
 
-    meta = metadata or {}
-    cfg = meta.get('adaptive_detection', {})
-    method = str(cfg.get('method', getattr(Config, 'FACADE_DETECT_METHOD', 'hybrid'))).lower()
-    if method not in {'ransac', 'hough', 'hybrid'}:
-        method = 'hybrid'
+    intensity_arr = None
+    if intensities is not None:
+        candidate = np.asarray(intensities, float).reshape(-1)
+        if len(candidate) == n:
+            intensity_arr = candidate
 
     seed_mode = str(getattr(Config, 'FACADE_SEED_MODE', 'bucket')).lower()
 
+    cfg = meta.get('adaptive_detection', {})
     range_adaptive = bool(range_adaptive or cfg.get('enabled', False))
     if range_adaptive:
         range_coeff = float(cfg.get('range_coeff', range_coeff))
@@ -1411,127 +1147,48 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
             density_field = None
             trace('facade.algo.density', failed=True)
 
-    remaining = active.copy()
     facades = []
 
-    # ===== 阶段 4：粗到细双速提取 =====
-    coarse_voxel = voxel_size * 4
-    enable_coarse = (n > 100000 and method == 'hybrid' and
-                     getattr(Config, 'FACADE_ENABLE_COARSE_LAYER', True))
-
-    if enable_coarse:
-        coarse_pcd = work.voxel_down_sample(coarse_voxel)
-        coarse_points = np.asarray(coarse_pcd.points, float)
-        coarse_normals = np.asarray(coarse_pcd.normals, float) if coarse_pcd.has_normals() else np.zeros_like(coarse_points)
-        coarse_n = len(coarse_points)
-
-        if coarse_n >= max(min_count // 2, 50):
-            coarse_ranges = estimate_point_ranges(coarse_points, scan_origin) if range_adaptive else np.zeros(coarse_n)
-            coarse_tol = adaptive_plane_tolerance(coarse_ranges, base * 2.0, range_coeff, base * 6.0)
-            coarse_theta = np.clip(float(getattr(Config, 'FACADE_NORMAL_ANGLE_DEG', 8.0)) +
-                                   normal_relax_deg_per_m * coarse_ranges, 8., normal_angle_max_deg)
-            coarse_cos_tol = np.cos(np.deg2rad(coarse_theta))
-            coarse_spacing = np.full(coarse_n, coarse_voxel, dtype=np.float32)
-
-            # 粗层 bucket 种子 + 非竞争扩展
-            if seed_mode in ('bucket', 'hybrid'):
-                coarse_seeds = build_bucket_seeds(
-                    coarse_points, coarse_normals, np.ones(coarse_n, bool),
-                    coarse_ranges, coarse_tol, base, max(min_count // 2, 50), coarse_voxel)
-                if coarse_seeds:
-                    coarse_facades = _extract_bucket_to_facades(
-                        coarse_seeds, coarse_points, coarse_normals, coarse_ranges,
-                        coarse_tol, coarse_cos_tol, coarse_spacing, coarse_voxel,
-                        base * 2.0, max(min_count // 2, 50), min_facade_area * 0.5,
-                        irls_iters, signed_dist_tolerance=2.0)
-                else:
-                    coarse_facades = []
-            else:
-                coarse_seeds = _build_spatial_hough_seeds(
-                    coarse_points, coarse_normals, np.ones(coarse_n, bool),
-                    coarse_ranges, coarse_tol, base, max(min_count // 2, 50), coarse_voxel)
-                coarse_facades, _ = _extract_facades_from_seeds(
-                    [('hough', s) for s in coarse_seeds],
-                    coarse_points, coarse_normals, np.ones(coarse_n, bool),
-                    coarse_ranges, coarse_tol, coarse_cos_tol, coarse_spacing,
-                    coarse_voxel, base * 2.0,
-                    max(min_count // 2, 50), min_facade_area * 0.5,
-                    irls_iters, 2.0)
-
-            # 粗层 facade 映射回原始点云
-            if coarse_facades:
-                covered = np.zeros(n, dtype=bool)
-                for cf in coarse_facades:
-                    cn = np.asarray(cf['normal'])
-                    cd = float(np.asarray(cf['plane_model'])[3])
-                    on_plane = (np.abs(points @ cn + cd) <= tol * 1.5) & \
-                               (np.abs(normals @ cn) >= np.cos(np.deg2rad(5.0)))
-                    covered |= on_plane
-
-                remaining &= ~covered
-                for cf in coarse_facades:
-                    cn = np.asarray(cf['normal'])
-                    cd = float(np.asarray(cf['plane_model'])[3])
-                    all_signed = points @ cn + cd
-                    all_near = np.abs(all_signed) <= tol * 0.9
-                    all_near &= np.abs(normals @ cn) >= cos_tol
-                    if all_near.sum() >= min_count:
-                        model = fit_plane_weighted(points[all_near], irls_iters=irls_iters)
-                        facades.append(_info(len(facades), model, points[all_near],
-                                            np.flatnonzero(all_near), ranges[all_near]))
-
-                for f in facades:
-                    remaining[np.asarray(f['inlier_indices'], int)] = False
-
-            trace("facade.algo.coarse", coarse_points=coarse_n,
-                  facades=len(facades),
-                  seconds=f"{time.perf_counter()-started:.2f}")
-
-    # ===== 细层：Bucket 或 Hough =====
+    # ===== 种子阶段：precluster + bucket 双通道全域非竞争提取 =====
     fine_facades = []
 
-    if seed_mode in ('bucket', 'hybrid') and remaining.sum() >= min_count:
+    # 1) 预聚类种子：快速发现高置信候选
+    if seed_mode in ('precluster', 'hybrid') and active.sum() >= min_count:
+        patch_seeds = build_depth_normal_patch_seeds(
+            points, normals, active, voxel_size=float(voxel_size),
+            min_count=min_count, depth_hard_m=DEPTH_HARD_M,
+            normal_angle_deg=float(getattr(
+                Config, 'FACADE_PRECLUSTER_NORMAL_ANGLE_DEG', 10.0)),
+            neighbour_radius=float(getattr(
+                Config, 'FACADE_PRECLUSTER_RADIUS_M',
+                max(float(voxel_size) * 3.0, 0.12))),
+            intensities=intensity_arr,
+            density_field=density_field,
+            debug_features=bool(getattr(
+                Config, 'FACADE_DEBUG_PATCH_FEATURES', False)))
+        if patch_seeds:
+            fine_facades = _extract_bucket_to_facades(
+                patch_seeds, points, normals, ranges,
+                tol, cos_tol, spacing, voxel_size, base,
+                min_count, min_facade_area, irls_iters, signed_dist_tolerance,
+                density_field=density_field)
+            trace('facade.algo.precluster', seeds=len(patch_seeds),
+                  facades=len(fine_facades),
+                  seconds=f"{time.perf_counter()-started:.2f}")
+
+    # 2) Bucket 种子（含残余方向补充通道）：全域运行，补充召回
+    if ((seed_mode == 'bucket' or seed_mode == 'hybrid')
+            and active.sum() >= min_count):
         bucket_seeds = build_bucket_seeds(
-            points, normals, remaining, ranges, tol, base, min_count, voxel_size,
+            points, normals, active, ranges, tol, base, min_count, voxel_size,
             elevations=elevations, density_field=density_field)
         if bucket_seeds:
-            fine_facades = _extract_bucket_to_facades(
+            bucket_facades = _extract_bucket_to_facades(
                 bucket_seeds, points, normals, ranges,
                 tol, cos_tol, spacing, voxel_size, base,
                 min_count, min_facade_area, irls_iters, signed_dist_tolerance,
                 density_field=density_field)
-            # 更新 remaining
-            if fine_facades:
-                used = np.zeros(n, bool)
-                for f in fine_facades:
-                    used[np.asarray(f['inlier_indices'], int)] = True
-                remaining &= ~used
-
-    # hybrid fallback：bucket 为空或极少时切 hough
-    if seed_mode == 'hybrid' and len(fine_facades) < 2 and remaining.sum() >= min_count:
-        hough_seeds = _build_spatial_hough_seeds(
-            points, normals, remaining, ranges, tol, base, min_count, voxel_size)
-        seed_iter = [('hough', s) for s in hough_seeds]
-        seed_iter.extend([('ransac', None)] * 8)
-        hough_facades, remaining = _extract_facades_from_seeds(
-            seed_iter, points, normals, remaining, ranges,
-            tol, cos_tol, spacing, voxel_size, base,
-            min_count, min_facade_area, irls_iters, signed_dist_tolerance)
-        fine_facades.extend(hough_facades)
-
-    if seed_mode == 'hough' and remaining.sum() >= min_count:
-        hough_seeds = _build_spatial_hough_seeds(
-            points, normals, remaining, ranges, tol, base, min_count, voxel_size)
-        seed_iter = [('hough', s) for s in hough_seeds]
-        if method == 'ransac' or not seed_iter:
-            seed_iter = [('ransac', None)] * 30
-        elif method == 'hybrid':
-            seed_iter.extend([('ransac', None)] * 8)
-        hough_facades, remaining = _extract_facades_from_seeds(
-            seed_iter, points, normals, remaining, ranges,
-            tol, cos_tol, spacing, voxel_size, base,
-            min_count, min_facade_area, irls_iters, signed_dist_tolerance)
-        fine_facades.extend(hough_facades)
+            fine_facades.extend(bucket_facades)
 
     trace("facade.algo.seeds", seed_mode=seed_mode,
           fine_facades=len(fine_facades),
@@ -1539,25 +1196,15 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
 
     facades.extend(fine_facades)
 
-    # ===== 弱边界召回 =====
-    if getattr(Config, 'FACADE_ENABLE_WEAK_BOUNDARY_RECALL', False):
-        weak_facades = _weak_boundary_recall(
-            facades, points, normals, remaining, ranges,
-            tol, cos_tol, spacing, voxel_size, base,
-            min_count, min_facade_area, irls_iters, signed_dist_tolerance)
-        if weak_facades:
-            facades.extend(weak_facades)
-            trace("facade.algo.weak_recall", recalled=len(weak_facades),
-                  seconds=f"{time.perf_counter()-started:.2f}")
-
-    # ===== E. 同层合并（仅合并大间隙段）=====
+    # ===== E. 同层合并（跨板带/洞口桥接，几何复验保精度）=====
     if enable_merge:
         facades = _merge_same_layer(
             facades, points, normals,
             d_thresh=float(getattr(Config, 'MERGE_D_THRESH_M', 0.08)),
             angle_deg=float(getattr(Config, 'MERGE_ANGLE_DEG', 5.0)),
             max_plane_dist=base,
-            layer_hard_m=DEPTH_HARD_M)
+            layer_hard_m=DEPTH_HARD_M,
+            intensities=intensity_arr)
         trace("facade.algo.merge_same_layer", facades=len(facades),
               seconds=f"{time.perf_counter()-started:.2f}")
 
@@ -1583,15 +1230,15 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
               violations=n_viol,
               seconds=f"{time.perf_counter()-started:.2f}")
 
-    # ===== G. 水平面挂靠 — 已彻底删除（v4） =====
-
     # ===== H. 完形回收 =====
-    facades = _postprocess_v2(facades, points, normals, tol, cos_tol, spacing, voxel_size)
+    facades = _postprocess_v2(
+        facades, points, normals, tol, cos_tol, spacing, voxel_size,
+        intensities=intensity_arr)
 
     # ===== 【v3】完形回收后再次终审：回收可能重新引入跨层点 =====
     facades, n_viol2 = _enforce_depth_hard_split(facades, points)
     if n_viol2:
-        trace("facade.algo.depth_hard_split.post_reclaim",
+        trace('facade.algo.depth_hard_split.post_reclaim',
               violations=n_viol2,
               seconds=f"{time.perf_counter()-started:.2f}")
 
@@ -1608,7 +1255,19 @@ def detect_facades_adaptive(pcd, voxel_size=.05, min_facade_area=5., max_plane_d
     facades.sort(key=lambda f: -f['point_count'])
     for i, f in enumerate(facades):
         f['id'] = i
+    assigned_count = int(np.count_nonzero(used))
     trace("facade.algo.done", facades=len(facades), total_points=n,
+          assigned_points=assigned_count, unassigned_points=int(n - assigned_count),
+          coverage=f"{assigned_count / max(n, 1):.4f}",
           seconds=f"{time.perf_counter()-started:.2f}")
 
-    return {'facades': facades, 'remaining': out, 'total_points': n}
+    for facade in facades:
+        ids = np.asarray(facade['inlier_indices'], dtype=np.int64)
+        mapped = source_indices[ids]
+        facade['inlier_indices'] = mapped.astype(int).tolist()
+        facade['support_indices'] = mapped.astype(int).tolist()
+        # Seed/merge diagnostics are internal implementation details and must
+        # not leak into the frozen facade business contract.
+        for internal_key in ('dir_bin', 'layer', 'attachments', 'adjacency', 'weak'):
+            facade.pop(internal_key, None)
+    return {'facades': facades, 'remaining': out, 'total_points': input_count}

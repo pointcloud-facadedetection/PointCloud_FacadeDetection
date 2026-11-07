@@ -217,35 +217,52 @@ def build_density_field(points: np.ndarray,
             area_m2 = max(n_occ * cell_voxel * cell_voxel, 1e-6)
             density = cnt / area_m2
 
+            # 这里只记录壳层统计，不再直接用固定绝对阈值给整壳层定级。
+            # 代理云经过距离分层体素化后，绝对密度天然接近 1/voxel²，旧逻辑
+            # 因而几乎恒为 dense。最终等级由下方局部密度/同壳层期望密度决定。
             level = _classify_level(density, dense_thr_m2, sparse_thr_m2)
             point_density[m] = density
-            point_level[m] = level_map[level]
             cells.append(DensityCell(
                 shell_lo=lo_shell, shell_hi=float(hi), elev_layer=el,
                 point_count=cnt, area_m2=area_m2,
                 density_m2=float(density), level=level))
 
-    # ---- 局部精化：体素网格内逐点二次判定 ----
-    # 壳层×高度层仍可能掩盖局部极稀疏斑块（如被树木遮挡的墙面）。
-    # 在全局 voxel 网格上估计局部占用密度，覆盖单元级结果（只降不升）。
-    local_voxel = max(float(voxel_size) * 4.0, 0.20)
+    # ---- 局部相对密度：物理分析格 / 同距离与高度层期望值 ----
+    # 分析尺度必须显著大于代理体素，否则每格一个代理点会退化成恒定
+    # 1/voxel²。30cm 格可覆盖约 6×6 个 5cm 子格，同时仍能分辨洞口边缘、
+    # 遮挡和孤立噪声。局部密度按物理分析格统计，并在同距离/高度层归一化。
+    local_voxel = max(float(_cfg('DENSITY_ANALYSIS_CELL_M', 0.30)),
+                      float(voxel_size) * 5.0)
     keys = np.floor(pts / local_voxel).astype(np.int64)
-    _, inv, counts = np.unique(_pack_voxel_keys(keys), return_inverse=True,
-                               return_counts=True)
-    expected = max((local_voxel / max(float(voxel_size), 1e-6)) ** 2, 1.0)
-    local_fill = counts[inv] / expected          # 局部填充率 ≈ 相对密度
-    local_sparse_thr = float(_cfg('DENSITY_LOCAL_SPARSE_FILL', 0.05))
-    local_skip_thr = float(_cfg('DENSITY_LOCAL_SKIP_FILL', 0.01))
-    downgrade = np.where(local_fill < local_skip_thr,
-                         DensityField.LEVEL_SKIP,
-                         np.where(local_fill < local_sparse_thr,
-                                  DensityField.LEVEL_SPARSE,
-                                  DensityField.LEVEL_DENSE))
-    point_level = np.maximum(point_level, downgrade).astype(np.int8)
-    # 局部极稀疏时把逐点密度一并压低，供下游 tol 膨胀使用
-    point_density = np.where(downgrade == DensityField.LEVEL_SKIP,
-                             np.minimum(point_density, sparse_thr_m2 * 0.5),
-                             point_density)
+    packed = _pack_voxel_keys(keys)
+    _, inv, counts = np.unique(packed, return_inverse=True, return_counts=True)
+    local_density = counts[inv].astype(np.float64) / (local_voxel * local_voxel)
+
+    # 每个距离壳层×高度层以非空局部格的中位密度作为扫描期望值。这样远距、
+    # 高层和斜入射区域各自归一化，不再被近距离高密度区域压制。
+    relative = np.ones(n, dtype=np.float64)
+    expected_density = np.zeros(n, dtype=np.float64)
+    for si in range(len(shells)):
+        for el in (0, 1):
+            mask = (shell_idx == si) & (elev_layer == el)
+            if not np.any(mask):
+                continue
+            cell_ids = np.unique(inv[mask])
+            cell_density = counts[cell_ids].astype(np.float64) / (
+                local_voxel * local_voxel)
+            expected = float(np.median(cell_density)) if len(cell_density) else 0.0
+            expected = max(expected, 1.0)
+            expected_density[mask] = expected
+            relative[mask] = local_density[mask] / expected
+
+    dense_ratio_thr = float(_cfg('DENSITY_RELATIVE_DENSE_RATIO', 0.55))
+    sparse_ratio_thr = float(_cfg('DENSITY_RELATIVE_SPARSE_RATIO', 0.15))
+    point_level = np.where(
+        relative < sparse_ratio_thr, DensityField.LEVEL_SKIP,
+        np.where(relative < dense_ratio_thr, DensityField.LEVEL_SPARSE,
+                 DensityField.LEVEL_DENSE)).astype(np.int8)
+    # 下游仍消费 pts/m²；提供局部物理面密度，而非旧壳层常量。
+    point_density = local_density
 
     return DensityField(
         point_density=point_density,
@@ -254,6 +271,11 @@ def build_density_field(points: np.ndarray,
         params={'dense_thr_m2': dense_thr_m2,
                 'sparse_thr_m2': sparse_thr_m2,
                 'elev_split_deg': elev_split_deg,
+                'analysis_cell_m': local_voxel,
+                'relative_density': relative,
+                'expected_density': expected_density,
+                'relative_dense_ratio': dense_ratio_thr,
+                'relative_sparse_ratio': sparse_ratio_thr,
                 'gate_skip_ratio': float(_cfg('DENSITY_GATE_SKIP_RATIO', 0.5)),
                 'gate_sparse_ratio': float(
                     _cfg('DENSITY_GATE_SPARSE_RATIO', 0.35))})
