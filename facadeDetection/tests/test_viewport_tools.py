@@ -156,3 +156,80 @@ def test_empty_tool_clear_does_not_request_render():
     viewport.clear_ruler_overlay()
     viewport.clear_pick_markers()
     assert renders == []
+
+
+def test_qt_pick_input_does_not_reenter_vtk_and_restores_navigation(qapp):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    viewport = PyVistaViewport()
+    try:
+        viewport._widget.show()
+        qapp.processEvents()
+        native_presses = []
+        viewport._on_press = lambda *args: native_presses.append(args)
+        hits = []
+        viewport.ray_plane_pick = lambda pos, _model: np.array(
+            [pos.x(), pos.y(), 0.0], dtype=float)
+        viewport.enter_plane_pick_mode(
+            PLANE, callback=lambda value: hits.append(value['point']))
+        for _ in range(3):
+            QTest.mouseClick(viewport._widget, Qt.MouseButton.LeftButton,
+                             Qt.KeyboardModifier.NoModifier, QPoint(40, 50))
+        qapp.processEvents()
+        assert len(hits) == 3
+        assert native_presses == [], 'Qt pick 不得再进入 VTK 左键导航回调'
+        assert viewport._pick_press is None
+
+        viewport.exit_pick_mode()
+        QTest.mouseClick(viewport._widget, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, QPoint(45, 55))
+        assert native_presses, '退出 pick 后应恢复普通 VTK 导航'
+    finally:
+        viewport.destroy()
+
+
+def test_enter_pick_releases_roi_capture_and_old_press_state(qapp):
+    viewport = PyVistaViewport()
+    try:
+        class Roi:
+            calls = 0
+
+            def cancel(self):
+                self.calls += 1
+
+        roi = Roi()
+        viewport._roi_controller = roi
+        viewport._pick_press = (10, 10)
+        viewport._drag_left = (5, 5)
+        viewport.enter_plane_pick_mode(PLANE, callback=lambda _value: None)
+        assert roi.calls == 1
+        assert viewport._pick_press is None
+        assert viewport._drag_left is None
+        assert viewport._mode == viewport.InteractionMode.PICK
+        viewport.exit_pick_mode()
+        assert roi.calls == 2
+        assert viewport._mode == viewport.InteractionMode.NAVIGATE
+    finally:
+        viewport.destroy()
+
+
+def test_pick_releases_actual_roi_mouse_and_keyboard_grabs(qapp):
+    from PySide6.QtWidgets import QWidget
+    viewport = PyVistaViewport()
+    try:
+        viewport._widget.show()
+        qapp.processEvents()
+        viewport._roi_controller.start(None, lambda *_args: None)
+        qapp.processEvents()
+        overlay = viewport._roi_controller.overlay()
+        assert overlay.isVisible()
+        assert QWidget.mouseGrabber() is overlay
+        viewport.enter_plane_pick_mode(PLANE, callback=lambda _value: None)
+        assert not overlay.isVisible()
+        assert QWidget.mouseGrabber() is not overlay
+        assert QWidget.keyboardGrabber() is not overlay
+        assert viewport._mode == viewport.InteractionMode.PICK
+    finally:
+        viewport.exit_pick_mode()
+        viewport.destroy()

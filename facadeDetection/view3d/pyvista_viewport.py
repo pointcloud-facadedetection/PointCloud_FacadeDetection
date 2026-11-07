@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyvista as pv
-from PySide6.QtCore import QObject, Qt, Signal, QTimer
+from PySide6.QtCore import QObject, Qt, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget
 
@@ -80,6 +80,51 @@ class _RenderCounterShim:
 
     def __init__(self):
         self._frames_rendered = 0
+
+
+class _PickInputFilter(QObject):
+    def __init__(self, viewport, parent=None):
+        super().__init__(parent)
+        self._viewport = viewport
+
+    def eventFilter(self, watched, event):
+        viewport = self._viewport
+        if watched is not viewport._widget:
+            return False
+        event_type = event.type()
+        mouse_events = (
+            QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove)
+        if event_type not in mouse_events:
+            return False
+        left = event.button() == Qt.MouseButton.LeftButton
+        xy = viewport._qt_display_xy(event)
+        if viewport._quad_resize is not None and left:
+            handled = (
+                event_type == QEvent.Type.MouseButtonPress
+                and viewport._quad_resize_press(xy)) or (
+                event_type == QEvent.Type.MouseMove
+                and viewport._quad_resize_move(xy)) or (
+                event_type == QEvent.Type.MouseButtonRelease
+                and viewport._quad_resize_release(xy))
+            if handled:
+                event.accept()
+                return True
+        if viewport._mode != viewport.InteractionMode.PICK:
+            return False
+        if event_type == QEvent.Type.MouseMove:
+            if viewport._drag_right is not None:
+                return False
+            event.accept()
+            return True
+        if not left:
+            return False
+        event.accept()
+        if event_type == QEvent.Type.MouseButtonPress:
+            viewport._on_press_xy('left', xy)
+        elif event_type == QEvent.Type.MouseButtonRelease:
+            viewport._on_release_xy('left', xy)
+        return True
 
 
 class _GestureFilter(QObject):
@@ -184,6 +229,9 @@ class PyVistaViewport(BaseViewport):
         # 签名与本类同名方法一致，直接以自身充当相机垫片。
         self._camera = self
 
+        self._pick_input_filter = _PickInputFilter(self, parent=self._widget)
+        self._widget.installEventFilter(self._pick_input_filter)
+
         # 触控手势：捏合缩放（Surface 触屏）
         try:
             from PySide6.QtCore import Qt as _Qt
@@ -209,7 +257,7 @@ class PyVistaViewport(BaseViewport):
     _WHEEL_FACTOR = 1.15      # 滚轮缩放倍率
 
     def _install_zup_interaction(self):
-        """以 vtkInteractorStyleUser 接管全部鼠标事件，实现 Z 轴锁定转台。
+        """以 vtkInteractorStyleUser 处理普通导航鼠标事件，实现 Z 轴锁定转台。
 
         旋转模型与 Tekla/BIM 一致：水平拖绕注视点的全局 Z 轴转方位，
         垂直拖改变俯仰并钳制在 ±89°，视线 up 永远锁定全局 Z，绝不滚转。
@@ -249,15 +297,22 @@ class PyVistaViewport(BaseViewport):
         except Exception:
             return None
 
+    def _qt_display_xy(self, event):
+        position = event.position() if hasattr(event, 'position') else event.pos()
+        dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+        return (int(round(position.x() * dpr)),
+                int(round((self._widget.height() - position.y()) * dpr)))
+
     def _on_press(self, button, style_obj):
-        xy = self._pointer_xy(style_obj)
+        self._on_press_xy(button, self._pointer_xy(style_obj))
+
+    def _on_press_xy(self, button, xy):
         if xy is None:
             return
         if button == 'left':
             if self._quad_resize_press(xy):
                 return
             if self._mode == self.InteractionMode.PICK:
-                # 拾取模式：左键只做点选，不进入旋转
                 self._pick_press = xy
                 print(f'[PCFD] viewport.pick_press {xy}', flush=True)
                 return
@@ -266,29 +321,29 @@ class PyVistaViewport(BaseViewport):
             self._drag_right = xy
 
     def _on_release(self, button, style_obj=None):
+        xy = self._pointer_xy(style_obj) if style_obj is not None else None
+        self._on_release_xy(button, xy)
+
+    def _on_release_xy(self, button, xy):
         if button == 'left':
-            if style_obj is not None:
-                xy = self._pointer_xy(style_obj)
-                if xy is not None and self._quad_resize_release(xy):
-                    return
+            if xy is not None and self._quad_resize_release(xy):
+                return
             if self._mode == self.InteractionMode.PICK:
                 press, self._pick_press = self._pick_press, None
-                if press is not None and style_obj is not None:
-                    xy = self._pointer_xy(style_obj)
-                    if (xy is not None
-                            and abs(xy[0] - press[0]) <= 6
-                            and abs(xy[1] - press[1]) <= 6):
-                        from PySide6.QtCore import QPoint
-                        print(f'[PCFD] viewport.pick_release {xy}',
-                              flush=True)
-                        self.handle_pick_screen(QPoint(*xy))
+                if (press is not None and xy is not None
+                        and abs(xy[0] - press[0]) <= 6
+                        and abs(xy[1] - press[1]) <= 6):
+                    print(f'[PCFD] viewport.pick_release {xy}', flush=True)
+                    self.handle_pick_screen(QPoint(*xy))
                 return
             self._drag_left = None
         else:
             self._drag_right = None
 
     def _on_mouse_move(self, style_obj):
-        xy = self._pointer_xy(style_obj)
+        self._on_mouse_move_xy(self._pointer_xy(style_obj))
+
+    def _on_mouse_move_xy(self, xy):
         if xy is None:
             return
         if self._quad_resize_move(xy):
@@ -967,8 +1022,11 @@ class PyVistaViewport(BaseViewport):
             return None
 
     def enter_plane_pick_mode(self, plane_model, callback=None):
-        """平面拾取：复用 PICK 模式的 6px 点击判定，回调直接给平面交点。"""
+        """平面拾取由 Qt 分发左键，VTK 仅计算射线与平面的交点。"""
         print('[PCFD] viewport.enter_plane_pick_mode', flush=True)
+        self.exit_roi_selection()
+        self._pick_press = None
+        self._drag_left = self._drag_right = None
         self._mode = self.InteractionMode.PICK
         self._plane_pick_model = np.asarray(plane_model, dtype=np.float64)
         self._plane_pick_callback = callback
@@ -987,6 +1045,9 @@ class PyVistaViewport(BaseViewport):
 
     def enter_pick_mode(self, cloud_name=None, pick_radius=8, callback=None):
         print('[PCFD] viewport.enter_pick_mode（会顶掉平面拾取）', flush=True)
+        self.exit_roi_selection()
+        self._pick_press = None
+        self._drag_left = self._drag_right = None
         self._mode = self.InteractionMode.PICK
         self._pick_cloud = cloud_name or self._active_name
         self._pick_radius = float(pick_radius)
@@ -996,6 +1057,9 @@ class PyVistaViewport(BaseViewport):
 
     def exit_pick_mode(self):
         print('[PCFD] viewport.exit_pick_mode', flush=True)
+        self.exit_roi_selection()
+        self._pick_press = None
+        self._drag_left = self._drag_right = None
         self._mode = self.InteractionMode.NAVIGATE
         self._pick_callback = None
         self._plane_pick_model = None
