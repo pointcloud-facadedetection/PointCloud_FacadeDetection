@@ -7,8 +7,8 @@ import uuid
 import numpy as np
 
 
-def write_point_cloud_ply_atomic(path, points, colors=None):
-    """写入统一 Runtime PLY：总是包含 xyz + uchar rgb。
+def write_point_cloud_ply_atomic(path, points, colors=None, intensities=None):
+    """写入统一 Runtime PLY：包含 xyz + uchar rgb，可选原生 intensity。
 
     参数
     ----
@@ -16,6 +16,8 @@ def write_point_cloud_ply_atomic(path, points, colors=None):
         全局坐标；必须已过滤 NaN/Inf。
     colors : (N, 3) float32 或 None
         值域 [0,1] 或 [0,255]；None 时填充中性灰 (128,128,128)。
+    intensities : (N,) float32 或 None
+        点级原生反射强度。该字段与 RGB 独立，绝不从颜色亮度推导。
 
     返回
     ----
@@ -30,6 +32,13 @@ def write_point_cloud_ply_atomic(path, points, colors=None):
         raise ValueError("PLY 点云坐标包含 NaN/Inf")
 
     n = len(points)
+
+    intensity_data = None
+    if intensities is not None:
+        candidate = np.asarray(intensities, dtype=np.float32).reshape(-1)
+        if len(candidate) != n:
+            raise ValueError("intensities must have same length as points")
+        intensity_data = np.ascontiguousarray(candidate, dtype=np.float32)
 
     # 颜色：无颜色时补齐中性灰；兼容 [0,1] float 与 [0,255]
     colors_arr = np.asarray(colors, dtype=np.float32) if colors is not None else None
@@ -56,21 +65,28 @@ def write_point_cloud_ply_atomic(path, points, colors=None):
         "property uchar red",
         "property uchar green",
         "property uchar blue",
-        "end_header",
     ]
+    if intensity_data is not None:
+        header_lines.append("property float intensity")
+    header_lines.append("end_header")
     header = "\n".join(header_lines).encode("ascii") + b"\n"
 
     # 构建二进制记录：确保与 read_ply_fast 的解析规则对齐
-    records = np.empty(n, dtype=[
+    record_dtype = [
         ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
         ('red', 'u1'), ('green', 'u1'), ('blue', 'u1'),
-    ])
+    ]
+    if intensity_data is not None:
+        record_dtype.append(('intensity', '<f4'))
+    records = np.empty(n, dtype=record_dtype)
     records['x'] = points[:, 0]
     records['y'] = points[:, 1]
     records['z'] = points[:, 2]
     records['red'] = color_data[:, 0]
     records['green'] = color_data[:, 1]
     records['blue'] = color_data[:, 2]
+    if intensity_data is not None:
+        records['intensity'] = intensity_data
 
     binary_data = records.tobytes()
 
@@ -90,6 +106,7 @@ def write_point_cloud_ply_atomic(path, points, colors=None):
         'path': str(path),
         'point_count': int(n),
         'has_colors': bool(has_colors),
+        'has_intensity': bool(intensity_data is not None),
         'bounds_min': points.min(axis=0).tolist(),
         'bounds_max': points.max(axis=0).tolist(),
     }

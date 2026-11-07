@@ -42,6 +42,7 @@ class PointCloudService:
         for dataset in self.datasets.values():
             dataset.raw.points = np.empty((0, 3), dtype=np.float32)
             dataset.raw.colors = None
+            dataset.raw.intensities = None
             dataset.index.source_points = None
             dataset.index.source_colors = None
             dataset.index.source_raw_offsets = None
@@ -58,8 +59,9 @@ class PointCloudService:
         self._project_uuid = None
         self._project_generation += 1
 
-    def register_dataset(self, dataset_id: str, points, colors=None, metadata=None) -> PointCloudDataset:
-        raw = RawPointStore.from_arrays(points, colors)
+    def register_dataset(self, dataset_id: str, points, colors=None, metadata=None,
+                         intensities=None) -> PointCloudDataset:
+        raw = RawPointStore.from_arrays(points, colors, intensities)
         meta = metadata or {}
         # 处理版本：代理内容变化（去噪/重建）即变化，供结果修订号校验。
         # 立面/质量结果按该版本盖戳，恢复时与当前数据集比对，防止旧索引错位复用。
@@ -75,13 +77,18 @@ class PointCloudService:
         index = VoxelCascadeIndex.build(
             raw, source_points=source_points, source_colors=source_colors,
             source_raw_offsets=source_raw_offsets, source_raw_indices=source_raw_indices)
+        source_asset = self.source_assets.get(meta.get('source_id'), {})
+        if source_asset.get('intensities') is not None:
+            # 运行期私有引用，不写入业务 JSON。
+            meta['_source_intensities'] = source_asset['intensities']
         dataset = PointCloudDataset(dataset_id, raw, index, meta)
         self.datasets[dataset_id] = dataset
         self.decisions.pop(dataset_id, None)
         self._decision_versions.pop(dataset_id, None)
         return dataset
 
-    def register_source_asset(self, source_id: str, points, colors=None, metadata=None):
+    def register_source_asset(self, source_id: str, points, colors=None, metadata=None,
+                              intensities=None):
         # raw 缓存三件套是本进程写入的已校验数据：load_raw_cache 会在
         # colors memmap 上附带 _pcfd_colors_in_range 标记，据此跳过值域
         # 扫描（对 memmap 的 min/max 整扫会把全部颜色页换入内存）。
@@ -101,9 +108,15 @@ class PointCloudService:
                                                 float(colors.max()) <= 1.0):
                         colors = np.clip(colors, 0.0, 1.0)
                 colors = np.ascontiguousarray(colors)
+        intensity = None
+        if intensities is not None:
+            candidate = np.asarray(intensities, dtype=np.float32).reshape(-1)
+            if len(candidate) == len(points):
+                intensity = np.ascontiguousarray(candidate)
         self.source_assets[source_id] = {
             "points": points,
             "colors": colors,
+            "intensities": intensity,
             "metadata": metadata or {},
         }
 
@@ -132,6 +145,7 @@ class PointCloudService:
                     source_ids.add(src)
                 dataset.raw.points = np.empty((0, 3), dtype=np.float32)
                 dataset.raw.colors = None
+                dataset.raw.intensities = None
                 dataset.index.source_points = None
                 dataset.index.source_colors = None
                 dataset.index.source_raw_offsets = None
@@ -146,6 +160,7 @@ class PointCloudService:
             if asset is not None:
                 asset['points'] = np.empty((0, 3), dtype=np.float32)
                 asset['colors'] = None
+                asset['intensities'] = None
 
     def bind_processing_cloud(self, cloud_name: str) -> Optional[str]:
         """从数据集注册表中修复已恢复视口云的元数据。 """
@@ -320,6 +335,11 @@ class PointCloudService:
             print(f"[PCFD] denoise.skip cloud={name} dataset={dataset_id} reason=dataset_not_registered", flush=True)
             return None
         n_before = len(pts)
+        old_proxy_normals = None
+        if dataset is not None:
+            candidate_normals = getattr(dataset, 'proxy_normals', None)
+            if candidate_normals is not None and len(candidate_normals) == n_before:
+                old_proxy_normals = np.asarray(candidate_normals)
         keep_proxy = np.empty(0, dtype=np.int32)
 
         # ============================================================
@@ -406,6 +426,9 @@ class PointCloudService:
         n_after = len(keep_proxy)
         new_pts = pts[keep_proxy] if n_after > 0 else np.empty((0, 3), dtype=np.float32)
         new_cols = cols[keep_proxy] if (cols is not None and n_after > 0) else None
+        old_intensity = dataset.proxy_intensities if dataset is not None else None
+        new_intensity = (np.asarray(old_intensity)[keep_proxy]
+                         if old_intensity is not None and n_after > 0 else None)
 
         raw_ids = None
         raw_count = 0
@@ -444,7 +467,16 @@ class PointCloudService:
                         new_meta['elevations'] = old_elev[keep_proxy].tolist()
 
                 # 重新注册 dataset
-                dataset = self.register_dataset(dataset_id, new_pts, new_cols, metadata=new_meta)
+                dataset = self.register_dataset(
+                    dataset_id, new_pts, new_cols, metadata=new_meta,
+                    intensities=new_intensity)
+                # Denoising only removes proxy rows; coordinates of retained
+                # rows do not change.  Preserve the already-computed normals in
+                # exactly the same index transform instead of estimating all
+                # million-plus normals again on the next facade operation.
+                if old_proxy_normals is not None:
+                    dataset.proxy_normals = np.ascontiguousarray(
+                        old_proxy_normals[keep_proxy])
 
                 # 计算 raw_ids
                 new_proxy_ids = np.arange(n_after, dtype=np.int32)
