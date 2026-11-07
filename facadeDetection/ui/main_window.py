@@ -425,12 +425,13 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
 
     # 点云加载/导入/激活：统一走 TaskProgressController 的 TASK_LOAD 任务
     def _show_loading_dialog(self):
-        self.task_progress.begin(TASK_LOAD, '点云加载', '任务处理中')
+        self.task_progress.begin(TASK_LOAD, '点云加载', '任务处理中',
+                                 determinate=True)
         # 兼容旧属性：历史代码/测试通过 _loading_dialog 探测控件。
         self._loading_dialog = self.task_progress.dialog(TASK_LOAD)
 
     def _update_loading_dialog(self, percent, text):
-        # 忙碌条只透传阶段文案，百分比忽略。
+        # E57 转换阶段显示真实百分比，未知阶段自动保留忙碌条。
         self.task_progress.report(TASK_LOAD, percent, text or '任务处理中')
 
     def _hide_loading_dialog(self, success=True, message='处理完成'):

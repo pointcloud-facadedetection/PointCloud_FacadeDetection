@@ -21,7 +21,7 @@ class FakeOverviewService:
         self.fls_payload = {'success': True, 'uploaded': 2}
         self.on_upload = None
 
-    def activate_project(self, uuid):
+    def activate_project(self, uuid, progress_cb=None):
         self.log.append(('overview.activate', uuid))
 
     def upload_files(self, paths, pid):
@@ -443,7 +443,7 @@ class TestActivateBackgroundSplit:
         quality = SimpleNamespace(active_quality_worker=None,
                                   quality_result_cache={}, quality_reports=[])
         overview = FakeOverviewService(log)
-        def failing_activate(uuid):
+        def failing_activate(uuid, progress_cb=None):
             raise RuntimeError('模拟 DB 激活失败')
         overview.activate_project = failing_activate
         controller = ProjectLifecycleController(

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 from pathlib import Path
+from queue import Empty
 
 from config.storage import Storage
 from services.dal.file_repo import FileRepo
@@ -37,13 +38,16 @@ def _e57_convert_worker(
             Path(cache_path),
             project_uuid=project_uuid,
             metadata=metadata,
+            progress_cb=lambda percent, text: queue.put(
+                ('progress', int(percent), str(text))),
         )
         queue.put(("ok", info))
     except Exception as exc:
         queue.put(("error", str(exc)))
 
 
-def ensure_e57_cache(project_uuid: str, asset, *, force: bool = False) -> Path:
+def ensure_e57_cache(project_uuid: str, asset, *, force: bool = False,
+                     progress_cb=None) -> Path:
     """Return a usable cache PLY for an E57 FileAsset.
 
     Cache PLY is written to the project's own cache/ directory with the same
@@ -139,11 +143,32 @@ def ensure_e57_cache(project_uuid: str, asset, *, force: bool = False) -> Path:
         ),
     )
     p.start()
+    if progress_cb is not None:
+        progress_cb(0, f'开始转换 {source.name}')
+    while True:
+        try:
+            message = q.get(timeout=0.2)
+            if message[0] == 'progress':
+                status, payload = message[0], message[1:]
+            else:
+                status, payload = message
+        except Empty:
+            if not p.is_alive():
+                raise RuntimeError(
+                    f'E57 转换子进程异常退出（exit code={p.exitcode}），未生成缓存。')
+            continue
+        if status == 'progress':
+            if progress_cb is not None:
+                progress_cb(payload[0], payload[1])
+            continue
+        break
     p.join()
-
-    status, payload = q.get()
+    q.close()
+    q.join_thread()
     if status == "error":
         raise RuntimeError(f"E57 转换失败: {payload}")
+    if progress_cb is not None:
+        progress_cb(100, 'E57 缓存转换完成')
 
     info = payload
     info["cache_status"] = "ready"

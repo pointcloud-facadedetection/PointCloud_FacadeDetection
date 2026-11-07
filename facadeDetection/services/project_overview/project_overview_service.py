@@ -182,7 +182,9 @@ class ProjectOverviewService:
             report_date=info.get("report_date"),
             inspection_params_json=info.get("inspection_params_json"),
         )
-        self.update_project_assets(card.project_id, fls_directories or [], pointcloud_files or [], photo_files or [])
+        self.update_project_assets(card.project_id, fls_directories or [],
+                                   pointcloud_files or [], photo_files or [],
+                                   defer_e57=True)
         return self.get_project(card.project_id) or card
 
     def open_project(self, directory_path: str) -> ProjectCard:
@@ -265,26 +267,27 @@ class ProjectOverviewService:
                                              src_path=str(pointcloud_path),
                                              kind=FileKind.raw_pointcloud,
                                              copy_into_project=False)
-                if pointcloud_path.suffix.lower() == '.e57':
-                    ensure_e57_cache(pc.project_id, asset)
             if pointcloud_candidates:
                 PointCloudStationRepo.sync_assets(pc.project_id)
         except Exception:
             pass
         return pc
 
-    def activate_project(self, project_id: str) -> None:
+    def activate_project(self, project_id: str, progress_cb=None) -> None:
         """Validate and activate a project without hiding restore failures."""
         if not project_id:
             raise ValueError('项目标识为空，无法激活项目')
         ProjectRepo.load_and_activate(project_id)
-        # 补偿旧项目及历史旁路登记的 E57：先生成 cache，再同步站点。
-        # 原始 E57 缺失时保留结构化错误，由站点层提示重导，不回退解析 E57。
-        for asset in FileRepo.list_assets_by_kind(project_id, FileKind.raw_pointcloud):
-            if Path(asset.path or '').suffix.lower() != '.e57':
-                continue
+        assets = [asset for asset in FileRepo.list_assets_by_kind(
+            project_id, FileKind.raw_pointcloud)
+            if Path(asset.path or '').suffix.lower() == '.e57']
+        for index, asset in enumerate(assets):
             try:
-                ensure_e57_cache(project_id, asset)
+                ensure_e57_cache(
+                    project_id, asset,
+                    progress_cb=(lambda percent, text, i=index: progress_cb(
+                        (i + percent / 100) * 60 / len(assets), text))
+                    if progress_cb is not None else None)
             except Exception as exc:
                 log_event(project_id, 'e57.cache.ensure_failed', asset_id=asset.id,
                           source_path=asset.path, error=repr(exc))
@@ -387,6 +390,7 @@ class ProjectOverviewService:
         return None
 
     def update_project(self, project_id: str, **fields) -> ProjectCard:
+        defer_e57 = bool(fields.pop('defer_e57', False))
         resources = {key: fields.pop(key, None) for key in (
             'fls_directories', 'pointcloud_files', 'photo_files')}
         info = ProjectRepo.update_project(project_id, **fields)
@@ -411,7 +415,8 @@ class ProjectOverviewService:
         # intentional clear operation and must be persisted as such.
         if any(value is not None for value in resources.values()):
             self.update_project_assets(project_id, resources['fls_directories'] or [],
-                                       resources['pointcloud_files'] or [], resources['photo_files'] or [])
+                                       resources['pointcloud_files'] or [],
+                                       resources['photo_files'] or [], defer_e57=defer_e57)
             # Keep station projections in lockstep with the edited asset list;
             # otherwise deleted rows reappear until the next application start.
             PointCloudStationRepo.sync_assets(project_id)
@@ -431,7 +436,8 @@ class ProjectOverviewService:
         }
 
     def update_project_assets(self, project_uuid: str, fls_directories: list[str],
-                              pointcloud_files: list[str], photo_files: list[str]) -> None:
+                              pointcloud_files: list[str], photo_files: list[str],
+                              *, defer_e57: bool = False) -> None:
         """以弹窗列表为事实来源同步资源，支持新增、删除、清空后保存。
 
         FLS 目录会被实际转换并导入；E57 生成 cache PLY 后统一按 PLY 处理；
@@ -504,7 +510,7 @@ class ProjectOverviewService:
                         meta = dict(existing_asset.meta_json or {})
                         cache_path = meta.get('cache_path')
                         cache_valid = cache_path and Path(cache_path).is_file() and Path(cache_path).stat().st_size > 0
-                        if not cache_valid:
+                        if not cache_valid and not defer_e57:
                             try:
                                 ensure_e57_cache(project_uuid, existing_asset)
                             except Exception as exc:
@@ -515,7 +521,7 @@ class ProjectOverviewService:
             asset = FileRepo.import_file(
                 project_uuid, p, FileKind.raw_pointcloud,
                 copy_into_project=False)
-            if Path(p).suffix.lower() == '.e57':
+            if Path(p).suffix.lower() == '.e57' and not defer_e57:
                 try:
                     ensure_e57_cache(project_uuid, asset)
                 except Exception as exc:
@@ -621,7 +627,11 @@ class ProjectOverviewService:
                 item = svc.prepare_upload(
                     project_uuid=project_uuid, file_path=p,
                     distance_path=dist_by_stem.get(Path(p).stem.lower()),
-                    copy_into_project=False)
+                    copy_into_project=False,
+                    progress_cb=(None if worker is None else
+                                 lambda percent, text, i=index: worker.signals.progress.emit(
+                                     int(10 + 80 * (i + percent / 100) / max(total, 1)),
+                                     f'{Path(p).name}：{text}')))
                 prepared.append(item)
                 uploaded.append(p)
             except Exception as e:

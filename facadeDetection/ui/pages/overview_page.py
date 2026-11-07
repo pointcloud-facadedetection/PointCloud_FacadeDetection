@@ -387,7 +387,7 @@ class OverviewPageMixin:
 
         try:
             updated_project = self.project_overview_service.update_project(
-                project_id, **values
+                project_id, defer_e57=True, **values
             )
         except (ValueError, OSError) as error:
             QMessageBox.warning(self, '编辑项目', str(error))
@@ -401,10 +401,15 @@ class OverviewPageMixin:
         if is_current:
             self._set_current_project(updated_project)
 
-        # update_project 内部已调用 update_project_assets 同步完成资源导入
-        # （包括 FLS 转换、E57 cache 生成、站点同步），因此无需再走 _start_load
-        # 异步链路。直接在当前线程刷新 UI，避免 before_ids 已包含新站点导致
-        # on_load_finished 找不到"新"站点而跳过视口刷新。
+        if is_current and any(
+                Path(path).suffix.lower() == '.e57'
+                for path in values.get('pointcloud_files') or []):
+            self._prepare_project_activation(project_id)
+            self._start_load('activate', project_id, project=updated_project)
+            self._refresh_project_list()
+            return
+
+        # 非 E57 资源沿用现有同步刷新；E57 已在上方进入后台百分比导入。
         if is_current:
             try:
                 self.station_service.refresh()

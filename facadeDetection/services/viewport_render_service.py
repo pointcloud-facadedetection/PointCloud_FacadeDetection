@@ -259,6 +259,12 @@ class ViewportRenderService:
         method = getattr(self.viewport, 'get_cloud_names', None)
         return method() if callable(method) else []
 
+    def set_initial_camera(self, camera):
+        method = getattr(self.viewport, 'set_initial_camera', None)
+        if callable(method) and camera:
+            method(camera.get('position'), camera.get('focal_point'),
+                   camera.get('up') or (0.0, 0.0, 1.0))
+
     def clear_viewport(self):
         """清空视口场景（项目销毁时调用），委托给 viewport.clear。"""
         method = getattr(self.viewport, 'clear', None)

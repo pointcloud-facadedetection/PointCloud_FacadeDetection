@@ -230,6 +230,8 @@ class PointCloudStationRepo:
             )).scalars().all()
             existing = {x.file_asset_id: x for x in all_rows if x.file_asset_id is not None}
             by_key = {x.station_key: x for x in all_rows if x.station_key}
+            from services.initial_camera_service import initial_view_from_asset
+            camera_candidate = None
             for order, asset in enumerate(assets):
                 valid, reason = FileRepo.validate_asset(asset)
                 asset.meta_json = dict(asset.meta_json or {}, validation_status=reason)
@@ -243,38 +245,41 @@ class PointCloudStationRepo:
                     # 导入完成后 cache PLY 是唯一运行时资产。原 E57 可移动/归档，
                     # 不能因此阻断项目恢复，也绝不回退去读取其复杂元数据。
                     valid, reason = True, 'ok'
+                initial_pose, camera = initial_view_from_asset(asset)
                 key = f'{project_uuid}:{asset.sha256 or asset.id}'
                 if asset.id in existing:
                     row = existing[asset.id]
-                    row.is_deleted = False
-                    row.source_path = str(runtime_path or asset.path)
-                    row.last_error = None if valid else reason
-                    row.display_name = asset.original_name or Path(asset.path).name
-                    row.display_order = order
-                    continue
-                # 兼容旧数据库
-                if key in by_key:
+                elif key in by_key:
                     row = by_key[key]
                     row.file_asset_id = asset.id
-                    row.is_deleted = False
-                    row.source_path = str(runtime_path or asset.path)
-                    row.last_error = None if valid else reason
-                    row.display_name = asset.original_name or Path(asset.path).name
-                    row.display_order = order
-                    continue
-                station = PointCloudStation(project_id=p.id, file_asset_id=asset.id,
-                    station_key=key,
-                    display_name=asset.original_name or Path(asset.path).name,
-                    source_path=str(runtime_path or asset.path), display_order=order,
-                    is_selected=(order == 0))
-                station.last_error = None if valid else reason
-                s.add(station)
+                else:
+                    row = PointCloudStation(
+                        project_id=p.id, file_asset_id=asset.id, station_key=key,
+                        display_name=asset.original_name or Path(asset.path).name,
+                        source_path=str(runtime_path or asset.path), display_order=order,
+                        is_selected=(order == 0))
+                    s.add(row)
+                row.is_deleted = False
+                row.source_path = str(runtime_path or asset.path)
+                row.last_error = None if valid else reason
+                row.display_name = asset.original_name or Path(asset.path).name
+                row.display_order = order
+                if initial_pose is not None:
+                    row.initial_pose_json = initial_pose
+                if camera is not None and camera_candidate is None:
+                    camera_candidate = row, camera
             active_asset_ids = {asset.id for asset in assets}
             for row in all_rows:
                 if (row.file_asset_id is not None and
                         row.file_asset_id not in active_asset_ids):
                     row.is_deleted = True
             s.flush()
+            if camera_candidate is not None:
+                row, camera = camera_candidate
+                camera['station_id'] = int(row.id)
+                p.initial_camera_json = camera
+            else:
+                p.initial_camera_json = None
             active_rows = s.execute(select(PointCloudStation).where(
                 PointCloudStation.project_id == p.id,
                 PointCloudStation.is_deleted == False,
@@ -299,6 +304,14 @@ class PointCloudStationRepo:
                 return None
             return s.execute(select(PointCloudViewState).where(
                 PointCloudViewState.project_id == p.id)).scalar_one_or_none()
+
+    @staticmethod
+    def save_initial_camera(project_uuid, camera):
+        with project_session(project_uuid) as s:
+            project = s.execute(select(Project).where(
+                Project.uuid == project_uuid)).scalar_one_or_none()
+            if project is not None:
+                project.initial_camera_json = dict(camera)
 
     @staticmethod
     def delete(project_uuid, station_ids):

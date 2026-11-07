@@ -182,7 +182,11 @@ class ImportTaskQueue(QObject):
                     project_uuid, p, FileKind.raw_pointcloud,
                     copy_into_project=False)
                 if asset is not None:
-                    cache_path = ensure_e57_cache(project_uuid, asset)
+                    cache_path = ensure_e57_cache(
+                        project_uuid, asset,
+                        progress_cb=lambda percent, text: worker.signals.progress.emit(
+                            int(10 + 80 * (step - 1 + percent / 100) / max(total_steps, 1)),
+                            text))
                     # Now treat the cache PLY as a regular PLY for rendering
                     prep = self.file_service.prepare_upload(
                         project_uuid, str(cache_path),

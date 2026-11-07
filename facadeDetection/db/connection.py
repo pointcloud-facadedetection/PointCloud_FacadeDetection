@@ -113,6 +113,7 @@ def _project_engine(project_uuid: str):
             'inspection_date': 'DATETIME',
             'report_date': 'DATETIME',
             'inspection_params_json': 'TEXT',
+            'initial_camera_json': 'JSON',
         }
         for name, definition in proj_additions.items():
             if name not in proj_cols:
@@ -145,8 +146,9 @@ def _project_engine(project_uuid: str):
                AND label GLOB 'Facade [0-9]*'
             """))
         station_columns = {c['name'] for c in inspect(conn).get_columns('pointcloud_stations')}
-        if 'denoise_state_json' not in station_columns:
-            conn.execute(text('ALTER TABLE pointcloud_stations ADD COLUMN denoise_state_json JSON'))
+        for name in ('denoise_state_json', 'initial_pose_json'):
+            if name not in station_columns:
+                conn.execute(text(f'ALTER TABLE pointcloud_stations ADD COLUMN {name} JSON'))
     return engine
 
 

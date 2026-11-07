@@ -17,6 +17,7 @@ class PointCloudStation(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
     registration_status = Column(String, default='raw', nullable=False)
     transform_json = Column(JSON, nullable=True)
+    initial_pose_json = Column(JSON, nullable=True)
     fitness = Column(Float, nullable=True)
     inlier_rmse = Column(Float, nullable=True)
     registered_path = Column(String, nullable=True)

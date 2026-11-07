@@ -539,12 +539,23 @@ class PointCloudStationService:
             return None
         return self._load_proxy_domain(station)
 
-    def commit_show_single(self, station, dataset):
+    def _apply_initial_camera(self, station, dataset):
+        from services.initial_camera_service import initial_view_from_station
+        camera = initial_view_from_station(station, dataset.proxy_points)
+        if camera is None:
+            return
+        self.render.set_initial_camera(camera)
+        PointCloudStationRepo.save_initial_camera(self.project_uuid, camera)
+
+    def commit_show_single(self, station, dataset, apply_initial=True):
         """提交段：渲染提交 + 活动站点与视图持久化，必须在 GUI 线程执行。"""
         if station.last_error or dataset is None:
             self.render.clear_scene_display()
             log_event(self.project_uuid, 'asset.invalid', station_id=station.id, reason=station.last_error)
             return
+        first_view = not self.render.get_cloud_names()
+        if apply_initial and first_view:
+            self._apply_initial_camera(station, dataset)
         self.render.clear_scene_display()
         self.render.show_station_proxy(
             station.id, station.display_name, dataset.proxy_points,
@@ -655,7 +666,8 @@ class PointCloudStationService:
         if station is None:
             self.render.clear_scene_display()
         else:
-            self.commit_show_single(station, dataset)
+            self._apply_initial_camera(station, dataset)
+            self.commit_show_single(station, dataset, apply_initial=False)
         self._loaded_project = self.project_uuid
 
     def register_selected(self, update_viewport=True, manual_points=None,

@@ -137,6 +137,7 @@ class PyVistaViewport(BaseViewport):
         self._render_enabled = True
         self._render_pending = False
         self._scene_view_initialized = False
+        self._initial_camera = None
         self._grid_actor = None
         self._grid_border_actor = None
         self._pick_callback = None
@@ -513,8 +514,44 @@ class PyVistaViewport(BaseViewport):
             self._initialize_scene_view()
         self._render()
 
+    def set_initial_camera(self, position, focal_point=None, up=(0.0, 0.0, 1.0)):
+        position = np.asarray(position, dtype=float).reshape(3)
+        focal_point = (np.asarray(focal_point, dtype=float).reshape(3)
+                       if focal_point is not None else None)
+        if not np.isfinite(position).all() or (
+                focal_point is not None and not np.isfinite(focal_point).all()):
+            raise ValueError('初始相机包含无效坐标')
+        if focal_point is not None and np.linalg.norm(position - focal_point) < 1e-8:
+            raise ValueError('初始相机位置不能与观察目标重合')
+        self._initial_camera = {
+            'position': position.tolist(),
+            'focal_point': focal_point.tolist() if focal_point is not None else None,
+            'up': np.asarray(up, dtype=float).reshape(3).tolist(),
+        }
+        self._scene_view_initialized = False
+        if self.point_data:
+            self._initialize_scene_view()
+
+    def _apply_initial_camera(self):
+        camera = dict(self._initial_camera)
+        if camera['focal_point'] is None:
+            bounds = self._plotter.renderer.ComputeVisiblePropBounds()
+            camera['focal_point'] = ((bounds[0] + bounds[1]) / 2,
+                                     (bounds[2] + bounds[3]) / 2,
+                                     (bounds[4] + bounds[5]) / 2)
+        self._plotter.disable_parallel_projection()
+        self._plotter.camera_position = [
+            tuple(camera['position']), tuple(camera['focal_point']), tuple(camera['up'])]
+        self._plotter.camera.SetViewAngle(60.0)
+        self._plotter.renderer.ResetCameraClippingRange()
+        self._add_ground_grid()
+        self._scene_view_initialized = True
+
     def _initialize_scene_view(self):
-        """初始相机与 Open3D 视口对齐：正视立面、Z 轴向上、正交投影。"""
+        """优先恢复 E57 测站位置，无测站位姿时使用默认立面正视图。"""
+        if self._initial_camera is not None:
+            self._apply_initial_camera()
+            return
         try:
             # 与 Open3DViewport._initialize_scene_view 同向：
             # front=[0,-1,0]（面向建筑正面），up=[0,0,1]（Z 轴屏幕向上）
@@ -708,6 +745,7 @@ class PyVistaViewport(BaseViewport):
         self.point_data.clear()
         self._hidden_rows.clear()
         self._active_name = None
+        self._initial_camera = None
         self._render()
 
     def get_cloud_names(self) -> list[str]:

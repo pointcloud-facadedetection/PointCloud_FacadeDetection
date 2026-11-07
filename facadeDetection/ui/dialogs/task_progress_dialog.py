@@ -1,4 +1,4 @@
-"""统一耗时任务进度窗：纯忙碌条（indeterminate），无取消按钮、无百分比。"""
+"""统一耗时任务进度窗：默认忙碌条，导入任务可显示真实百分比。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ class TaskProgressDialog(QDialog):
         self._auto_close = bool(auto_close)
         self._finished = False
         self._elapsed_seconds = 0
+        self._allow_percentage = False
 
         self.setWindowTitle(title or self.DEFAULT_TITLE)
         self.setMinimumWidth(360)
@@ -59,7 +60,7 @@ class TaskProgressDialog(QDialog):
                                  | Qt.AlignmentFlag.AlignVCenter)
         self._label.setWordWrap(True)
 
-        # 永远是不定量忙碌条：算法阶段无法回报可靠百分比，不假装知道进度。
+        # 默认忙碌条；只有允许百分比的任务才切换到 0–100 区间。
         self._bar = QProgressBar()
         self._bar.setRange(0, 0)
         self._bar.setTextVisible(False)
@@ -116,10 +117,13 @@ class TaskProgressDialog(QDialog):
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
-    def start(self, title: str | None = None, message: str | None = None) -> None:
-        """开始一个新任务；同一实例可复用承载连续任务。"""
+    def start(self, title: str | None = None, message: str | None = None,
+              determinate: bool = False) -> None:
+        """开始任务；只有允许百分比的任务才会显示真实进度数值。"""
         self._finished = False
         self._elapsed_seconds = 0
+        self._allow_percentage = bool(determinate)
+        self._set_progress_mode(self._allow_percentage)
         self._reporter.reset()
         if title:
             self.setWindowTitle(title)
@@ -128,6 +132,12 @@ class TaskProgressDialog(QDialog):
             self._label.setText(message)
         self._status_label.setText('处理中')
         self._heartbeat.start()
+
+    def _set_progress_mode(self, determinate):
+        self._bar.setRange(0, 100 if determinate else 0)
+        self._bar.setTextVisible(bool(determinate))
+        if determinate:
+            self._bar.setValue(0)
 
     # ------------------------------------------------------------------
     # 心跳 / 文案
@@ -148,8 +158,15 @@ class TaskProgressDialog(QDialog):
         if text:
             self._label.setText(str(text))
 
-    def report_progress(self, _percent=None, text: str = '') -> None:
-        """高频进度入口：百分比被忽略（忙碌条），文案写入缓存按节拍刷新。"""
+    def report_progress(self, percent=None, text: str = '') -> None:
+        """百分比来自任务的真实进度；未知阶段保留忙碌条。"""
+        if self._allow_percentage:
+            if percent is None or int(percent) < 0:
+                self._set_progress_mode(False)
+            else:
+                if self._bar.maximum() != 100:
+                    self._set_progress_mode(True)
+                self._bar.setValue(min(100, int(percent)))
         self._reporter.report(text)
 
     def flush_progress(self) -> None:

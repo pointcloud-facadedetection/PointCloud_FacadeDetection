@@ -84,6 +84,7 @@ class FileService:
         copy_into_project: bool = False,
         dataset_metadata: Optional[dict] = None,
         distance_path: Optional[str] = None,
+        progress_cb=None,
     ) -> PreparedUpload:
         """计算段：读取、距离解析、代理构建与 dataset 注册。
 
@@ -114,7 +115,12 @@ class FileService:
         if kind == FileKind.raw_pointcloud and src.suffix.lower() == '.e57':
             if not project_uuid or asset is None:
                 raise ValueError('E57 导入必须绑定项目，才能生成可恢复的 cache PLY')
-            load_path = ensure_e57_cache(project_uuid, asset)
+            load_path = ensure_e57_cache(
+                project_uuid, asset,
+                progress_cb=(lambda percent, text: progress_cb(
+                    percent * 0.85, text)) if progress_cb is not None else None)
+            if progress_cb is not None:
+                progress_cb(85, 'E57 缓存已就绪，正在建立点云索引')
             # 读取 E57 cache sidecar，将统一 pose schema 注入 dataset metadata
             sidecar = load_path.with_suffix('.json')
             if sidecar.exists():
@@ -136,6 +142,8 @@ class FileService:
             print(f"[PCFD] load.begin path={load_path}", flush=True)
             pts, cols = self._load_point_cloud(str(load_path))
             print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
+            if progress_cb is not None:
+                progress_cb(92, f'已读取 {len(pts):,} 点，正在建立索引')
 
             # 直接上传 PLY + 同名 .dist 时，预处理发生在 register_dataset 之前。
             # 未提供 .dist 的普通 PLY 继续走旧路径，保证历史导入行为不变。
@@ -230,6 +238,8 @@ class FileService:
                                                            str(load_path))
             except Exception:
                 pass
+            if progress_cb is not None:
+                progress_cb(100, '点云导入准备完成')
             return PreparedUpload(kind=kind, asset=asset, name=name,
                                   dataset_id=dataset_id, points=pts_ds, colors=cols_ds)
         if kind == FileKind.raw_image:

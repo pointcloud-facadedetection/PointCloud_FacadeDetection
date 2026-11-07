@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON
 from sqlalchemy.orm import relationship
 
 from . import Base
@@ -37,6 +37,7 @@ class Project(Base):
 
     # ── 质量检测参数快照（创建项目时录入，作为该项目的默认参数） ──
     inspection_params_json = Column(String, nullable=True)      # JSON 字符串存储
+    initial_camera_json = Column(JSON, nullable=True)
 
     # Relationships
     scenes = relationship("ResultScene", back_populates="project", cascade="all, delete-orphan")

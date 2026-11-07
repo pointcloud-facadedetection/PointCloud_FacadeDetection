@@ -7,7 +7,7 @@ import uuid
 import numpy as np
 
 
-def write_point_cloud_ply_atomic(path, points, colors=None):
+def write_point_cloud_ply_atomic(path, points, colors=None, progress_cb=None):
     """写入统一 Runtime PLY：总是包含 xyz + uchar rgb。
 
     参数
@@ -72,14 +72,17 @@ def write_point_cloud_ply_atomic(path, points, colors=None):
     records['green'] = color_data[:, 1]
     records['blue'] = color_data[:, 2]
 
-    binary_data = records.tobytes()
-
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp.ply")
     try:
         with open(tmp, 'wb') as f:
             f.write(header)
-            f.write(binary_data)
+            chunk_rows = 262144
+            for start in range(0, n, chunk_rows):
+                end = min(start + chunk_rows, n)
+                f.write(records[start:end].tobytes())
+                if progress_cb is not None:
+                    progress_cb(int(end * 100 / n))
         if not tmp.exists() or tmp.stat().st_size == 0:
             raise IOError(f"PLY 写入结果为空: {path}")
         os.replace(tmp, path)

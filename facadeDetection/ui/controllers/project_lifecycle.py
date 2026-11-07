@@ -128,8 +128,11 @@ class ProjectLifecycleController(QObject):
         """
         def run(worker):
             worker.check_cancelled()
-            worker.signals.progress.emit(-1, '正在激活项目数据')
-            self.project_overview_service.activate_project(project_uuid)
+            worker.signals.progress.emit(0, '正在激活项目数据')
+            self.project_overview_service.activate_project(
+                project_uuid,
+                progress_cb=lambda percent, text: worker.signals.progress.emit(
+                    int(percent), text))
             try:
                 worker.signals.progress.emit(-1, '正在准备站点数据')
                 self.pointcloud_service.set_project(project_uuid)

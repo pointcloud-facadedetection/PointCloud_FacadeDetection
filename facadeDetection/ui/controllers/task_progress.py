@@ -23,7 +23,7 @@ TASK_PHOTO_MATCH = 'photo_match'
 
 
 class TaskProgressController(QObject):
-    """按任务键管理模态进度弹窗（纯忙碌条）的生命周期。"""
+    """按任务键管理模态进度弹窗，默认忙碌条，支持真实百分比。"""
 
     def __init__(self, parent=None, *, interval_ms: Optional[int] = None):
         super().__init__(parent)
@@ -52,8 +52,7 @@ class TaskProgressController(QObject):
               **_ignored) -> TaskProgressDialog:
         """创建/复用一个任务弹窗并立即以模态方式显示。
 
-        ``**_ignored`` 兼容历史调用方传入的 determinate/cancellable，
-        忙碌条模式下这两个概念已移除。
+        ``determinate=True`` 允许显示任务回报的真实百分比，默认保持忙碌条。
         """
         dialog = self._dialogs.get(task_key)
         if dialog is None:
@@ -63,21 +62,19 @@ class TaskProgressController(QObject):
             dialog = TaskProgressDialog(self._parent, **kwargs)
             self._dialogs[task_key] = dialog
 
-        dialog.start(title, message or None)
+        dialog.start(title, message or None,
+                     determinate=bool(_ignored.get('determinate', False)))
         # 非阻塞模态：show() 而非 exec()，事件循环继续跑，后台信号照常投递。
         dialog.show()
         dialog.raise_()
         return dialog
 
     def report(self, task_key: str, percent=None, text: str = '') -> None:
-        """节流写入阶段文案；百分比参数被忽略（忙碌条无数值）。
-
-        不定量护栏：弹窗不存在或已终态时不报错，避免后台线程在 GUI 关闭后仍然写进度。
-        """
+        """写入真实百分比与阶段文案；无弹窗或已终态时安全忽略。"""
         dialog = self._dialogs.get(task_key)
         if dialog is None or dialog.is_finished:
             return
-        dialog.report_progress(text=text)
+        dialog.report_progress(percent, text=text)
 
     def finish(self, task_key: str, success: bool = True,
                message: str = '') -> None:

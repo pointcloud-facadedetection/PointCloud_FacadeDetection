@@ -45,7 +45,21 @@ class TestLoadingDialogBehavior:
         assert 'bllygg01.ply' in dlg._label.text()
         dlg.update_progress('点云加载完成')
         assert '点云加载完成' in dlg._label.text()
-        assert dlg._bar.maximum() == 0  # 恒为忙碌条
+        assert dlg._bar.maximum() == 0  # 默认仍为忙碌条
+
+    def test_real_percentage_for_pointcloud_import(self, qapp):
+        dlg = _make_loading_dialog()
+        dlg.start(determinate=True)
+        dlg.report_progress(37, '已读取测站 1/2')
+        assert dlg._bar.maximum() == 100
+        assert dlg._bar.value() == 37
+        assert dlg._bar.isTextVisible()
+        dlg.report_progress(-1, '正在恢复视图')
+        assert dlg._bar.maximum() == 0
+        dlg.report_progress(100, '转换完成')
+        assert dlg._bar.maximum() == 100
+        assert dlg._bar.value() == 100
+        dlg.finish()
 
 
 # ---------------------------------------------------------------------------
