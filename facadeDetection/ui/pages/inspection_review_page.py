@@ -76,7 +76,7 @@ class InspectionReviewPageMixin:
     right_dock（立面检测结果面板），形成两栏布局。
     """
 
-    # 复核页热力贴图的 4 档模式（值与导出 PNG 文件名中的 mode 一致）
+    # 热力模式的值与导出 PNG 文件名一致；原色模式仅显示外框和尺寸。
     # 全局平面两档（红蓝渐变热力）优先，默认选中第一档
     REVIEW_ORIGINAL_MODE = 'original'
     REVIEW_HEATMAP_MODES = (
@@ -219,6 +219,12 @@ class InspectionReviewPageMixin:
         self.lbl_review_heatmap_hint.setStyleSheet(
             'color:#64748B; font-size:12px;')
         row.addWidget(self.lbl_review_heatmap_hint)
+
+        self.lbl_review_dimensions = QLabel('')
+        self.lbl_review_dimensions.setObjectName('lblReviewDimensions')
+        self.lbl_review_dimensions.setStyleSheet(
+            'color:#0F4C81; font-size:12px; font-weight:600;')
+        row.addWidget(self.lbl_review_dimensions)
 
         self.lbl_review_tool_result = QLabel('')
         self.lbl_review_tool_result.setObjectName('lblReviewToolResult')
@@ -410,7 +416,7 @@ class InspectionReviewPageMixin:
             self._review_present_facade(facade, focus_camera=False)
 
     def _review_present_facade(self, facade, focus_camera=True):
-        """选中立面：检测时导出的热力 PNG 贴到四边面上 + 相机正视。"""
+        """选中立面：按模式显示热力图/原色外框、横纵尺寸并调整相机。"""
         viewport = getattr(self, 'viewport', None)
         hint_label = getattr(self, 'lbl_review_heatmap_hint', None)
         self._close_review_resize_confirm_card()
@@ -492,6 +498,26 @@ class InspectionReviewPageMixin:
                 hint = heatmap_spec(self._review_heatmap_mode)['title']
         if hint_label is not None:
             hint_label.setText(hint)
+        self._review_present_dimensions(facade, geometry)
+
+    def _review_present_dimensions(self, facade, geometry):
+        viewport = getattr(self, 'viewport', None)
+        label = getattr(self, 'lbl_review_dimensions', None)
+        dimensions = None
+        if viewport is not None and hasattr(viewport, 'show_facade_dimensions'):
+            try:
+                corners = np.asarray(geometry.get('corners_3d') or [],
+                                     dtype=np.float64).reshape(4, 3)
+                project_id = getattr(self.current_project, 'project_id', None)
+                cache_key = ('dimensions', project_id, int(facade.get('id', -1)),
+                             tuple(float(value) for value in corners.reshape(-1)))
+                dimensions = viewport.show_facade_dimensions(
+                    corners, cache_key=cache_key)
+            except (AttributeError, TypeError, ValueError):
+                viewport.clear_facade_dimensions()
+        if label is not None:
+            label.setText('' if dimensions is None else
+                          f'横向 {dimensions[0]:.3f} m  |  纵向 {dimensions[1]:.3f} m')
 
     def _review_heat_png(self, facade, quality):
         """命中缓存直接返回；未命中由后台线程解码 PNG。"""
@@ -643,13 +669,17 @@ class InspectionReviewPageMixin:
         return None
 
     def _review_clear_presentation(self):
-        """清除选中/迁出复核页：摘除贴图与边缘高亮、恢复相机。"""
+        """清除选中/迁出复核页：摘除贴图、尺寸标注并恢复相机。"""
         self._review_heat_rect_current_key = None
         self._review_heat_png_current_key = None
         self._review_heat_png_pending = False
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()
+        if viewport is not None and hasattr(viewport, 'clear_facade_dimensions'):
+            viewport.clear_facade_dimensions()
+        if hasattr(self, 'lbl_review_dimensions'):
+            self.lbl_review_dimensions.clear()
         if self._review_camera_snapshot is not None and viewport is not None \
                 and hasattr(viewport, 'restore_camera'):
             viewport.restore_camera(self._review_camera_snapshot)

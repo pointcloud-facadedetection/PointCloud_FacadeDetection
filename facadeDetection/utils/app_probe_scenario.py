@@ -115,6 +115,8 @@ def run(project_id=None):
             print('[scenario] no facade available', flush=True)
             QApplication.instance().quit()
             return
+        state['cloud_buffers'] = {
+            name: id(data['pos']) for name, data in win.viewport.point_data.items()}
         win.list_facades.setCurrentItem(item)
         mark('facade.select.start')
         measured('facade_select', lambda: win._on_facade_item_clicked(item))
@@ -123,6 +125,22 @@ def run(project_id=None):
 
     def verify_original_mode():
         win = window()
+        dimensions = win.viewport._dimension_actors
+        labels = [actor for actor in dimensions if hasattr(actor, 'GetTextProperty')]
+        expect(len(labels) == 2, 'dimension labels missing')
+        expect('W ' in labels[0].GetInput() and 'H ' in labels[1].GetInput(),
+               'dimension label values')
+        expect('横向' in win.lbl_review_dimensions.text() and
+               '纵向' in win.lbl_review_dimensions.text(), 'dimension summary')
+        expect(state['cloud_buffers'] == {
+            name: id(data['pos']) for name, data in win.viewport.point_data.items()},
+            'dimension rendering reloaded point-cloud buffers')
+        state['dimension_actors'] = dimensions
+        QApplication.processEvents()
+        screenshot = Path(os.environ['FACD_DATA_DIR']) / 'diagnostics' / 'facade_dimensions.png'
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        win.viewport.get_widget().grab().save(str(screenshot))
+        print(f'[scenario] dimensions.screenshot={screenshot}', flush=True)
         state['heatmap_mode'] = win.review_heatmap_combo.currentData()
         index = win.review_heatmap_combo.findData(win.REVIEW_ORIGINAL_MODE)
         expect(index >= 0, 'original mode is missing')
@@ -144,6 +162,8 @@ def run(project_id=None):
         actors = win.viewport._heatmap_quad_actors
         expect(any(actor.GetTexture() is not None and actor.GetVisibility()
                    for actor in actors), 'heatmap was not restored')
+        expect(win.viewport._dimension_actors == state['dimension_actors'],
+               'dimension actors were rebuilt on heatmap switch')
         mark('original.heatmap_restored')
         toggle_measure()
 

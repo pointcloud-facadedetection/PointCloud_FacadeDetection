@@ -89,7 +89,8 @@ class _PickInputFilter(QObject):
 
     def eventFilter(self, watched, event):
         viewport = self._viewport
-        if watched is not viewport._widget:
+        widget = getattr(viewport, '_widget', None)
+        if widget is None or watched is not widget:
             return False
         event_type = event.type()
         mouse_events = (
@@ -206,6 +207,11 @@ class PyVistaViewport(BaseViewport):
         self._heatmap_quad_actors = []
         self._heatmap_quad_groups = {}     # cache_key -> [actors]（LRU）
         self._heatmap_quad_key = None      # 当前可见组的 key
+        self._dimension_actors = []
+        self._dimension_groups = {}
+        self._dimension_label_groups = {}
+        self._dimension_label_bindings = []
+        self._dimension_key = None
         self._quad_resize = None
         self._quad_resize_drag = None
         self._quad_resize_actors = []
@@ -243,6 +249,8 @@ class PyVistaViewport(BaseViewport):
 
         # VTK 按需渲染：渲染成功后递增帧计数
         try:
+            self._widget.render_window.AddObserver(
+                'StartEvent', self._on_render_start)
             self._widget.render_window.AddObserver(
                 'EndEvent', self._on_render_end)
         except Exception:
@@ -432,6 +440,9 @@ class PyVistaViewport(BaseViewport):
     # ------------------------------------------------------------------
     # 基础装配
     # ------------------------------------------------------------------
+    def _on_render_start(self, *_args):
+        self._update_dimension_label_positions()
+
     def _on_render_end(self, *_args):
         self._adapter._frames_rendered += 1
 
@@ -785,6 +796,7 @@ class PyVistaViewport(BaseViewport):
         self._render()
 
     def clear(self):
+        self._clear_facade_dimension_cache()
         for name in list(self._actors):
             self._remove_actor(self._actors[name])
         for name in list(self._bbox_actors):
@@ -1430,6 +1442,151 @@ class PyVistaViewport(BaseViewport):
             self.clear_measure_visuals()
             self.clear_ruler_overlay()
             self.clear_pick_markers()
+        finally:
+            self.set_render_enabled(True)
+
+    # ---- 立面横纵尺寸：独立于热力贴图和临时测量工具 ----
+    def _hide_facade_dimensions(self):
+        for actor in self._dimension_actors:
+            try:
+                actor.SetVisibility(False)
+            except Exception:
+                pass
+        self._dimension_actors = []
+        self._dimension_label_bindings = []
+        self._dimension_key = None
+
+    def clear_facade_dimensions(self):
+        if self._dimension_actors or self._dimension_label_bindings:
+            self._hide_facade_dimensions()
+            self._render()
+
+    def _clear_facade_dimension_cache(self):
+        for actor in self._dimension_actors:
+            self._remove_visual_actor(actor)
+        for actors in self._dimension_groups.values():
+            for actor in actors:
+                self._remove_visual_actor(actor)
+        self._dimension_groups.clear()
+        self._dimension_label_groups.clear()
+        self._hide_facade_dimensions()
+
+    def _dimension_text_actor(self, text, world_position):
+        import vtk
+        actor = vtk.vtkTextActor()
+        actor.SetInput(str(text))
+        actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
+        prop = actor.GetTextProperty()
+        prop.SetFontSize(18)
+        prop.SetBold(True)
+        prop.SetJustificationToCentered()
+        prop.SetVerticalJustificationToCentered()
+        prop.SetColor((0.02, 0.32, 0.60) if text.startswith('W')
+                      else (0.75, 0.32, 0.02))
+        prop.SetBackgroundColor(1.0, 1.0, 1.0)
+        prop.SetBackgroundOpacity(0.92)
+        prop.SetFrame(True)
+        actor.GetPositionCoordinate().SetValue(0.0, 0.0, 0.0)
+        self._dimension_label_bindings.append(
+            (actor, tuple(float(value) for value in world_position)))
+        return self._to_overlay(actor, tool=True)
+
+    def _update_dimension_label_positions(self):
+        if (not getattr(self, '_dimension_label_bindings', None)
+                or getattr(self, '_widget', None) is None
+                or getattr(self, '_plotter', None) is None):
+            return
+        projected = self.project_points(
+            [position for _actor, position in self._dimension_label_bindings])
+        if projected is None:
+            return
+        screen, valid = projected
+        dpr = max(1.0, float(self._widget.devicePixelRatioF()))
+        framebuffer_width, framebuffer_height = (
+            max(1, int(value), int(round(widget_size * dpr)))
+            for value, widget_size in zip(self._plotter.renderer.GetSize(),
+                                          (self._widget.width(), self._widget.height())))
+        for (actor, _position), (x, y), visible in zip(
+                self._dimension_label_bindings, screen, valid):
+            if not visible:
+                actor.SetVisibility(False)
+                continue
+            try:
+                text_width, text_height = actor.GetSize(self._plotter.renderer)
+            except Exception:
+                text_width, text_height = len(actor.GetInput()) * 11, 26
+            half_width = max(40.0, float(text_width) / 2 + 10)
+            half_height = max(18.0, float(text_height) / 2 + 8)
+            display_x = min(max(x * dpr, half_width),
+                            max(half_width, framebuffer_width - half_width))
+            display_y = min(max(framebuffer_height - y * dpr, half_height),
+                            max(half_height, framebuffer_height - half_height))
+            actor.SetPosition(float(display_x), float(display_y))
+            actor.SetVisibility(True)
+
+    def _stash_facade_dimensions(self, cache_key):
+        if cache_key is None:
+            return
+        self._dimension_groups[cache_key] = self._dimension_actors
+        self._dimension_label_groups[cache_key] = self._dimension_label_bindings
+        self._dimension_key = cache_key
+        while len(self._dimension_groups) > 4:
+            evicted_key = next(iter(self._dimension_groups))
+            actors = self._dimension_groups.pop(evicted_key)
+            self._dimension_label_groups.pop(evicted_key, None)
+            for actor in actors:
+                self._remove_visual_actor(actor)
+
+    def show_facade_dimensions(self, corners_3d, cache_key=None):
+        """显示角点、横纵尺寸线及文字；缓存键包含当前实际角点。"""
+        from algorithms.facade.facade_geometry import facade_dimension_spec
+        try:
+            spec = facade_dimension_spec(corners_3d)
+        except (TypeError, ValueError):
+            self.clear_facade_dimensions()
+            return None
+        self.set_render_enabled(False)
+        try:
+            self._hide_facade_dimensions()
+            if cache_key is not None and cache_key in self._dimension_groups:
+                actors = self._dimension_groups.pop(cache_key)
+                self._dimension_groups[cache_key] = actors
+                labels = self._dimension_label_groups.pop(cache_key)
+                self._dimension_label_groups[cache_key] = labels
+                for actor in actors:
+                    actor.SetVisibility(True)
+                self._dimension_actors = list(actors)
+                self._dimension_label_bindings = list(labels)
+                self._dimension_key = cache_key
+                self._update_dimension_label_positions()
+                return spec['width_m'], spec['height_m']
+
+            self._dimension_actors = []
+            self._dimension_label_bindings = []
+            for point in spec['corners']:
+                self._dimension_actors.append(self._point_marker_actor(
+                    point, (0.06, 0.36, 0.72), 11, 'facade_dimension_corner'))
+            for key, color in (('width_line', '#0284C7'),
+                               ('height_line', '#D97706')):
+                start, end = spec[key]
+                actor = self._add_mesh(
+                    pv.Line(tuple(start), tuple(end)), color=color,
+                    line_width=3, lighting=False, name=f'facade_dimension_{key}')
+                self._dimension_actors.append(self._to_overlay(actor, tool=True))
+            for start, end in spec['extensions']:
+                actor = self._add_mesh(
+                    pv.Line(tuple(start), tuple(end)), color='#64748B',
+                    line_width=1, lighting=False, name='facade_dimension_extension')
+                self._dimension_actors.append(self._to_overlay(actor, tool=True))
+            for label in spec['labels']:
+                self._dimension_actors.append(self._dimension_text_actor(
+                    label['text'], label['position']))
+            self._stash_facade_dimensions(cache_key)
+            self._update_dimension_label_positions()
+            return spec['width_m'], spec['height_m']
+        except Exception as exc:
+            print(f'[PCFD] viewport.facade_dimensions_failed: {exc!r}', flush=True)
+            return None
         finally:
             self.set_render_enabled(True)
 

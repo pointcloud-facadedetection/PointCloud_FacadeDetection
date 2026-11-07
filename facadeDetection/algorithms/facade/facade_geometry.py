@@ -81,3 +81,42 @@ def extract_facade_geometry(plane_model, origin, u_axis, v_axis, uv_bounds):
         'edge_midpoints_3d': mids.tolist(),
         'normal': normal.tolist(),
     }
+
+
+def facade_dimension_spec(corners_3d):
+    """从 BL/BR/TR/TL 角点生成横向、纵向复尺标注。"""
+    corners = np.asarray(corners_3d, dtype=np.float64).reshape(4, 3)
+    if not np.isfinite(corners).all():
+        raise ValueError('立面角点包含无效坐标')
+    bottom = float(np.linalg.norm(corners[1] - corners[0]))
+    top = float(np.linalg.norm(corners[2] - corners[3]))
+    left = float(np.linalg.norm(corners[3] - corners[0]))
+    right = float(np.linalg.norm(corners[2] - corners[1]))
+    if min(bottom, top, left, right) < 1e-8:
+        raise ValueError('立面边长过小，无法生成尺寸标注')
+    u = (corners[1] - corners[0]) / bottom
+    v = (corners[3] - corners[0]) / left
+    width = (bottom + top) / 2
+    height = (left + right) / 2
+    gap = min(max(0.12, 0.04 * min(width, height)), 0.5)
+    width_start, width_end = corners[0] - v * gap, corners[1] - v * gap
+    height_start, height_end = corners[0] - u * gap, corners[3] - u * gap
+    return {
+        'width_m': width,
+        'height_m': height,
+        'corners': corners.tolist(),
+        'width_line': [width_start.tolist(), width_end.tolist()],
+        'height_line': [height_start.tolist(), height_end.tolist()],
+        'extensions': [
+            [corners[0].tolist(), width_start.tolist()],
+            [corners[1].tolist(), width_end.tolist()],
+            [corners[0].tolist(), height_start.tolist()],
+            [corners[3].tolist(), height_end.tolist()],
+        ],
+        'labels': [
+            {'text': f'W {width:.3f} m',
+             'position': ((width_start + width_end) / 2 - v * gap * 0.55).tolist()},
+            {'text': f'H {height:.3f} m',
+             'position': ((height_start + height_end) / 2 - u * gap * 0.55).tolist()},
+        ],
+    }
