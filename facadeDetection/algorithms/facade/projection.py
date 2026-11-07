@@ -11,7 +11,8 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
                      projection_v_axis=None, physical_cell_m=None,
                      gaussian_sigma=None,
                      min_splat_px=4,
-                     uv_range=None):
+                     uv_range=None,
+                     max_pixels=12_000_000):
     """将点云 + 缺陷值栅格化为底图 + 热力叠加图。
 
     Parameters
@@ -25,18 +26,20 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
         每个缺陷 splat 的最小像素半径，保证可视化可读性。
     """
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    # 底图可能是数千万原始点。保留其原始浮点精度，禁止在入口处把
+    # float32 整体复制成 float64；投影时再按块转换。
     frame_pts = (pts if base_points is None
-                 else np.asarray(base_points, dtype=float).reshape(-1, 3))
+                 else np.asarray(base_points).reshape(-1, 3))
     gaps = np.asarray(defect_values, dtype=float).reshape(-1)
     rgb = np.asarray(
         colors if colors is not None else np.full((len(pts), 3), .75),
         dtype=float)
-    frame_rgb = np.asarray(
-        base_colors if base_colors is not None
-        else np.full((len(frame_pts), 3), .75),
-        dtype=float).reshape(-1, 3)
-    if len(frame_rgb) != len(frame_pts):
-        frame_rgb = np.full((len(frame_pts), 3), .75, dtype=float)
+    # 常量数组；该颜色在栅格层按占用像素一次性写入。
+    frame_rgb = None
+    if base_colors is not None:
+        candidate = np.asarray(base_colors)
+        if candidate.ndim == 2 and candidate.shape == (len(frame_pts), 3):
+            frame_rgb = candidate
     if len(pts) == 0 or len(gaps) != len(pts):
         raise ValueError('points and defect_values must have equal non-zero length')
 
@@ -55,13 +58,17 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
               else np.mean(frame_pts, axis=0))
 
     uv = np.column_stack(((pts - origin) @ u, (pts - origin) @ v))
-    frame_uv = np.column_stack(((frame_pts - origin) @ u,
-                                (frame_pts - origin) @ v))
-    finite_frame = np.all(np.isfinite(frame_uv), axis=1)
-    frame_uv = frame_uv[finite_frame]
-    frame_rgb = frame_rgb[finite_frame]
-    if len(frame_uv) == 0:
-        raise ValueError('base_points contains no finite facade points')
+    # 有权威质量域时无需提前物化 (N, 2) frame_uv。
+    frame_uv = None
+    if uv_range is None:
+        rel = np.asarray(frame_pts, dtype=np.float64) - origin
+        frame_uv = np.column_stack((rel @ u, rel @ v))
+        finite_frame = np.all(np.isfinite(frame_uv), axis=1)
+        frame_uv = frame_uv[finite_frame]
+        if frame_rgb is not None:
+            frame_rgb = frame_rgb[finite_frame]
+        if len(frame_uv) == 0:
+            raise ValueError('base_points contains no finite facade points')
 
     # ---- 画布边界框：显式 uv_range > 鲁棒分位数（绝不用 min/max）----
     if uv_range is not None:
@@ -92,6 +99,19 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     if max(shape) > max_size:
         size = max(size, float(np.max(hi - lo)) / max(max_size - 1, 1))
         shape = np.maximum(np.ceil((hi - lo) / size).astype(int) + 1, 1)
+    # max_size 只能限制单边；接近正方形的 6000×6000 画布仍会同时分配
+    # base/count/mask/overlay/weight 等多个数组，峰值超过 1 GiB。再按总像素
+    # 预算放大物理像素尺寸，保持 UV 比例和方向不变，避免 OOM。
+    max_pixels = max(int(max_pixels), 1)
+    pixel_count = int(shape[0]) * int(shape[1])
+    if pixel_count > max_pixels:
+        scale = np.sqrt(float(pixel_count) / float(max_pixels))
+        size *= scale
+        shape = np.maximum(np.ceil((hi - lo) / size).astype(int) + 1, 1)
+        # ceil 可能让结果略超预算；单调增大 size 直到落入预算。
+        if int(shape[0]) * int(shape[1]) > max_pixels:
+            size *= 1.001
+            shape = np.maximum(np.ceil((hi - lo) / size).astype(int) + 1, 1)
 
     h, w = int(shape[1]), int(shape[0])
 
@@ -102,15 +122,50 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     count = np.bincount(flat, minlength=h * w).reshape(h, w).astype(np.int32)
 
     base_flat = np.zeros((h * w, 3), dtype=np.float32)
-    frame_x = np.clip(((frame_uv[:, 0] - lo[0]) / size).astype(int), 0, w - 1)
-    frame_y = np.clip((h - 1 - (frame_uv[:, 1] - lo[1]) / size).astype(int),
-                      0, h - 1)
-    frame_flat = frame_y * w + frame_x
-    np.add.at(base_flat, frame_flat, frame_rgb.astype(np.float32))
-    base_flat /= np.maximum(
-        np.bincount(frame_flat, minlength=h * w).reshape(-1, 1), 1)
+    # 单像素计数不可能接近 int32 上限，避免为大画布浪费一倍内存。
+    frame_counts = np.zeros(h * w, dtype=np.int32)
+    chunk_size = 1_000_000
+    for start in range(0, len(frame_pts), chunk_size):
+        stop = min(start + chunk_size, len(frame_pts))
+        if frame_uv is None:
+            block = np.asarray(frame_pts[start:stop], dtype=np.float64)
+            finite = np.all(np.isfinite(block), axis=1)
+            if not np.any(finite):
+                continue
+            rel = block[finite] - origin
+            block_uv = np.column_stack((rel @ u, rel @ v))
+            block_colors = (None if frame_rgb is None else
+                            np.asarray(frame_rgb[start:stop])[finite])
+        else:
+            block_uv = frame_uv[start:stop]
+            block_colors = (None if frame_rgb is None else
+                            np.asarray(frame_rgb[start:stop]))
+        # 权威域之外的点必须丢弃，不能 clip 到画布边缘形成伪边框。
+        inside = (np.all(np.isfinite(block_uv), axis=1)
+                  & (block_uv[:, 0] >= lo[0]) & (block_uv[:, 0] <= hi[0])
+                  & (block_uv[:, 1] >= lo[1]) & (block_uv[:, 1] <= hi[1]))
+        if not np.any(inside):
+            continue
+        selected = block_uv[inside]
+        frame_x = np.clip(((selected[:, 0] - lo[0]) / size).astype(np.int32),
+                          0, w - 1)
+        frame_y = np.clip((h - 1 - (selected[:, 1] - lo[1]) / size).astype(np.int32),
+                          0, h - 1)
+        frame_flat = frame_y.astype(np.int64) * w + frame_x
+        frame_counts += np.bincount(
+            frame_flat, minlength=h * w).astype(np.int32, copy=False)
+        if block_colors is not None:
+            np.add.at(base_flat, frame_flat,
+                      np.asarray(block_colors[inside], dtype=np.float32))
+
+    facade_mask = frame_counts.reshape(h, w) > 0
+    if not np.any(facade_mask):
+        raise ValueError('base_points contains no points inside facade uv_range')
+    if frame_rgb is None:
+        base_flat[frame_counts > 0] = 0.75
+    else:
+        base_flat /= np.maximum(frame_counts.reshape(-1, 1), 1)
     base = base_flat.reshape(h, w, 3)
-    facade_mask = np.bincount(frame_flat, minlength=h * w).reshape(h, w) > 0
 
     # ==================== 缺陷热力图 ====================
     abs_gap = np.abs(gaps)
@@ -159,7 +214,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
 
     # ==================== 缺陷热力 physical-footprint 渲染 ====================
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
-    pixel_values = np.full(h * w, -np.inf, dtype=float)
+    pixel_values = np.full(h * w, -np.inf, dtype=np.float32)
     pixel_ids = flat[defect_indices]
 
     if len(pixel_ids):
