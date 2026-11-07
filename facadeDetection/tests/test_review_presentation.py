@@ -202,6 +202,21 @@ class TestHeatmapQuadCache:
         assert viewport._heatmap_quad_actors == actors_first
 
 
+def test_original_frame_hides_textured_actors(viewport):
+    viewport.show_heatmap_quad(
+        **TestHeatmapQuadCache._quad_args(), cache_key=('facade', 'heat'))
+    textured = [actor for actor in viewport._heatmap_quad_actors
+                if actor.GetTexture() is not None]
+    assert textured
+    viewport.show_heatmap_frame(
+        [[0, 0, 0], [0, 4, 0], [0, 4, 3], [0, 0, 3]],
+        cache_key=('original-frame', 1))
+    assert viewport._heatmap_quad_actors
+    assert all(actor.GetTexture() is None
+               for actor in viewport._heatmap_quad_actors)
+    assert all(not actor.GetVisibility() for actor in textured)
+
+
 def test_clear_tool_visuals_keeps_heatmap_visible(viewport):
     viewport.show_heatmap_quad(
         **TestHeatmapQuadCache._quad_args(), cache_key=('f1', 'm1'))
@@ -387,6 +402,54 @@ def test_review_tool_active_state_is_exclusive_and_restored(qapp):
     for button in (harness.btn_review_measure, harness.btn_review_ruler):
         assert not button.isChecked()
         assert button.property('toolActive') is False
+
+
+def test_original_mode_skips_png_and_restores_heatmap(qapp):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QLabel
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    class Viewport:
+        _quad_resize = None
+
+        def __init__(self):
+            self.frames = []
+            self.quads = []
+
+        def show_heatmap_frame(self, corners, cache_key=None):
+            self.frames.append((corners, cache_key))
+
+        def show_heatmap_quad(self, *args, **kwargs):
+            self.quads.append((args, kwargs))
+
+        def clear_heatmap_quad(self):
+            pass
+
+    harness = InspectionReviewPageMixin()
+    harness.viewport = Viewport()
+    harness.lbl_review_heatmap_hint = QLabel()
+    harness._review_heatmap_mode = harness.REVIEW_ORIGINAL_MODE
+    harness._review_heat_png_current_key = ('old.png', 1)
+    harness._review_heat_png_pending = True
+    harness._review_heat_png = lambda *_args: (_ for _ in ()).throw(
+        AssertionError('原色模式不应读取 PNG'))
+    facade = {'id': 2, 'quality_report': {'facade_geometry': {
+        'origin': [0, 0, 0], 'u_axis': [1, 0, 0], 'v_axis': [0, 0, 1],
+        'normal': [0, -1, 0], 'uv_bounds': [0, 0, 4, 3],
+        'corners_3d': [[0, 0, 0], [4, 0, 0], [4, 0, 3], [0, 0, 3]],
+    }}}
+    harness._review_present_facade(facade, focus_camera=False)
+    assert len(harness.viewport.frames) == 1
+    assert not harness.viewport.quads
+    assert harness._review_heat_png_current_key is None
+    assert harness._review_heat_png_pending is False
+
+    harness._review_heatmap_mode = 'global_plane_flatness_area'
+    harness._review_heat_png = lambda *_args: (
+        np.zeros((8, 8, 4), dtype=np.uint8), ('heat', 2))
+    harness._review_heat_uv_bounds = lambda *_args: (0, 0, 4, 3)
+    harness._review_present_facade(facade, focus_camera=False)
+    assert len(harness.viewport.quads) == 1
 
 
 def test_facade_list_item_stores_id_and_resolves_python_payload(qapp):

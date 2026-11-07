@@ -91,8 +91,16 @@ def run(project_id=None):
         win = window()
         items = [win.list_facades.item(i)
                  for i in range(win.list_facades.count())]
-        item = next((item for item in items
-                     if (win._facade_from_item(item) or {}).get('quality_report')), None)
+        def has_heatmap(item):
+            facade = win._facade_from_item(item) or {}
+            quality = facade.get('quality_report')
+            return bool(isinstance(quality, dict) and
+                        win._review_heatmap_png_path(facade, quality))
+
+        item = next((item for item in items if has_heatmap(item)), None)
+        if item is None:
+            item = next((item for item in items
+                         if (win._facade_from_item(item) or {}).get('quality_report')), None)
         if item is None and items:
             item = items[0]
         if item is None:
@@ -103,7 +111,33 @@ def run(project_id=None):
         mark('facade.select.start')
         measured('facade_select', lambda: win._on_facade_item_clicked(item))
         mark('facade.select.return')
-        QTimer.singleShot(2500, toggle_measure)
+        QTimer.singleShot(2500, verify_original_mode)
+
+    def verify_original_mode():
+        win = window()
+        state['heatmap_mode'] = win.review_heatmap_combo.currentData()
+        index = win.review_heatmap_combo.findData(win.REVIEW_ORIGINAL_MODE)
+        expect(index >= 0, 'original mode is missing')
+        win.review_heatmap_combo.setCurrentIndex(index)
+        QApplication.processEvents()
+        actors = win.viewport._heatmap_quad_actors
+        expect(bool(actors), 'original mode has no facade frame')
+        expect(all(actor.GetTexture() is None for actor in actors),
+               'original mode still has a textured actor')
+        expect('仅显示立面外框' in win.lbl_review_heatmap_hint.text(),
+               'original mode hint')
+        mark('original.frame_only')
+        win.review_heatmap_combo.setCurrentIndex(
+            win.review_heatmap_combo.findData(state['heatmap_mode']))
+        QTimer.singleShot(1000, restore_heatmap)
+
+    def restore_heatmap():
+        win = window()
+        actors = win.viewport._heatmap_quad_actors
+        expect(any(actor.GetTexture() is not None and actor.GetVisibility()
+                   for actor in actors), 'heatmap was not restored')
+        mark('original.heatmap_restored')
+        toggle_measure()
 
     def expect(condition, message):
         if not condition:

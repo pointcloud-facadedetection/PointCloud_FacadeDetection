@@ -78,11 +78,13 @@ class InspectionReviewPageMixin:
 
     # 复核页热力贴图的 4 档模式（值与导出 PNG 文件名中的 mode 一致）
     # 全局平面两档（红蓝渐变热力）优先，默认选中第一档
+    REVIEW_ORIGINAL_MODE = 'original'
     REVIEW_HEATMAP_MODES = (
         ('global_plane_flatness_area', '全局平整度'),
         ('global_plane_verticality_area', '全局垂直度'),
         ('ruler_flatness_area', '靠尺平整度'),
         ('ruler_verticality_area', '靠尺垂直度'),
+        (REVIEW_ORIGINAL_MODE, '原色模式'),
     )
 
     def _create_inspection_review_page(self, page_title, page_key):
@@ -446,6 +448,20 @@ class InspectionReviewPageMixin:
         if not isinstance(quality, dict) or not isinstance(geometry, dict):
             viewport.clear_heatmap_quad()
             hint = '该立面暂无质量结果，无法生成热力图'
+        elif self._review_heatmap_mode == self.REVIEW_ORIGINAL_MODE:
+            self._review_heat_png_current_key = None
+            self._review_heat_rect_current_key = None
+            self._review_heat_png_pending = False
+            corners = np.asarray(geometry.get('corners_3d') or [],
+                                 dtype=np.float64).reshape(-1, 3)
+            if len(corners) >= 3:
+                frame_key = ('original-frame', int(facade.get('id', -1)),
+                             tuple(float(value) for value in corners.reshape(-1)))
+                viewport.show_heatmap_frame(corners, cache_key=frame_key)
+                hint = '原色模式：仅显示立面外框，不显示热力贴图'
+            else:
+                viewport.clear_heatmap_quad()
+                hint = '该立面暂无可显示的四边面外框'
         else:
             rgba, token = self._review_heat_png(facade, quality)
             if rgba is None:
