@@ -361,3 +361,9 @@
 - 完整二次打开日志显示 `raw_cache.restored` 到 `proxy_cache.restored` 仍约31秒，除读取外还包括逐点 Python 中位数聚合。
 - 代理 NPZ 新增 `proxy_intensity` 字段：首次构建保存，旧缓存首次升级后保存，重开直接恢复，不再读取原生 PLY intensity 或重复聚合。
 - 已缓存 intensity 时 `source_intensities` 仍走独立懒加载；41 项缓存测试通过，覆盖重开禁止原生读取。
+
+## 二次打开优化实测
+
+- 旧缓存首次升级写入 1488353 个 `proxy_intensity` 后，独立第二次打开验证通过。
+- `raw_cache.restored` 到 `proxy_cache.restored` 约 0.6 秒，约 1 秒完成站点切换；立面结果随后约 2.5 秒加载完成，进度 82→95→100，探针 PASS。
+- 对比优化前约 25–31 秒的 intensity 全量读取和逐点聚合，已消除该阻塞；应用退出清理阶段不计入打开耗时。
