@@ -33,7 +33,15 @@ def _continuous_signed_overlay(values, pixel_ids, facade_mask, limit_m,
         support.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
     if not np.any(support):
         return overlay, smooth
+    small_gap_support = cv2.morphologyEx(
+        support.astype(np.uint8), cv2.MORPH_CLOSE,
+        np.ones((7, 7), np.uint8)) > 0
+    small_gaps = small_gap_support & ~support
+    if np.any(small_gaps):
+        support |= small_gaps
     smooth[support] = interpolated[support]
+    if np.any(small_gaps):
+        smooth[small_gaps] = 0.0
     colors = colormap(smooth[support] * 1000.0, limit_m * 1000.0)
     overlay[:, :, :3][support] = np.clip(colors * 255, 0, 255).astype(np.uint8)
     coverage = np.clip(weights * 80.0, 0.65, 1.0)
@@ -44,7 +52,10 @@ def _continuous_signed_overlay(values, pixel_ids, facade_mask, limit_m,
     boundary_band = cv2.morphologyEx(
         inside_limit.astype(np.uint8), cv2.MORPH_GRADIENT,
         np.ones((3, 3), np.uint8)) > 0
-    boundary_band &= support
+    support_boundary = cv2.morphologyEx(
+        support.astype(np.uint8), cv2.MORPH_GRADIENT,
+        np.ones((3, 3), np.uint8)) > 0
+    boundary_band &= support & ~support_boundary
     if np.any(boundary_band):
         overlay[:, :, :3][boundary_band] = (40, 45, 50)
         overlay[:, :, 3][boundary_band] = 255

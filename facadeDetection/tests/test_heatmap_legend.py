@@ -142,7 +142,7 @@ def test_continuous_signed_raster_has_smooth_values_and_preserves_holes():
     ])
     sparse = rasterize_facade(
         corners, None, [1.0, 0.0, 0.0, 0.0], corners[:, 0], 0.004,
-        pixel_size=1.0, base_points=corners, physical_cell_m=1.0,
+        pixel_size=0.01, base_points=corners, physical_cell_m=1.0,
         uv_range=(0.0, 0.0, 8.0, 8.0), continuous_signed=True,
         continuous_colormap=bipolar_colormap)
     center_alpha = sparse['overlay_rgba'][4, 4, 3]
@@ -194,3 +194,24 @@ def test_sparse_samples_keep_visibility_and_threshold_contour():
     boundary = np.all(overlay[:, :, :3] == [40, 45, 50], axis=2) & visible
     assert int(boundary.sum()) > 0, '±阈值位置必须绘制独立分界线'
     assert np.all(overlay[:, :, 3][boundary] == 255)
+
+
+def test_sparse_sampling_gaps_are_neutralized_without_outer_ring():
+    from algorithms.facade.projection import _continuous_signed_overlay
+    from services.heatmap_spec import bipolar_colormap
+
+    values = np.array([-0.006, 0.006], dtype=np.float32)
+    overlay, smooth = _continuous_signed_overlay(
+        values, np.array([0, 6], dtype=np.int64),
+        np.array([[True, False, False, False, False, False, True]]),
+        0.004, 0.02, 0.01, bipolar_colormap)
+    assert overlay[0, 3, 3] > 0, '采样小孔应作为0mm中性区显示'
+    assert smooth[0, 3] == 0.0
+
+    pass_values = np.array([-0.002, 0.002], dtype=np.float32)
+    pass_overlay, _ = _continuous_signed_overlay(
+        pass_values, np.array([0, 6], dtype=np.int64),
+        np.array([[True, False, False, False, False, False, True]]),
+        0.004, 0.02, 0.01, bipolar_colormap)
+    dark = np.all(pass_overlay[:, :, :3] == [40, 45, 50], axis=2)
+    assert not dark.any(), '透明外边界不得误绘深色线'
