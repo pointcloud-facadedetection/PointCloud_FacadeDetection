@@ -119,7 +119,8 @@ class ResultsRepo:
                 return value.item()
             if isinstance(value, dict):
                 return {str(k): serializable(v) for k, v in value.items()
-                        if not str(k).startswith('__') or str(k) == '__global_indices'}
+                        if not str(k).startswith('__')
+                        or (str(k) == '__global_indices' and not quality_artifact_path)}
             if isinstance(value, (list, tuple)):
                 return [serializable(v) for v in value]
             return value

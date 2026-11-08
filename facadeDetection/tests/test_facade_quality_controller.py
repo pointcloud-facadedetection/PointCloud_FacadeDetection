@@ -2,6 +2,9 @@
 
 Storage 在 fixture 中打桩，测试不会创建真实项目目录。
 """
+from pathlib import Path
+
+import numpy as np
 import pytest
 from PySide6.QtCore import QThreadPool, SignalInstance
 
@@ -307,3 +310,21 @@ def test_quality_cache_evicts_previous_revisions_of_same_facade(env):
         ('cloud2', 1, 'edit-0'): other_cloud,
         ('cloud1', 1, 'edit-2'): latest,
     }
+
+
+def test_quality_artifact_replaces_runtime_indices_with_lazy_path(env, tmp_path):
+    controller = env[0]
+    from services.dal.results_repo import ResultsRepo
+    quality = {
+        '__global_indices': np.arange(1000, dtype=np.int64),
+        '__export_context': {'results_dir': str(tmp_path)},
+    }
+    artifact = controller._persist_quality_artifact(
+        'uuid-1', {'id': 3, 'station_id': 1}, quality)
+    assert artifact == 'facade_003_quality_domain.npz'
+    assert '__global_indices' not in quality
+    assert Path(quality['quality_artifact_path']) == (
+        tmp_path / artifact)
+    restored = ResultsRepo.ensure_global_indices(quality)
+    assert np.array_equal(restored, np.arange(1000))
+    assert quality['__global_indices'] is restored

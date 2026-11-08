@@ -347,6 +347,19 @@ class FacadeQualityController(QObject):
         self.project_operation_service.set_facade_results_for_station(
             int(station_id), all_results)
 
+    def _persist_quality_artifact(self, project_uuid, facade, quality):
+        from services.dal.results_repo import ResultsRepo
+        context = quality.get('__export_context') or {}
+        results_dir = context.get('results_dir') or self._quality_results_dir(
+            project_uuid, facade)
+        artifact_path = ResultsRepo.persist_quality_artifact(
+            results_dir, int(facade.get('id', 0)), quality)
+        if artifact_path:
+            quality['quality_artifact_path'] = str(
+                Path(results_dir) / artifact_path)
+            quality.pop('__global_indices', None)
+        return artifact_path
+
     def _on_batch_finished(self, cloud, facade, quality):
         """批量完成处理：成功结果入库；不发单立面 Dialog 信号。"""
         try:
@@ -357,10 +370,13 @@ class FacadeQualityController(QObject):
             if valid:
                 dataset = self.facade_service.get_dataset(cloud)
                 project_uuid, _ = self._context_provider()
+                artifact_path = self._persist_quality_artifact(
+                    project_uuid, facade, quality)
                 self.facade_service.commit_quality_success(
                     project_uuid, int(facade.get('id', 0)), quality,
                     display_no=facade.get('display_no'), facade_data=facade,
                     dataset_revision=getattr(dataset, 'revision', None),
+                    quality_artifact_path=artifact_path,
                     color=self.render_service.facade_color_for(
                         facade, facade.get('display_no')))
                 facade['quality_status'] = 'complete'
@@ -615,7 +631,8 @@ class FacadeQualityController(QObject):
             if not project_uuid:
                 raise RuntimeError('当前项目已失效，无法保存质量结果')
             dataset = self.facade_service.get_dataset(cloud)
-            artifact_path = None
+            artifact_path = self._persist_quality_artifact(
+                project_uuid, f, quality)
             self.facade_service.commit_quality_success(
                 project_uuid, int(f.get('id', 0)), quality,
                 display_no=facade_no,
