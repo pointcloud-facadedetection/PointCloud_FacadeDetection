@@ -46,7 +46,7 @@ def run(project_id):
         values = json.loads(win.current_project.inspection_params_json)
         expected = state['expected']
         assert values['ruler_length_m'] == expected, values
-        assert '已单独设置' in win.lbl_inspection_params_source.text()
+        assert win._inspection_profile_for_facade(facade).measure_height_m == expected
         with project_session(win.current_project.project_id) as session:
             saved = session.get(Facade, int(facade['id']))
             assert saved is not None
@@ -90,9 +90,13 @@ def run(project_id):
         original_default = json.loads(win.current_project.inspection_params_json or '{}')
         original_facade = json.loads(facade.get('inspection_params_json') or 'null')
         state['original'] = (original_default, original_facade)
-        print('[parameters-probe] ' + win.lbl_inspection_params_source.text(), flush=True)
+        from services.inspection_parameters import InspectionParametersService
+        _values, source = InspectionParametersService.resolve(
+            win.current_project.inspection_params_json,
+            facade.get('inspection_params_json'))
+        print(f'[parameters-probe] facade parameter source={source}', flush=True)
         QTimer.singleShot(500, lambda: edit_dialog(win, facade))
-        win.btn_inspection_params.click()
+        win._edit_inspection_parameters()
 
     def open_project():
         win = window()

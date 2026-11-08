@@ -23,8 +23,12 @@ class InspectionParametersService:
 
         project_values = decode(project_params)
         facade_values = decode(facade_params)
-        if facade_values:
-            return facade_values, 'facade'
+        overrides = {key: value for key, value in facade_values.items()
+                     if key != 'building_info'}
+        if overrides:
+            if 'building_info' in project_values:
+                overrides['building_info'] = project_values['building_info']
+            return overrides, 'facade'
         return project_values, 'default'
 
     @staticmethod
@@ -41,12 +45,21 @@ class InspectionParametersService:
                 facade = session.get(Facade, int(facade_id))
                 if facade is None or facade.project_id != project.id:
                     raise ValueError('立面不存在或不属于当前项目。')
-                facade.inspection_params_json = raw
+                facade_values = {key: value for key, value in values.items()
+                                 if key != 'building_info'}
+                facade.inspection_params_json = (
+                    json.dumps(facade_values, ensure_ascii=False)
+                    if facade_values else None)
 
         root = Path(project.root_dir)
         index = Storage.load_pcfd_index(root) or {}
         index.setdefault('project', {})['inspection_params_json'] = raw
         Storage.save_pcfd_index(root, index)
+        from services.building_info_cache import BuildingInfoCache
+        try:
+            BuildingInfoCache.save_inspection_params(raw)
+        except (OSError, ValueError, TypeError) as error:
+            print(f'[PCFD] building_info.cache_failed: {error!r}', flush=True)
 
     @staticmethod
     def use_project_default(project_uuid: str, facade_id: int) -> dict:

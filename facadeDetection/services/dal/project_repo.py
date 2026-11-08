@@ -291,6 +291,20 @@ class ProjectRepo:
         return data[:limit] if limit else data
 
     @staticmethod
+    def latest_project() -> Optional[dict]:
+        init_index_db()
+        with index_session() as session:
+            row = session.execute(
+                select(IndexProject).order_by(
+                    IndexProject.created_at.desc(), IndexProject.id.desc()
+                ).limit(1)
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return next((item for item in ProjectRepo.list_projects()
+                     if item['project_id'] == row.project_uuid), None)
+
+    @staticmethod
     def load_and_activate(project_uuid: str, scene_id: Optional[int] = None) -> dict:
         with project_session(project_uuid) as s:
             proj = s.execute(select(Project).where(Project.uuid == project_uuid)).scalar_one()

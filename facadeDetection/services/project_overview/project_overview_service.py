@@ -185,7 +185,17 @@ class ProjectOverviewService:
         self.update_project_assets(card.project_id, fls_directories or [],
                                    pointcloud_files or [], photo_files or [],
                                    defer_e57=True)
-        return self.get_project(card.project_id) or card
+        project = self.get_project(card.project_id) or card
+        self._cache_project_defaults(project)
+        return project
+
+    @staticmethod
+    def _cache_project_defaults(project):
+        from services.building_info_cache import BuildingInfoCache
+        try:
+            BuildingInfoCache.save_project(project)
+        except (OSError, ValueError, TypeError) as error:
+            print(f'[PCFD] building_info.cache_failed: {error!r}', flush=True)
 
     def open_project(self, directory_path: str) -> ProjectCard:
         # TODO(生命周期/性能): open_project：目录扫描、索引同步和项目激活应避免在 GUI 线程同步执行，并核查重复索引读取与激活失败回滚。
@@ -420,7 +430,9 @@ class ProjectOverviewService:
             # Keep station projections in lockstep with the edited asset list;
             # otherwise deleted rows reappear until the next application start.
             PointCloudStationRepo.sync_assets(project_id)
-        return self.get_project(project_id) or card
+        project = self.get_project(project_id) or card
+        self._cache_project_defaults(project)
+        return project
 
     def get_project_assets(self, project_uuid: str) -> dict[str, list[str]]:
         from config.storage import Storage

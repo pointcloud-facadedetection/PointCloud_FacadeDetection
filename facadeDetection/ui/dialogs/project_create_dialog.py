@@ -208,6 +208,44 @@ class ProjectCreateDialog(QDialog):
         self._build_ui()
         if project is not None:
             self._load_project(project)
+        else:
+            self._load_latest_project_info()
+
+    def _load_latest_project_info(self):
+        from services.building_info_cache import BuildingInfoCache
+        info = BuildingInfoCache.latest_project_defaults()
+        if info is None:
+            return
+        self._load_building_info(info)
+        self._load_basic_report_defaults(info)
+        subtitle = self.findChild(QLabel, 'formDialogSubtitle')
+        if subtitle is not None:
+            subtitle.setText('已沿用本地保存的基础、楼宇及报告信息，可按新项目修改。')
+
+    def _load_basic_report_defaults(self, info):
+        basic = info.get('basic_info') or {}
+        report = info.get('report_info') or {}
+        self.edt_org.setText(str(basic.get('org_unit') or ''))
+        address = str(basic.get('address') or '')
+        self.edt_address.setText(address)
+        self._restore_region(address)
+        self.edt_building.setText(str(basic.get('building_floor') or ''))
+        self.edt_remarks.setPlainText(str(basic.get('remarks') or ''))
+        for key, widget in (
+                ('construction_unit', self.edt_construction_unit),
+                ('construction_unit_executor', self.edt_construction_unit_executor),
+                ('inspection_unit', self.edt_inspection_unit),
+                ('supervision_unit', self.edt_supervision_unit),
+                ('client_unit', self.edt_client_unit)):
+            widget.setText(str(report.get(key) or ''))
+        for key, widget in (
+                ('inspection_date', self.date_inspection),
+                ('report_date', self.date_report)):
+            value = report.get(key)
+            if value:
+                date = QDate.fromString(str(value)[:10], 'yyyy-MM-dd')
+                if date.isValid():
+                    widget.setDate(date)
 
     # ------------------------------------------------------------------
     # UI 构建
@@ -350,23 +388,23 @@ class ProjectCreateDialog(QDialog):
         self.spin_base_elevation.setRange(-1000.0, 10000.0)
         self.spin_base_elevation.setDecimals(3)
         self.spin_base_elevation.setSuffix(" m")
-        form.addRow("楼层基准标高（±0.000）：", self.spin_base_elevation)
+        form.addRow(self._required_label("楼层基准标高（±0.000）："), self.spin_base_elevation)
         self.spin_base_floor_no = QSpinBox()
         self.spin_base_floor_no.setRange(-20, 300)
         self.spin_base_floor_no.setValue(1)
         self.spin_base_floor_no.setSuffix(" F")
-        form.addRow("基准标高对应楼层号：", self.spin_base_floor_no)
+        form.addRow(self._required_label("基准标高对应楼层号："), self.spin_base_floor_no)
         self.spin_standard_floor_height = QDoubleSpinBox()
         self.spin_standard_floor_height.setRange(0.1, 100.0)
         self.spin_standard_floor_height.setDecimals(3)
         self.spin_standard_floor_height.setValue(3.0)
         self.spin_standard_floor_height.setSuffix(" m")
-        form.addRow("标准楼层层高：", self.spin_standard_floor_height)
+        form.addRow(self._required_label("标准楼层层高："), self.spin_standard_floor_height)
         self.spin_total_floor_count = QSpinBox()
         self.spin_total_floor_count.setRange(1, 300)
         self.spin_total_floor_count.setValue(1)
         self.spin_total_floor_count.setSuffix(" 层")
-        form.addRow("楼宇总层数：", self.spin_total_floor_count)
+        form.addRow(self._required_label("楼宇总层数："), self.spin_total_floor_count)
         layout.addLayout(form)
         layout.addWidget(QLabel("特殊楼层配置（该层高度覆盖标准层高）："))
         self.special_floor_table = QListWidget()
@@ -493,6 +531,14 @@ class ProjectCreateDialog(QDialog):
             clear.clicked.connect(lambda _=False, k=key, t=title: self._clear_resources(k, t))
             head.addWidget(add)
             head.addWidget(clear)
+            if kind == 'photo':
+                self.btn_capture_photo = QPushButton('本机相机拍照')
+                self.btn_capture_photo.setObjectName('btn_capture_photo')
+                self.btn_capture_photo.setProperty('buttonRole', 'secondary')
+                self.btn_capture_photo.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.btn_capture_photo.setToolTip('调用本机摄像头拍摄现场照片并添加到列表')
+                self.btn_capture_photo.clicked.connect(self._open_camera)
+                head.addWidget(self.btn_capture_photo)
             layout.addLayout(head)
 
             # 列表支持从资源管理器直接拖入，交互路径与"新增"按钮完全一致。
@@ -539,6 +585,15 @@ class ProjectCreateDialog(QDialog):
                 flt = '照片文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff);;所有文件 (*)'
             paths, _ = QFileDialog.getOpenFileNames(self, title, '', flt)
         self._add_paths(key, title, paths)
+
+    def _open_camera(self):
+        from ui.dialogs.camera_dialog import CameraDialog
+        dialog = CameraDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        path = dialog.photo_path()
+        if path and path not in self._resource_values('photo_files'):
+            self._append_resource_row('photo_files', path)
 
     def _add_paths(self, key: str, title: str, paths) -> int:
         """统一的路径入库通道：拖拽与「新增」按钮共用，校验口径完全一致。
