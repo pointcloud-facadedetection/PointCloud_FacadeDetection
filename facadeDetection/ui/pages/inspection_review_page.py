@@ -442,8 +442,13 @@ class InspectionReviewPageMixin:
             return normal
         try:
             toward_camera = np.asarray(position, dtype=np.float64) - center
-            if np.isfinite(toward_camera).all() and np.dot(toward_camera, normal) < 0:
-                normal = -normal
+            length = float(np.linalg.norm(toward_camera))
+            if np.isfinite(toward_camera).all() and length > 1e-12:
+                normal = toward_camera / length
+            print(f'[PCFD] review.camera_reference '
+                  f'source={"initial" if initial.get("position") is not None else "snapshot"} '
+                  f'position={np.asarray(position).tolist()} '
+                  f'center={center.tolist()} normal={normal.tolist()}', flush=True)
         except (TypeError, ValueError):
             pass
         return normal

@@ -486,6 +486,17 @@ def test_review_facade_normal_faces_initial_camera(qapp):
         viewport, [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
     assert np.allclose(normal, [-1.0, 0.0, 0.0])
 
+    viewport._initial_camera = {'position': [10.0, -20.0, 5.0]}
+    normal = harness._review_orient_normal_to_camera(
+        viewport, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0])
+    assert np.allclose(normal, np.asarray([10.0, -20.0, 5.0]) / np.linalg.norm([10.0, -20.0, 5.0]))
+
+    viewport._initial_camera = None
+    harness._review_camera_snapshot = None
+    normal = harness._review_orient_normal_to_camera(
+        viewport, [0.0, -1.0, 0.0], [0.0, 0.0, 0.0])
+    assert np.allclose(normal, [0.0, -1.0, 0.0])
+
 
 def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
     from ui.main_window import MainWindow
