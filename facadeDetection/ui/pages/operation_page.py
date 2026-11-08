@@ -67,6 +67,13 @@ class OperationPageMixin:
         viewport_title.setProperty('uiRole', 'sectionTitle')
         viewport_heading_row.addWidget(viewport_title)
         viewport_heading_row.addStretch(1)
+        self.btn_operation_reset_view = QPushButton('归位')
+        self.btn_operation_reset_view.setObjectName('btnOperationResetView')
+        self.btn_operation_reset_view.setProperty('buttonRole', 'secondary')
+        self.btn_operation_reset_view.setToolTip('恢复测站初始视角或默认立面视角')
+        self.btn_operation_reset_view.clicked.connect(
+            self.project_operation_service.reset_view)
+        viewport_heading_row.addWidget(self.btn_operation_reset_view)
         viewport_state = QLabel('等待点云加载')
         viewport_state.setObjectName('viewportStateLabel')
         viewport_state.setAlignment(Qt.AlignmentFlag.AlignCenter)

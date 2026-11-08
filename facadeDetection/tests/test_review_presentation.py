@@ -466,3 +466,51 @@ def test_facade_list_item_stores_id_and_resolves_python_payload(qapp):
     legacy = QListWidgetItem()
     legacy.setData(256, facade)
     assert harness._facade_from_item(legacy) == facade
+
+
+def test_review_facade_normal_faces_initial_camera(qapp):
+    from types import SimpleNamespace
+    from ui.pages.inspection_review_page import InspectionReviewPageMixin
+
+    harness = InspectionReviewPageMixin()
+    viewport = SimpleNamespace(
+        _initial_camera={'position': [10.0, 0.0, 0.0]})
+    normal = harness._review_orient_normal_to_camera(
+        viewport, [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    assert np.dot(np.asarray(viewport._initial_camera['position']), normal) > 0
+    assert np.allclose(normal, [1.0, 0.0, 0.0])
+
+    viewport._initial_camera = None
+    harness._review_camera_snapshot = {'position': [-10.0, 0.0, 0.0]}
+    normal = harness._review_orient_normal_to_camera(
+        viewport, [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    assert np.allclose(normal, [-1.0, 0.0, 0.0])
+
+
+def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    try:
+        calls = {'reset': 0, 'cancel': 0, 'resize_exit': 0}
+
+        def reset_view():
+            calls['reset'] += 1
+
+        window.viewport.reset_view = reset_view
+        window.viewport._upload_cloud = lambda *_args: (_ for _ in ()).throw(
+            AssertionError('归位不得重传点云'))
+        window.btn_operation_reset_view.click()
+        assert calls['reset'] == 1
+
+        window.viewport_tools_controller.cancel = lambda: calls.__setitem__(
+            'cancel', calls['cancel'] + 1)
+        window._close_review_resize_confirm_card = lambda: None
+        window.viewport._quad_resize = object()
+        window.viewport.exit_heatmap_resize = lambda: (
+            calls.__setitem__('resize_exit', calls['resize_exit'] + 1),
+            setattr(window.viewport, '_quad_resize', None))
+        window.btn_review_reset_view.click()
+        assert calls == {'reset': 2, 'cancel': 1, 'resize_exit': 1}
+    finally:
+        window.close()

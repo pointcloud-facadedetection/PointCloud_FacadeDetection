@@ -184,6 +184,13 @@ class InspectionReviewPageMixin:
         self.btn_review_clear.clicked.connect(self._on_review_clear_clicked)
         row.addWidget(self.btn_review_clear)
 
+        self.btn_review_reset_view = QPushButton('归位')
+        self.btn_review_reset_view.setObjectName('btnReviewResetView')
+        self.btn_review_reset_view.setProperty('buttonRole', 'secondary')
+        self.btn_review_reset_view.setToolTip('退出当前工具并恢复测站初始视角或默认立面视角')
+        self.btn_review_reset_view.clicked.connect(self._on_review_reset_view)
+        row.addWidget(self.btn_review_reset_view)
+
         self.btn_review_resize = QPushButton('调整边界')
         self.btn_review_resize.setObjectName('btn_review_resize')
         self.btn_review_resize.setProperty('buttonRole', 'secondary')
@@ -252,6 +259,14 @@ class InspectionReviewPageMixin:
 
     def _on_review_clear_clicked(self):
         self.viewport_tools_controller.clear_visuals()
+
+    def _on_review_reset_view(self):
+        self.viewport_tools_controller.cancel()
+        self._close_review_resize_confirm_card()
+        viewport = self.viewport
+        if getattr(viewport, '_quad_resize', None) is not None:
+            viewport.exit_heatmap_resize()
+        viewport.reset_view()
 
     def _on_review_resize_clicked(self):
         facade = self._selected_review_facade()
@@ -415,6 +430,24 @@ class InspectionReviewPageMixin:
                                           'review_mode', False):
             self._review_present_facade(facade, focus_camera=False)
 
+    def _review_orient_normal_to_camera(self, viewport, normal, center):
+        normal = np.asarray(normal, dtype=np.float64)
+        center = np.asarray(center, dtype=np.float64)
+        initial = getattr(viewport, '_initial_camera', None) or {}
+        position = initial.get('position')
+        if position is None:
+            position = (getattr(self, '_review_camera_snapshot', None) or {}).get(
+                'position')
+        if position is None:
+            return normal
+        try:
+            toward_camera = np.asarray(position, dtype=np.float64) - center
+            if np.isfinite(toward_camera).all() and np.dot(toward_camera, normal) < 0:
+                normal = -normal
+        except (TypeError, ValueError):
+            pass
+        return normal
+
     def _review_present_facade(self, facade, focus_camera=True):
         """选中立面：按模式显示热力图/原色外框、横纵尺寸并调整相机。"""
         viewport = getattr(self, 'viewport', None)
@@ -445,6 +478,8 @@ class InspectionReviewPageMixin:
                 center = (corners.mean(axis=0) if len(corners)
                           else np.asarray(geometry['origin'],
                                           dtype=np.float64))
+                normal = self._review_orient_normal_to_camera(
+                    viewport, normal, center)
                 viewport.focus_plane(normal, center,
                                      geometry['v_axis'],
                                      (bounds[2] - bounds[0],
