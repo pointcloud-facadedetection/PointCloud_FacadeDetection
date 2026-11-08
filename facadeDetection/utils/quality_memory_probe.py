@@ -12,6 +12,56 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 
+def windows_memory_regions():
+    if os.name != 'nt':
+        return {}
+    import ctypes
+
+    class MemoryBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ('BaseAddress', ctypes.c_void_p),
+            ('AllocationBase', ctypes.c_void_p),
+            ('AllocationProtect', ctypes.c_ulong),
+            ('RegionSize', ctypes.c_size_t),
+            ('State', ctypes.c_ulong),
+            ('Protect', ctypes.c_ulong),
+            ('Type', ctypes.c_ulong),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.VirtualQueryEx.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(MemoryBasicInformation), ctypes.c_size_t]
+    kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+    process = kernel32.OpenProcess(0x0400, 0, os.getpid())
+    labels = {0x1000000: 'image', 0x40000: 'mapped', 0x20000: 'private'}
+    totals = {label: 0 for label in labels.values()}
+    largest = []
+    address = 0x10000
+    info = MemoryBasicInformation()
+    while address < (1 << 47):
+        result = kernel32.VirtualQueryEx(
+            process, address, ctypes.byref(info), ctypes.sizeof(info))
+        if not result or not info.RegionSize:
+            break
+        if info.State == 0x1000:
+            label = labels.get(info.Type, 'other')
+            totals[label] = totals.get(label, 0) + int(info.RegionSize)
+            largest.append((int(info.RegionSize), label, int(info.BaseAddress)))
+        address += int(info.RegionSize)
+    kernel32.CloseHandle(process)
+    return {
+        'committed_mib': {key: round(value / 1024**2, 2)
+                          for key, value in totals.items()},
+        'largest_regions': [
+            {'mib': round(size / 1024**2, 2), 'type': label,
+             'base': hex(base)}
+            for size, label, base in sorted(largest, reverse=True)[:12]],
+    }
+
+
 def array_nbytes(value, seen):
     if isinstance(value, np.ndarray):
         if id(value) in seen:
@@ -65,7 +115,8 @@ def run(project_id):
 
     def after_quality():
         state['after'] = inventory(window())
-        print(json.dumps({'before': state['before'], 'after': state['after']},
+        print(json.dumps({'before': state['before'], 'after': state['after'],
+                          'memory_regions': windows_memory_regions()},
                          ensure_ascii=False), flush=True)
         finish(0 if not state['after']['children'] else 2)
 

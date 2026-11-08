@@ -342,3 +342,10 @@
 - 数据集、CSR、代理与索引保留 366.94 MiB，视口数组 39.74 MiB；这些是后续检测和复核继续使用的对象。
 - 评估前/后 RSS 分别为 1685.47/2233.43 MiB。对象释放不等于 CRT、Python/Open3D/VTK 原生运行时和分配器立即归还全部内存，不能把剩余 RSS 全归为原始 XYZ 或 worker 泄漏。
 - 探针展开自定义数据集对象统计，避免把 CSR/代理漏算为“原生占用”。
+
+## 最终RSS的Windows区域拆解
+
+- 最终 RSS 2234.38 MiB；可直接识别的 NumPy/业务对象为：CSR/代理/索引 366.94、视口 39.74、最新质量缓存 13.64，原始 `source_assets` 为 0。
+- `VirtualQueryEx` 已提交区域：MEM_PRIVATE 2724.62 MiB、MEM_IMAGE 808.00 MiB、MEM_MAPPED 12.45 MiB。文件映射仅剩 12.45 MiB，证明原始点云映射没有继续整份驻留。
+- MEM_PRIVATE 最大区域约 224.59 MiB，其他较大区域约 106.82/80.00/34.07 MiB；MEM_IMAGE 最大区域约 130.38/64.84 MiB，属于本机 DLL 映像。
+- 注意：VirtualQuery 统计的是已提交虚拟内存，不等于实际驻留物理页，不能将三类数值直接与 RSS 相减。未驻留的私有页、Python/Open3D/VTK 堆与分配器、DLL 映像共同构成剩余工作集。
