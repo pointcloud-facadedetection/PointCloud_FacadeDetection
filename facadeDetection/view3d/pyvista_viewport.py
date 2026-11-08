@@ -204,6 +204,8 @@ class PyVistaViewport(BaseViewport):
         self._pick_marker_actors = []
         self._measure_actors = []
         self._ruler_actors = []
+        self._edge_distance_actors = []
+        self._edge_distance_label_bindings = []
         self._heatmap_quad_actors = []
         self._heatmap_quad_groups = {}     # cache_key -> [actors]（LRU）
         self._heatmap_quad_key = None      # 当前可见组的 key
@@ -442,6 +444,7 @@ class PyVistaViewport(BaseViewport):
     # ------------------------------------------------------------------
     def _on_render_start(self, *_args):
         self._update_dimension_label_positions()
+        self._update_edge_distance_label_positions()
 
     def _on_render_end(self, *_args):
         self._adapter._frames_rendered += 1
@@ -1364,6 +1367,7 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     def clear_measure_visuals(self):
+        self.clear_edge_distance_markers()
         if not self._measure_actors:
             return
         for actor in self._measure_actors:
@@ -1426,6 +1430,7 @@ class PyVistaViewport(BaseViewport):
             self.set_render_enabled(True)
 
     def clear_ruler_overlay(self):
+        self.clear_edge_distance_markers()
         if not self._ruler_actors:
             return
         for actor in self._ruler_actors:
@@ -1436,7 +1441,8 @@ class PyVistaViewport(BaseViewport):
     def clear_tool_visuals(self):
         # 没有任何工具 actor 时，模式切换不触发场景渲染。
         if not (self._measure_actors or self._ruler_actors
-                or self._pick_marker_actors):
+                or self._pick_marker_actors
+                or getattr(self, '_edge_distance_actors', [])):
             return
         self.set_render_enabled(False)
         try:
@@ -1492,13 +1498,12 @@ class PyVistaViewport(BaseViewport):
             (actor, tuple(float(value) for value in world_position)))
         return self._to_overlay(actor, tool=True)
 
-    def _update_dimension_label_positions(self):
-        if (not getattr(self, '_dimension_label_bindings', None)
-                or getattr(self, '_widget', None) is None
+    def _update_label_bindings(self, bindings):
+        if (not bindings or getattr(self, '_widget', None) is None
                 or getattr(self, '_plotter', None) is None):
             return
         projected = self.project_points(
-            [position for _actor, position in self._dimension_label_bindings])
+            [position for _actor, position in bindings])
         if projected is None:
             return
         screen, valid = projected
@@ -1507,8 +1512,7 @@ class PyVistaViewport(BaseViewport):
             max(1, int(value), int(round(widget_size * dpr)))
             for value, widget_size in zip(self._plotter.renderer.GetSize(),
                                           (self._widget.width(), self._widget.height())))
-        for (actor, _position), (x, y), visible in zip(
-                self._dimension_label_bindings, screen, valid):
+        for (actor, _position), (x, y), visible in zip(bindings, screen, valid):
             if not visible:
                 actor.SetVisibility(False)
                 continue
@@ -1524,6 +1528,83 @@ class PyVistaViewport(BaseViewport):
                             max(half_height, framebuffer_height - half_height))
             actor.SetPosition(float(display_x), float(display_y))
             actor.SetVisibility(True)
+
+    def _update_dimension_label_positions(self):
+        self._update_label_bindings(self._dimension_label_bindings)
+
+    def _update_edge_distance_label_positions(self):
+        self._update_label_bindings(self._edge_distance_label_bindings)
+
+    @staticmethod
+    def _edge_distance_specs(point, geometry):
+        point = np.asarray(point, dtype=np.float64).reshape(3)
+        origin = np.asarray(geometry['origin'], dtype=np.float64).reshape(3)
+        u = np.asarray(geometry['u_axis'], dtype=np.float64).reshape(3)
+        v = np.asarray(geometry['v_axis'], dtype=np.float64).reshape(3)
+        u /= max(np.linalg.norm(u), 1e-12)
+        v /= max(np.linalg.norm(v), 1e-12)
+        u0, v0, u1, v1 = np.asarray(
+            geometry['uv_bounds'], dtype=np.float64).reshape(4)
+        delta = point - origin
+        du, dv = float(delta @ u), float(delta @ v)
+        return (
+            ('顶', origin + du * u + v1 * v, abs(v1 - dv)),
+            ('底', origin + du * u + v0 * v, abs(dv - v0)),
+            ('左', origin + u0 * u + dv * v, abs(du - u0)),
+            ('右', origin + u1 * u + dv * v, abs(u1 - du)),
+        )
+
+    def _edge_distance_text_actor(self, text, world_position, color):
+        import vtk
+        actor = vtk.vtkTextActor()
+        actor.SetInput(str(text))
+        prop = actor.GetTextProperty()
+        prop.SetFontSize(14)
+        prop.SetColor(color)
+        prop.SetBackgroundColor(1.0, 1.0, 1.0)
+        prop.SetBackgroundOpacity(0.92)
+        prop.SetFrame(True)
+        actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
+        actor.GetPositionCoordinate().SetValue(0.0, 0.0, 0.0)
+        self._edge_distance_label_bindings.append(
+            (actor, tuple(float(value) for value in world_position)))
+        return self._to_overlay(actor, tool=True)
+
+    def show_edge_distance_markers(self, points, geometry):
+        self.set_render_enabled(False)
+        try:
+            self.clear_edge_distance_markers()
+            if not isinstance(geometry, dict):
+                return
+            for point in points:
+                for edge, foot, distance in self._edge_distance_specs(
+                        point, geometry):
+                    color = ((0.10, 0.48, 0.78) if edge in ('顶', '底')
+                             else (0.92, 0.48, 0.08))
+                    actor = self._add_mesh(
+                        pv.Line(tuple(point), tuple(foot)), color=color,
+                        line_width=2, lighting=False,
+                        name=f'edge_distance_{edge}')
+                    self._edge_distance_actors.append(
+                        self._to_overlay(actor, tool=True))
+                    midpoint = (np.asarray(point) + np.asarray(foot)) * 0.5
+                    actor = self._edge_distance_text_actor(
+                        f'{edge} {distance:.3f} m', midpoint, color)
+                    self._edge_distance_actors.append(actor)
+            self._update_edge_distance_label_positions()
+        except Exception as exc:
+            print(f'[PCFD] viewport.edge_distances_failed: {exc!r}', flush=True)
+        finally:
+            self.set_render_enabled(True)
+
+    def clear_edge_distance_markers(self):
+        self._edge_distance_actors = getattr(self, '_edge_distance_actors', [])
+        self._edge_distance_label_bindings = getattr(
+            self, '_edge_distance_label_bindings', [])
+        for actor in self._edge_distance_actors:
+            self._remove_visual_actor(actor)
+        self._edge_distance_actors.clear()
+        self._edge_distance_label_bindings.clear()
 
     def _stash_facade_dimensions(self, cache_key):
         if cache_key is None:

@@ -20,6 +20,7 @@ class FakeViewport:
     def __init__(self):
         self.rulers = []
         self.markers = []
+        self.edge_markers = []
 
     def clear_ruler_overlay(self):
         self.rulers.clear()
@@ -32,6 +33,12 @@ class FakeViewport:
 
     def show_ruler_overlay(self, render, exceeded=False):
         self.rulers.append((render, exceeded))
+
+    def show_measure_line(self, p1, p2):
+        self.measure_line = (p1, p2)
+
+    def show_edge_distance_markers(self, points, geometry):
+        self.edge_markers.append((list(points), geometry))
 
     def clear_tool_visuals(self):
         self.rulers.clear()
@@ -87,6 +94,8 @@ def test_high_sor_removed_ratio_requires_defect_review(qapp):
     })
     assert '需复核（原判合格）' in messages[-1]
     assert '40%' in messages[-1]
+    assert len(viewport.edge_markers) == 1
+    assert len(viewport.edge_markers[0][0]) == 2
     controller.cancel()
 
 
@@ -264,3 +273,43 @@ def test_ruler_base_completion_releases_source_payload(qapp):
         lambda: {})
     controller._on_ruler_base_thread_finished()
     assert releases == [1]
+
+
+def test_edge_distance_specs_are_perpendicular_to_four_sides():
+    from view3d.pyvista_viewport import PyVistaViewport
+    specs = PyVistaViewport._edge_distance_specs(
+        [0.0, 1.0, 1.5], GEOMETRY)
+    distances = {edge: distance for edge, _foot, distance in specs}
+    assert distances == {'顶': 1.5, '底': 1.5, '左': 1.0, '右': 3.0}
+    for _edge, foot, _distance in specs:
+        assert foot[0] == 0.0
+
+
+def test_edge_distance_markers_have_four_lines_and_labels(qapp):
+    viewport = PyVistaViewport()
+    try:
+        viewport.show_edge_distance_markers([[0.0, 1.0, 1.5]], GEOMETRY)
+        assert len(viewport._edge_distance_actors) == 8
+        assert len(viewport._edge_distance_label_bindings) == 4
+        texts = [actor.GetInput() for actor, _position in viewport._edge_distance_label_bindings]
+        assert texts == ['顶 1.500 m', '底 1.500 m', '左 1.000 m', '右 3.000 m']
+        viewport.clear_edge_distance_markers()
+        assert not viewport._edge_distance_actors
+        assert not viewport._edge_distance_label_bindings
+    finally:
+        viewport.destroy()
+
+
+def test_measure_pick_shows_distances_for_both_endpoints(qapp):
+    viewport = FakeViewport()
+    controller = ViewportToolsController(
+        viewport, object(), lambda: 'cloud', lambda: {'id': 1},
+        lambda: {})
+    controller._tool = controller.TOOL_MEASURE
+    controller._plane_geometry = GEOMETRY
+    controller._on_measure_pick({'point': [0.0, 1.0, 1.0]})
+    controller._on_measure_pick({'point': [0.0, 2.0, 1.0]})
+    assert len(viewport.edge_markers) == 1
+    points, geometry = viewport.edge_markers[0]
+    assert len(points) == 2
+    assert geometry is GEOMETRY

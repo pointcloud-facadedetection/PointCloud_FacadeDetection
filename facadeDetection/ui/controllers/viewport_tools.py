@@ -290,6 +290,9 @@ class ViewportToolsController(QObject):
         viewport.clear_pick_markers()
         if hasattr(viewport, 'show_measure_line'):
             viewport.show_measure_line(p1, p2)
+        if hasattr(viewport, 'show_edge_distance_markers'):
+            viewport.show_edge_distance_markers(
+                [p1, p2], self._plane_geometry)
         text = f'距离：{distance:.3f} m（{distance * 1000:.1f} mm）'
         self.measure_text.emit(text)
         self.status_message.emit(text, 0)
@@ -427,6 +430,9 @@ class ViewportToolsController(QObject):
         if hasattr(viewport, 'show_ruler_overlay'):
             viewport.show_ruler_overlay(
                 result['render'], exceeded=result.get('exceeded', False))
+        body = result['render'].get('body_line')
+        if body is not None and hasattr(viewport, 'show_edge_distance_markers'):
+            viewport.show_edge_distance_markers(body, self._plane_geometry)
         gap_mm = float(result.get('gap_mm', 0.0))
         threshold_mm = (self._ruler_params_provider() or {}).get('threshold_mm')
         review_required = float(result.get('sor_removed_ratio', 0.0)) >= 0.20
