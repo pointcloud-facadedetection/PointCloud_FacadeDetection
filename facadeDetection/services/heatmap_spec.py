@@ -148,6 +148,15 @@ def bipolar_colormap(signed_values_mm, limit_mm, scale_mm=None):
     out = np.empty((len(values), 3), dtype=np.float32)
 
     out[:] = neutral
+    warm_pass = np.array((0.86, 0.82, 0.55), dtype=np.float32)
+    cold_pass = np.array((0.45, 0.75, 0.85), dtype=np.float32)
+    pass_ratio = np.clip(np.abs(values / limit), 0.0, 1.0)[:, None]
+    warm_pass_mask = (values < 0) & (values >= -limit)
+    cold_pass_mask = (values > 0) & (values <= limit)
+    out[warm_pass_mask] = (neutral * (1.0 - pass_ratio[warm_pass_mask])
+                           + warm_pass * pass_ratio[warm_pass_mask])
+    out[cold_pass_mask] = (neutral * (1.0 - pass_ratio[cold_pass_mask])
+                           + cold_pass * pass_ratio[cold_pass_mask])
 
     # 暖色区（凹陷，负值）：黄 → 红
     warm_mask = values < -limit
@@ -155,7 +164,8 @@ def bipolar_colormap(signed_values_mm, limit_mm, scale_mm=None):
         tw = q[warm_mask][:, None]
         warm = np.array((1.0, 0.86, 0.24), dtype=np.float32)
         hot = np.array((220.0, 30.0, 20.0), dtype=np.float32) / 255.0
-        out[warm_mask] = neutral * (1.0 - tw) + (warm * (1.0 - tw) + hot * tw) * tw
+        out[warm_mask] = (warm_pass * (1.0 - tw)
+                          + (warm * (1.0 - tw) + hot * tw) * tw)
 
     # 冷色区（凸起，正值）：青 → 深蓝
     cold_mask = values > limit
@@ -163,7 +173,13 @@ def bipolar_colormap(signed_values_mm, limit_mm, scale_mm=None):
         tc = q[cold_mask][:, None]
         cool = np.array((60.0, 220.0, 240.0), dtype=np.float32) / 255.0
         cold = np.array((20.0, 80.0, 220.0), dtype=np.float32) / 255.0
-        out[cold_mask] = neutral * (1.0 - tc) + (cool * (1.0 - tc) + cold * tc) * tc
+        out[cold_mask] = (cold_pass * (1.0 - tc)
+                          + (cool * (1.0 - tc) + cold * tc) * tc)
+
+    boundary_width = min(0.25, limit * 0.05)
+    near_boundary = np.abs(np.abs(values) - limit) <= boundary_width
+    out[near_boundary & (values < 0)] = (0.95, 0.65, 0.12)
+    out[near_boundary & (values > 0)] = (0.10, 0.65, 0.85)
 
     return np.clip(out, 0.0, 1.0)
 

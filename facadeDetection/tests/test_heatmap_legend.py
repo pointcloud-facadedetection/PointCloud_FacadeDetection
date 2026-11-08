@@ -127,7 +127,7 @@ def test_continuous_signed_raster_has_smooth_values_and_preserves_holes():
         continuous_signed=True, continuous_colormap=bipolar_colormap)
     overlay = raster['overlay_rgba']
     occupied = overlay[:, :, 3] > 0
-    assert np.any(overlay[:, :, 3] == 110), '阈值内使用中性半透明色'
+    assert np.any(overlay[:, :, 3] == 160), '阈值内使用中性半透明色'
     assert np.any(overlay[:, :, 3] == 225), '超限使用高亮红/蓝'
     assert len(np.unique(overlay[:, :, :3][occupied].reshape(-1, 3), axis=0)) > 5
 
@@ -163,3 +163,12 @@ def test_bipolar_midrange_is_not_fully_saturated():
     assert not np.allclose(middle[1], cold_end)
     assert middle[0, 1] > warm_end[1]
     assert middle[1, 0] > cold_end[0]
+
+
+def test_pass_band_has_signed_gradient_and_explicit_threshold_colors():
+    from services.heatmap_spec import bipolar_colormap
+    colors = bipolar_colormap([-8.0, -4.0, 0.0, 4.0, 8.0], 8.0, scale_mm=16.0)
+    assert not np.allclose(colors[1], colors[3]), '合格区不能整片同色'
+    assert np.allclose(colors[2], [158 / 255, 178 / 255, 158 / 255])
+    assert np.allclose(colors[0], [0.95, 0.65, 0.12])
+    assert np.allclose(colors[4], [0.10, 0.65, 0.85])

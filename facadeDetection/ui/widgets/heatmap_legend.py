@@ -94,6 +94,14 @@ class HeatmapLegendWidget(QWidget):
             note = '颜色表示偏差量（mm）'
         painter.drawText(QRectF(0, 56, self.width(), 18),
                          Qt.AlignmentFlag.AlignCenter, note)
+        if method == 'global_plane':
+            maximum = float(vmax) if vmax is not None else limit_mm
+            if maximum > 0:
+                painter.setPen(QPen(QColor('#475569'), 2))
+                for sign in (-1.0, 1.0):
+                    ratio = (sign * limit_mm + maximum) / (2.0 * maximum)
+                    x = round(6 + ratio * (width - 1))
+                    painter.drawLine(x, 5, x, 21)
         painter.setPen(QPen(QColor('#CBD5E1'), 1))
         painter.drawRect(6, 6, max(1, self.width() - 12), 14)
         painter.end()
