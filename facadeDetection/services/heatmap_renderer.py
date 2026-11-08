@@ -18,7 +18,7 @@ from services.heatmap_spec import (
 
 
 # 画布分辨率上限：让 splat 在照片 warp 后保持合理物理大小。
-_HEATMAP_MAX_SIZE = 3200
+_HEATMAP_MAX_SIZE = 4096
 
 
 def _resolve_domain_uv_range(quality: dict):
@@ -231,8 +231,41 @@ class FacadeHeatmapTripletRenderer:
             "overlay": self._to_bgr(overlay),
             "heatmap_grid": self._to_bgr(heatmap_grid),
             "photo": self._to_bgr(photo) if photo is not None else None,
-            "transparent": transparent,
+            "transparent": self._smooth_rgba_edges(transparent),
+            "legend": self._legend_metadata(raster, spec),
         }
+
+    @staticmethod
+    def _legend_metadata(raster, spec):
+        return {
+            'mode': spec['file_key'],
+            'method': spec.get('method', 'ruler'),
+            'metric': spec.get('metric', 'flatness'),
+            'limit_mm': float(raster.get('vmin', 0.0)) * 1000.0,
+            'vmax_mm': float(raster.get(
+                'vmax', raster.get('vmin', 0.004))) * 1000.0,
+        }
+
+    @staticmethod
+    def _smooth_rgba_edges(image):
+        """仅对透明边缘抗锯齿，保持内部偏差颜色及画布尺寸。"""
+        img = np.asarray(image, dtype=np.uint8)
+        if img.ndim != 3 or img.shape[2] != 4:
+            raise ValueError('透明边缘处理需要 RGBA 图像')
+        alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+        if not np.any(alpha > 0):
+            return img.copy()
+        premultiplied = img[:, :, :3].astype(np.float32) * alpha
+        smooth_alpha = np.maximum(
+            alpha, cv2.GaussianBlur(alpha, (3, 3), 0)[..., None])
+        smooth_rgb = cv2.GaussianBlur(premultiplied, (3, 3), 0)
+        smooth_rgb /= np.maximum(smooth_alpha, 1e-6)
+        smooth_rgb = np.where(alpha >= 1.0, img[:, :, :3], smooth_rgb)
+        result = img.copy()
+        result[:, :, :3] = np.clip(np.rint(smooth_rgb), 0, 255).astype(np.uint8)
+        result[:, :, 3:4] = np.clip(
+            np.rint(smooth_alpha * 255.0), 0, 255).astype(np.uint8)
+        return result
 
     @staticmethod
     def _to_bgr(image: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -1088,7 +1121,7 @@ class FacadeHeatmapTripletRenderer:
             raise ValueError("透明热力图裁剪后丢失 alpha 通道")
 
         if not return_metadata:
-            return cropped
+            return self._smooth_rgba_edges(cropped)
 
         mask = np.asarray(raster.get("facade_mask"), dtype=bool)
         h, w = mask.shape

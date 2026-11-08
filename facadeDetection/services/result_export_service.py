@@ -184,7 +184,7 @@ class ResultExportService:
                         continue
                     # transparent 在下方以固定命名写出，不在 triplet 循环
                     # 重复落盘。
-                    if key == 'transparent':
+                    if key in ('transparent', 'legend'):
                         continue
                     suffix = {
                         'overlay': '_overlay.png',
@@ -224,6 +224,7 @@ class ResultExportService:
 
                 exported[mode] = {
                     'title': spec['title'],
+                    'legend': triplet.get('legend'),
                     **paths,
                 }
 

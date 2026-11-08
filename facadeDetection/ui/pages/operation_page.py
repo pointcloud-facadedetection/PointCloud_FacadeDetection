@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ui.widgets.station_panel import StationPanel
 from ui.widgets.pointcloud_controls import PointCloudControls
+from ui.widgets.heatmap_legend import HeatmapLegendWidget
 from ui.dialogs.facade_quality_dialog import FacadeQualityDialog
 from services.inspection_profile import InspectionProfileService
 from services.result_export_service import ResultExportService
@@ -175,6 +176,10 @@ class OperationPageMixin:
         self.lbl_facade_summary.setWordWrap(True)
         self.lbl_facade_summary.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.lbl_facade_summary)
+        self.heatmap_legend = HeatmapLegendWidget()
+        self.heatmap_legend.setObjectName('reviewHeatmapLegend')
+        self.heatmap_legend.setVisible(False)
+        lay.addWidget(self.heatmap_legend)
         
         # 原"评估立面质量"按钮已由顶部步骤④取代，此处不再重复提供入口。
 

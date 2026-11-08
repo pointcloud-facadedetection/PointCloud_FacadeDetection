@@ -499,6 +499,28 @@ class InspectionReviewPageMixin:
         if hint_label is not None:
             hint_label.setText(hint)
         self._review_present_dimensions(facade, geometry)
+        self._review_update_heatmap_legend(quality)
+
+    def _review_update_heatmap_legend(self, quality):
+        widget = getattr(self, 'heatmap_legend', None)
+        if widget is None:
+            return
+        if self._review_heatmap_mode == self.REVIEW_ORIGINAL_MODE \
+                or not isinstance(quality, dict):
+            widget.clear_metadata()
+            return
+        heatmaps = (quality.get('__export_context') or {}).get('heatmaps') or {}
+        metadata = (heatmaps.get(self._review_heatmap_mode) or {}).get('legend')
+        if metadata is None:
+            spec = heatmap_spec(self._review_heatmap_mode)
+            values = (quality.get('profile_snapshot')
+                      or quality.get('parameters') or quality.get('thresholds') or {})
+            metadata = {
+                'method': spec.get('method', 'ruler'),
+                'metric': spec.get('metric', 'flatness'),
+                'limit_mm': float(values.get(spec['limit_key'], 4.0)),
+            }
+        widget.set_metadata(metadata)
 
     def _review_present_dimensions(self, facade, geometry):
         viewport = getattr(self, 'viewport', None)
@@ -673,6 +695,8 @@ class InspectionReviewPageMixin:
         self._review_heat_rect_current_key = None
         self._review_heat_png_current_key = None
         self._review_heat_png_pending = False
+        if hasattr(self, 'heatmap_legend'):
+            self.heatmap_legend.clear_metadata()
         viewport = getattr(self, 'viewport', None)
         if viewport is not None and hasattr(viewport, 'clear_heatmap_quad'):
             viewport.clear_heatmap_quad()
@@ -735,6 +759,7 @@ class InspectionReviewPageMixin:
         # 复核页呈现模式：点云恒灰 + 热力贴图；相机快照态随进入重置
         self._review_camera_snapshot = None
         self.render_service.set_review_mode(True)
+        self.heatmap_legend.setVisible(True)
         results = self.project_operation_service.last_facade_results or []
         self._show_facade_results_review(results)
         self._review_update_tool_buttons()
@@ -750,6 +775,7 @@ class InspectionReviewPageMixin:
         # 先关 review 模式再 cancel 工具：tool_deactivated 触发的
         # 贴图补画会因 review_mode 守卫短路，避免"先贴一次再摘"
         self.render_service.set_review_mode(False)
+        self.heatmap_legend.setVisible(False)
         # 视口迁出复核页前退出测距/靠尺工具，避免拾取回调挂在隐藏页面上
         controller = getattr(self, 'viewport_tools_controller', None)
         if controller is not None:
