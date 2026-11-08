@@ -1357,9 +1357,10 @@ class PyVistaViewport(BaseViewport):
                     pv.Line(tuple(p1), tuple(p2)), color=color,
                     line_width=3, lighting=False, name='measure_line')
                 self._measure_actors.append(self._to_overlay(actor, tool=True))
-                for p in (p1, p2):
-                    actor = self._point_marker_actor(p, color, 12,
-                                                     'measure_point')
+                endpoint_colors = ((0.86, 0.15, 0.15), (0.10, 0.35, 0.85))
+                for index, p in enumerate((p1, p2)):
+                    actor = self._point_marker_actor(
+                        p, endpoint_colors[index], 12, 'measure_point')
                     self._measure_actors.append(actor)
             except Exception:
                 pass
@@ -1391,6 +1392,11 @@ class PyVistaViewport(BaseViewport):
                     color=(0.98, 0.62, 0.10), line_width=9,
                     lighting=False, name='ruler_body')
                 self._ruler_actors.append(self._to_overlay(actor, tool=True))
+                endpoint_colors = ((0.86, 0.15, 0.15), (0.10, 0.35, 0.85))
+                for index, point in enumerate(body[:2]):
+                    actor = self._point_marker_actor(
+                        point, endpoint_colors[index], 12, 'ruler_endpoint')
+                    self._ruler_actors.append(actor)
             corners = np.asarray(render.get('corners'), dtype=np.float64)
             if corners.shape == (4, 3):
                 plate_color = ((0.85, 0.25, 0.22) if exceeded
@@ -1601,12 +1607,13 @@ class PyVistaViewport(BaseViewport):
                 sign_u, sign_v = ((-1.0, 1.0) if index % 2 == 0 else (1.0, -1.0))
                 anchor = (np.asarray(point) + sign_u * offset_u * u_axis
                           + sign_v * offset_v * v_axis)
-                text = (f"上：{distances['顶'] * 1000:.2f}mm  "
-                        f"下：{distances['底'] * 1000:.2f}mm\n"
-                        f"左：{distances['左'] * 1000:.2f}mm  "
-                        f"右：{distances['右'] * 1000:.2f}mm")
+                text = (f"UP:{distances['顶'] * 1000:.2f}mm  "
+                        f"DOWN:{distances['底'] * 1000:.2f}mm\n"
+                        f"LEFT:{distances['左'] * 1000:.2f}mm  "
+                        f"RIGHT:{distances['右'] * 1000:.2f}mm")
+                endpoint_colors = ((0.86, 0.15, 0.15), (0.10, 0.35, 0.85))
                 actor = self._edge_distance_text_actor(
-                    text, anchor, (0.10, 0.22, 0.32))
+                    text, anchor, endpoint_colors[index % 2])
                 self._edge_distance_actors.append(actor)
             self._update_edge_distance_label_positions()
         except Exception as exc:

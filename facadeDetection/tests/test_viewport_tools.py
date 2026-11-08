@@ -292,13 +292,16 @@ def test_edge_distance_markers_have_four_lines_and_labels(qapp):
         assert len(viewport._edge_distance_actors) == 5
         assert len(viewport._edge_distance_label_bindings) == 1
         text = viewport._edge_distance_label_bindings[0][0].GetInput()
-        assert text == '上：1500.00mm  下：1500.00mm\n左：1000.00mm  右：3000.00mm'
+        assert text == 'UP:1500.00mm  DOWN:1500.00mm\nLEFT:1000.00mm  RIGHT:3000.00mm'
 
         viewport.show_edge_distance_markers(
             [[0.0, 1.0, 1.5], [0.0, 1.0, 1.5]], GEOMETRY)
         assert len(viewport._edge_distance_label_bindings) == 2
         anchors = [position for _actor, position in viewport._edge_distance_label_bindings]
         assert anchors[0] != anchors[1], '相同端点也必须使用不同的标签锚点'
+        first, second = [actor for actor, _position in viewport._edge_distance_label_bindings]
+        assert first.GetTextProperty().GetColor()[0] > first.GetTextProperty().GetColor()[2]
+        assert second.GetTextProperty().GetColor()[2] > second.GetTextProperty().GetColor()[0]
         viewport.clear_edge_distance_markers()
         assert not viewport._edge_distance_actors
         assert not viewport._edge_distance_label_bindings
@@ -319,3 +322,24 @@ def test_measure_pick_shows_distances_for_both_endpoints(qapp):
     points, geometry = viewport.edge_markers[0]
     assert len(points) == 2
     assert geometry is GEOMETRY
+
+
+def test_measure_and_ruler_use_matching_red_blue_endpoints(qapp):
+    viewport = PyVistaViewport()
+    try:
+        viewport.show_measure_line([0.0, 1.0, 1.0], [0.0, 2.0, 1.0])
+        colors = [actor.GetProperty().GetColor()
+                  for actor in viewport._measure_actors[1:]]
+        assert colors[0][0] > colors[0][2]
+        assert colors[1][2] > colors[1][0]
+
+        viewport.show_ruler_overlay({
+            'body_line': [[0.0, 1.0, 1.0], [0.0, 2.0, 1.0]],
+            'defect_segments': [],
+        })
+        colors = [actor.GetProperty().GetColor()
+                  for actor in viewport._ruler_actors[-2:]]
+        assert colors[0][0] > colors[0][2]
+        assert colors[1][2] > colors[1][0]
+    finally:
+        viewport.destroy()
