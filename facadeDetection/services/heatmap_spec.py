@@ -140,10 +140,8 @@ def bipolar_colormap(signed_values_mm, limit_mm, scale_mm=None):
 
     t = np.clip(excess / scale, 0.0, 1.0)
 
-    # Keep a visible neutral buffer around the acceptance boundary.  This is
-    # deliberately continuous: colour starts at neutral and only reaches a
-    # saturated warm/cool hue after the excess becomes material.
-    neutral_width = 0.20
+    # 整个超限量范围参与渐变，仅在到达色带端点时完全饱和。
+    neutral_width = 1.0
     q = np.clip(t / neutral_width, 0.0, 1.0)
     neutral = np.array((158 / 255.0, 178 / 255.0, 158 / 255.0), dtype=np.float32)
 

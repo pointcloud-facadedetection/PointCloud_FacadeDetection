@@ -152,3 +152,14 @@ def test_global_vmax_uses_robust_range_instead_of_single_outlier():
     assert robust < 0.085845
     assert robust >= 0.0096
     assert actual == pytest.approx(0.085845)
+
+
+def test_bipolar_midrange_is_not_fully_saturated():
+    from services.heatmap_spec import bipolar_colormap
+    middle = bipolar_colormap([-12.0, 12.0], 8.0, scale_mm=16.0)
+    warm_end = bipolar_colormap([-24.0], 8.0, scale_mm=16.0)[0]
+    cold_end = bipolar_colormap([24.0], 8.0, scale_mm=16.0)[0]
+    assert not np.allclose(middle[0], warm_end)
+    assert not np.allclose(middle[1], cold_end)
+    assert middle[0, 1] > warm_end[1]
+    assert middle[1, 0] > cold_end[0]

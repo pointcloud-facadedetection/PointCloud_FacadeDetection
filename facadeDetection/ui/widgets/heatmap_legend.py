@@ -60,21 +60,22 @@ class HeatmapLegendWidget(QWidget):
         painter.setPen(QColor('#334155'))
         if method == 'global_plane':
             maximum = float(vmax) if vmax is not None else limit_mm
-            for rect, text, alignment in (
-                (QRectF(0, 24, self.width() / 3, 14),
-                 f'-{maximum:.4g}', Qt.AlignmentFlag.AlignLeft),
-                (QRectF(self.width() / 3, 24, self.width() / 3, 14),
-                 '0', Qt.AlignmentFlag.AlignCenter),
-                (QRectF(self.width() * 2 / 3, 24, self.width() / 3, 14),
-                 f'+{maximum:.4g}', Qt.AlignmentFlag.AlignRight),
-                (QRectF(0, 38, self.width() / 3, 14),
-                 f'-{limit_mm:.4g}', Qt.AlignmentFlag.AlignLeft),
-                (QRectF(self.width() / 3, 38, self.width() / 3, 14),
-                 '阈值 mm', Qt.AlignmentFlag.AlignCenter),
-                (QRectF(self.width() * 2 / 3, 38, self.width() / 3, 14),
-                 f'+{limit_mm:.4g}', Qt.AlignmentFlag.AlignRight),
-            ):
-                painter.drawText(rect, alignment, text)
+            tick_values = np.linspace(-maximum, maximum, 7)
+            cell_width = self.width() / 7
+            painter.save()
+            font = painter.font()
+            font.setPixelSize(9)
+            painter.setFont(font)
+            for index, value in enumerate(tick_values):
+                x = 6 + index * (width - 1) / 6
+                painter.drawLine(round(x), 21, round(x), 24)
+                rect = QRectF(index * cell_width, 25, cell_width, 14)
+                text = '0' if index == 3 else f'{value:.3g}'
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+            painter.restore()
+            painter.drawText(
+                QRectF(0, 40, self.width(), 14),
+                Qt.AlignmentFlag.AlignCenter, f'阈值 ±{limit_mm:.3g} mm')
         else:
             left = f'限值 {limit_mm:.4g}'
             right = f'最大 {float(vmax):.4g}' if vmax is not None else '超限'
