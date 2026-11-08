@@ -4,6 +4,41 @@ import cv2
 from algorithms.geometry import plane_axes
 
 
+def _continuous_signed_overlay(values, pixel_ids, facade_mask, limit_m,
+                               physical_cell_m, pixel_size, colormap):
+    h, w = facade_mask.shape
+    count = np.bincount(pixel_ids, minlength=h * w).reshape(h, w)
+    sums = np.bincount(pixel_ids, weights=values,
+                       minlength=h * w).reshape(h, w)
+    occupied = count > 0
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+    smooth = np.full((h, w), np.nan, dtype=np.float32)
+    if not np.any(occupied):
+        return overlay, smooth
+    samples = np.zeros((h, w), dtype=np.float32)
+    samples[occupied] = (sums[occupied] / count[occupied]).astype(np.float32)
+    sigma = max(0.8, min(3.0, float(physical_cell_m or 0.06)
+                         / max(4.0 * float(pixel_size), 1e-6)))
+    occupied_f = occupied.astype(np.float32)
+    weights = cv2.GaussianBlur(occupied_f, (0, 0), sigma)
+    weighted = cv2.GaussianBlur(samples * occupied_f, (0, 0), sigma)
+    interpolated = weighted / np.maximum(weights, 1e-6)
+    distance = cv2.distanceTransform(
+        (~occupied).astype(np.uint8), cv2.DIST_L2, 3)
+    support = ((weights > 0.02) & (distance <= max(2.0, sigma * 3.0))
+               & facade_mask)
+    if not np.any(support):
+        return overlay, smooth
+    smooth[support] = interpolated[support]
+    colors = colormap(smooth[support] * 1000.0, limit_m * 1000.0)
+    overlay[:, :, :3][support] = np.clip(colors * 255, 0, 255).astype(np.uint8)
+    coverage = np.clip(weights * 4.0, 0.0, 1.0)
+    alpha = np.where(np.abs(smooth) > limit_m, 225.0, 110.0)
+    overlay[:, :, 3][support] = np.clip(
+        alpha[support] * coverage[support], 0, 255).astype(np.uint8)
+    return overlay, smooth
+
+
 def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
                      pixel_size=0.01, max_size=6000, defect_colors=None,
                      vmin=None, vmax=None, base_points=None, base_colors=None,
@@ -12,7 +47,9 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
                      gaussian_sigma=None,
                      min_splat_px=4,
                      uv_range=None,
-                     max_pixels=12_000_000):
+                     max_pixels=12_000_000,
+                     continuous_signed=False,
+                     continuous_colormap=None):
     """将点云 + 缺陷值栅格化为底图 + 热力叠加图。
 
     Parameters
@@ -169,14 +206,16 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
 
     # ==================== 缺陷热力图 ====================
     abs_gap = np.abs(gaps)
-    defect = np.isfinite(abs_gap) & (abs_gap > float(defect_limit))
-    values = abs_gap[defect]
+    finite = np.isfinite(abs_gap)
+    defect = finite & (abs_gap > float(defect_limit))
+    render_mask = finite if continuous_signed else defect
+    values = gaps[render_mask] if continuous_signed else abs_gap[defect]
 
     if vmax is not None:
         vmax = float(vmax)
     else:
         vmax = max(
-            float(np.percentile(values, 98)) if values.size
+            float(np.percentile(np.abs(values), 98)) if values.size
             else float(defect_limit) * 1.05,
             float(defect_limit) * 1.05,
         )
@@ -186,7 +225,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
     if defect_colors is not None:
         supplied = np.asarray(defect_colors, dtype=np.float32).reshape(-1, 3)
         if len(supplied) == len(pts):
-            heat = np.clip(supplied[defect], 0.0, 1.0)
+            heat = np.clip(supplied[render_mask], 0.0, 1.0)
         elif len(supplied) == len(values):
             heat = np.clip(supplied, 0.0, 1.0)
         else:
@@ -210,17 +249,24 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
         heat[mask3, 1] = 0.5 - 0.5 * tt3
         heat[mask3, 2] = 0.0
 
-    defect_indices = np.flatnonzero(defect)
+    render_indices = np.flatnonzero(render_mask)
 
     # ==================== 缺陷热力 physical-footprint 渲染 ====================
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
     pixel_values = np.full(h * w, -np.inf, dtype=np.float32)
-    pixel_ids = flat[defect_indices]
+    pixel_ids = flat[render_indices]
+    continuous_values = None
 
     if len(pixel_ids):
-        np.maximum.at(pixel_values, pixel_ids, values)
+        np.maximum.at(pixel_values, pixel_ids, np.abs(values))
 
-    if len(pixel_ids) > 0:
+    if continuous_signed:
+        if continuous_colormap is None:
+            raise ValueError('continuous_colormap is required for signed heatmaps')
+        overlay, continuous_values = _continuous_signed_overlay(
+            values, pixel_ids, facade_mask, float(defect_limit),
+            physical_cell_m, size, continuous_colormap)
+    elif len(pixel_ids) > 0:
         if len(pixel_ids) > 1:
             order = np.argsort(-np.abs(values), kind="stable")
             sorted_px = pixel_ids[order]
@@ -326,6 +372,7 @@ def rasterize_facade(points, colors, plane_model, defect_values, defect_limit,
         'count': count,
         'defect_mask': defect,
         'uv': uv,
-        'pixel_defect_values': pixel_values.reshape(h, w),
+        'pixel_defect_values': (continuous_values if continuous_signed
+                                else pixel_values.reshape(h, w)),
         'pixel_defect_abs': pixel_values.reshape(h, w),
     }

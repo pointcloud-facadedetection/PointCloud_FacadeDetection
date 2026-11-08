@@ -173,6 +173,8 @@ class FacadeHeatmapTripletRenderer:
             physical_cell_m=physical_cell_m,
             min_splat_px=4,
             uv_range=uv_range,          # ★ 显式画布边界
+            continuous_signed=(method == 'global_plane'),
+            continuous_colormap=bipolar_colormap,
         )
 
         # 靠尺法不是连续数值热力图：只显示实际检测失败的靠尺位置。
@@ -566,18 +568,13 @@ class FacadeHeatmapTripletRenderer:
     @staticmethod
     def _prepare_global_plane_point_samples(points, windows, spec, quality,
                                              metric='flatness'):
-        """模拟墙面专用：每个超阈值点作为一个 splat 中心。
+        """模拟墙面：优先用质量域全部有效样本构造连续有符号偏差场。
 
-        语义严格的四类候选（全部为 raw_global_row 语义，可直接索引
-        ``processed_raw_points``）：
-
-          1) quality['defect_samples'][metric]['raw_ids']
-          2) quality['defect_samples'][metric]['source_rows']
-             + quality['__global_indices']
-          3) windows[].defect_point_rows + quality['__global_indices']
-          4) windows[].defect_point_indices
+        大质量域均匀抽样并保留极端偏差。旧结果缺少质量域或平面时，
+        回退到 raw_global_row 语义的超阈值样本：defect_samples、
+        windows.defect_point_rows 或 windows.defect_point_indices。
         """
-        source = np.asarray(points, dtype=float).reshape(-1, 3)
+        source = np.asarray(points).reshape(-1, 3)
         if len(source) == 0:
             return None
         n_source = int(len(source))
@@ -587,6 +584,12 @@ class FacadeHeatmapTripletRenderer:
                    if raw_ids_src is not None
                    else np.empty(0, dtype=np.int64))
         n_raw = int(len(raw_ids))
+        if n_raw == 0 and quality.get('quality_artifact_path'):
+            from services.dal.results_repo import ResultsRepo
+            ResultsRepo.ensure_global_indices(quality)
+            raw_ids = np.asarray(
+                quality.get('__global_indices') or [], dtype=np.int64).reshape(-1)
+            n_raw = int(len(raw_ids))
 
         profile = quality.get('profile_snapshot', {}) or {}
         limit = float(profile.get(
@@ -713,6 +716,38 @@ class FacadeHeatmapTripletRenderer:
                     dists = np.sum((source - c) ** 2, axis=1)
                     rows_fallback.append(int(np.argmin(dists)))
                 _push(rows_fallback, center_values, 'fallback.window_centers_nearest')
+
+        geometry = quality.get('facade_geometry') or {}
+        plane = geometry.get('plane_model')
+        if plane is None:
+            plane = (quality.get('overall') or {}).get('plane_model')
+        if n_raw and plane is not None:
+            plane = np.asarray(plane, dtype=np.float64).reshape(4)
+            normal_length = float(np.linalg.norm(plane[:3]))
+            domain_rows = raw_ids[(raw_ids >= 0) & (raw_ids < n_source)]
+            if normal_length > 1e-12 and len(domain_rows):
+                plane = plane / normal_length
+                if len(domain_rows) > 500_000:
+                    positions = np.linspace(
+                        0, len(domain_rows) - 1, 500_000, dtype=np.int64)
+                    selected_rows = domain_rows[positions]
+                    if candidates:
+                        defect_rows, defect_values, _ = max(
+                            candidates, key=lambda candidate: len(candidate[0]))
+                        extreme = np.argsort(
+                            -np.abs(defect_values), kind='stable')[:100_000]
+                        selected_rows = np.union1d(
+                            selected_rows, defect_rows[extreme])
+                else:
+                    selected_rows = domain_rows
+                centers = np.asarray(source[selected_rows], dtype=np.float64)
+                sel_values = (centers @ plane[:3] + plane[3]) * 1000.0
+                finite = np.isfinite(sel_values)
+                centers, sel_values = centers[finite], sel_values[finite]
+                print(f'[PCFD] defect.samples: metric={metric} '
+                      f'source=quality_domain.continuous matched={len(centers)}/{n_raw}',
+                      flush=True)
+                return centers, sel_values, bipolar_colormap(sel_values, limit)
 
         # ============ 选择：raw_global_row 语义候选，全部落空即失败 ============
         if not candidates:
@@ -1073,12 +1108,9 @@ class FacadeHeatmapTripletRenderer:
         ))
         limit_m = limit_mm / 1000.0
 
-        pts_arr = np.asarray(points, dtype=float).reshape(-1, 3)
+        pts_arr = np.asarray(points).reshape(-1, 3)
         merged_base = (pts_arr if len(pts_arr)
                        else np.asarray(defect_points, dtype=float).reshape(-1, 3))
-
-        base_colors = np.full((len(merged_base), 3),
-                              [0.80, 0.83, 0.86], dtype=float)
 
         excess = np.maximum(np.abs(values) - limit_mm, 0.0)
         vmax_m = (
@@ -1105,10 +1137,12 @@ class FacadeHeatmapTripletRenderer:
             projection_u_axis=quality.get("projection_u_axis"),
             projection_v_axis=quality.get("projection_v_axis"),
             base_points=merged_base,
-            base_colors=base_colors,
+            base_colors=None,
             physical_cell_m=physical_cell_m,
             min_splat_px=4,
             uv_range=uv_range,          # ★ 显式画布边界
+            continuous_signed=(method == 'global_plane'),
+            continuous_colormap=bipolar_colormap,
         )
 
         overlay_rgba = raster["overlay_rgba"].copy()

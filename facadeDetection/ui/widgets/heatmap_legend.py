@@ -12,7 +12,7 @@ class HeatmapLegendWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.metadata = None
-        self.setMinimumSize(190, 70)
+        self.setMinimumSize(190, 78)
         self.setToolTip('颜色与导出热力图一致；数值为当前立面实际毫米范围')
 
     def set_metadata(self, metadata):
@@ -59,19 +59,31 @@ class HeatmapLegendWidget(QWidget):
         vmax = self.metadata.get('vmax_mm')
         painter.setPen(QColor('#334155'))
         if method == 'global_plane':
-            negative = '内陷' if metric == 'verticality' else '凹陷'
-            positive = '外倾' if metric == 'verticality' else '凸起'
-            left = f'{negative} -{float(vmax):g}' if vmax is not None else negative
-            right = f'{positive} +{float(vmax):g}' if vmax is not None else positive
+            maximum = float(vmax) if vmax is not None else limit_mm
+            for rect, text, alignment in (
+                (QRectF(0, 24, self.width() / 3, 14),
+                 f'-{maximum:.4g}', Qt.AlignmentFlag.AlignLeft),
+                (QRectF(self.width() / 3, 24, self.width() / 3, 14),
+                 '0', Qt.AlignmentFlag.AlignCenter),
+                (QRectF(self.width() * 2 / 3, 24, self.width() / 3, 14),
+                 f'+{maximum:.4g}', Qt.AlignmentFlag.AlignRight),
+                (QRectF(0, 38, self.width() / 3, 14),
+                 f'-{limit_mm:.4g}', Qt.AlignmentFlag.AlignLeft),
+                (QRectF(self.width() / 3, 38, self.width() / 3, 14),
+                 '阈值 mm', Qt.AlignmentFlag.AlignCenter),
+                (QRectF(self.width() * 2 / 3, 38, self.width() / 3, 14),
+                 f'+{limit_mm:.4g}', Qt.AlignmentFlag.AlignRight),
+            ):
+                painter.drawText(rect, alignment, text)
         else:
-            left = f'限值 {limit_mm:g}'
-            right = f'最大 {float(vmax):g}' if vmax is not None else '超限'
-        painter.drawText(QRectF(0, 26, self.width() / 3, 16),
-                         Qt.AlignmentFlag.AlignLeft, left)
-        painter.drawText(QRectF(self.width() / 3, 26, self.width() / 3, 16),
-                         Qt.AlignmentFlag.AlignCenter, f'{limit_mm:g} mm')
-        painter.drawText(QRectF(self.width() * 2 / 3, 26, self.width() / 3, 16),
-                         Qt.AlignmentFlag.AlignRight, right)
+            left = f'限值 {limit_mm:.4g}'
+            right = f'最大 {float(vmax):.4g}' if vmax is not None else '超限'
+            painter.drawText(QRectF(0, 26, self.width() / 3, 16),
+                             Qt.AlignmentFlag.AlignLeft, left)
+            painter.drawText(QRectF(self.width() / 3, 26, self.width() / 3, 16),
+                             Qt.AlignmentFlag.AlignCenter, f'{limit_mm:.4g} mm')
+            painter.drawText(QRectF(self.width() * 2 / 3, 26, self.width() / 3, 16),
+                             Qt.AlignmentFlag.AlignRight, right)
         painter.setPen(QColor('#64748B'))
         if method == 'global_plane':
             positive_text = '外倾' if metric == 'verticality' else '凸起'
@@ -79,7 +91,7 @@ class HeatmapLegendWidget(QWidget):
             note = f'蓝色={positive_text}  红色={negative_text}'
         else:
             note = '颜色表示偏差量（mm）'
-        painter.drawText(QRectF(0, 46, self.width(), 18),
+        painter.drawText(QRectF(0, 56, self.width(), 18),
                          Qt.AlignmentFlag.AlignCenter, note)
         painter.setPen(QPen(QColor('#CBD5E1'), 1))
         painter.drawRect(6, 6, max(1, self.width() - 12), 14)

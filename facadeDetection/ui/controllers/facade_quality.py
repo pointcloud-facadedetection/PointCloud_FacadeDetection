@@ -402,9 +402,7 @@ class FacadeQualityController(QObject):
         #   defect_point_indices 是原始全局行号（raw_global_rows），
         #   若传入子集会导致索引错位或越界。
         points = np.asarray(dataset.processed_raw_points)
-        colors = np.tile(np.asarray(self.render_service.facade_color_for(
-            facade, facade.get('display_no')), dtype=float),
-            (len(points), 1))
+        colors = None
         context = quality.setdefault('__export_context', {})
         results_dir = context.get('results_dir')
         if not results_dir:

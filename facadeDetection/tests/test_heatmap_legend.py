@@ -92,3 +92,52 @@ def test_raster_limit_matches_review_uv_reconstruction():
     assert _HEATMAP_MAX_SIZE == 4096
     signature = inspect.signature(transparent_png_uv_rect)
     assert signature.parameters['max_size'].default == 4096
+
+
+def test_global_samples_include_signed_pass_values_from_quality_domain():
+    points = np.array([
+        [-0.002, 0.0, 0.0],
+        [0.000, 1.0, 0.0],
+        [0.006, 2.0, 0.0],
+    ], dtype=np.float32)
+    quality = {
+        '__global_indices': np.arange(3),
+        'facade_geometry': {'plane_model': [1.0, 0.0, 0.0, 0.0]},
+        'thresholds': {'flatness_limit_mm': 4.0},
+    }
+    centers, values, _colors = FacadeHeatmapTripletRenderer._prepare_global_plane_point_samples(
+        points, [], heatmap_spec('global_plane_flatness_area'), quality)
+    assert np.allclose(centers, points)
+    assert np.allclose(values, [-2.0, 0.0, 6.0])
+    assert np.any(np.abs(values) <= 4.0), '连续场必须包含阈值内样本'
+
+
+def test_continuous_signed_raster_has_smooth_values_and_preserves_holes():
+    from algorithms.facade.projection import rasterize_facade
+    from services.heatmap_spec import bipolar_colormap
+
+    y, z = np.meshgrid(np.arange(9, dtype=float), np.arange(9, dtype=float))
+    points = np.column_stack([
+        np.linspace(-0.006, 0.006, y.size), y.ravel(), z.ravel()])
+    values = points[:, 0].copy()
+    raster = rasterize_facade(
+        points, None, [1.0, 0.0, 0.0, 0.0], values, 0.004,
+        pixel_size=1.0, base_points=points, physical_cell_m=2.0,
+        continuous_signed=True, continuous_colormap=bipolar_colormap)
+    overlay = raster['overlay_rgba']
+    occupied = overlay[:, :, 3] > 0
+    assert np.any(overlay[:, :, 3] == 110), '阈值内使用中性半透明色'
+    assert np.any(overlay[:, :, 3] == 225), '超限使用高亮红/蓝'
+    assert len(np.unique(overlay[:, :, :3][occupied].reshape(-1, 3), axis=0)) > 5
+
+    corners = np.array([
+        [-0.006, 0.0, 0.0], [0.006, 8.0, 0.0],
+        [0.000, 0.0, 8.0], [0.000, 8.0, 8.0],
+    ])
+    sparse = rasterize_facade(
+        corners, None, [1.0, 0.0, 0.0, 0.0], corners[:, 0], 0.004,
+        pixel_size=1.0, base_points=corners, physical_cell_m=1.0,
+        uv_range=(0.0, 0.0, 8.0, 8.0), continuous_signed=True,
+        continuous_colormap=bipolar_colormap)
+    center_alpha = sparse['overlay_rgba'][4, 4, 3]
+    assert center_alpha == 0, '无采样的大空洞不得插值填色'
