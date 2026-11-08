@@ -94,11 +94,11 @@ class TestUploadPrepareCommitSplit:
         svc, pointcloud, viewport, render = _make_service()
 
         load_threads = []
-        real_load = svc._load_point_cloud
+        real_load = svc._load_point_cloud_features
         def counting_load(path):
             load_threads.append(threading.get_ident())
             return real_load(path)
-        svc._load_point_cloud = counting_load
+        svc._load_point_cloud_features = counting_load
 
         holder = {}
         def work():
@@ -106,7 +106,7 @@ class TestUploadPrepareCommitSplit:
             holder['prepared'] = svc.prepare_upload(None, str(ply))
             holder['elapsed'] = time.perf_counter() - t0
         t0 = time.perf_counter()
-        raw_pts, raw_cols = real_load(str(ply))  # 基线：真实读盘耗时（不计入后台线程断言）
+        raw_pts, raw_cols, _intensity = real_load(str(ply))  # 基线：真实读盘耗时（不计入后台线程断言）
         t_real_read = time.perf_counter() - t0
         thread = threading.Thread(target=work)
         thread.start()
@@ -217,11 +217,11 @@ class TestFlsImportBackgroundable:
 
         svc, pointcloud, viewport, render = _make_service()
         load_threads = []
-        real_load = svc._load_point_cloud
+        real_load = svc._load_point_cloud_features
         def counting_load(path):
             load_threads.append(threading.get_ident())
             return real_load(path)
-        svc._load_point_cloud = counting_load
+        svc._load_point_cloud_features = counting_load
 
         progress = []
         holder = {}

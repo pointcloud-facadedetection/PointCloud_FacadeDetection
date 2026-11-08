@@ -43,8 +43,10 @@ def initial_view_from_asset(asset):
     metadata = dict(asset.meta_json or {})
     cache_path = Path(metadata.get('cache_path') or '')
     if cache_path.is_file():
-        sidecar = cache_path.with_suffix('.json')
-        if sidecar.is_file():
+        sidecar = next((path for path in (
+            cache_path.with_suffix('.ply.json'), cache_path.with_suffix('.json'))
+            if path.is_file()), None)
+        if sidecar is not None:
             try:
                 metadata.update(json.loads(sidecar.read_text(encoding='utf-8')))
             except (OSError, ValueError, json.JSONDecodeError):

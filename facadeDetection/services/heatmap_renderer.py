@@ -137,12 +137,10 @@ class FacadeHeatmapTripletRenderer:
         ))
         limit_m = limit_mm / 1000.0
 
-        pts_arr = np.asarray(points, dtype=float).reshape(-1, 3)
+        # 保留原始点 dtype，避免数千万 float32 点被复制为 float64。
+        pts_arr = np.asarray(points).reshape(-1, 3)
         merged_base = (pts_arr if len(pts_arr)
                        else np.asarray(defect_points, dtype=float).reshape(-1, 3))
-
-        base_colors = np.full((len(merged_base), 3),
-                              [0.80, 0.83, 0.86], dtype=float)
 
         excess = np.maximum(np.abs(values) - limit_mm, 0.0)
         vmax_m = (
@@ -169,7 +167,9 @@ class FacadeHeatmapTripletRenderer:
             projection_u_axis=quality.get("projection_u_axis"),
             projection_v_axis=quality.get("projection_v_axis"),
             base_points=merged_base,
-            base_colors=base_colors,
+            # None 表示统一底色，由 rasterize_facade 在像素层生成；禁止
+            # 分配 (原始点数, 3) 的常量 float64 数组。
+            base_colors=None,
             physical_cell_m=physical_cell_m,
             min_splat_px=4,
             uv_range=uv_range,          # ★ 显式画布边界

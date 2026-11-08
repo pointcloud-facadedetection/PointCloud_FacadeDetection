@@ -182,6 +182,10 @@ class ResultExportService:
                     if img is None:
                         paths[key] = None
                         continue
+                    # transparent 在下方以固定命名写出，不在 triplet 循环
+                    # 重复落盘。
+                    if key == 'transparent':
+                        continue
                     suffix = {
                         'overlay': '_overlay.png',
                         'heatmap_grid': '_heatmap_grid.png',
@@ -205,6 +209,8 @@ class ResultExportService:
                 # ---- 透明热力图（仅热力层，用于照片叠加） ----
                 transparent_path = root / f'{prefix}_transparent.png'
                 try:
+                    # render 已返回与 overlay 同源、同 UV 画布的透明层。
+                    # 禁止再次完整渲染（此前每个模式重复投影全部原始点）。
                     transparent = triplet.get('transparent')
                     if transparent is not None:
                         self._safe_imwrite(transparent_path, transparent)

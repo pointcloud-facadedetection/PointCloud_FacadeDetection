@@ -1,6 +1,7 @@
-"""方向桶 × 深度层种子生成 v2：深度间隙切割 + Hough 验证融合 + 密度门控。
+"""方向桶 × 深度层种子生成 v3：全主朝向建桶 + 排序间隙分层 + ρ-Hough 校验
++ 残余方向（bin_idx=-2）补充通道。
 
-1. 【硬约束】深度分层由「排序 + 间隙切割」：
+1. 【硬性约束】深度分层由「排序 + 间隙切割」：
    ρ 升序排序后，相邻间隙 > ``FACADE_DEPTH_LAYER_HARD_M``(5cm) 即切层。
    性质保证：
      - 任意两个不同层的 ρ 代表值之差 > 5cm（切点即 >5cm 的间隙）；
@@ -8,14 +9,18 @@
        即同层在深度方向连续——满足「相邻空间域候选深度差 >5cm 必分割」。
 2. 【双归属落地】``FACADE_LAYER_BOUNDARY_EPS_M`` 真正生效：切点两侧 ε 带内
    的点同时归属相邻两层，避免硬切把同一面劈成两半（层合并阶段再去重）。
-3. 【Hough 融合】每个方向桶内先跑 ``rho_hough_peaks`` 得到投票层中心，
-   与间隙切割层互相校验：
-     - 间隙切割有、Hough 也有的层 → 用 Hough 峰值精化 rho_center；
-     - Hough 有、间隙切割没有的层（稀疏区连通域断裂所致）→ 以 Hough 层
-       中心 ±bin 直接补种（sparse 补种通道，用更宽的距离窗收集点）；
-     - 间隙切割有、Hough 无 → 保留（切割更保守，不误杀）。
-4. 【密度门控】接入 density_estimator：单元/连通域级 'skip' 直接跳过；
-   'sparse' 放宽 min_pts 并允许 Hough 补种。
+3. 【Hough 定位修正】主方向域内 ρ-Hough 仅做层中心校验/精化（原"断裂层
+   补种"经两次运行证明几何上不可触发：真实层峰必落在某层中位数 2.5cm 内，
+   断裂层残余峰又落在相邻层内部——已删除）。Hough 改派到补充通道：残余
+   方向域的点云碎、稀，ρ 投票按支持度直接发现层中心，是 Hough 的结构性
+   优势场景。
+4. 【全主朝向建桶】`_quantize_directions` 使用 `_estimate_principal_directions`
+   返回的【全部】主朝向（各 +{0,90,180,270}°，5° 内去重），不再只用第 1 个。
+   非正交第二朝向的墙面此前整面落入 bin_idx=-2 而永不种子。
+5. 【补充通道】对 bin_idx=-2 的弧外残余竖直点做二次方向发现 → ρ-Hough
+   层中心 → ±2.5cm 成窗 → 3D 连通域成种，与主链完全相同的门控格式。
+6. 【密度门控】接入 density_estimator：单元/连通域级 'skip' 直接跳过；
+   'sparse' 放宽 min_pts。
 """
 from __future__ import annotations
 
@@ -40,12 +45,19 @@ except Exception:  # 密度模块缺失时优雅降级为旧行为
 
 
 # ---------------------------------------------------------------------------
-# A. 方向桶化（沿用 v1，未改动）
+# A. 方向桶化
 # ---------------------------------------------------------------------------
 
 def _estimate_principal_directions(normals, vertical_nz=0.30,
-                                   min_support_ratio=0.01):
-    """从 ROI 法向估计建筑主朝向 azimuth（Top-2 峰），返回弧度。"""
+                                   min_support_ratio=0.01,
+                                   min_peak_spacing_deg=45.0,
+                                   max_peaks=4):
+    """从 ROI 法向估计建筑主朝向 azimuth（贪心 Top-K 峰），返回弧度。
+
+    多建筑场景下（如并排双塔），Top-2 只能覆盖一个建筑的两个主立面。
+    贪心选取最多 max_peaks 个不重叠峰（最小间距 min_peak_spacing_deg），
+    确保所有建筑主朝向都被方向桶覆盖。
+    """
     valid = np.abs(normals[:, 2]) <= float(vertical_nz)
     if not np.any(valid):
         return []
@@ -66,12 +78,22 @@ def _estimate_principal_directions(normals, vertical_nz=0.30,
             peaks.append((float((edges[i] + edges[i + 1]) * 0.5),
                           float(smooth[i])))
     peaks.sort(key=lambda x: -x[1])
-    if len(peaks) >= 2:
-        az0, az1 = peaks[0][0], peaks[1][0]
-        diff = float(abs(np.mod(az1 - az0 + np.pi, 2.0 * np.pi) - np.pi))
-        if diff >= np.deg2rad(60.0):
-            return [az0, az1]
-    return [peaks[0][0]] if peaks else []
+
+    # 贪心选取不重叠峰
+    selected = []
+    min_rad = np.deg2rad(float(min_peak_spacing_deg))
+    for az_peak, support in peaks:
+        isolated = True
+        for s in selected:
+            diff = float(abs(np.mod(az_peak - s + np.pi, 2.0 * np.pi) - np.pi))
+            if diff < min_rad:
+                isolated = False
+                break
+        if isolated:
+            selected.append(az_peak)
+        if len(selected) >= int(max_peaks):
+            break
+    return selected
 
 
 def _circular_distance(a, b):
@@ -80,7 +102,12 @@ def _circular_distance(a, b):
 
 def _quantize_directions(normals, principal_azimuths, arc_half_deg=28.0,
                          vertical_nz=0.30, fallback_n_buckets=8):
-    """方向桶化。返回 (bin_idx, bucket_normals, buckets_meta)。与 v1 相同。"""
+    """方向桶化 v2：用【全部】主朝向建桶。
+
+    每个主朝向展开 {0,90,180,270}° 四个桶心，5° 以内去重；竖直点按最近
+    桶心分配，弧外点 bin_idx=-2（交由补充通道二次发现）。修复旧版只用
+    principal_azimuths[0] 导致非正交第二朝向整面墙永不种子的问题。
+    """
     n = len(normals)
     norms = np.linalg.norm(normals, axis=1, keepdims=True)
     n_unit = normals / np.where(norms > 1e-8, norms, 1.0)
@@ -94,19 +121,19 @@ def _quantize_directions(normals, principal_azimuths, arc_half_deg=28.0,
     bucket_normals_list = []
 
     if len(principal_azimuths) >= 1:
-        az0 = principal_azimuths[0]
-        used = []
-        for off in (0.0, np.pi / 2, np.pi, 3.0 * np.pi / 2):
-            c = float(np.mod(az0 + off, 2.0 * np.pi))
-            if any(_circular_distance(np.array([c]), uc)[0] < np.deg2rad(5.0)
-                   for uc in used):
-                continue
-            used.append(c)
-            bn = np.array([np.cos(c), np.sin(c), 0.0])
-            buckets_meta.append({"index": len(buckets_meta), "az_center": c,
-                                 "half_width": arc_half, "normal": bn,
-                                 "is_principal": True})
-            bucket_normals_list.append(bn)
+        used: List[float] = []
+        for az0 in principal_azimuths:
+            for off in (0.0, np.pi / 2, np.pi, 3.0 * np.pi / 2):
+                c = float(np.mod(az0 + off, 2.0 * np.pi))
+                if any(_circular_distance(np.array([c]), np.array([uc]))[0]
+                       < np.deg2rad(5.0) for uc in used):
+                    continue
+                used.append(c)
+                bn = np.array([np.cos(c), np.sin(c), 0.0])
+                buckets_meta.append({"index": len(buckets_meta), "az_center": c,
+                                     "half_width": arc_half, "normal": bn,
+                                     "is_principal": True})
+                bucket_normals_list.append(bn)
     else:
         for i in range(int(fallback_n_buckets)):
             c = 2.0 * np.pi * i / fallback_n_buckets
@@ -259,13 +286,13 @@ def split_depth_layers(rho: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# C. Hough 验证与补种
+# C. Hough 层中心校验（主方向域：仅校验/精化，不再补种）
 # ---------------------------------------------------------------------------
 
 def _hough_layer_centers(pts: np.ndarray, direction: np.ndarray,
                          hard_gap_m: float, min_support: int,
                          voxel_size: float) -> List[Dict[str, Any]]:
-    """在方向桶内做 ρ-Hough 投票，返回层中心列表。"""
+    """在方向域内做 ρ-Hough 投票，返回层中心列表。"""
     bin_size = min(max(float(voxel_size), 0.02), hard_gap_m * 0.5)
     peaks = rho_hough_peaks(
         pts, direction,
@@ -278,9 +305,13 @@ def _hough_layer_centers(pts: np.ndarray, direction: np.ndarray,
 
 
 def _match_hough_to_layers(hough_centers, layers, rho, hard_gap_m):
-    """把 Hough 层中心分配给间隙切割层；返回 (精化后的层中心, 未匹配 Hough 峰)。"""
+    """把 Hough 层中心分配给间隙切割层；返回精化后的层中心。
+
+    仅做校验/精化：匹配半径收紧到 hard_gap/2，保证精化后层间距仍 > 5cm。
+    （"未匹配峰补种"已删除——经两次运行 n_hough_rescued=0 证明该通道几何
+    上不可触发，见模块 docstring 第 3 条。）
+    """
     layer_rhos = [float(np.median(rho[layer])) for layer in layers]
-    unmatched = []
     for hc in hough_centers:
         best, best_d = -1, float('inf')
         for li, lr in enumerate(layer_rhos):
@@ -292,9 +323,134 @@ def _match_hough_to_layers(hough_centers, layers, rho, hard_gap_m):
             # Hough 峰精化层中心（仅当 Hough 支持度可观）
             if hc['support'] >= len(layers[best]) * 0.3:
                 layer_rhos[best] = hc['rho']
+    return layer_rhos
+
+
+# ---------------------------------------------------------------------------
+# C2. 补充通道：残余方向（bin_idx=-2）方向发现
+# ---------------------------------------------------------------------------
+
+def _discover_supplemental_directions(normals, mask, min_support,
+                                      max_dirs=4, bin_deg=5.0,
+                                      min_spacing_deg=20.0):
+    """在弧外残余竖直点上发现补充方向。
+
+    无向方位角 [0,π) 直方图 → 贪心不重叠峰（最小间距 min_spacing_deg）
+    → 峰内成员法向中位数精化（z 置零），绝不使用直方图 bin 中心作为
+    物理法向（bin 中心误差会在长墙上造成米级 ρ 漂移）。返回
+    [(direction, support), ...]，按支持度降序。
+    """
+    idx = np.flatnonzero(mask)
+    if len(idx) < max(20, int(min_support)):
+        return []
+    nrms = np.asarray(normals, dtype=np.float64)[idx]
+    az = np.mod(np.arctan2(nrms[:, 1], nrms[:, 0]), np.pi)
+    nbins = max(18, int(np.ceil(np.pi / np.deg2rad(float(bin_deg)))))
+    counts, edges = np.histogram(az, bins=nbins, range=(0.0, np.pi))
+    smooth = (np.convolve(counts.astype(float), [0.25, 0.5, 0.25], mode='same')
+              if len(counts) >= 3 else counts.astype(float))
+    peaks = []
+    for i in range(len(smooth)):
+        prev = smooth[i - 1] if i > 0 else 0.0
+        nxt = smooth[(i + 1) % len(smooth)]
+        if smooth[i] > prev and smooth[i] > nxt and smooth[i] >= min_support:
+            peaks.append((float((edges[i] + edges[i + 1]) * 0.5),
+                          float(smooth[i])))
+    peaks.sort(key=lambda x: -x[1])
+    selected = []
+    min_rad = float(np.deg2rad(min_spacing_deg))
+    for az_peak, _support in peaks:
+        if any(abs(az_peak - s) < min_rad for s in selected):
+            continue
+        selected.append(az_peak)
+        if len(selected) >= int(max_dirs):
+            break
+
+    az_deg = np.degrees(az)
+    half = float(bin_deg)
+    directions = []
+    for az_peak in selected:
+        members = idx[np.abs(az_deg - np.degrees(az_peak)) <= half]
+        if not len(members):
+            continue
+        d = np.median(np.asarray(normals, dtype=np.float64)[members], axis=0)
+        d[2] = 0.0
+        length = float(np.linalg.norm(d))
+        if length <= 1e-12:
+            continue
+        directions.append((d / length, int(len(members))))
+    return directions
+
+
+def _supplemental_layer_seeds(pts, nrms, global_ids, direction, layer_hard,
+                              grid_size, eff_seed_min, density_field,
+                              voxel_size):
+    """残余方向域成种：ρ-Hough 发现层中心 → ±2.5cm 成窗 → 3D 连通域。
+
+    残余域点云碎、稀，排序间隙切割会先切碎再补；ρ 投票按支持度直接给出
+    层中心，正是 Hough 的结构性优势场景（Hough 无峰时回退间隙切割）。
+    """
+    rho = pts @ direction
+    seeds = []
+    min_win = max(20, eff_seed_min // 2)
+    centers = _hough_layer_centers(
+        pts, direction, layer_hard,
+        min_support=min_win,
+        voxel_size=float(voxel_size))
+    if centers:
+        candidates = [(float(c['rho']), int(c['support'])) for c in centers]
+    else:
+        layers = split_depth_layers(rho, layer_hard, 0.0)
+        candidates = [(float(np.median(rho[layer])), int(len(layer)))
+                      for layer in layers if len(layer) >= min_win]
+
+    for rho_c, _support in candidates:
+        # Hough 仅作层中心，收集窗严禁超过 ±2.5cm（同主链唯一层中心门控），
+        # 否则会把相邻退台面吸入同一候选。
+        sel = np.abs(rho - rho_c) <= layer_hard * 0.5
+        sel_local = np.flatnonzero(sel)
+        if len(sel_local) < min_win:
+            continue
+        gids = global_ids[sel_local]
+        if density_field is not None:
+            lv = density_field.gate_indices(gids)
+            if lv == 'skip':
+                continue
+            comp_min = adaptive_min_count(eff_seed_min, lv)
         else:
-            unmatched.append(hc)
-    return layer_rhos, unmatched
+            comp_min = eff_seed_min
+        sub_pts = pts[sel_local]
+        sub_nrms = nrms[sel_local]
+        comps = connected_components_3d_grid(
+            sub_pts, grid_size=grid_size, min_points=comp_min)
+        if not comps:
+            continue
+        for comp_mask in comps:
+            comp_local = np.flatnonzero(comp_mask)
+            if len(comp_local) < comp_min:
+                continue
+            c_pts = sub_pts[comp_local]
+            c_nrms = sub_nrms[comp_local]
+            c_gids = gids[comp_local]
+            try:
+                model = fit_plane_weighted(c_pts, irls_iters=2)
+            except Exception:
+                continue
+            n_vec = model[:3] / (np.linalg.norm(model[:3]) + 1e-12)
+            if np.median(np.abs(c_nrms @ n_vec)) < np.cos(np.deg2rad(20.0)):
+                continue
+            seeds.append({
+                "direction": n_vec.copy(),
+                "rho": float(rho_c),
+                "spatial_ids": c_gids,
+                "support": int(len(c_gids)),
+                "plane_model": model.copy(),
+                "layer": -2,
+                "dir_bin": -3,               # 补充通道标记（<0，不参与桶隔离）
+                "density_level": 'dense',
+                "supplemental": True,
+            })
+    return seeds
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +460,7 @@ def _match_hough_to_layers(hough_centers, layers, rho, hard_gap_m):
 def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
                        voxel_size, elevations=None, scan_origin=None,
                        density_field=None):
-    """方向桶 × 深度层种子生成（v2）。
+    """方向桶 × 深度层种子生成（v3）。
 
     新增参数
     --------
@@ -346,6 +502,11 @@ def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
         fallback_n_buckets=int(getattr(Config, "FACADE_FALLBACK_BUCKETS", 8)),
     )
 
+    # bin 分布观测（长期保留）：-2=弧外残余，-1=水平
+    _uniq, _cnts = np.unique(bin_idx_local, return_counts=True)
+    trace("facade.bucket.bin_histogram",
+          bins={int(b): int(c) for b, c in zip(_uniq, _cnts)})
+
     layer_hard = float(getattr(Config, "FACADE_DEPTH_LAYER_HARD_M", 0.05))
     boundary_eps = min(float(getattr(Config, "FACADE_LAYER_BOUNDARY_EPS_M", 0.012)),
                        layer_hard * 0.25)
@@ -358,7 +519,6 @@ def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
     all_seeds: List[Dict[str, Any]] = []
     n_dir_buckets = 0
     n_skipped_sparse = 0
-    n_hough_rescued = 0
 
     for bmeta in buckets_meta:
         if bmeta.get("is_horizontal"):
@@ -391,9 +551,7 @@ def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
         # ---- B. 深度分层（排序+间隙切割，硬约束 5cm）----
         layers_local = split_depth_layers(rho, layer_hard, boundary_eps)
 
-        # ---- C. Hough 层中心验证与补种 ----
-        hough_centers = []
-        unmatched_hough = []
+        # ---- C. Hough 层中心校验/精化（不做补种）----
         layer_rhos = [float(np.median(rho[layer])) for layer in layers_local]
         if enable_hough_fusion and len(rho) >= eff_seed_min * 2:
             hough_centers = _hough_layer_centers(
@@ -401,10 +559,8 @@ def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
                 min_support=max(20, eff_seed_min // 2),
                 voxel_size=float(voxel_size))
             if hough_centers and layers_local:
-                layer_rhos, unmatched_hough = _match_hough_to_layers(
+                layer_rhos = _match_hough_to_layers(
                     hough_centers, layers_local, rho, layer_hard)
-            elif hough_centers:
-                unmatched_hough = hough_centers
 
         # ---- D. 逐层连通域 + 轻量拟合 ----
         for li, layer in enumerate(layers_local):
@@ -456,45 +612,48 @@ def build_bucket_seeds(points, normals, mask, ranges, tol, base, min_count,
                     "density_level": bucket_level,
                 })
 
-        # ---- E. Hough 补种：连通域断裂丢失的稀疏层 ----
-        for hc in unmatched_hough:
-            if hc['support'] < max(20, eff_seed_min // 2):
-                continue
-            # Hough 仅作补种中心，最终候选必须通过唯一层中心门控。
-            # 禁止使用 ±5cm/±10cm 窗口，否则会把相邻退台面吸入同一候选。
-            sel = np.abs(rho - hc['rho']) <= layer_hard * 0.5
-            sel_ids = bucket_global_ids[sel]
-            if len(sel_ids) < max(20, eff_seed_min // 2):
-                continue
-            if density_field is not None and \
-                    density_field.gate_indices(sel_ids) == 'skip':
-                continue
-            sub_pts = bucket_pts[np.isin(bucket_global_ids, sel_ids)]
-            sub_nrms = bucket_nrms[np.isin(bucket_global_ids, sel_ids)]
-            try:
-                model = fit_plane_weighted(sub_pts, irls_iters=irls_iters)
-            except Exception:
-                continue
-            n_vec = model[:3] / (np.linalg.norm(model[:3]) + 1e-12)
-            if np.median(np.abs(sub_nrms @ n_vec)) < np.cos(np.deg2rad(20.0)):
-                continue
-            all_seeds.append({
-                "direction": n_vec.copy(),
-                "rho": float(hc['rho']),
-                "spatial_ids": valid[sel_ids],
-                "support": int(hc['support']),
-                "plane_model": model.copy(),
-                "layer": -1,                 # Hough 补种层号独立
-                "dir_bin": bid,
-                "density_level": bucket_level,
-                "hough_rescued": True,
-            })
-            n_hough_rescued += 1
+    # ---- F. 补充通道：弧外残余方向（bin_idx=-2）----
+    n_supplemental = 0
+    if bool(getattr(Config, 'FACADE_SUPPLEMENTAL_ENABLE', True)):
+        sup_min_total = int(min_count * float(getattr(
+            Config, 'FACADE_SUPPLEMENTAL_MIN_TOTAL_RATIO', 0.5)))
+        sup_mask = bin_idx_local == -2
+        n_sup_points = int(np.count_nonzero(sup_mask))
+        if n_sup_points >= max(50, sup_min_total):
+            sup_ids = np.flatnonzero(sup_mask)
+            min_sup = max(50, seed_min_pts // 2)
+            sup_dirs = _discover_supplemental_directions(
+                nrms, sup_mask, min_support=min_sup,
+                max_dirs=int(getattr(Config, 'FACADE_SUPPLEMENTAL_MAX_DIRS', 4)))
+            sup_meta = []
+            arc_agree = np.cos(np.deg2rad(float(getattr(
+                Config, 'FACADE_DIR_ARC_HALF_DEG', 28.0))))
+            for direction, support in sup_dirs:
+                agree = np.abs(nrms[sup_ids] @ direction)
+                m = agree >= arc_agree
+                if int(np.count_nonzero(m)) < max(50, min_sup):
+                    continue
+                sel_ids = sup_ids[m]
+                new_seeds = _supplemental_layer_seeds(
+                    pts[sel_ids], nrms[sel_ids], valid[sel_ids], direction,
+                    layer_hard, grid_size, seed_min_pts, density_field,
+                    voxel_size)
+                all_seeds.extend(new_seeds)
+                n_supplemental += len(new_seeds)
+                sup_meta.append({
+                    'azimuth_deg': round(float(np.degrees(
+                        np.arctan2(direction[1], direction[0]))) % 360.0, 1),
+                    'support': int(support),
+                    'n_seeds': int(len(new_seeds)),
+                })
+            if sup_meta:
+                trace('facade.bucket.supplemental',
+                      points=int(n_sup_points), directions=sup_meta)
 
     trace("facade.bucket.done",
           n_dir_buckets=n_dir_buckets,
           n_seeds=len(all_seeds),
-          n_hough_rescued=n_hough_rescued,
+          n_supplemental=n_supplemental,
           n_skipped_sparse=n_skipped_sparse,
           seconds=f"{time.perf_counter()-started:.2f}")
     return all_seeds

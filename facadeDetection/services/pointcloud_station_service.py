@@ -13,7 +13,7 @@ from algorithms.geometry import (
     build_proxy_domain, stratified_proxy_build, estimate_elevation_angles,
 )
 from utils.dist_reader import read_dist
-from utils.ply_fast_reader import read_ply_fast
+from utils.ply_fast_reader import read_ply_fast, read_ply_features_fast
 from config.storage import Storage
 import uuid
 
@@ -167,14 +167,66 @@ class PointCloudStationService:
         return points, colors
 
     @staticmethod
+    def _load_native_intensity(path):
+        """仅读取 PLY 原生 intensity；RGB 不作为反射强度替代品。"""
+        if Path(path).suffix.lower() != '.ply':
+            return None
+        # 先只读 PLY 头判断属性是否存在。绝大多数旧资产没有 intensity，
+        # 此时不得创建/切片 memmap，否则代理缓存命中后仍会换入原始点页，
+        # 破坏“重开项目零 raw gather”的性能契约。
+        try:
+            header_lines = []
+            with open(path, 'rb') as stream:
+                for _ in range(512):
+                    line = stream.readline()
+                    if not line:
+                        return None
+                    header_lines.append(line.strip().lower())
+                    if line.strip().lower() == b'end_header':
+                        break
+                else:
+                    return None
+            if not any(line in (b'property float intensity',
+                                b'property float32 intensity',
+                                b'property double intensity',
+                                b'property float64 intensity')
+                       for line in header_lines):
+                return None
+        except OSError:
+            return None
+        payload = read_ply_features_fast(path)
+        return None if payload is None else payload[2]
+
+    @staticmethod
+    def _aggregate_proxy_intensity(source_intensity, offsets, indices):
+        """按 proxy→source CSR 稳健聚合点级原生强度。"""
+        if source_intensity is None:
+            return None
+        values = np.asarray(source_intensity, dtype=np.float32).reshape(-1)
+        offsets = np.asarray(offsets, dtype=np.int64).reshape(-1)
+        indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+        if len(offsets) < 2 or len(indices) != int(offsets[-1]):
+            return None
+        result = np.full(len(offsets) - 1, np.nan, dtype=np.float32)
+        for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+            ids = indices[start:end]
+            ids = ids[(ids >= 0) & (ids < len(values))]
+            if len(ids):
+                finite = values[ids]
+                finite = finite[np.isfinite(finite)]
+                if len(finite):
+                    result[row] = np.median(finite)
+        return result
+
+    @staticmethod
     def _global_coordinate_metadata(path):
         """Audit the export matrix without transforming runtime point data."""
         ply = Path(path)
-        # FLS 输出：.json sidecar；E57 cache：.json sidecar
+        # E57 新侧载为 .ply.json，旧缓存和 FLS 继续使用 .json。
         candidates = (
+            ply.with_suffix('.ply.json'),
             ply.with_suffix('.json'),
             ply.parent / 'pointclouds' / f'{ply.stem}.json',
-            ply.with_suffix('.json'),
         )
         json_path = next((item for item in candidates if item.exists()), None)
         metadata = {'coordinate_frame': 'global',
@@ -257,6 +309,9 @@ class PointCloudStationService:
             proxy_cache.save_raw_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 points=points, colors=colors)
+        # 原生 intensity 保存在规范化 PLY 的独立标量属性中。旧 raw/proxy
+        # 缓存尚未包含该数组，因此这里按资产读取一次并随后同步到代理域。
+        source_intensity = self._load_native_intensity(station.source_path)
         source_id = f'{dataset_id}:source'
         state = _normalize_denoise_state(PointCloudStationRepo.get_denoise_state(
             self.project_uuid, station.id))
@@ -303,6 +358,8 @@ class PointCloudStationService:
             representative_ids = state_indices[state_offsets[:-1]]
             proxy = points[representative_ids]
             proxy_colors = colors[representative_ids] if colors is not None else None
+            proxy_intensity = (source_intensity[representative_ids]
+                               if source_intensity is not None else None)
             # 运行期 metadata 的 CSR/ranges 一律以 ndarray 传递：
             # 千万级 indices 的 .tolist() 会产生 GB 级 Python int 临时对象，
             # pymalloc 不会把这些内存还给 OS。sidecar 读出即为 ndarray。
@@ -329,6 +386,8 @@ class PointCloudStationService:
                 representative_ids = cached_proxy['representative_ids']
                 proxy = points[representative_ids]
                 proxy_colors = colors[representative_ids] if colors is not None else None
+            proxy_intensity = self._aggregate_proxy_intensity(
+                source_intensity, cached_proxy['offsets'], cached_proxy['indices'])
             metadata.update({
                 'proxy_source_offsets': cached_proxy['offsets'],
                 'proxy_source_indices': cached_proxy['indices'],
@@ -361,6 +420,8 @@ class PointCloudStationService:
             indices = built['proxy_source_indices']
             ranges = built['ranges']
             representatives = built['representatives']
+            proxy_intensity = self._aggregate_proxy_intensity(
+                source_intensity, offsets, indices)
             metadata.update({
                 'proxy_source_offsets': offsets,
                 'proxy_source_indices': indices,
@@ -381,10 +442,12 @@ class PointCloudStationService:
             print(f'[PCFD] proxy.built station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)} '
                   f'density={dist.density_source}', flush=True)
-        self.pointcloud.register_source_asset(source_id, points, colors,
-                                              {'ply_path': station.source_path})
+        self.pointcloud.register_source_asset(
+            source_id, points, colors, {'ply_path': station.source_path},
+            intensities=source_intensity)
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
-                                                   metadata=metadata)
+                                                   metadata=metadata,
+                                                   intensities=proxy_intensity)
         self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
         if state and state.get('enabled') and not restored_direct:

@@ -128,3 +128,10 @@
 - 尺寸截图：`C:\Users\CHarLes\AppData\Local\PointCloudFacadeDetection\diagnostics\facade_dimensions.png`，已读回确认文字完整、无裁切。
 - E57 真实文件兼容性与现场特定事件失效序列的验证边界见第 2、5 项，不以模拟或常规场景替代这些验证。
 - 本任务记录按用户要求保留，不删除。
+
+## 后续合并：ruiqi_auto_ui@840f276
+
+- 已合并最新 `origin/ruiqi_auto_ui`：intensity 数据支持、分割与质量评估更新、热力图性能优化。
+- 保留现有 E57 实际进度、初始相机和 UI 交互；intensity 与写入进度、新旧 `.ply.json`/`.json` 侧载格式均已兼容。
+- 首次全量回归发现新算法输出前误删 `layer`、`dir_bin`、`attachments`、`adjacency` 四个冻结公开字段，已仅恢复接口元数据，未改变检测逻辑；`weak` 内部标记仍移除。
+- 相关适配测试 72 passed，冻结接口测试 2 passed；最终全量回归 **287 passed**，耗时 260.94 秒。

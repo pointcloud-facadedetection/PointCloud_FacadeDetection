@@ -1,4 +1,4 @@
-"""E57 point-cloud reader with a stable ``(points, colors)`` contract.
+"""E57 point-cloud reader with a stable feature-array contract.
 
 E57 is not consistently supported by the Open3D wheels used on Windows, so
 the optional pye57 reader is preferred.  Keeping this adapter at the file
@@ -134,7 +134,7 @@ def _extract_scan_poses(reader):
 
 
 def read_e57(path: str, progress_cb=None):
-    """Return finite E57 points and optional RGB colors as float32 arrays."""
+    """Return finite E57 points, optional RGB and native point intensity."""
     source = Path(path).expanduser().resolve()
     # 待后续启用：E57 原始元数据、强度、距离及姿态字段的完整反序列化。
     # 当前转换边界只启用已验证稳定的坐标/颜色，并通过 transform=True
@@ -149,15 +149,21 @@ def read_e57(path: str, progress_cb=None):
         reader = pye57.E57(str(source))
         chunks = []
         color_chunks = []
+        intensity_chunks = []
         have_color = True
+        any_intensity = False
         scan_count = _scan_count(reader)
         for scan_index in range(scan_count):
             if progress_cb is not None:
                 progress_cb(int(scan_index * 100 / scan_count),
                             f'正在读取测站 {scan_index + 1}/{scan_count}')
             raw = reader.read_scan(
-                scan_index, colors=True, transform=True,
-                ignore_missing_fields=True)
+                scan_index,
+                colors=True,
+                intensity=True,
+                transform=True,
+                ignore_missing_fields=True,
+            )
             x = _field(raw, 'cartesianX')
             y = _field(raw, 'cartesianY')
             z = _field(raw, 'cartesianZ')
@@ -165,15 +171,18 @@ def read_e57(path: str, progress_cb=None):
                 continue
             points = np.column_stack((x, y, z)).astype(np.float32, copy=False)
             invalid = _field(raw, 'cartesianInvalidState')
+            source_keep = np.ones(len(points), dtype=bool)
             if invalid is not None:
                 try:
                     invalid_mask = np.asarray(invalid, dtype=np.int32) != 0
                     if len(invalid_mask) == len(points):
-                        points = points[~invalid_mask]
+                        source_keep &= ~invalid_mask
                 except (TypeError, ValueError):
                     pass
-            finite = np.isfinite(points).all(axis=1)
-            points = points[finite]
+
+            # 坐标、颜色和 intensity 必须使用同一个有效点掩码。
+            source_keep &= np.isfinite(points).all(axis=1)
+            points = points[source_keep]
             red = _field(raw, 'colorRed')
             green = _field(raw, 'colorGreen')
             blue = _field(raw, 'colorBlue')
@@ -181,12 +190,30 @@ def read_e57(path: str, progress_cb=None):
                 have_color = False
             elif have_color:
                 colors = np.column_stack((red, green, blue))
-                if len(colors) == len(points) + len(finite):
-                    colors = colors[finite]
+                if len(colors) == len(source_keep):
+                    colors = colors[source_keep]
                 elif len(colors) != len(points):
                     have_color = False
-                    continue
-                color_chunks.append(colors)
+                if have_color:
+                    color_chunks.append(colors)
+            native_intensity = _field(raw, 'intensity')
+            if native_intensity is None:
+                intensity_chunks.append(
+                    np.full(len(points), np.nan, dtype=np.float32))
+            else:
+                native_intensity = np.asarray(native_intensity).reshape(-1)
+                if len(native_intensity) == len(source_keep):
+                    native_intensity = native_intensity[source_keep]
+                elif len(native_intensity) != len(points):
+                    raise ValueError(
+                        f'E57 scan {scan_index} intensity/coordinate length '
+                        f'mismatch: {len(native_intensity)} != '
+                        f'{len(source_keep)} (raw) or {len(points)} (valid)')
+                native_intensity = np.asarray(
+                    native_intensity, dtype=np.float32)
+                intensity_chunks.append(native_intensity)
+                any_intensity = any_intensity or bool(
+                    np.any(np.isfinite(native_intensity)))
             chunks.append(points)
             if progress_cb is not None:
                 progress_cb(int((scan_index + 1) * 100 / scan_count),
@@ -199,7 +226,12 @@ def read_e57(path: str, progress_cb=None):
                   if have_color and color_chunks and
                   sum(len(chunk) for chunk in color_chunks) == len(points)
                   else None)
-        return points, colors
+        intensities = (np.ascontiguousarray(np.concatenate(intensity_chunks),
+                                            dtype=np.float32)
+                       if any_intensity and intensity_chunks and
+                       sum(len(chunk) for chunk in intensity_chunks) == len(points)
+                       else None)
+        return points, colors, intensities
     except Exception:
         # Do not silently reinterpret malformed E57 data as an empty cloud.
         raise
@@ -209,7 +241,7 @@ def convert_e57_to_ply(source_path, cache_path, project_uuid=None, metadata=None
                        progress_cb=None):
     """一次性将 E57 标准化为 PLY；业务处理从此只接收 PLY。
 
-    Sidecar JSON (cache_path.json) 现在额外包含 scan_poses 和
+    Sidecar JSON (cache_path.ply.json) 额外包含 scan_poses 和
     scan_origins，与 FLS 转换器的元数据 schema 统一，供下游配准流程使用。
     """
     started = time.perf_counter()
@@ -230,7 +262,7 @@ def convert_e57_to_ply(source_path, cache_path, project_uuid=None, metadata=None
             if progress_cb is not None:
                 progress_cb(int(percent), text)
 
-        points, colors = read_e57(
+        points, colors, intensities = read_e57(
             str(source_path),
             progress_cb=lambda percent, text: report(percent * 0.85, text))
         scan_poses = _extract_scan_poses(reader)
@@ -238,21 +270,35 @@ def convert_e57_to_ply(source_path, cache_path, project_uuid=None, metadata=None
         elapsed = time.perf_counter() - started
         log_event(project_uuid, 'e57.convert.read_done', source_path=str(source_path),
                   cache_path=str(cache_path), point_count=int(len(points)),
-                  has_colors=bool(colors is not None), elapsed_seconds=elapsed)
+                  has_colors=bool(colors is not None),
+                  has_intensity=bool(intensities is not None),
+                  intensity_valid_ratio=(
+                      float(np.mean(np.isfinite(intensities)))
+                      if intensities is not None else 0.0),
+                  elapsed_seconds=elapsed)
         bounds = write_point_cloud_ply_atomic(
-            cache_path, points, colors,
+            cache_path, points, colors, intensities=intensities,
             progress_cb=lambda percent: report(86 + percent * 0.12,
                                                f'正在写入缓存点云 {percent}%'))
-        info = dict(metadata or {}, cache_version=2, source_format='e57',
+        info = dict(metadata or {}, cache_version=3, source_format='e57',
                     cache_format='ply', source_path=str(source_path),
                     cache_path=str(cache_path), point_count=int(len(points)),
-                    has_colors=bool(colors is not None), pose_applied=True,
+                     has_colors=bool(colors is not None), pose_applied=True,
+                     has_intensity=bool(intensities is not None),
+                     intensity_valid_ratio=(
+                         float(np.mean(np.isfinite(intensities)))
+                         if intensities is not None else 0.0),
+                     intensity_source=(
+                         'e57.point_record.intensity'
+                         if intensities is not None else None),
+                     intensity_scale=(
+                         'native' if intensities is not None else None),
                     scan_count=len(scan_poses),
                     scan_poses=scan_poses,
                     scan_origins=scan_origins if scan_origins else None,
                     bounds_min=bounds['bounds_min'], bounds_max=bounds['bounds_max'],
                     conversion_seconds=time.perf_counter() - started)
-        cache_path.with_suffix('.json').write_text(
+        cache_path.with_suffix('.ply.json').write_text(
             json.dumps(info, ensure_ascii=False, indent=2), encoding='utf-8')
         log_event(project_uuid, 'e57.convert.write_done', source_path=str(source_path),
                   cache_path=str(cache_path), point_count=int(len(points)),

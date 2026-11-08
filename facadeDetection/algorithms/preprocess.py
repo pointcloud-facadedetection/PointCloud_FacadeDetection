@@ -2,6 +2,56 @@ import numpy as np
 import open3d as o3d
 from typing import Optional, Tuple
 
+
+def finite_sparse_keep_indices(points: np.ndarray, voxel_size: float = 0.05,
+                               radius: Optional[float] = None,
+                               min_neighbors: Optional[int] = None,
+                               enabled: bool = True) -> np.ndarray:
+    """Return a deterministic keep mask for finite points and isolated noise.
+
+    The returned mask is in the *input* coordinate system.  This is deliberately
+    separate from :func:`denoise`: facade detection exposes input-local indices,
+    so callers can slice every synchronized feature array with the same mask.
+    A conservative default is used because sparse facade samples must not be
+    removed merely for being farther from the scanner.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must be (N,3)")
+    finite = np.all(np.isfinite(pts), axis=1)
+    if not enabled or finite.sum() < 12:
+        return finite
+
+    ids = np.flatnonzero(finite)
+    clean = pts[ids]
+    r = float(radius if radius is not None else max(float(voxel_size) * 2.5, 0.08))
+    k = int(min_neighbors if min_neighbors is not None else 2)
+    if r <= 0 or k < 1:
+        raise ValueError("radius must be > 0 and min_neighbors must be >= 1")
+
+    cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(clean))
+    # Open3D 的 nb_points 计数包含查询点自身。
+    radius_eps = max(np.finfo(np.float32).eps * max(abs(r), 1.0) * 8.0,
+                     1e-9)
+    query_radius = r + radius_eps
+    if k == 1:
+        # Open3D counts the query point itself, so every finite sample satisfies
+        # the one-point rule.
+        kept_local = np.arange(len(clean), dtype=np.int64)
+    elif k == 2:
+        nearest = np.asarray(
+            cloud.compute_nearest_neighbor_distance(), dtype=np.float64)
+        kept_local = np.flatnonzero(nearest <= query_radius)
+    else:
+        _, kept_local = cloud.remove_radius_outlier(
+            nb_points=k, radius=query_radius)
+    keep = np.zeros(len(pts), dtype=bool)
+    if len(kept_local):
+        keep[ids[np.asarray(kept_local, dtype=np.int64)]] = True
+    if np.count_nonzero(keep) < 3:
+        return finite
+    return keep
+
 def voxel_downsample(points: np.ndarray,
                      colors: Optional[np.ndarray] = None,
                      voxel_size: float = 0.05) -> Tuple[np.ndarray, Optional[np.ndarray]]:

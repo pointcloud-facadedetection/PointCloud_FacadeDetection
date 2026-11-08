@@ -1,20 +1,16 @@
-"""Unified local baseline plane fitting for facade quality assessment.
+"""用于立面质量评估的统一局部基准平面拟合。
 
 Key design decisions
 --------------------
-1.  **No overlap** between blocks: each physical point belongs to exactly
-    one block, eliminating the "which-plane-should-I-use" ambiguity.
-2.  **Robust Huber IRLS** per block: identical fitting pipeline to the
-    global plane fit, only confined to the local point set.
-3.  **Signed-distance cache**: once a block plane is fitted, every point
-    in that block gets its signed distance to the block plane (in mm)
-    pre-computed.  Both downstream algorithms re-use this cache,
-    avoiding redundant SVD inside tight loops.
-4.  **V-direction strip assignment**: strips/windows query the block
-    that owns their *centre v-coordinate*, guaranteeing a single,
-    deterministic baseline for any given measurement location.
-5.  **Per-point local normals**: each block also stores its fitted plane
-    normal per contained point (模拟墙面法垂直度逐点法向使用）。
+1.  **块之间无重叠**：每个物理点仅属于一个块，从而消除了“应使用哪个平面”的歧义。
+2.  每个块采用**鲁棒的Huber IRLS**：仅限于局部点集。
+3.  **带符号距离缓存**：一旦块平面拟合完成，该块内每个点到块平面的带符号距离（单位：毫米）
+    即被预先计算出来。后续两个算法均复用此缓存，
+    从而避免在紧循环中进行冗余的奇异值分解（SVD）。
+4.  **V 方向条带分配**：各条带/窗口查询拥有其
+    *中心 V 坐标*的块，从而确保针对任何给定测量位置，均采用单一、确定性的基线。
+5.  **逐点局部法线**：每个块还存储其所含各点的拟合平面
+    法线（用于模拟墙面法垂直度的逐点法向计算）。
 """
 
 from __future__ import annotations
@@ -102,8 +98,16 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                      enable_partition_fallback=True,
                      partition_depth_gap_m=0.08,
                      partition_min_points_ratio=0.10,
-                     partition_angle_limit_deg=5.0):
-    """Huber M-estimator IRLS with prior-normal initialization."""
+                     partition_angle_limit_deg=5.0,
+                     enable_p95_refit=True,
+                     p95_confidence=0.95):
+    """Huber M-estimator IRLS with prior-normal initialization.
+
+    p95_confidence：表示保留残差分布的中心 95% 可信核心，而不是把
+    均值±1.96σ误用于通常非高斯、重尾的点云残差。可信核心先由
+    median/MAD 定位，再用绝对中心残差的 P95 截断；随后重新估计完整
+    平面法向和截距。
+    """
     from algorithms.geometry import cluster_depth_significant
 
     raw = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -172,6 +176,43 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
     plane = np.r_[n, d]
 
+    # ===== 中心 95% 可信核心重拟合 =====
+    p95_ci_refit = False
+    p95_threshold_mm = np.nan
+    p95_core_count = 0
+    p95_core_ratio = 0.0
+    if enable_p95_refit and len(pts) >= 3:
+        confidence = float(np.clip(p95_confidence, 0.50, 0.999))
+        signed_r_all = pts @ plane[:3] + plane[3]
+        center_r = float(np.median(signed_r_all))
+        centered_abs = np.abs(signed_r_all - center_r)
+        robust_sigma = max(
+            1.4826 * float(np.median(centered_abs)), 1e-6)
+        percentile_gate = float(np.percentile(
+            centered_abs, confidence * 100.0))
+        # P95 是主筛选；MAD 上限防止大量远离墙面的第二表面把 P95 本身抬高。
+        p95_threshold = min(percentile_gate,
+                            max(float(outlier_sigma), 2.5) * robust_sigma)
+        p95_mask = centered_abs <= max(p95_threshold, 1e-6)
+        p95_core_count = int(p95_mask.sum())
+        p95_core_ratio = float(p95_core_count / len(pts))
+        if p95_core_count >= max(3, int(len(pts) * min_inlier_ratio)):
+            try:
+                candidate = _plane_from_points(pts[p95_mask])
+                if candidate[:3] @ n0 < 0:
+                    candidate *= -1.0
+                candidate_angle = float(np.degrees(np.arccos(
+                    np.clip(candidate[:3] @ n0, -1.0, 1.0))))
+                if candidate_angle <= float(angle_limit_deg):
+                    # 在可信核心上再做一次 Huber 截距估计，法向来自核心 SVD。
+                    plane = _fit_constrained_normal_plane(
+                        pts[p95_mask], candidate[:3], delta_m=delta,
+                        max_iterations=min(int(max_iterations), 50))
+                    p95_ci_refit = True
+                    p95_threshold_mm = p95_threshold * 1000.0
+            except Exception:
+                pass
+
     residuals = pts @ plane[:3] + plane[3]
     med_r = float(np.median(residuals))
     mad_r = max(float(np.median(np.abs(residuals - med_r))) * 1.4826, 1e-6)
@@ -180,8 +221,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
     inliers = np.abs(residuals - med_r) <= gate
 
     if inliers.sum() >= 3:
+        # 保留可信核心重拟合得到的法向；这里只在最终支持集上稳健更新截距。
+        # 若仍使用 n0，会把上面的 P95 法向改进完全覆盖掉。
         plane = _fit_constrained_normal_plane(
-            pts[inliers], n0, delta_m=delta,
+            pts[inliers], plane[:3], delta_m=delta,
             max_iterations=min(int(max_iterations), 50))
         residuals = pts @ plane[:3] + plane[3]
         med_r = float(np.median(residuals[inliers]))
@@ -333,6 +376,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                 'support_mask': support_mask,
                 'iterations': it + 1,
                 'partition_fallback': True,
+                'p95_ci_refit': p95_ci_refit,
+                'p95_threshold_mm': float(p95_threshold_mm),
+                'p95_core_count': p95_core_count,
+                'p95_core_ratio': p95_core_ratio,
             }
 
     return {
@@ -350,6 +397,10 @@ def fit_global_plane(points, *, reference_plane, seed=42,
         'support_mask': support_mask,
         'iterations': it + 1,
         'partition_fallback': False,
+        'p95_ci_refit': p95_ci_refit,
+        'p95_threshold_mm': float(p95_threshold_mm),
+        'p95_core_count': p95_core_count,
+        'p95_core_ratio': p95_core_ratio,
     }
 
 
@@ -378,6 +429,7 @@ def fit_interval_baseline_planes(
     partition_depth_gap_m=0.02,
     partition_min_points_ratio=0.15,
     continuity_constraint_mm=5.0,
+    enable_p95_refit=False,
 ) -> list[BaselineBlock]:
     """Fit robust local planes along the v-axis in non-overlapping intervals.
 
@@ -404,6 +456,15 @@ def fit_interval_baseline_planes(
 
     n_blocks = max(1, int(np.ceil((v_max - v_min) / size)))
 
+    # v 只排序一次；各 block 通过 searchsorted 取得连续区间，避免每个
+    # block 都构造一个 N 长布尔掩码（原实现为 O(blocks * N) 扫描）。
+    v_order = np.argsort(v_all, kind='stable')
+    v_sorted = v_all[v_order]
+    edges = v_min + np.arange(n_blocks + 1, dtype=np.float64) * size
+    edges[-1] = v_max
+    edge_pos = np.searchsorted(v_sorted, edges, side='left')
+    edge_pos[-1] = len(v_sorted)
+
     blocks: list[BaselineBlock] = []
     prev_plane = np.asarray(reference_plane, dtype=np.float64).reshape(4)
     continuity_m = max(float(continuity_constraint_mm) / 1000.0, 1e-6)
@@ -412,12 +473,7 @@ def fit_interval_baseline_planes(
         v0 = v_min + i * size
         v1 = v_max if i == n_blocks - 1 else v_min + (i + 1) * size
 
-        if i < n_blocks - 1:
-            mask = (v_all >= v0) & (v_all < v1)
-        else:
-            mask = (v_all >= v0) & (v_all <= v1)
-
-        indices = np.flatnonzero(mask)
+        indices = v_order[edge_pos[i]:edge_pos[i + 1]]
         if len(indices) < 3:
             ref = np.asarray(reference_plane, dtype=np.float64).reshape(4)
             blocks.append(
@@ -449,6 +505,7 @@ def fit_interval_baseline_planes(
                 enable_partition_fallback=enable_partition_fallback,
                 partition_depth_gap_m=partition_depth_gap_m,
                 partition_min_points_ratio=partition_min_points_ratio,
+                enable_p95_refit=enable_p95_refit,
             )
         except Exception:
             fit = {
@@ -481,6 +538,7 @@ def fit_interval_baseline_planes(
                         enable_partition_fallback=enable_partition_fallback,
                         partition_depth_gap_m=partition_depth_gap_m,
                         partition_min_points_ratio=partition_min_points_ratio,
+                        enable_p95_refit=enable_p95_refit,
                     )
                     new_plane = np.asarray(fit["plane_model"], dtype=np.float64).reshape(4)
                     new_plane[:3] = _unit(new_plane[:3])
@@ -519,18 +577,16 @@ def compute_block_signed_distances_mm(points, blocks, origin, v_axis) -> np.ndar
     n = len(pts)
     result = np.full(n, np.nan, dtype=np.float64)
 
-    origin = np.asarray(origin, dtype=float).reshape(3)
-    v_ax = _unit(v_axis)
-    v_all = (pts - origin) @ v_ax
-
+    # fit_interval_baseline_planes 已经保存每个 block 的精确 owner 索引和
+    # 对应距离。直接散写缓存即可，避免再次投影以及 blocks 次全量扫描。
     for block in blocks:
-        mask = (v_all >= block.v0) & (v_all <= block.v1)
-        if not np.any(mask):
+        indices = np.asarray(block.point_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
             continue
-
-        block_pts = pts[mask]
-        dist_m = block_pts @ block.plane_model[:3] + block.plane_model[3]
-        result[mask] = dist_m * 1000.0
+        cached = np.asarray(block.signed_dist_mm, dtype=np.float64).reshape(-1)
+        if cached.size != indices.size:
+            raise ValueError('BaselineBlock signed_dist_mm 与 point_indices 长度不一致')
+        result[indices] = cached
 
     return result
 
@@ -547,18 +603,14 @@ def compute_block_local_normals(points, blocks, origin, v_axis) -> np.ndarray:
     n = len(pts)
     result = np.full((n, 3), np.nan, dtype=np.float64)
 
-    origin = np.asarray(origin, dtype=float).reshape(3)
-    v_ax = _unit(v_axis)
-    v_all = (pts - origin) @ v_ax
-
     for block in blocks:
-        mask = (v_all >= block.v0) & (v_all <= block.v1)
-        if not np.any(mask):
+        indices = np.asarray(block.point_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
             continue
-        if len(block.local_normals) == int(mask.sum()):
-            result[mask] = block.local_normals
+        if len(block.local_normals) == len(indices):
+            result[indices] = block.local_normals
         else:
-            result[mask] = block.plane_model[:3]
+            result[indices] = block.plane_model[:3]
 
     return result
 
@@ -566,25 +618,18 @@ def compute_block_local_normals(points, blocks, origin, v_axis) -> np.ndarray:
 def find_block_for_v(v_coord: float, blocks: list) -> int | None:
     """Return the index of the block that owns *v_coord*.
 
-    Compatible with both BaselineBlock dataclass and legacy dict blocks.
     Because blocks are non-overlapping and gap-free, this is O(log N)
     in the number of blocks (blocks are kept sorted).
     """
     if not blocks:
         return None
 
-    def _v0(b):
-        return b.v0 if hasattr(b, 'v0') else b.get('v0', float('-inf'))
-
-    def _v1(b):
-        return b.v1 if hasattr(b, 'v1') else b.get('v1', float('inf'))
-
     lo, hi = 0, len(blocks)
     while lo < hi:
         mid = (lo + hi) // 2
         b = blocks[mid]
-        bv0 = _v0(b)
-        bv1 = _v1(b)
+        bv0 = b.v0
+        bv1 = b.v1
         if v_coord < bv0:
             hi = mid
         elif v_coord > bv1:
@@ -592,8 +637,8 @@ def find_block_for_v(v_coord: float, blocks: list) -> int | None:
         else:
             return mid
 
-    first_v0 = _v0(blocks[0])
-    last_v1 = _v1(blocks[-1])
+    first_v0 = blocks[0].v0
+    last_v1 = blocks[-1].v1
     if v_coord < first_v0:
         return 0
     if v_coord > last_v1:

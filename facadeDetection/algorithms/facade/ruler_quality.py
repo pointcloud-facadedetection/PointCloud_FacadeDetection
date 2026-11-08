@@ -317,13 +317,42 @@ def _prepare_strip_surface_directional(*, along_sorted, across_sorted, w_sorted,
 
 def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
     local_center = float(centre_uv[0])
-    result = ruler_at(
-        surface, local_center, params.ruler_length_m,
-        threshold_mm=params.flatness_limit_mm)
     ruler_half = params.ruler_length_m / 2.0
     u_center = local_center
+
+    # ★ 前置有效点数 guard：strip 内该窗口必须有足够表面点才生成靠尺
     u_mask = ((surface.u >= u_center - ruler_half) &
               (surface.u <= u_center + ruler_half) & surface.surf)
+    effective_point_count = int(np.count_nonzero(u_mask))
+    # 2m strip / 0.04m bin ≈ 50 bins，每 bin 至少 1 点 => 50 ；下限不低于 min_points
+    min_surface_points = min(
+        params.min_points,
+        int(params.ruler_length_m / max(params.bin_size_m, 0.01)) * 1
+    )
+    if effective_point_count < min_surface_points:
+        return {
+            'ok': False,
+            'gap_mm': np.nan,
+            'signed_gap_mm': np.nan,
+            'angle_deg': np.nan,
+            'u_center': float(u_center),
+            'direction_deg': float(angle),
+            'candidate_count': int(surface.stats.get('n_points', 0)),
+            'effective_point_count': effective_point_count,
+            'coverage_valid': False,
+            'hole_ratio': 1.0,
+            'hole_length_m': 0.0,
+            'center_xyz': [np.nan, np.nan, np.nan],
+            'center_uv': (np.nan, np.nan),
+            'depression_source_id': -1,
+            'pivot_source_ids': [-1, -1],
+            'covered_source_ids': _EMPTY_SOURCE_IDS,
+        }
+
+    result = ruler_at(
+        surface, local_center, params.ruler_length_m,
+        threshold_mm=params.flatness_limit_mm,
+        min_surface_points=min_surface_points)
     along_c = centre_uv[0]
     across_c = centre_uv[1]
     center_xyz = origin + along_c * d3 + across_c * q3
@@ -335,7 +364,7 @@ def _ruler_at_for_centre(*, surface, centre_uv, d3, q3, origin, angle, params):
         'u_center': float(u_center),
         'direction_deg': float(angle),
         'candidate_count': int(surface.stats.get('n_points', 0)),
-        'effective_point_count': int(np.count_nonzero(u_mask)),
+        'effective_point_count': effective_point_count,
         'coverage_valid': result.get('coverage_valid', False),
         'hole_ratio': result.get('hole_ratio', 1.0),
         'hole_length_m': result.get('hole_length', 0.0),
@@ -552,7 +581,7 @@ def _verticality_strip_worker(args):
      u_axis, v_axis, base_u_min, base_v_min, v_step, u_step,
      half_width, min_points, ruler_length_m, verticality_limit_mm,
      sor_enabled, sor_k, sor_sigma, sor_w_weight, sor_method,
-     select_band, hole_band, normal) = args
+     select_band, hole_band, max_hole_ratio, normal) = args
 
     # ---- 在全局有序的 surf_u 上快速定位 strip ----
     lo_idx = np.searchsorted(surf_u, u_c - half_width, side='left')
@@ -628,19 +657,25 @@ def _verticality_strip_worker(args):
         if np.sum(final_mask) < 3:
             continue
 
+        # ★ strip 内窗口有效点数 guard
+        expected_win_pts = min(min_points, int(ruler_length_m / 0.04) * 1)
+        if np.sum(final_mask) < expected_win_pts:
+            continue
+
         # ================================================================
         #  垂直度：上下两条水平靠线 → 窗口平面 vs 铅垂线（靠尺法物理模型）
-        #
-        #  现实操作：2m 靠尺竖直贴墙，尺身上下两端与墙面接触形成两条水
-        #  平靠线；两靠线张成该窗口段的局部平面，其相对铅垂线的倾斜即
-        #  垂直度。靠线带内最凸出的表面点为实际接触点（w 外法向为正，
-        #  正值=凸起）。
+        #  接触点由 argmax 单点改为带内最凸 10% 点的质心；
+        #    带内点不足时回退为全点平面拟合（SVD）。
         # ================================================================
         h_ax = np.asarray(horizontal_axis, dtype=np.float64)
         v_ax_l = np.asarray(vertical_axis, dtype=np.float64)
         n_vec = np.asarray(normal, dtype=np.float64)
+        gravity = np.asarray((0., 0., 1.), dtype=np.float64)
 
-        band_h = min(0.1, ruler_length_m * 0.1)   # 靠线带高：上下各 0.1m
+        # ================================================================
+        #  垂直度接触点：与平整度统一 —— 上凸包 + 0.5%-99.5% 截断
+        # ================================================================
+        band_h = min(0.2, ruler_length_m * 0.1)   # 靠线带高
         v_hi_w = float(win_v.max())
         v_lo_w = float(win_v.min())
         top_m = final_mask & (win_v >= v_hi_w - band_h)
@@ -648,40 +683,108 @@ def _verticality_strip_worker(args):
 
         top_count = int(np.count_nonzero(top_m))
         bot_count = int(np.count_nonzero(bot_m))
-        if top_count < 1 or bot_count < 1:
-            # 上下任一侧无表面点：该窗口无法放置靠尺，跳过
-            continue
+        # 带内最少点数：按窗口期望点数的 5% 计，绝对下限 5 点
+        min_band_pts = max(5, int(expected_win_pts * 0.05))
 
-        # 单点接触：靠线带内 w 最大点即为该侧实际接触点
-        top_pos = np.flatnonzero(top_m)
-        bot_pos = np.flatnonzero(bot_m)
-        top_idx = int(top_pos[int(np.argmax(win_w[top_m]))])
-        bot_idx = int(bot_pos[int(np.argmax(win_w[bot_m]))])
+        def _band_hull_contact(mask_band):
+            """上凸包接触点：带内最凸点经 0.5%-99.5% 截断后取质心。
 
-        p_top = (origin + win_u[top_idx] * h_ax + win_v[top_idx] * v_ax_l
-                 + win_w[top_idx] * n_vec)
-        p_bot = (origin + win_u[bot_idx] * h_ax + win_v[bot_idx] * v_ax_l
-                 + win_w[bot_idx] * n_vec)
-        span = p_top - p_bot
-        span_norm = float(np.linalg.norm(span))
-        if span_norm < 1e-9:
-            # 上下接触点重合：垂直度无法定义
-            continue
-        # 窗口平面 = 尺宽方向(h_ax) 与两接触点连线张成
-        n_w = np.cross(h_ax, span)
-        nn = float(np.linalg.norm(n_w))
-        if nn < 1e-12:
-            continue
-        n_w = n_w / nn
-        if float(np.dot(n_w, n_vec)) < 0:
-            n_w = -n_w
-        plane_d = -float(np.dot(n_w, p_bot))
-        contact_pos = (bot_idx, top_idx)   # 窗口内索引（下、上）
+            与平整度 ruler_at 的 upper_hull 逻辑同源：
+              - 平整度：沿尺方向 (u) 取每 bin 最凸点 → upper_hull 包络 → 支点；
+              - 垂直度：上下带内最凸点 → 99% 截断去极值 → 质心为等效接触点。
+            """
+            if np.count_nonzero(mask_band) < 3:
+                return None
+            # 始终维护“窗口原数组行号”
+            band_rows = np.flatnonzero(mask_band)
+            v_b = win_v[band_rows]
+            w_b = win_w[band_rows]
+            # 0.5%-99.5% 截断：去掉带内极端离群差异
+            if len(w_b) >= 10:
+                w_p05, w_p995 = np.percentile(w_b, [0.5, 99.5])
+                clip_mask = (w_b >= w_p05) & (w_b <= w_p995)
+                if np.sum(clip_mask) >= 3:
+                    band_rows = band_rows[clip_mask]
+                    v_b = v_b[clip_mask]
+                    w_b = w_b[clip_mask]
+            # 取最凸 10% 点（w 最大）的质心作为等效接触点
+            cnt = len(w_b)
+            k = max(1, int(np.ceil(cnt * 0.1)))
+            topk_rel = np.argpartition(w_b, -k)[-k:]
+            pos = band_rows[topk_rel]
+            v_c = float(np.mean(win_v[pos]))
+            w_c = float(np.mean(win_w[pos]))
+            # u 也取质心（ strip 内 strip_u 即水平方向）
+            u_c = float(np.mean(win_u[pos]))
+            # 归因 id：取带内最接近质心 w 的真实点
+            attr_idx = int(pos[int(np.argmin(np.abs(win_w[pos] - w_c)))])
+            return u_c, v_c, w_c, attr_idx
 
-        gravity = np.asarray((0., 0., 1.), dtype=np.float64)
+        top_contact = _band_hull_contact(top_m)
+        bot_contact = _band_hull_contact(bot_m)
+
+        use_band_contact = (top_contact is not None and bot_contact is not None
+                            and top_count >= min_band_pts and bot_count >= min_band_pts)
+
+        top_idx = bot_idx = -1
+        if use_band_contact:
+            u_t, v_t, w_t, top_idx = top_contact
+            u_b, v_b, w_b0, bot_idx = bot_contact
+
+            p_top = origin + u_t * h_ax + v_t * v_ax_l + w_t * n_vec
+            p_bot = origin + u_b * h_ax + v_b * v_ax_l + w_b0 * n_vec
+            span = p_top - p_bot
+            span_norm = float(np.linalg.norm(span))
+            if span_norm < 1e-9:
+                continue
+            n_w = np.cross(h_ax, span)
+            nn = float(np.linalg.norm(n_w))
+            if nn < 1e-12:
+                continue
+            n_w = n_w / nn
+            if float(np.dot(n_w, n_vec)) < 0:
+                n_w = -n_w
+            plane_d = -float(np.dot(n_w, p_bot))
+            rel_top_mm = float((w_t - w_b0) * 1000.0)
+            dv_proj = max(abs(v_t - v_b), 1e-6)
+        else:
+            # ---- 回退路径：窗口内全部清洗点拟合局部平面（SVD）----
+            # 兑现文档承诺：带内点不足时回退全点平面拟合，避免单点极值主导。
+            X = np.column_stack((win_u[final_mask], win_v[final_mask], win_w[final_mask]))
+            if len(X) < 3:
+                continue
+            ctr = X.mean(axis=0)
+            try:
+                _, _, vh = np.linalg.svd((X - ctr).T @ (X - ctr), full_matrices=False)
+            except np.linalg.LinAlgError:
+                continue
+            n_local = vh[-1]
+            nn = np.linalg.norm(n_local)
+            if nn < 1e-12:
+                continue
+            # (u,v,w) 局部帧 → 世界系
+            n_world = n_local[0] * h_ax + n_local[1] * v_ax_l + n_local[2] * n_vec
+            if float(np.dot(n_world, n_vec)) < 0:
+                n_world = -n_world
+            n_w = n_world
+            plane_d = -float(np.dot(n_w, origin + ctr[0] * h_ax + ctr[1] * v_ax_l + ctr[2] * n_vec))
+
+            # 归因点：上下带若存在则取各自最凸点，否则取全窗极值点
+            if top_count >= 1:
+                top_idx = int(np.flatnonzero(top_m)[int(np.argmax(win_w[top_m]))])
+            else:
+                top_idx = int(np.argmax(win_w[final_mask]))
+            if bot_count >= 1:
+                bot_idx = int(np.flatnonzero(bot_m)[int(np.argmax(win_w[bot_m]))])
+            else:
+                bot_idx = int(np.argmin(win_w[final_mask]))
+            rel_top_mm = float((win_w[top_idx] - win_w[bot_idx]) * 1000.0)
+            dv_proj = max(abs(float(win_v[top_idx] - win_v[bot_idx])), 1e-6)
+
         cos_ng = abs(float(np.dot(n_w, gravity)))
         theta = float(np.arcsin(min(cos_ng, 1.0)))
-        deviation_mm = float(np.tan(theta) * ruler_length_m * 1000.0)
+        # 保持 2m 靠尺语义，但用实际接触跨距下限防止 strip 末端虚高
+        deviation_mm = float(np.tan(theta) * max(dv_proj, ruler_length_m * 0.75) * 1000.0)
         angle_deg = float(np.degrees(theta))
         verticality_pass = (np.isfinite(deviation_mm)
                             and deviation_mm <= verticality_limit_mm)
@@ -710,14 +813,12 @@ def _verticality_strip_worker(args):
             u_step, v_step)
 
         # 靠点 = 上下靠线接触点（导致窗口倾斜的关键接触点，随 pivot 存储）
-        bot_idx, top_idx = contact_pos
         dep_source_id = int(win_ids[top_idx])
         dep_xyz = (origin + win_u[top_idx] * h_ax + win_v[top_idx] * v_ax_l
                    + win_w[top_idx] * n_vec).tolist()
 
         # 底部 0 基准：以下靠线接触点为 0，上接触点相对偏移的正负
         # 判定外凸（+，外倾）/ 内陷（−，内倾）
-        rel_top_mm = float((win_w[top_idx] - win_w[bot_idx]) * 1000.0)
         outward = rel_top_mm > 0.0
 
         # 垂直度缺陷专用数组（仅在超阈值时填充；存储导致倾斜的上接触点）
@@ -742,7 +843,7 @@ def _verticality_strip_worker(args):
             'verticality_angle_deg': angle_deg,
             'verticality_pass': bool(verticality_pass),
             'hole_ratio': float(hole_ratio),
-            'coverage_valid': hole_ratio <= 0.2,
+            'coverage_valid': hole_ratio <= max_hole_ratio,
             'effective_point_count': int(np.sum(final_mask)),
             'snap_distance_m': snap_distance,
             'pivot_source_ids': [int(win_ids[bot_idx]), int(win_ids[top_idx])],
@@ -846,9 +947,9 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
     half = params.ruler_length_m / 2.0
     half_width = params.ruler_width_m / 2.0
 
-    # ★ 统一步长：纵向 = 半尺长，横向 = 尺宽
+    # 纵向、横向滑移均服从项目参数；不再用隐式半尺长/尺宽覆盖配置。
     v_step = max(float(params.verticality_bin_size_m), 1e-6)
-    u_step = max(float(params.ruler_width_m), 1e-6)
+    u_step = max(float(params.strip_step_m), 1e-6)
 
     v_centers = _full_window_centers(v_min, v_max, v_step, params.ruler_length_m)
     u_centers = _full_window_centers(u_min, u_max, u_step, params.ruler_width_m)
@@ -901,7 +1002,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                     params.verticality_limit_mm,
                     params.sor_enabled, params.sor_k, params.sor_sigma,
                     params.sor_w_weight, params.sor_method,
-                    params.select_band_m, params.hole_band_m,
+                     params.select_band_m, params.hole_band_m,
+                     params.max_hole_ratio,
                     normal,
                 ))
             strip_results = _pool_map(
@@ -924,7 +1026,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                 params.verticality_limit_mm,
                 params.sor_enabled, params.sor_k, params.sor_sigma,
                 params.sor_w_weight, params.sor_method,
-                params.select_band_m, params.hole_band_m,
+                 params.select_band_m, params.hole_band_m,
+                 params.max_hole_ratio,
                 normal,
             ))
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -945,7 +1048,8 @@ def _compute_verticality(points, raw_ids, plane_model, u_axis, v_axis, origin,
                 params.verticality_limit_mm,
                 params.sor_enabled, params.sor_k, params.sor_sigma,
                 params.sor_w_weight, params.sor_method,
-                params.select_band_m, params.hole_band_m,
+                 params.select_band_m, params.hole_band_m,
+                 params.max_hole_ratio,
                 normal,
             ))
         strip_results = [_verticality_strip_worker(args) for args in args_list]
@@ -1417,6 +1521,8 @@ def compute_ruler_quality(points, raw_ids, plane_model, origin, u_axis, v_axis,
         'ok': True,
         'parameters': params.snapshot(),
         'windows': rows,
+        # 保持既有质量报告数据契约：调用方和历史报告直接读取 intervals。
+        # interval_count 仅是摘要，不能替代逐区间统计明细。
         'intervals': intervals,
         'interval_size_m': size,
         'interval_count': len(intervals),

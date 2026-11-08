@@ -14,13 +14,14 @@ VOXEL_SIZE_M = 0.05
 class RawPointStore:
     points: np.ndarray
     colors: np.ndarray | None = None
+    intensities: np.ndarray | None = None
 
     @property
     def count(self) -> int:
         return int(len(self.points))
 
     @classmethod
-    def from_arrays(cls, points, colors=None) -> "RawPointStore":
+    def from_arrays(cls, points, colors=None, intensities=None) -> "RawPointStore":
         p = np.ascontiguousarray(np.asarray(points, dtype=np.float32).reshape(-1, 3))
         c = None
         if colors is not None:
@@ -35,7 +36,12 @@ class RawPointStore:
                             float(raw_colors.max()) <= 1.0):
                         raw_colors = np.clip(raw_colors, 0.0, 1.0)
                     c = np.ascontiguousarray(raw_colors)
-        return cls(p, c)
+        intensity = None
+        if intensities is not None:
+            candidate = np.asarray(intensities, dtype=np.float32).reshape(-1)
+            if len(candidate) == len(p):
+                intensity = np.ascontiguousarray(candidate)
+        return cls(p, c, intensity)
 
 
 @dataclass
@@ -58,6 +64,15 @@ class PointCloudDataset:
     index: "VoxelCascadeIndex"
     metadata: dict | None = None
     proxy_normals: np.ndarray | None = None
+
+    @property
+    def proxy_intensities(self) -> np.ndarray | None:
+        """代理域原生反射强度；缺失时必须为 None，不从 RGB 推导。"""
+        return self.raw.intensities
+
+    @property
+    def source_intensities(self) -> np.ndarray | None:
+        return (self.metadata or {}).get('_source_intensities')
 
     @property
     def revision(self) -> str:

@@ -341,7 +341,7 @@ def prepare_surface(points, source_ids=None, ruler_dir=None, outward=(0, 0, 1),
 
 
 def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0.2,
-             threshold_mm=None):
+             threshold_mm=None, min_surface_points=20):
     """在 u_center 处放置 2m 刚体靠尺，返回平整度。
 
     物理过程（对应现实靠尺+塞尺操作）：
@@ -365,6 +365,23 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
             "coverage_valid": False,
             "hole_ratio": 1.0,
         }
+
+    # 有效表面点数 guard：strip 内该窗口必须有足够点支撑靠尺模拟
+    if len(ts) < min_surface_points:
+        return {
+            "ok": False,
+            "reason": "too_few_surface_points",
+            "u_center": float(u_center),
+            "coverage_valid": False,
+            "hole_ratio": 1.0,
+        }
+
+    # 0.5%-99.5% 截断：去掉 strip 内极端离群差异，保留 99% 带内点参与凸包
+    if len(tw) >= 10:
+        w_p05, w_p995 = np.percentile(tw, [0.5, 99.5])
+        mask_99 = (tw >= w_p05) & (tw <= w_p995)
+        if np.sum(mask_99) >= 3:
+            tu, tw, ts = tu[mask_99], tw[mask_99], ts[mask_99]
 
     hull = upper_hull(tu, tw)
     # 重心平衡：靠尺重心投影必须落在两凸支点的水平跨度内（clip），
@@ -410,7 +427,8 @@ def ruler_at(surface: Surface, u_center=None, ruler_length=2.0, max_hole_ratio=0
             })
 
         exceed_mask = gap_mm > float(threshold_mm)
-        defect_point_indices = np.flatnonzero(exceed_mask).tolist()
+        # 返回 source id 而非切片内偏移，避免下游索引错位
+        defect_point_indices = ts[exceed_mask].astype(np.int64).tolist()
         defect_values_mm = gap_mm[exceed_mask].tolist()
 
         ruler_defect_grid = {

@@ -192,6 +192,32 @@ def _load_scan_meta(json_path: Path, ply_path: Path, point_count: int) -> ScanMe
     return meta
 
 
+def _ply_has_native_intensity(path: Path) -> bool:
+    """仅以 PLY 点属性为准确认可消费的点级原生 intensity。
+
+    当前 FlsConverter.pyd 只保证导出文件和元数据；即使扫描元数据声明
+    has_intensity，也可能没有向 Python 暴露数组或写入 PLY 属性。此时不得
+    把 RGB 亮度伪装成反射强度，检测链会明确退化为纯几何模式。
+    """
+    try:
+        with path.open('rb') as stream:
+            for _ in range(512):
+                line = stream.readline()
+                if not line:
+                    return False
+                token = line.strip().lower()
+                if token in (b'property float intensity',
+                             b'property float32 intensity',
+                             b'property double intensity',
+                             b'property float64 intensity'):
+                    return True
+                if token == b'end_header':
+                    return False
+    except OSError:
+        return False
+    return False
+
+
 def _meta_from_pybind_scan(scan, meta_dir: Path) -> ScanMeta:
     ply_path = Path(str(getattr(scan, "ply_path", ""))).resolve()
     json_attr = str(getattr(scan, "json_path", "") or "")
@@ -199,7 +225,16 @@ def _meta_from_pybind_scan(scan, meta_dir: Path) -> ScanMeta:
     meta = _load_scan_meta(json_path, ply_path, int(getattr(scan, "point_count", 0) or 0))
     meta.scan_name = str(getattr(scan, "scan_name", "") or meta.scan_name or ply_path.stem)
     meta.has_color = bool(getattr(scan, "has_color", False))
-    meta.has_intensity = bool(getattr(scan, "has_intensity", False))
+    reported_intensity = bool(getattr(scan, "has_intensity", False))
+    meta.has_intensity = _ply_has_native_intensity(ply_path)
+    if reported_intensity and not meta.has_intensity:
+        trace(
+            "fls.convert.intensity_unavailable",
+            scan=meta.scan_name,
+            ply=ply_path,
+            reason="pyd_did_not_export_point_intensity_property",
+            fallback="geometry_only",
+        )
     meta.has_distance = bool(getattr(scan, "has_distance", False))
 
     # pyd 层透传的统一字段

@@ -57,8 +57,11 @@ def _parse_header(stream):
     return vertex_count, properties, offset, stream.tell()
 
 
-def read_ply_fast(path):
-    """快读 PLY；返回 (points float32 (N,3), colors float32 (N,3) 或 None)。
+def read_ply_features_fast(path):
+    """快读 PLY，返回 ``(points, colors, intensity)``。
+
+    intensity 仅来自 PLY 的原生 ``intensity``/``Intensity`` 标量属性；
+    RGB 与 intensity 始终保持独立，缺失时返回 None。
 
     不满足快读条件或文件损坏时返回 None，调用方必须回退 Open3D 读取。
     """
@@ -104,6 +107,23 @@ def read_ply_fast(path):
             for axis, (_, off) in enumerate(rgb):
                 colors[:, axis] = records[:, off]
             colors /= np.float32(255.0)
-        return points, colors
+        intensity = None
+        intensity_prop = by_name.get('intensity') or by_name.get('Intensity')
+        if intensity_prop is not None:
+            dtype, off = intensity_prop
+            width = np.dtype(dtype).itemsize
+            intensity = np.ascontiguousarray(
+                records[:, off:off + width].view(dtype)[:, 0],
+                dtype=np.float32)
+        return points, colors, intensity
     except Exception:
         return None
+
+
+def read_ply_fast(path):
+    """兼容旧接口：快读 PLY 并仅返回 ``(points, colors)``。"""
+    result = read_ply_features_fast(path)
+    if result is None:
+        return None
+    points, colors, _ = result
+    return points, colors

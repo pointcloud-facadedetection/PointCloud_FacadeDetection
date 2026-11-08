@@ -44,6 +44,36 @@ class FacadeDetectionService:
     def set_index_service(self, index_service: FacadeIndexService):
         self._index_service = index_service
 
+    @staticmethod
+    def _proxy_intensity(dataset, indices=None):
+        """读取代理域原生反射强度；禁止把真彩 RGB 亮度当 intensity。"""
+        native = getattr(dataset, 'proxy_intensities', None)
+        if native is None:
+            return None
+        values = np.asarray(native, dtype=float).reshape(-1)
+        if len(values) != len(dataset.proxy_points) or len(values) == 0:
+            return None
+        if indices is not None:
+            values = values[np.asarray(indices, dtype=np.int64)]
+        finite = np.isfinite(values)
+        if np.count_nonzero(finite) < 20:
+            trace('facade.intensity.input', points=len(values),
+                  valid_ratio=f'{float(np.mean(finite)):.4f}',
+                  reason='too_few_finite')
+            return None
+        lo, hi = np.percentile(values[finite], [1.0, 99.0])
+        if hi <= lo + 1e-12:
+            trace('facade.intensity.input', points=len(values),
+                  valid_ratio=f'{float(np.mean(finite)):.4f}',
+                  reason='constant_signal', raw_p01=f'{float(lo):.6g}',
+                  raw_p99=f'{float(hi):.6g}')
+            return None
+        normalized = np.clip((values - lo) / (hi - lo), 0.0, 1.0)
+        trace('facade.intensity.input', points=len(values),
+              valid_ratio=f'{float(np.mean(finite)):.4f}',
+              raw_p01=f'{float(lo):.6g}', raw_p99=f'{float(hi):.6g}')
+        return normalized
+
     def _get_dataset(self, cloud_name: str):
         """获取点云数据集。"""
         data = self._viewport.get_cloud_data(cloud_name)
@@ -149,6 +179,7 @@ class FacadeDetectionService:
             metadata=detect_kwargs,
             scan_origin=detect_kwargs.get('scan_origins'),
             normals=dataset.proxy_normals,
+            intensities=self._proxy_intensity(dataset),
         )
 
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
@@ -344,6 +375,7 @@ class FacadeDetectionService:
             metadata=detect_kwargs,
             scan_origin=detect_kwargs.get('scan_origins'),
             normals=roi_normals,
+            intensities=self._proxy_intensity(dataset, global_indices),
         )
         facades = result.get('facades', []) if isinstance(result, dict) else (result or [])
 

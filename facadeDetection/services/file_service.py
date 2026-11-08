@@ -20,7 +20,7 @@ from config.storage import Storage
 
 from utils.convert_fls2ply import convert_fls_single, convert_fls_to_ply
 from utils.dist_reader import read_dist
-from utils.ply_fast_reader import read_ply_fast
+from utils.ply_fast_reader import read_ply_features_fast
 from services.e57_cache_service import ensure_e57_cache
 from utils.logging_utils import log_event, trace
 from algorithms.geometry import stratified_proxy_build
@@ -122,7 +122,9 @@ class FileService:
             if progress_cb is not None:
                 progress_cb(85, 'E57 缓存已就绪，正在建立点云索引')
             # 读取 E57 cache sidecar，将统一 pose schema 注入 dataset metadata
-            sidecar = load_path.with_suffix('.json')
+            sidecar = next((path for path in (
+                load_path.with_suffix('.ply.json'), load_path.with_suffix('.json'))
+                if path.exists()), load_path.with_suffix('.json'))
             if sidecar.exists():
                 try:
                     sidecar_data = json.loads(sidecar.read_text(encoding='utf-8'))
@@ -140,7 +142,7 @@ class FileService:
         if kind == FileKind.raw_pointcloud:
             started = time.perf_counter()
             print(f"[PCFD] load.begin path={load_path}", flush=True)
-            pts, cols = self._load_point_cloud(str(load_path))
+            pts, cols, source_intensity = self._load_point_cloud_features(str(load_path))
             print(f"[PCFD] load.read points={len(pts)} seconds={time.perf_counter()-started:.2f}", flush=True)
             if progress_cb is not None:
                 progress_cb(92, f'已读取 {len(pts):,} 点，正在建立索引')
@@ -204,11 +206,16 @@ class FileService:
                 # === 先注册 source asset，再注册 dataset ===
                 self.pointcloud_service.register_source_asset(
                     source_id, pts, cols,
-                    {'ply_path': str(load_path), 'dist_path': str(dist_file)})
+                    {'ply_path': str(load_path), 'dist_path': str(dist_file)},
+                    intensities=source_intensity)
+
+                proxy_intensity = self._aggregate_proxy_intensity(
+                    source_intensity, proxy_offsets, proxy_indices)
 
                 dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
                 dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, proc_pts, proc_cols, metadata=metadata)
+                    dataset_id, proc_pts, proc_cols, metadata=metadata,
+                    intensities=proxy_intensity)
 
                 pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
                 print(f"[PCFD] load.range_adaptive dist={dist_file.name} "
@@ -218,7 +225,8 @@ class FileService:
             elif self.pointcloud_service is not None:
                 dataset_id = f"{project_uuid or 'local'}:{load_path.name}"
                 dataset = self.pointcloud_service.register_dataset(
-                    dataset_id, pts, cols, metadata=dataset_metadata)
+                    dataset_id, pts, cols, metadata=dataset_metadata,
+                    intensities=source_intensity)
                 pts_ds, cols_ds = dataset.proxy_points, dataset.proxy_colors
                 print(f"[PCFD] load.index_ready proxy={len(pts_ds)} raw={len(pts)} "
                       f"seconds={time.perf_counter()-started:.2f}", flush=True)
@@ -372,7 +380,8 @@ class FileService:
                         FileRepo.update_cache_metadata(project_uuid, asset.id, {
                             'fls_source_dir': str(src),
                         })
-                source_pts, source_cols = self._load_point_cloud(p)
+                source_pts, source_cols, source_intensity = \
+                    self._load_point_cloud_features(p)
                 scan_meta = next((s for s in getattr(result, 'scans', [])
                                   if str(getattr(s, 'ply_path', '')) == str(Path(p).resolve())), None)
 
@@ -429,13 +438,18 @@ class FileService:
                 if self.pointcloud_service is not None:
                     self.pointcloud_service.register_source_asset(
                         source_id, source_pts, source_cols,
-                        {'ply_path': str(Path(p).resolve()), 'dist_path': str(dist_path)})
+                        {'ply_path': str(Path(p).resolve()), 'dist_path': str(dist_path)},
+                        intensities=source_intensity)
+
+                proxy_intensity = self._aggregate_proxy_intensity(
+                    source_intensity, proxy_offsets, proxy_indices)
 
                 dataset_id = f"{project_uuid or 'local'}:{Path(p).name}"
 
                 if self.pointcloud_service is not None:
                     self.pointcloud_service.register_dataset(
-                        dataset_id, proc_pts, proc_cols, metadata=metadata)
+                        dataset_id, proc_pts, proc_cols, metadata=metadata,
+                        intensities=proxy_intensity)
                     dataset = self.pointcloud_service.get_dataset(dataset_id)
                     trace('fls.import.dataset_bound', cloud=Path(p).name,
                           dataset=dataset_id, proxy=len(dataset.proxy_points))
@@ -481,19 +495,47 @@ class FileService:
             return FileKind.raw_image
         return None
 
-    def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    @staticmethod
+    def _aggregate_proxy_intensity(source_intensity, offsets, indices):
+        """按 proxy→source CSR 聚合原生强度；不从 RGB 推导。"""
+        if source_intensity is None:
+            return None
+        values = np.asarray(source_intensity, dtype=np.float32).reshape(-1)
+        offsets = np.asarray(offsets, dtype=np.int64).reshape(-1)
+        indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+        if len(offsets) < 2 or len(indices) != int(offsets[-1]):
+            trace('pointcloud.intensity.unavailable', reason='invalid_proxy_csr')
+            return None
+        result = np.full(len(offsets) - 1, np.nan, dtype=np.float32)
+        # 每个 proxy 组通常很小；中位数可抑制扫描噪声，且保持原生强度语义。
+        for row in range(len(result)):
+            ids = indices[offsets[row]:offsets[row + 1]]
+            ids = ids[(ids >= 0) & (ids < len(values))]
+            if len(ids):
+                finite = values[ids]
+                finite = finite[np.isfinite(finite)]
+                if len(finite):
+                    result[row] = np.median(finite)
+        valid = np.isfinite(result)
+        trace('pointcloud.intensity.proxy', points=len(result),
+              valid_ratio=f'{float(np.mean(valid)):.4f}', aggregation='median')
+        return result
+
+    def _load_point_cloud_features(self, path: str):
+        """读取坐标、颜色及独立原生 intensity，并保持三者逐点对齐。"""
         # 二进制 PLY 走 memmap 免解析快读；不满足条件时回退 Open3D，行为不变
         if Path(path).suffix.lower() == '.e57':
             raise RuntimeError('E57 必须在导入时转换为 cache PLY，禁止进入运行时读取链路')
-        fast = read_ply_fast(path)
+        fast = read_ply_features_fast(path)
         if fast is not None:
-            pts, cols = fast
+            pts, cols, intensity = fast
         else:
             pcd = o3d.io.read_point_cloud(path)
             try:
                 pts = np.asarray(pcd.points, dtype=np.float32).reshape(-1, 3)
                 pts = pts if pts.flags.c_contiguous else np.ascontiguousarray(pts)
                 cols = None
+                intensity = None
                 if pcd.has_colors():
                     candidate = np.asarray(pcd.colors, dtype=np.float32).reshape(-1, 3)
                     if len(candidate) == len(pts):
@@ -513,6 +555,15 @@ class FileService:
                 cols = cols[finite_mask]
             else:
                 cols = None
+        if intensity is not None:
+            if len(intensity) == len(finite_mask):
+                intensity = np.ascontiguousarray(
+                    np.asarray(intensity, dtype=np.float32).reshape(-1)[finite_mask])
+            else:
+                trace('pointcloud.intensity.unavailable', path=path,
+                      reason='length_mismatch', intensity_points=len(intensity),
+                      coordinate_points=len(finite_mask))
+                intensity = None
 
         if len(pts) == 0:
             raise ValueError(f"PLY 无非有限坐标点: {path}")
@@ -528,6 +579,26 @@ class FileService:
         # 3) 确保 C-contiguous float32
         pts = np.ascontiguousarray(pts, dtype=np.float32)
 
+        if intensity is None:
+            trace('pointcloud.intensity.unavailable', path=path,
+                  reason='missing_native_property')
+        else:
+            valid = np.isfinite(intensity)
+            if np.any(valid):
+                p01, p99 = np.percentile(intensity[valid], [1.0, 99.0])
+                trace('pointcloud.intensity.loaded', path=path, points=len(intensity),
+                      valid_ratio=f'{float(np.mean(valid)):.4f}',
+                      raw_p01=f'{float(p01):.6g}', raw_p99=f'{float(p99):.6g}')
+            else:
+                trace('pointcloud.intensity.unavailable', path=path,
+                      reason='all_non_finite')
+                intensity = None
+
+        return pts, cols, intensity
+
+    def _load_point_cloud(self, path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """兼容旧调用方，仅返回坐标与颜色。"""
+        pts, cols, _ = self._load_point_cloud_features(path)
         return pts, cols
 
     def _load_image(self, path: str) -> np.ndarray:

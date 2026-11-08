@@ -238,6 +238,9 @@ class ReportDataService:
             "ruler_verticality": _extract(ruler, "verticality"),
             "global_plane_flatness": _extract(global_plane, "flatness"),
             "global_plane_verticality": _extract(global_plane, "verticality"),
+            # PDF/预览层直接消费该字段，避免把低置信度几何最优拟合
+            # 误解释为自动验收结论。
+            "quality_advisory": dict(quality.get("quality_advisory") or {}),
         }
 
         # 双指标面积参考率：按两个指标各自的物理面积加权，禁止直接平均

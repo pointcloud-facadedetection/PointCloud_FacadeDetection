@@ -192,17 +192,67 @@ class FacadeQualityService:
                 partition_min_points_ratio=float(getattr(
                     profile, 'global_plane_partition_min_points_ratio',
                     getattr(Config, 'GLOBAL_PLANE_PARTITION_MIN_POINTS_RATIO', 0.10))),
+                enable_p95_refit=bool(getattr(
+                    profile, 'global_plane_enable_p95_refit',
+                    getattr(Config, 'GLOBAL_PLANE_ENABLE_P95_REFIT', True))),
+                p95_confidence=float(getattr(
+                    profile, 'global_plane_p95_confidence',
+                    getattr(Config, 'GLOBAL_PLANE_P95_CONFIDENCE', 0.95))),
             )
-            if not global_fit.get('fit_accepted', False):
-                trace('quality.warn', facade_no=facade_no,
-                      reason='global_plane_fit_below_threshold_forcing_continue',
+            # 门窗或跨楼层大空洞会显著降低严格支持集占全立面点数的比例，
+            # 但不必然意味着基准面不可用。仅在几何本身不可用时硬拒绝；
+            # 其余低置信度结果继续计算，并在结果与报告中强制标记人工复核。
+            strict_fit_accepted = bool(global_fit.get('fit_accepted', False))
+            fitted_plane = np.asarray(
+                global_fit.get('plane_model', []), dtype=np.float64).reshape(-1)
+            support_count = int(global_fit.get('inlier_count', 0) or 0)
+            fit_angle = float(global_fit.get(
+                'normal_angle_to_reference_deg', np.inf))
+            configured_angle_limit = float(getattr(
+                profile, 'global_plane_angle_limit_deg',
+                getattr(Config, 'GLOBAL_PLANE_ANGLE_LIMIT_DEG', 2.0)))
+            hard_angle_limit = max(5.0, configured_angle_limit * 2.0)
+            fit_geometry_usable = bool(
+                fitted_plane.shape == (4,)
+                and np.all(np.isfinite(fitted_plane))
+                and np.linalg.norm(fitted_plane[:3]) > 1e-12
+                and support_count >= max(
+                    3, int(getattr(profile, 'min_points', 30)))
+                and np.isfinite(fit_angle)
+                and fit_angle <= hard_angle_limit)
+            review_required = not strict_fit_accepted
+            if review_required and not fit_geometry_usable:
+                trace('quality.reject', facade_no=facade_no,
+                      reason='global_plane_fit_unusable',
                       inlier_ratio=global_fit.get('inlier_ratio'),
+                      inlier_count=support_count,
+                      angle_deg=fit_angle,
                       p95_mm=global_fit.get('p95_abs_residual_mm'))
-                fallback_plane = np.asarray(
-                    global_fit.get('plane_model', plane_model), dtype=np.float64)
-                global_fit['plane_model'] = fallback_plane
-                global_fit['fit_accepted'] = True
-                global_fit['forced_continue'] = True
+                return {
+                    'ok': False,
+                    'reason': 'global_plane_fit_unusable',
+                    'message': '立面基准面几何拟合不可用，请检查立面归属点。',
+                    'facade_no': facade_no,
+                    'reference_fit': global_fit,
+                }
+            if review_required:
+                global_fit.update({
+                    'fit_status': 'review_required',
+                    'review_required': True,
+                    'strict_fit_accepted': False,
+                })
+                trace('quality.warn', facade_no=facade_no,
+                      reason='global_plane_fit_review_required',
+                      inlier_ratio=global_fit.get('inlier_ratio'),
+                      inlier_count=support_count,
+                      angle_deg=fit_angle,
+                      p95_mm=global_fit.get('p95_abs_residual_mm'))
+            else:
+                global_fit.update({
+                    'fit_status': 'accepted',
+                    'review_required': False,
+                    'strict_fit_accepted': True,
+                })
             global_plane = np.asarray(global_fit['plane_model'], dtype=np.float64)
             if float(global_plane[:3] @ plane_model[:3]) < 0:
                 global_plane *= -1.0
@@ -283,7 +333,9 @@ class FacadeQualityService:
                 ruler_length_m=rsize,
                 ruler_width_m=float(getattr(profile, 'ruler_width_m', .055)),
                 scan_step_m=rstep,
-                strip_step_m=float(getattr(profile, 'strip_step_m', window_width)),
+                strip_step_m=float(getattr(
+                    profile, 'strip_step_m',
+                    getattr(profile, 'step_size_m', window_width))),
                 select_band_m=float(getattr(profile, 'select_band_m', .03)),
                 hole_band_m=float(getattr(profile, 'hole_band_m', .02)),
                 bin_size_m=float(getattr(profile, 'bin_size_m', .04)),
@@ -414,7 +466,7 @@ class FacadeQualityService:
                              if w.get('coverage_valid', True)]
             raw_total = len(np.unique(quality_indices))
 
-            _DOMAIN_RES = 0.01
+            _DOMAIN_RES = float(getattr(Config, 'QUALITY_COVERAGE_RESOLUTION_M', 0.02))
 
             def _window_rect(w, length_m, width_m):
                 cx = np.asarray(w.get('center_xyz'), dtype=float)
@@ -693,6 +745,20 @@ class FacadeQualityService:
                 'ruler_method': methods['ruler'],
                 'global_plane_method': methods['global_plane'],
             }
+
+            advisory_message = (
+                '立面存在大面积门窗/楼层空洞，基准面为几何最优拟合，'
+                '结果仅供复核参考，不直接判定验收。')
+            result['quality_advisory'] = {
+                'review_required': bool(review_required),
+                'code': ('large_opening_reference_fit'
+                         if review_required else None),
+                'message': advisory_message if review_required else '',
+                'acceptance_decision': ('manual_review'
+                                        if review_required else 'automatic'),
+            }
+            result['overall']['acceptance_decision'] = (
+                'manual_review' if review_required else 'automatic')
 
             voxel_ids = facade.get('voxel_ids')
             if voxel_ids is not None:

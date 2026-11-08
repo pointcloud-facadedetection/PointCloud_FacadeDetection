@@ -43,6 +43,34 @@ class FakeE57:
         }
 
 
+def test_native_intensity_write_read_and_progress(monkeypatch, tmp_path):
+    class E57WithIntensity(FakeE57):
+        def read_scan(self, index, **kwargs):
+            raw = super().read_scan(index, **kwargs)
+            raw['intensity'] = np.arange(len(raw['cartesianX']),
+                                         dtype=np.float32) + index
+            return raw
+
+    monkeypatch.setitem(sys.modules, 'pye57',
+                        SimpleNamespace(E57=E57WithIntensity))
+    progress = []
+    cache = tmp_path / 'native.ply'
+    info = convert_e57_to_ply(
+        tmp_path / 'scan.e57', cache,
+        progress_cb=lambda percent, text: progress.append(percent))
+    from utils.ply_fast_reader import read_ply_features_fast
+    _points, _colors, intensities = read_ply_features_fast(cache)
+    assert info['has_intensity'] is True
+    assert info['intensity_valid_ratio'] == 1.0
+    np.testing.assert_array_equal(
+        intensities, np.r_[np.arange(4), np.arange(5) + 1].astype(np.float32))
+    assert progress[-1] == 100
+    _pose, camera = initial_view_from_asset(SimpleNamespace(
+        path='scan.e57', meta_json={'cache_path': str(cache)}))
+    assert camera['position'] == [5.0, 6.0, 7.0]
+    assert camera['focal_point'] == [2.0, 1.5, 2.0]
+
+
 def test_conversion_progress_and_pose_sidecar(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, 'pye57',
                         SimpleNamespace(E57=FakeE57))
@@ -59,7 +87,7 @@ def test_conversion_progress_and_pose_sidecar(monkeypatch, tmp_path):
     assert all(first[0] <= second[0] for first, second in zip(progress, progress[1:]))
     assert any('2/2' in text for _percent, text in progress)
     assert (tmp_path / 'cache.ply').stat().st_size > 0
-    assert json.loads((tmp_path / 'cache.json').read_text(encoding='utf-8'))['scan_poses']
+    assert json.loads((tmp_path / 'cache.ply.json').read_text(encoding='utf-8'))['scan_poses']
 
 
 def test_parent_forwards_subprocess_progress(monkeypatch, tmp_path):
@@ -135,7 +163,7 @@ def test_upload_adapter_forwards_conversion_and_index_progress(monkeypatch, tmp_
                         lambda *_args: None)
     service = module.FileService(None, None, SimpleNamespace(pointcloud_service=None))
     points = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]], dtype=np.float32)
-    service._load_point_cloud = lambda _path: (points, None)
+    service._load_point_cloud_features = lambda _path: (points, None, None)
     progress = []
     prepared = service.prepare_upload(
         'uuid', str(source),

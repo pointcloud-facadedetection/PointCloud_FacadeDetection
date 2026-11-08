@@ -1,7 +1,7 @@
 """兼容读取 E57 / FLS 两种缓存格式的测站位姿（旋转矩阵 + 平移向量）。
 
 两种存储路径：
-  1. E57:  {cache_dir}/{station_name}.json
+  1. E57:  {cache_dir}/{station_name}.ply.json（兼容旧 .json）
   2. FLS:  {cache_dir}/{station_name}.fls/pointclouds/{station_name}.json
 
 返回统一命名字段，便于下游算法直接消费。
@@ -113,9 +113,12 @@ def read_station_pose(
     """
     cache_dir = Path(cache_dir).expanduser().resolve()
 
-    # 1) 尝试 E57 格式
-    e57_path = cache_dir / f"{station_name}.json"
+    # 1) 尝试 E57 新旧两种侧载命名
+    e57_path = cache_dir / f"{station_name}.ply.json"
     data = _try_load_json(e57_path)
+    if data is None:
+        e57_path = cache_dir / f"{station_name}.json"
+        data = _try_load_json(e57_path)
     pose = _extract_pose_from_e57(data) if data is not None else None
 
     # 2) 尝试 FLS 格式
@@ -165,7 +168,11 @@ def get_all_station_poses(
 
     # E57
     for json_path in cache_dir.glob("*.json"):
-        name = json_path.stem
+        name = json_path.name
+        if name.endswith('.ply.json'):
+            name = name[:-len('.ply.json')]
+        else:
+            name = json_path.stem
         data = _try_load_json(json_path)
         pose = _extract_pose_from_e57(data) if data is not None else None
         if pose is not None:
