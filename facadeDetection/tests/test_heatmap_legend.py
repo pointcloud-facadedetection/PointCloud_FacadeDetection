@@ -179,7 +179,7 @@ def test_pass_band_has_signed_gradient_and_explicit_threshold_colors():
     assert np.allclose(colors[4], [0.10, 0.65, 0.85])
 
 
-def test_sparse_samples_keep_visibility_and_threshold_contour():
+def test_sparse_samples_keep_visibility_without_divider_line():
     from algorithms.facade.projection import _continuous_signed_overlay
     from services.heatmap_spec import bipolar_colormap
 
@@ -191,9 +191,8 @@ def test_sparse_samples_keep_visibility_and_threshold_contour():
     visible = overlay[:, :, 3] > 0
     assert visible.any()
     assert np.all(overlay[:, :, 3][visible] >= 100), '稀疏样本不得产生接近透明的条纹'
-    boundary = np.all(overlay[:, :, :3] == [40, 45, 50], axis=2) & visible
-    assert int(boundary.sum()) > 0, '±阈值位置必须绘制独立分界线'
-    assert np.all(overlay[:, :, 3][boundary] == 255)
+    dark = np.all(overlay[:, :, :3] == [40, 45, 50], axis=2)
+    assert not dark.any(), '热力图不得绘制深色阈值分割线'
 
 
 def test_sparse_sampling_gaps_are_neutralized_without_outer_ring():

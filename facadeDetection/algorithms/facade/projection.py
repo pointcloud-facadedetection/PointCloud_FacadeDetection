@@ -48,17 +48,6 @@ def _continuous_signed_overlay(values, pixel_ids, facade_mask, limit_m,
     alpha = np.where(np.abs(smooth) > limit_m, 225.0, 160.0)
     overlay[:, :, 3][support] = np.clip(
         alpha[support] * coverage[support], 0, 255).astype(np.uint8)
-    inside_limit = support & (np.abs(smooth) <= limit_m)
-    boundary_band = cv2.morphologyEx(
-        inside_limit.astype(np.uint8), cv2.MORPH_GRADIENT,
-        np.ones((3, 3), np.uint8)) > 0
-    support_boundary = cv2.morphologyEx(
-        support.astype(np.uint8), cv2.MORPH_GRADIENT,
-        np.ones((3, 3), np.uint8)) > 0
-    boundary_band &= support & ~support_boundary
-    if np.any(boundary_band):
-        overlay[:, :, :3][boundary_band] = (40, 45, 50)
-        overlay[:, :, 3][boundary_band] = 255
     return overlay, smooth
 
 
