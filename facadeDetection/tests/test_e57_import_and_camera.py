@@ -259,3 +259,37 @@ def test_viewport_applies_saved_station_position(qapp):
         assert updates == [1]
     finally:
         viewport.destroy()
+
+
+def test_plane_positive_side_faces_e57_camera_without_pose_fallback():
+    from services.initial_camera_service import orient_plane_to_camera
+
+    plane = np.array([1.0, 0.0, 0.0, -10.0])
+    camera = {'position': [0.0, 0.0, 0.0]}
+    oriented = orient_plane_to_camera(plane, [10.0, 0.0, 0.0], camera)
+    assert np.allclose(oriented, [-1.0, 0.0, 0.0, 10.0])
+    assert np.allclose(orient_plane_to_camera(plane, [10.0, 0.0, 0.0], None), plane)
+
+
+def test_station_camera_is_attached_to_quality_dataset(monkeypatch):
+    from services.pointcloud_station_service import PointCloudStationService
+
+    class Render:
+        def __init__(self):
+            self.camera = None
+
+        def set_initial_camera(self, camera):
+            self.camera = camera
+
+    render = Render()
+    service = PointCloudStationService(render, project_uuid='project')
+    station = SimpleNamespace(initial_pose_json={'scan_poses': [{
+        'has_pose': True, 'scan_index': 0, 'scan_position': [5.0, 6.0, 7.0],
+    }]})
+    dataset = SimpleNamespace(
+        proxy_points=np.array([[0.0, 0.0, 0.0], [2.0, 2.0, 2.0]]), metadata={})
+    monkeypatch.setattr(PointCloudStationRepo, 'save_initial_camera',
+                        lambda *_args: None)
+    service._apply_initial_camera(station, dataset)
+    assert dataset.metadata['initial_camera']['position'] == [5.0, 6.0, 7.0]
+    assert render.camera['position'] == [5.0, 6.0, 7.0]

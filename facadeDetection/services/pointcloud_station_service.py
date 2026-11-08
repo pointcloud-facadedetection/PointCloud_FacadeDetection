@@ -617,6 +617,9 @@ class PointCloudStationService:
         camera = initial_view_from_station(station, dataset.proxy_points)
         if camera is None:
             return
+        metadata = getattr(dataset, 'metadata', None)
+        if isinstance(metadata, dict):
+            metadata['initial_camera'] = dict(camera)
         self.render.set_initial_camera(camera)
         PointCloudStationRepo.save_initial_camera(self.project_uuid, camera)
 

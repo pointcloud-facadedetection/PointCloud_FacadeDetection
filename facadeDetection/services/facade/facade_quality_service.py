@@ -276,6 +276,12 @@ class FacadeQualityService:
             plane_d = float(plane_model[3])
             plane_n = plane_model[:3]
             origin_on_plane = bbox_center - (np.dot(bbox_center, plane_n) + plane_d) * plane_n
+            from services.initial_camera_service import orient_plane_to_camera
+            plane_model = orient_plane_to_camera(
+                plane_model, origin_on_plane,
+                (dataset.metadata or {}).get('initial_camera'))
+            plane_d = float(plane_model[3])
+            plane_n = plane_model[:3]
 
             facade_ref = {
                 'plane_model': [float(x) for x in plane_model],

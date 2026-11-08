@@ -65,6 +65,21 @@ def initial_view_from_asset(asset):
     return payload, camera
 
 
+def orient_plane_to_camera(plane_model, reference_point, camera):
+    plane = np.asarray(plane_model, dtype=float).reshape(4)
+    position = (camera or {}).get('position')
+    if position is None:
+        return plane
+    try:
+        toward_camera = np.asarray(position, dtype=float).reshape(3) - np.asarray(
+            reference_point, dtype=float).reshape(3)
+        if np.isfinite(toward_camera).all() and np.dot(toward_camera, plane[:3]) < 0:
+            return -plane
+    except (TypeError, ValueError):
+        pass
+    return plane
+
+
 def initial_view_from_station(station, points):
     pose = _first_pose(getattr(station, 'initial_pose_json', None))
     points = np.asarray(points)
