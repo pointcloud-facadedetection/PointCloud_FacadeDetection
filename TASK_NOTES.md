@@ -349,3 +349,9 @@
 - `VirtualQueryEx` 已提交区域：MEM_PRIVATE 2724.62 MiB、MEM_IMAGE 808.00 MiB、MEM_MAPPED 12.45 MiB。文件映射仅剩 12.45 MiB，证明原始点云映射没有继续整份驻留。
 - MEM_PRIVATE 最大区域约 224.59 MiB，其他较大区域约 106.82/80.00/34.07 MiB；MEM_IMAGE 最大区域约 130.38/64.84 MiB，属于本机 DLL 映像。
 - 注意：VirtualQuery 统计的是已提交虚拟内存，不等于实际驻留物理页，不能将三类数值直接与 RSS 相减。未驻留的私有页、Python/Open3D/VTK 堆与分配器、DLL 映像共同构成剩余工作集。
+
+## 二次打开intensity快读修复
+
+- 二次打开约25秒的主要原因是 `_load_native_intensity` 调用全量 `read_ply_features_fast`，为读取 intensity 同时创建 2800 万点 XYZ/RGB/intensity（约780MB）。
+- 新增 `read_ply_intensity_fast`，仅按 PLY 记录布局映射并复制 intensity 列，不创建 XYZ/RGB。
+- 2800 万点实测单项读取 0.255 秒、峰值106.83 MiB；40 项 E57、代理与 memmap 测试通过。

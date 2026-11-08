@@ -64,6 +64,9 @@ def test_native_intensity_write_read_and_progress(monkeypatch, tmp_path):
     assert info['intensity_valid_ratio'] == 1.0
     np.testing.assert_array_equal(
         intensities, np.r_[np.arange(4), np.arange(5) + 1].astype(np.float32))
+    from utils.ply_fast_reader import read_ply_intensity_fast
+    np.testing.assert_array_equal(
+        read_ply_intensity_fast(cache), intensities)
     assert progress[-1] == 100
     _pose, camera = initial_view_from_asset(SimpleNamespace(
         path='scan.e57', meta_json={'cache_path': str(cache)}))

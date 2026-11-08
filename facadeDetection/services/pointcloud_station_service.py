@@ -14,7 +14,8 @@ from algorithms.geometry import (
     build_proxy_domain, stratified_proxy_build, estimate_elevation_angles,
 )
 from utils.dist_reader import read_dist
-from utils.ply_fast_reader import read_ply_fast, read_ply_features_fast
+from utils.ply_fast_reader import (
+    read_ply_fast, read_ply_features_fast, read_ply_intensity_fast)
 from config.storage import Storage
 import uuid
 
@@ -195,8 +196,7 @@ class PointCloudStationService:
                 return None
         except OSError:
             return None
-        payload = read_ply_features_fast(path)
-        return None if payload is None else payload[2]
+        return read_ply_intensity_fast(path)
 
     @staticmethod
     def _aggregate_proxy_intensity(source_intensity, offsets, indices):

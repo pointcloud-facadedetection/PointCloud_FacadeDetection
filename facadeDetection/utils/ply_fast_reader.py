@@ -120,6 +120,33 @@ def read_ply_features_fast(path):
         return None
 
 
+def read_ply_intensity_fast(path):
+    """仅映射并复制 intensity 列，不创建 XYZ/RGB 数组。"""
+    try:
+        if Path(str(path)).suffix.lower() != '.ply':
+            return None
+        with open(path, 'rb') as stream:
+            parsed = _parse_header(stream)
+            if parsed is None:
+                return None
+            count, properties, record_size, data_offset = parsed
+        if Path(path).stat().st_size - data_offset < count * record_size:
+            return None
+        by_name = {name: (dtype, off) for name, dtype, off in properties}
+        intensity_prop = by_name.get('intensity') or by_name.get('Intensity')
+        if intensity_prop is None:
+            return None
+        dtype, off = intensity_prop
+        width = np.dtype(dtype).itemsize
+        raw = np.memmap(path, dtype=np.uint8, mode='r',
+                        offset=data_offset, shape=(count * record_size,))
+        records = raw.reshape(count, record_size)
+        return np.ascontiguousarray(
+            records[:, off:off + width].view(dtype)[:, 0], dtype=np.float32)
+    except Exception:
+        return None
+
+
 def read_ply_fast(path):
     """兼容旧接口：快读 PLY 并仅返回 ``(points, colors)``。"""
     result = read_ply_features_fast(path)
