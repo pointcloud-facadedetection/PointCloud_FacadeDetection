@@ -118,14 +118,16 @@ def test_touch_controls_sync_and_ruler_restores_mode(qapp):
 
     window = MainWindow()
     try:
+        assert not hasattr(window, 'btn_review_touch_mode')
+        assert not hasattr(window, 'review_zoom_slider')
+        assert not hasattr(window, 'btn_review_reset_view')
         assert window.btn_operation_touch_mode.text() == '旋转'
-        assert window.btn_review_touch_mode.text() == '旋转'
         assert window.lbl_review_ruler_example.text()
         window.btn_operation_touch_mode.click()
         assert window.viewport._touch_navigation_mode == 'pan'
-        assert window.btn_review_touch_mode.text() == '平移'
+        assert window.btn_operation_touch_mode.text() == '平移'
 
-        window.btn_review_touch_mode.click()
+        window.btn_operation_touch_mode.click()
         assert window.viewport._touch_navigation_mode == 'rotate'
         window._on_review_tool_activated('ruler')
         assert window.viewport._touch_navigation_mode == 'pan'
@@ -134,11 +136,9 @@ def test_touch_controls_sync_and_ruler_restores_mode(qapp):
 
         window.viewport._plotter.enable_parallel_projection()
         before = _parallel_scale(window.viewport)
-        window.review_zoom_slider.setValue(200)
-        assert window.operation_zoom_slider.value() == 200
+        window.operation_zoom_slider.setValue(200)
         assert _parallel_scale(window.viewport) == pytest.approx(before / 2)
-        window.btn_review_reset_view.click()
-        assert window.review_zoom_slider.value() == 100
+        window.btn_operation_reset_view.click()
         assert window.operation_zoom_slider.value() == 100
     finally:
         window.close()
@@ -147,3 +147,33 @@ def test_touch_controls_sync_and_ruler_restores_mode(qapp):
 def test_viewport_accepts_native_touch_events(viewport):
     from PySide6.QtCore import Qt
     assert viewport._widget.testAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
+
+
+def test_pinch_locks_single_touch_navigation_until_all_fingers_lift(viewport):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QEvent, QPointF
+
+    calls = []
+    viewport._turntable_rotate = lambda dx, dy: calls.append(('rotate', dx, dy))
+    viewport._camera_pan = lambda dx, dy: calls.append(('pan', dx, dy))
+
+    def touch(event_type, count):
+        points = [SimpleNamespace(position=lambda: QPointF(10, 10))
+                  for _ in range(count)]
+        return SimpleNamespace(type=lambda: event_type,
+                               touchPoints=lambda: points)
+
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, touch(QEvent.Type.TouchBegin, 2))
+    assert viewport._touch_pinching is True
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, touch(QEvent.Type.TouchUpdate, 1))
+    assert calls == [], '双指期间不得叠加单指导航'
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, touch(QEvent.Type.TouchEnd, 0))
+    assert viewport._touch_pinching is False
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, touch(QEvent.Type.TouchBegin, 1))
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, touch(QEvent.Type.TouchUpdate, 1))
+    assert calls, '全部手指抬起后应恢复单指导航'

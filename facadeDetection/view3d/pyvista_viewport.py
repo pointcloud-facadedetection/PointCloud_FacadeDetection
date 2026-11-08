@@ -147,7 +147,16 @@ class _GestureFilter(QObject):
                         or viewport._quad_resize is not None):
                     return False
                 points = event.touchPoints()
+                if viewport._touch_pinching:
+                    if (event.type() in (QEvent.Type.TouchEnd,
+                                         QEvent.Type.TouchCancel)
+                            and not points):
+                        viewport._touch_pinching = False
+                        viewport._touch_drag = None
+                    event.accept()
+                    return True
                 if len(points) >= 2:
+                    viewport._touch_pinching = True
                     viewport._touch_drag = None
                     event.accept()
                     return True
@@ -225,6 +234,7 @@ class PyVistaViewport(BaseViewport):
         self._drag_left = None
         self._drag_right = None
         self._touch_drag = None
+        self._touch_pinching = False
         self._touch_navigation_mode = 'rotate'
         self._zoom_reference = None
         self._install_zup_interaction()

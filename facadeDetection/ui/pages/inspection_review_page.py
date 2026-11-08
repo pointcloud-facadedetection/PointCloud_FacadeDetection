@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidgetItem,
     QPushButton,
-    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -189,30 +188,6 @@ class InspectionReviewPageMixin:
         self.btn_review_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_clear.clicked.connect(self._on_review_clear_clicked)
         row.addWidget(self.btn_review_clear)
-
-        self.review_zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.review_zoom_slider.setObjectName('reviewZoomSlider')
-        self.review_zoom_slider.setRange(25, 400)
-        self.review_zoom_slider.setValue(100)
-        self.review_zoom_slider.setFixedWidth(100)
-        self.review_zoom_slider.setToolTip('缩放百分比：100%为当前视角，双指捏合同样可用')
-        self.review_zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
-        row.addWidget(self.review_zoom_slider)
-
-        self.btn_review_touch_mode = QPushButton('旋转')
-        self.btn_review_touch_mode.setObjectName('btnReviewTouchMode')
-        self.btn_review_touch_mode.setProperty('buttonRole', 'secondary')
-        self.btn_review_touch_mode.setCheckable(True)
-        self.btn_review_touch_mode.setToolTip('单点触控选择旋转或平移；双指捏合缩放')
-        self.btn_review_touch_mode.toggled.connect(self._on_touch_mode_toggled)
-        row.addWidget(self.btn_review_touch_mode)
-
-        self.btn_review_reset_view = QPushButton('归位')
-        self.btn_review_reset_view.setObjectName('btnReviewResetView')
-        self.btn_review_reset_view.setProperty('buttonRole', 'secondary')
-        self.btn_review_reset_view.setToolTip('退出当前工具并恢复测站初始视角或默认立面视角')
-        self.btn_review_reset_view.clicked.connect(self._on_review_reset_view)
-        row.addWidget(self.btn_review_reset_view)
 
         self.btn_review_resize = QPushButton('调整边界')
         self.btn_review_resize.setObjectName('btn_review_resize')

@@ -61,6 +61,11 @@ class OperationPageMixin:
 
     def _on_operation_reset_view(self):
         self._reset_zoom_sliders()
+        if getattr(self, '_workspace_in_review', False):
+            self.viewport_tools_controller.cancel()
+            self._close_review_resize_confirm_card()
+            if getattr(self.viewport, '_quad_resize', None) is not None:
+                self.viewport.exit_heatmap_resize()
         self.project_operation_service.reset_view()
 
     def _create_operation_page(self, page_title, page_key):

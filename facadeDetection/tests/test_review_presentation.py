@@ -505,7 +505,7 @@ def test_review_facade_normal_faces_initial_camera(qapp):
     assert np.allclose(normal, [0.0, -1.0, 0.0])
 
 
-def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
+def test_shared_reset_button_does_not_reload_cloud(qapp):
     from ui.main_window import MainWindow
 
     window = MainWindow()
@@ -521,6 +521,7 @@ def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
         window.btn_operation_reset_view.click()
         assert calls['reset'] == 1
 
+        window._workspace_in_review = True
         window.viewport_tools_controller.cancel = lambda: calls.__setitem__(
             'cancel', calls['cancel'] + 1)
         window._close_review_resize_confirm_card = lambda: None
@@ -528,7 +529,7 @@ def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
         window.viewport.exit_heatmap_resize = lambda: (
             calls.__setitem__('resize_exit', calls['resize_exit'] + 1),
             setattr(window.viewport, '_quad_resize', None))
-        window.btn_review_reset_view.click()
+        window.btn_operation_reset_view.click()
         assert calls == {'reset': 2, 'cancel': 1, 'resize_exit': 1}
     finally:
         window.close()
