@@ -121,6 +121,25 @@ def run(project_id=None):
         mark('facade.select.start')
         measured('facade_select', lambda: win._on_facade_item_clicked(item))
         mark('facade.select.return')
+        import numpy as np
+        facade = win._facade_from_item(item) or {}
+        geometry = (facade.get('quality_report') or {}).get('facade_geometry') or {}
+        initial = getattr(win.viewport, '_initial_camera', None) or {}
+        if geometry.get('normal') is not None and initial.get('focal_point') is not None:
+            plane_normal = np.asarray(geometry['normal'], dtype=float)
+            initial_forward = (np.asarray(initial['focal_point'], dtype=float)
+                               - np.asarray(initial['position'], dtype=float))
+            expected = (plane_normal if np.dot(initial_forward, plane_normal) >= 0
+                        else -plane_normal)
+            expected /= np.linalg.norm(expected)
+            camera = win.viewport._plotter.camera
+            actual = (np.asarray(camera.focal_point, dtype=float)
+                      - np.asarray(camera.position, dtype=float))
+            actual /= np.linalg.norm(actual)
+            expect(np.allclose(actual, expected, atol=1e-6),
+                   f'review lookat mismatch actual={actual} expected={expected}')
+            expect(np.allclose(camera.up, [0.0, 0.0, 1.0]),
+                   f'review up is not +Z: {camera.up}')
         QTimer.singleShot(2500, verify_original_mode)
 
     def verify_original_mode():

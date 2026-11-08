@@ -267,3 +267,9 @@
 
 - 全量回归发现 UI 控制器直接导入 DAL 的架构违规，已将 NPZ 持久化委托移至 `FacadeQualityService` 并经 `FacadeService` 门面暴露。
 - UI 仅调用业务服务，不再出现 `services.dal`；架构、质量缓存与 artifact 相关 30 项测试通过。
+
+## 真实E57最终lookat验证
+
+- 真实“123123”E57项目完成缓存加载、立面选中、热力/原色切换、测距和靠尺状态验证，到达 `scenario.finish`。
+- 探针直接比较最终 VTK `focal_point - position` 与按默认 lookat 选出的平面法向，数值完全一致；`camera.up == [0, 0, 1]`。
+- 另行只读调用真实数据库位姿与立面几何，最终辅助函数输出与期望方向 `match=True`。
