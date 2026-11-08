@@ -286,3 +286,24 @@ def test_toggle_heatmap_without_compatible_results(env):
     assert controller.heatmap_mode == 'flatness'  # 未翻转
     assert render_facade.quality_report_calls == []
     assert ('heatmap',) in rec.events
+
+
+def test_quality_cache_evicts_previous_revisions_of_same_facade(env):
+    controller = env[0]
+    old = {'indices': list(range(1000))}
+    other_facade = {'keep': True}
+    other_cloud = {'keep': True}
+    controller.quality_result_cache.update({
+        ('cloud1', 1, 'edit-0'): old,
+        ('cloud1', 1, 'edit-1'): old,
+        ('cloud1', 2, 'edit-0'): other_facade,
+        ('cloud2', 1, 'edit-0'): other_cloud,
+    })
+    latest = {'quality': 'latest'}
+    controller._store_quality_result(
+        ('cloud1', 1, 'edit-2'), 'cloud1', 1, latest)
+    assert controller.quality_result_cache == {
+        ('cloud1', 2, 'edit-0'): other_facade,
+        ('cloud2', 1, 'edit-0'): other_cloud,
+        ('cloud1', 1, 'edit-2'): latest,
+    }

@@ -474,6 +474,16 @@ class FacadeQualityController(QObject):
             len(domain), hash(tuple(domain[:32])),
         )
 
+    def _store_quality_result(self, cache_key, cloud, facade_id, quality):
+        facade_id = int(facade_id)
+        stale_keys = [key for key in self.quality_result_cache
+                      if isinstance(key, tuple) and len(key) > 1
+                      and key[0] == str(cloud or '') and key[1] == facade_id]
+        for key in stale_keys:
+            self.quality_result_cache.pop(key, None)
+        if cache_key is not None:
+            self.quality_result_cache[cache_key] = quality
+
     # ------------------------------------------------------------------
     # 单立面完成回调
     # ------------------------------------------------------------------
@@ -554,9 +564,8 @@ class FacadeQualityController(QObject):
             self.quality_failed.emit()
             return
 
-        cache_key = self._quality_request_cache_key
-        if cache_key is not None:
-            self.quality_result_cache[cache_key] = quality
+        self._store_quality_result(
+            self._quality_request_cache_key, cloud, f.get('id', 0), quality)
 
         # Update reports list
         self.quality_reports = [r for r in self.quality_reports
