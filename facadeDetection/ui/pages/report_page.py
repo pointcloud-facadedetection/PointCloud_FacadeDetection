@@ -90,7 +90,10 @@ class ReportPageMixin:
             self._report_snapshot = ReportDataService.build(
                 self.current_project, facades,
                 getattr(self.current_project, 'directory_path', None))
-        self._report_html = PdfReportRenderer.html(self._report_snapshot)
+        if not hasattr(self, '_report_page_cache'):
+            self._report_page_cache = {}
+        self._report_html = PdfReportRenderer.html(
+            self._report_snapshot, page_cache=self._report_page_cache)
         self.report_document_title_label.setText('建筑外立面质量检测报告')
         self.report_preview_browser.setHtml(self._report_html)
         self.report_preview_browser.setVisible(True)

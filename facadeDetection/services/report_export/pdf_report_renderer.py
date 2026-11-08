@@ -134,12 +134,13 @@ class PdfReportRenderer:
     # Main entry
     # ------------------------------------------------------------------
     @staticmethod
-    def html(snapshot: dict) -> str:
+    def html(snapshot: dict, page_cache: dict | None = None) -> str:
         project = snapshot.get("project") or {}
         summary = snapshot.get("summary") or {}
         facades = snapshot.get("facades", [])
         cover = PdfReportRenderer._cover(project, summary)
-        body = PdfReportRenderer._body(facades, snapshot.get("buildings"))
+        body = PdfReportRenderer._body(
+            facades, snapshot.get("buildings"), page_cache=page_cache)
         footer = PdfReportRenderer._footer(project, summary)
         style = PdfReportRenderer._style()
         return (
@@ -437,7 +438,43 @@ class PdfReportRenderer:
     # Body (facades)
     # ------------------------------------------------------------------
     @staticmethod
-    def _body(facades: list[dict], buildings: list[dict] | None = None) -> str:
+    def _facade_page(facade: dict, station_label: str) -> str:
+        wd = facade.get("wall_data") or {}
+        number = facade.get("report_no", facade.get("id", 0))
+        table_html = PdfReportRenderer._wall_data_table(wd)
+        analysis_html = PdfReportRenderer._analysis_text(wd)
+        triplets_html = PdfReportRenderer._triplets(
+            facade.get("images", []), number)
+        project_name = _text(facade.get("project_name"), "")
+        wall_label = _text(facade.get("wall_label"), f"墙面 {number}")
+        chapter_title = (
+            f"{project_name}-{station_label}-{wall_label}"
+            if project_name else f"{station_label}-{wall_label}")
+        return (f"<div class='wall-head'><h2>{chapter_title}</h2>"
+                f"{table_html}{analysis_html}</div>{triplets_html}")
+
+    @staticmethod
+    def _facade_page_key(facade: dict, station_label: str):
+        image_signatures = []
+        for image in facade.get("images", []):
+            path = Path(image.get("path", "")) if isinstance(image, dict) else Path(image)
+            try:
+                stat = path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                signature = None
+            image_signatures.append((str(path), signature))
+        return (
+            station_label, facade.get("id"), facade.get("report_no"),
+            facade.get("edit_revision"), facade.get("dataset_revision"),
+            facade.get("quality_status"), repr(facade.get("wall_data") or {}),
+            facade.get("project_name"), facade.get("wall_label"),
+            tuple(image_signatures),
+        )
+
+    @staticmethod
+    def _body(facades: list[dict], buildings: list[dict] | None = None,
+              page_cache: dict | None = None) -> str:
         if not facades:
             return "<p class='muted'>暂无立面检测结果</p>"
         sections = []
@@ -448,37 +485,21 @@ class PdfReportRenderer:
                 continue
 
             building_label = _text(building.get("label"), "点云站点")
-
-            sections.append(
-                f"<div class='building'>"
-                f"<h1>{building_label}</h1>"
-            )
+            sections.append(f"<div class='building'><h1>{building_label}</h1>")
 
             for facade in walls:
-                wd = facade.get("wall_data") or {}
-                number = facade.get("report_no", facade.get("id", 0))
-                table_html = PdfReportRenderer._wall_data_table(wd)
-                analysis_html = PdfReportRenderer._analysis_text(wd)
-                images = facade.get("images", [])
-                triplets_html = PdfReportRenderer._triplets(images, number)
-                project_name = _text(facade.get("project_name"), "")
                 station_label = _text(building.get("label"), "")
-                wall_label = _text(facade.get("wall_label"), f"墙面 {number}")
-                chapter_title = (
-                    f"{project_name}-{station_label}-{wall_label}"
-                    if project_name
-                    else f"{station_label}-{wall_label}"
-                )
-                sections.append(
-                    f"<div class='wall-head'>"
-                    f"<h2>{chapter_title}</h2>"
-                    f"{table_html}"
-                    f"{analysis_html}"
-                    f"</div>"
-                    f"{triplets_html}"
-                )
+                key = PdfReportRenderer._facade_page_key(facade, station_label)
+                cached = page_cache.pop(key, None) if page_cache is not None else None
+                if cached is None:
+                    cached = PdfReportRenderer._facade_page(facade, station_label)
+                if page_cache is not None:
+                    page_cache[key] = cached
+                    while len(page_cache) > 64:
+                        page_cache.pop(next(iter(page_cache)))
+                sections.append(cached)
 
-            sections.append("</div>")  # 关闭 building div
+            sections.append("</div>")
 
         return "".join(sections)
 

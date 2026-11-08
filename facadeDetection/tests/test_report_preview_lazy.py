@@ -45,3 +45,40 @@ def test_hidden_report_defers_build_until_page_visible(qapp):
     qapp.processEvents()
     assert harness._report_preview_dirty is True
     assert harness._report_html == previous_html
+
+
+def test_facade_page_cache_reuses_unchanged_pages_and_invalidates_images(
+        monkeypatch, tmp_path):
+    from services.report_export import PdfReportRenderer
+
+    image = tmp_path / 'heatmap.png'
+    image.write_bytes(b'old')
+    facade = {
+        'id': 7, 'report_no': 1, 'project_name': '项目',
+        'wall_label': '墙面 1', 'wall_data': {},
+        'images': [{'path': str(image), 'mode': 'global_plane_flatness_area'}],
+    }
+    snapshot = {
+        'project': {}, 'summary': {}, 'facades': [facade],
+        'buildings': [{'label': '站点', 'walls': [facade]}],
+    }
+    calls = []
+
+    def triplets(images, number):
+        calls.append((images, number))
+        return '<div>triplets</div>'
+
+    monkeypatch.setattr(PdfReportRenderer, '_triplets', staticmethod(triplets))
+    cache = {}
+    first = PdfReportRenderer.html(snapshot, page_cache=cache)
+    second = PdfReportRenderer.html(snapshot, page_cache=cache)
+    assert first == second
+    assert len(calls) == 1
+    assert len(cache) == 1
+
+    image.write_bytes(b'new-image-content')
+    PdfReportRenderer.html(snapshot, page_cache=cache)
+    assert len(calls) == 2, '图片变化必须只重建对应立面页'
+    PdfReportRenderer.html(snapshot, page_cache=cache)
+    assert len(calls) == 2
+    assert len(cache) == 2
