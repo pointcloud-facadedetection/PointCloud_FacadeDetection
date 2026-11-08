@@ -89,9 +89,9 @@ def test_alpha_edge_is_antialiased_without_changing_defect_colors():
 
 
 def test_raster_limit_matches_review_uv_reconstruction():
-    assert _HEATMAP_MAX_SIZE == 4096
+    assert _HEATMAP_MAX_SIZE == 8192
     signature = inspect.signature(transparent_png_uv_rect)
-    assert signature.parameters['max_size'].default == 4096
+    assert signature.parameters['max_size'].default == 8192
 
 
 def test_global_samples_include_signed_pass_values_from_quality_domain():

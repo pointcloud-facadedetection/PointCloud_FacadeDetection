@@ -187,7 +187,7 @@ def place_ruler(surface, click_point, ruler_length=2.0, ruler_width=0.055,
     }
 
 
-def transparent_png_uv_rect(points, quality, pixel_size=0.01, max_size=4096):
+def transparent_png_uv_rect(points, quality, pixel_size=0.01, max_size=8192):
     """重建 transparent PNG（裁剪后）对应的 UV 矩形。
 
     导出链路（heatmap_renderer.render_transparent_heatmap）的画布与裁剪：

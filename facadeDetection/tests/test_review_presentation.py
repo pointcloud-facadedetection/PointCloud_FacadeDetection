@@ -548,6 +548,7 @@ def test_heatmap_is_coplanar_and_uses_independent_foreground_layer(viewport):
     quad = next(actor for actor in viewport._heatmap_quad_actors
                 if actor.GetMapper().GetInput().GetPointData().GetTCoords())
     assert np.allclose(np.asarray(quad.GetMapper().GetInput().points)[:, 0], 0.0)
+    assert quad.GetTexture().GetInterpolate() == 1
 
     renderer = viewport._overlay_renderer
     assert renderer.GetLayer() == 1

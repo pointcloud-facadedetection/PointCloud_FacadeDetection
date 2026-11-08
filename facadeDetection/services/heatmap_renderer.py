@@ -18,7 +18,7 @@ from services.heatmap_spec import (
 
 
 # 画布分辨率上限：让 splat 在照片 warp 后保持合理物理大小。
-_HEATMAP_MAX_SIZE = 4096
+_HEATMAP_MAX_SIZE = 8192
 
 
 def _resolve_domain_uv_range(quality: dict):

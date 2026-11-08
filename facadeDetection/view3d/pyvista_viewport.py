@@ -1685,6 +1685,7 @@ class PyVistaViewport(BaseViewport):
                                dtype=np.float32)
             quad.GetPointData().SetTCoords(numpy_to_vtk(tcoords))
             texture = pv.Texture(rgba)
+            texture.InterpolateOn()
             actor = self._add_mesh(quad, texture=texture,
                                            lighting=False,
                                            name='heatmap_quad')
