@@ -35,6 +35,11 @@ class FacadeQualityService:
     def set_index_service(self, index_service: FacadeIndexService):
         self._index_service = index_service
 
+    @staticmethod
+    def persist_quality_artifact(results_dir, facade_id: int, quality: dict):
+        from services.dal.results_repo import ResultsRepo
+        return ResultsRepo.persist_quality_artifact(results_dir, facade_id, quality)
+
     def commit_quality_success(self, project_uuid: str, facade_id: int, quality: dict,
                                *, display_no=None, facade_data=None, color=None,
                                dataset_revision=None, quality_artifact_path=None) -> None:

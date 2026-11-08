@@ -82,6 +82,10 @@ class FacadeService:
             results_dir=results_dir,
             progress_cb=progress_cb)
 
+    def persist_quality_artifact(self, results_dir, facade_id: int, quality: dict):
+        return self._quality_service.persist_quality_artifact(
+            results_dir, facade_id, quality)
+
     def commit_quality_success(self, project_uuid: str, facade_id: int, quality: dict,
                                *, display_no=None, facade_data=None, color=None,
                                dataset_revision=None, quality_artifact_path=None) -> None:

@@ -37,6 +37,11 @@ class FakeFacadeService:
                             'quality_valid_window_count': 3},
                 'intervals': []}
 
+    @staticmethod
+    def persist_quality_artifact(results_dir, facade_id, quality):
+        from services.dal.results_repo import ResultsRepo
+        return ResultsRepo.persist_quality_artifact(results_dir, facade_id, quality)
+
     def commit_quality_success(self, project_uuid, facade_id, quality, **kwargs):
         self.commits.append((project_uuid, facade_id, quality, kwargs))
 

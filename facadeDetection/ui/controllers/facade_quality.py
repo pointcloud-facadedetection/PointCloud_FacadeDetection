@@ -348,11 +348,10 @@ class FacadeQualityController(QObject):
             int(station_id), all_results)
 
     def _persist_quality_artifact(self, project_uuid, facade, quality):
-        from services.dal.results_repo import ResultsRepo
         context = quality.get('__export_context') or {}
         results_dir = context.get('results_dir') or self._quality_results_dir(
             project_uuid, facade)
-        artifact_path = ResultsRepo.persist_quality_artifact(
+        artifact_path = self.facade_service.persist_quality_artifact(
             results_dir, int(facade.get('id', 0)), quality)
         if artifact_path:
             quality['quality_artifact_path'] = str(
