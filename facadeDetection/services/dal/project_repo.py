@@ -248,7 +248,9 @@ class ProjectRepo:
     @staticmethod
     def list_projects(limit: int | None = None) -> list[dict]:
         init_index_db()
-        items = list_index_projects()
+        items = sorted(
+            list_index_projects(),
+            key=lambda row: (row.created_at, row.id), reverse=True)
         data: list[dict] = []
         for r in items:
             # Prefer pcfd project name if present
