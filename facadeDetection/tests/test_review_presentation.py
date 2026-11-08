@@ -542,16 +542,14 @@ def test_focus_plane_always_uses_positive_z_up(qapp):
         viewport.destroy()
 
 
-def test_heatmap_lift_is_millimetre_scale_and_zero_means_coplanar(viewport):
+def test_heatmap_is_coplanar_and_uses_independent_foreground_layer(viewport):
     args = TestHeatmapQuadCache._quad_args()
     viewport.show_heatmap_quad(**args, cache_key=('lift', 'default'))
     quad = next(actor for actor in viewport._heatmap_quad_actors
                 if actor.GetMapper().GetInput().GetPointData().GetTCoords())
-    assert np.allclose(np.asarray(quad.GetMapper().GetInput().points)[:, 0], 0.002)
-
-    args['lift'] = 0.0
-    viewport.show_heatmap_quad(**args, cache_key=('lift', 'zero'))
-    quad = next(actor for actor in viewport._heatmap_quad_actors
-                if actor.GetMapper().GetInput().GetPointData().GetTCoords())
     assert np.allclose(np.asarray(quad.GetMapper().GetInput().points)[:, 0], 0.0)
-    assert viewport._heatmap_default_lift(87.0) <= 0.01
+
+    renderer = viewport._overlay_renderer
+    assert renderer.GetLayer() == 1
+    assert renderer.GetPreserveDepthBuffer() == 0
+    assert renderer.GetActors().IsItemPresent(quad)

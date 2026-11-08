@@ -1618,10 +1618,6 @@ class PyVistaViewport(BaseViewport):
             for actor in evicted:
                 self._remove_visual_actor(actor)
 
-    @staticmethod
-    def _heatmap_default_lift(span):
-        return min(0.01, max(0.002, float(span) * 0.00002))
-
     def show_heatmap_quad(self, image, origin, u_axis, v_axis, uv_bounds,
                           normal=None, lift=None, cache_key=None,
                           geometry_changed=False):
@@ -1631,7 +1627,7 @@ class PyVistaViewport(BaseViewport):
         行 0 = v 最大）；uv_bounds=(u0,v0,u1,v1) 必须与 PNG 内容严格对应
         （见 interactive_ruler.transparent_png_uv_rect）。透明像素 RGB 为黑，
         故 actor 必须进透明通道（ForceTranslucentOn），否则镂空区变黑块。
-        lift 缺省为 2–10mm，仅用于避免深度冲突；传 0 可完全贴合质量平面。
+        默认 lift=0，贴图与质量平面共面；前景遮挡由独立渲染层处理。
         cache_key 命中缓存时只恢复可见性，不重建 actor、不重传纹理。
         """
         self.set_render_enabled(False)
@@ -1672,7 +1668,7 @@ class PyVistaViewport(BaseViewport):
                 norm = np.linalg.norm(n)
                 n = n / norm if norm > 1e-12 else np.zeros(3)
             if lift is None:
-                lift = self._heatmap_default_lift(max(u1 - u0, v1 - v0))
+                lift = 0.0
             offset = n * float(lift)
             corners = np.array([
                 origin + u0 * u_axis + v0 * v_axis,
@@ -1719,7 +1715,7 @@ class PyVistaViewport(BaseViewport):
         norm = np.linalg.norm(normal)
         normal = normal / norm if norm > 1e-12 else np.zeros(3)
         if lift is None:
-            lift = PyVistaViewport._heatmap_default_lift(max(u1 - u0, v1 - v0))
+            lift = 0.0
         corners = np.array([
             origin + u0 * u_axis + v0 * v_axis,
             origin + u1 * u_axis + v0 * v_axis,
@@ -1778,9 +1774,7 @@ class PyVistaViewport(BaseViewport):
             if len(corners) < 3:
                 return
             if lift is None:
-                span = float(np.linalg.norm(
-                    corners.max(axis=0) - corners.min(axis=0)))
-                lift = self._heatmap_default_lift(span)
+                lift = 0.0
             n = np.cross(corners[1] - corners[0],
                          corners[2] - corners[0])
             norm = np.linalg.norm(n)
