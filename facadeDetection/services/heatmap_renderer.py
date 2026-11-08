@@ -142,12 +142,8 @@ class FacadeHeatmapTripletRenderer:
         merged_base = (pts_arr if len(pts_arr)
                        else np.asarray(defect_points, dtype=float).reshape(-1, 3))
 
-        excess = np.maximum(np.abs(values) - limit_mm, 0.0)
-        vmax_m = (
-            float(limit_m + np.max(excess) / 1000.0)
-            if len(excess) and np.any(np.isfinite(excess))
-            else limit_m * 1.2
-        )
+        vmax_m = self._vmax_m(
+            values, limit_mm, robust=(method == 'global_plane'))
 
         # ★ 从质量评估的有效域取画布范围，避免离群点稀释分辨率
         uv_range = _resolve_domain_uv_range(quality)
@@ -236,6 +232,17 @@ class FacadeHeatmapTripletRenderer:
             "transparent": self._smooth_rgba_edges(transparent),
             "legend": self._legend_metadata(raster, spec),
         }
+
+    @staticmethod
+    def _vmax_m(values, limit_mm, robust=False):
+        limit_m = limit_mm / 1000.0
+        excess = np.maximum(np.abs(values) - limit_mm, 0.0)
+        positive = excess[np.isfinite(excess) & (excess > 0)]
+        if not len(positive):
+            return limit_m * 1.2
+        scale = (float(np.percentile(positive, 98)) if robust
+                 else float(np.max(positive)))
+        return limit_m + scale / 1000.0
 
     @staticmethod
     def _legend_metadata(raster, spec):
@@ -1112,12 +1119,8 @@ class FacadeHeatmapTripletRenderer:
         merged_base = (pts_arr if len(pts_arr)
                        else np.asarray(defect_points, dtype=float).reshape(-1, 3))
 
-        excess = np.maximum(np.abs(values) - limit_mm, 0.0)
-        vmax_m = (
-            float(limit_m + np.max(excess) / 1000.0)
-            if len(excess) and np.any(np.isfinite(excess))
-            else limit_m * 1.2
-        )
+        vmax_m = self._vmax_m(
+            values, limit_mm, robust=(method == 'global_plane'))
 
         # ★ 与 render 一致：显式画布范围，避免离群点稀释分辨率
         uv_range = _resolve_domain_uv_range(quality)

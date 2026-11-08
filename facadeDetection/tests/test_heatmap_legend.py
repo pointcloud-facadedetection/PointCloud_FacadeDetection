@@ -1,6 +1,7 @@
 import inspect
 
 import numpy as np
+import pytest
 
 from algorithms.facade.interactive_ruler import transparent_png_uv_rect
 from services.heatmap_renderer import (
@@ -141,3 +142,13 @@ def test_continuous_signed_raster_has_smooth_values_and_preserves_holes():
         continuous_colormap=bipolar_colormap)
     center_alpha = sparse['overlay_rgba'][4, 4, 3]
     assert center_alpha == 0, '无采样的大空洞不得插值填色'
+
+
+def test_global_vmax_uses_robust_range_instead_of_single_outlier():
+    values = np.array([5.0] * 95 + [10.0, 12.0, 15.0, 20.0, 85.845])
+    robust = FacadeHeatmapTripletRenderer._vmax_m(values, 8.0, robust=True)
+    actual = FacadeHeatmapTripletRenderer._vmax_m(values, 8.0, robust=False)
+    assert robust < actual
+    assert robust < 0.085845
+    assert robust >= 0.0096
+    assert actual == pytest.approx(0.085845)
