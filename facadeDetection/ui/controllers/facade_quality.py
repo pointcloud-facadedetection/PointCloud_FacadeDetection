@@ -290,8 +290,14 @@ class FacadeQualityController(QObject):
             f'开始批量质量检测，共 {self._batch_total} 个立面...', 0)
         self._run_next_batch()
 
+    def _shutdown_quality_workers(self):
+        shutdown = getattr(self.facade_service, 'shutdown_quality_workers', None)
+        if callable(shutdown):
+            shutdown()
+
     def _run_next_batch(self):
         if not self._batch_queue:
+            self._shutdown_quality_workers()
             results = self._batch_results
             self._batch_results = []
             self._finish_quality_progress(
@@ -316,7 +322,8 @@ class FacadeQualityController(QObject):
         worker = QualityWorker(
             self.facade_service, cloud, facade, kwargs,
             postprocess=lambda quality: self._export_batch_heatmaps(
-                cloud, facade, quality))
+                cloud, facade, quality),
+            shutdown_process_pool=False)
         self.active_quality_worker = worker
         worker.signals.finished.connect(
             lambda f, q: self._on_batch_finished(cloud, f, q))
@@ -446,6 +453,7 @@ class FacadeQualityController(QObject):
             except Exception:
                 pass
             self.active_quality_worker = None
+        self._shutdown_quality_workers()
 
     # ------------------------------------------------------------------
     # 失败回调（外部入口）

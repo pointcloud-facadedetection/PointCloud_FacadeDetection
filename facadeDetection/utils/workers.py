@@ -94,7 +94,8 @@ class QualityWorkerSignals(QObject):
 class QualityWorker(QRunnable):
     """Worker for facade quality computation in QThreadPool."""
 
-    def __init__(self, facade_service, cloud_name, facade, kwargs, postprocess=None):
+    def __init__(self, facade_service, cloud_name, facade, kwargs, postprocess=None,
+                 shutdown_process_pool=True):
         super().__init__()
         self.facade_service = facade_service
         self.cloud_name = cloud_name
@@ -103,6 +104,7 @@ class QualityWorker(QRunnable):
         self.facade_no = int(self.facade.get('display_no', self.facade.get('id', 0)))
         self.kwargs = kwargs
         self.postprocess = postprocess
+        self.shutdown_process_pool = bool(shutdown_process_pool)
         self.signals = QualityWorkerSignals()
         # 中止标志：GUI 线程置位，工作线程在进度检查点读取（与模型导出 worker
         # 一致，bool 赋值在 CPython 下原子可见，无需额外同步对象）。
@@ -210,6 +212,11 @@ class QualityWorker(QRunnable):
                 'facade_no': facade_no,
             }
             self.signals.finished.emit(self.facade, error_result)
+        finally:
+            if self.shutdown_process_pool:
+                shutdown = getattr(self.facade_service, 'shutdown_quality_workers', None)
+                if callable(shutdown):
+                    shutdown()
 
 
 class ModelExportWorkerSignals(QObject):

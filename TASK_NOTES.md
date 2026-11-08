@@ -296,3 +296,9 @@
 - 按需求澄清，默认 `lift=0`，热力贴图、缓存几何更新与原色外框均严格位于质量平面，不再做法向坐标偏移。
 - 前景效果复用既有独立渲染层：热力图 layer 1、工具 layer 2，`PreserveDepthBufferOff` 清除前层深度，不需要物理抬高避免遮挡。
 - 测试同时验证角点共面、actor 属于 layer 1 且深度缓冲不保留；35 项相关测试通过。
+
+## 质量评估子进程生命周期
+
+- 默认 `parallel_mode='process'`、`n_jobs=4` 的约 200MB Python 子进程确认是 `ProcessPoolExecutor` 算法 worker，并非界面进程。
+- 单次 `QualityWorker` 在计算、导出、异常或取消结束后关闭共享进程池；批量 worker 不在每个立面关闭，整批完成或取消时统一关闭，保留批量复用性能。
+- 服务门面新增 `shutdown_quality_workers`，49 项相关测试通过，覆盖单次关闭与批量不提前关闭。

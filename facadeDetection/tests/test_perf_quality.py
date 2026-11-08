@@ -402,3 +402,25 @@ def test_heatmap_export_reuses_triplet_transparent(tmp_path):
     assert renderer.render_calls == 4
     assert len(exported) == 4
     assert all(item['transparent'] for item in exported.values())
+
+
+def test_quality_worker_closes_process_pool_only_when_requested(qapp):
+    from utils.workers import QualityWorker
+
+    class Service:
+        def __init__(self):
+            self.shutdown_calls = 0
+
+        def compute_quality(self, *_args, **_kwargs):
+            return {'ok': True, 'overall': {}}
+
+        def shutdown_quality_workers(self):
+            self.shutdown_calls += 1
+
+    service = Service()
+    QualityWorker(service, 'cloud', {'id': 1}, {}).run()
+    assert service.shutdown_calls == 1
+
+    QualityWorker(service, 'cloud', {'id': 2}, {},
+                  shutdown_process_pool=False).run()
+    assert service.shutdown_calls == 1, '批量任务必须等整批结束再关闭进程池'

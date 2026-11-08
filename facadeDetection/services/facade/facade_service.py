@@ -82,6 +82,9 @@ class FacadeService:
             results_dir=results_dir,
             progress_cb=progress_cb)
 
+    def shutdown_quality_workers(self):
+        self._quality_service.shutdown_quality_workers()
+
     def persist_quality_artifact(self, results_dir, facade_id: int, quality: dict):
         return self._quality_service.persist_quality_artifact(
             results_dir, facade_id, quality)

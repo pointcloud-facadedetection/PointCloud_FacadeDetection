@@ -36,6 +36,11 @@ class FacadeQualityService:
         self._index_service = index_service
 
     @staticmethod
+    def shutdown_quality_workers():
+        from algorithms.facade.ruler_quality import _reset_shared_process_pool
+        _reset_shared_process_pool()
+
+    @staticmethod
     def persist_quality_artifact(results_dir, facade_id: int, quality: dict):
         from services.dal.results_repo import ResultsRepo
         return ResultsRepo.persist_quality_artifact(results_dir, facade_id, quality)
