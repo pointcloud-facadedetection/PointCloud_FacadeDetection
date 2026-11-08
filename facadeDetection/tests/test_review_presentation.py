@@ -473,23 +473,24 @@ def test_review_facade_normal_faces_initial_camera(qapp):
     from ui.pages.inspection_review_page import InspectionReviewPageMixin
 
     harness = InspectionReviewPageMixin()
-    viewport = SimpleNamespace(
-        _initial_camera={'position': [10.0, 0.0, 0.0]})
+    viewport = SimpleNamespace(_initial_camera={
+        'position': [10.0, 0.0, 0.0], 'focal_point': [10.0, -10.0, 0.0]})
     normal = harness._review_orient_normal_to_camera(
-        viewport, [-1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
-    assert np.dot(np.asarray(viewport._initial_camera['position']), normal) > 0
-    assert np.allclose(normal, [1.0, 0.0, 0.0])
+        viewport, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0])
+    assert np.allclose(normal, [0.0, 1.0, 0.0]), 'lookat 应选 -Y，相机偏移为 +Y'
 
     viewport._initial_camera = None
-    harness._review_camera_snapshot = {'position': [-10.0, 0.0, 0.0]}
+    harness._review_camera_snapshot = {
+        'position': [-10.0, 0.0, 0.0], 'focal_point': [-10.0, 10.0, 0.0]}
     normal = harness._review_orient_normal_to_camera(
         viewport, [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
     assert np.allclose(normal, [-1.0, 0.0, 0.0])
 
-    viewport._initial_camera = {'position': [10.0, -20.0, 5.0]}
+    viewport._initial_camera = {
+        'position': [10.0, -20.0, 5.0], 'focal_point': [10.0, -10.0, 5.0]}
     normal = harness._review_orient_normal_to_camera(
         viewport, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0])
-    assert np.allclose(normal, np.asarray([10.0, -20.0, 5.0]) / np.linalg.norm([10.0, -20.0, 5.0]))
+    assert np.allclose(normal, [0.0, -1.0, 0.0])
 
     viewport._initial_camera = None
     harness._review_camera_snapshot = None
@@ -525,3 +526,17 @@ def test_operation_and_review_reset_buttons_do_not_reload_cloud(qapp):
         assert calls == {'reset': 2, 'cancel': 1, 'resize_exit': 1}
     finally:
         window.close()
+
+
+def test_focus_plane_always_uses_positive_z_up(qapp):
+    from view3d.pyvista_viewport import PyVistaViewport
+
+    viewport = PyVistaViewport()
+    try:
+        viewport.add_cloud('cloud', np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 1.0]], dtype=np.float32))
+        viewport.focus_plane([0.0, -1.0, 0.0], [0.0, 0.0, 0.0],
+                             [1.0, 0.0, 0.0], (4.0, 3.0))
+        assert np.allclose(viewport._plotter.camera.up, [0.0, 0.0, 1.0])
+    finally:
+        viewport.destroy()

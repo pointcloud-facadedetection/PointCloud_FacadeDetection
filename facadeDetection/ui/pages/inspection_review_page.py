@@ -434,24 +434,31 @@ class InspectionReviewPageMixin:
         normal = np.asarray(normal, dtype=np.float64)
         center = np.asarray(center, dtype=np.float64)
         initial = getattr(viewport, '_initial_camera', None) or {}
-        position = initial.get('position')
-        if position is None:
-            position = (getattr(self, '_review_camera_snapshot', None) or {}).get(
-                'position')
+        reference = initial if initial.get('position') is not None else (
+            getattr(self, '_review_camera_snapshot', None) or {})
+        position = reference.get('position')
         if position is None:
             return normal
         try:
-            toward_camera = np.asarray(position, dtype=np.float64) - center
-            length = float(np.linalg.norm(toward_camera))
-            if np.isfinite(toward_camera).all() and length > 1e-12:
-                normal = toward_camera / length
+            normal_length = float(np.linalg.norm(normal))
+            if normal_length < 1e-12:
+                return normal
+            normal = normal / normal_length
+            position = np.asarray(position, dtype=np.float64)
+            focal_point = reference.get('focal_point')
+            forward = (np.asarray(focal_point, dtype=np.float64) - position
+                       if focal_point is not None else center - position)
+            if not np.isfinite(forward).all() or np.linalg.norm(forward) < 1e-12:
+                return normal
+            look_normal = normal if np.dot(forward, normal) >= 0 else -normal
+            camera_offset = -look_normal
             print(f'[PCFD] review.camera_reference '
                   f'source={"initial" if initial.get("position") is not None else "snapshot"} '
-                  f'position={np.asarray(position).tolist()} '
-                  f'center={center.tolist()} normal={normal.tolist()}', flush=True)
+                  f'position={position.tolist()} center={center.tolist()} '
+                  f'look_normal={look_normal.tolist()}', flush=True)
+            return camera_offset
         except (TypeError, ValueError):
-            pass
-        return normal
+            return normal
 
     def _review_present_facade(self, facade, focus_camera=True):
         """选中立面：按模式显示热力图/原色外框、横纵尺寸并调整相机。"""
@@ -486,7 +493,7 @@ class InspectionReviewPageMixin:
                 normal = self._review_orient_normal_to_camera(
                     viewport, normal, center)
                 viewport.focus_plane(normal, center,
-                                     geometry['v_axis'],
+                                     np.array([0.0, 0.0, 1.0]),
                                      (bounds[2] - bounds[0],
                                       bounds[3] - bounds[1]))
 
