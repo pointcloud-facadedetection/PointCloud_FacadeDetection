@@ -142,3 +142,8 @@ def test_touch_controls_sync_and_ruler_restores_mode(qapp):
         assert window.operation_zoom_slider.value() == 100
     finally:
         window.close()
+
+
+def test_viewport_accepts_native_touch_events(viewport):
+    from PySide6.QtCore import Qt
+    assert viewport._widget.testAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)

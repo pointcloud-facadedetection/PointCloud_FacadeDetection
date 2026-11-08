@@ -189,6 +189,7 @@ class PyVistaViewport(BaseViewport):
 
         self._widget = QtInteractor(parent, auto_update=False)
         self._widget.setObjectName('pyvistaViewport')
+        self._widget.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self._plotter = self._widget  # QtInteractor 本身即 Plotter API
         self._plotter.set_background(BACKGROUND)
         # 坐标轴指示（X红/Y绿/Z蓝），替代 Web 版 AxesHelper
