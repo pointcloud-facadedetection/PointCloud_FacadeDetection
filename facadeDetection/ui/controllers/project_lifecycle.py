@@ -134,11 +134,14 @@ class ProjectLifecycleController(QObject):
                 progress_cb=lambda percent, text: worker.signals.progress.emit(
                     int(percent), text))
             try:
-                worker.signals.progress.emit(-1, '正在准备站点数据')
+                worker.signals.progress.emit(65, '正在初始化点云数据')
                 self.pointcloud_service.set_project(project_uuid)
                 self.station_service.set_project(project_uuid)
-                worker.signals.progress.emit(-1, '正在恢复站点视图')
-                prepared_view = self.station_service.prepare_restore_view()
+                worker.signals.progress.emit(75, '正在恢复站点视图')
+                prepared_view = self.station_service.prepare_restore_view(
+                    progress_cb=lambda percent, text: worker.signals.progress.emit(
+                        min(95, int(round(75 + percent * 0.20))), text))
+                worker.signals.progress.emit(95, '站点数据已就绪，正在显示')
             except Exception as exc:
                 raise RuntimeError(f'站点恢复失败：{exc}') from exc
             return {'operation': 'activate', 'project_uuid': project_uuid,

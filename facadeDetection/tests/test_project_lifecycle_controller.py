@@ -108,13 +108,15 @@ class FakeStationService:
     def show_single(self, row):
         self.log.append(('station.show_single', row.id))
 
-    def prepare_restore_view(self):
+    def prepare_restore_view(self, progress_cb=None):
         """与真实 StationService 相同的契约：计算段只准备数据，不渲染。"""
         import threading
         self.log.append(('station.prepare_restore',))
         self.prepare_threads.append(threading.get_ident())
         if not self.rows:
             return (None, None)
+        if progress_cb is not None:
+            progress_cb(50, '正在恢复站点数据')
         return (self.rows[0], object())
 
     def commit_restore_view(self, prepared):
@@ -247,6 +249,17 @@ def test_activate_full_sequence(env):
     assert ('status', '正在加载点云，请稍候...', 0) in rec.events
     assert controller._load_in_progress is False
     assert controller.project_operation_service.last_facade_results == [{'id': 1}]
+
+
+def test_restore_progress_is_determinate_and_monotonic(env):
+    controller, _, rec, _, project, _ = env
+    controller.load_progress.connect(
+        lambda percent, text: rec.events.append(('progress', percent, text)))
+    controller.start_load('activate', 'uuid-1', project=project)
+    percentages = [event[1] for event in rec.events if event[0] == 'progress']
+    assert percentages == [0, 65, 75, 85, 95]
+    assert all(percent >= 0 for percent in percentages)
+    assert percentages == sorted(percentages)
 
 
 def test_activate_empty_stations_branch(env):

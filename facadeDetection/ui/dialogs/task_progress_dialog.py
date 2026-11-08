@@ -194,6 +194,10 @@ class TaskProgressDialog(QDialog):
             self._label.setText(message)
         self._status_label.setText(
             self.FINISH_MESSAGE if success else '处理失败')
+        if success and self._allow_percentage:
+            if self._bar.maximum() != 100:
+                self._set_progress_mode(True)
+            self._bar.setValue(100)
 
         if self._auto_close:
             self.accept()

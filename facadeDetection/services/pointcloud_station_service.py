@@ -257,11 +257,15 @@ class PointCloudStationService:
                 pass
         return metadata
 
-    def _load_proxy_domain(self, station):
+    def _load_proxy_domain(self, station, progress_cb=None):
         """加载站点的两个域并返回用于显示的代理数据。
 
         原始数组被注册为精密度域；只有数据集返回的代理允许穿过视口边界。
         """
+        def report(percent, text):
+            if progress_cb is not None:
+                progress_cb(percent, text)
+
         if self.pointcloud is None:
             raise RuntimeError('PointCloudService 未注入，无法建立站点索引')
         dataset_id = f'{self.project_uuid}:{station.id}'
@@ -292,6 +296,7 @@ class PointCloudStationService:
             if not (state and state.get('enabled') and
                     not (existing.metadata or {}).get('denoise_restored')):
                 self._dataset_ids[station.id] = dataset_id
+                report(100, '已恢复站点索引')
                 return existing
             self.pointcloud.datasets.pop(dataset_id, None)
             self.pointcloud.release_station_domain(station.id)
@@ -309,6 +314,7 @@ class PointCloudStationService:
             proxy_cache.save_raw_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 points=points, colors=colors)
+        report(35, f'已读取原始点云 {len(points):,} 点')
         # 原生 intensity 保存在规范化 PLY 的独立标量属性中。旧 raw/proxy
         # 缓存尚未包含该数组，因此这里按资产读取一次并随后同步到代理域。
         source_intensity = self._load_native_intensity(station.source_path)
@@ -354,6 +360,7 @@ class PointCloudStationService:
             cached_proxy = proxy_cache.load_proxy_cache(
                 self.project_uuid, station.id, fingerprint_key,
                 source_count=len(points))
+        report(55, '代理缓存检查完成')
         if restored_direct:
             representative_ids = state_indices[state_offsets[:-1]]
             proxy = points[representative_ids]
@@ -442,12 +449,14 @@ class PointCloudStationService:
             print(f'[PCFD] proxy.built station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)} '
                   f'density={dist.density_source}', flush=True)
+        report(70, '代理点云准备完成')
         self.pointcloud.register_source_asset(
             source_id, points, colors, {'ply_path': station.source_path},
             intensities=source_intensity)
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
                                                    metadata=metadata,
                                                    intensities=proxy_intensity)
+        report(90, '点云索引建立完成')
         self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
         if state and state.get('enabled') and not restored_direct:
@@ -551,6 +560,7 @@ class PointCloudStationService:
             if (cached_normals is not None and
                     len(cached_normals) == len(dataset.proxy_points)):
                 dataset.proxy_normals = cached_normals
+        report(100, '站点数据准备完成')
         return dataset
 
     @staticmethod
@@ -690,7 +700,7 @@ class PointCloudStationService:
                 dataset.proxy_colors, dataset_id=dataset.dataset_id))
         return rows, names
 
-    def prepare_restore_view(self):
+    def prepare_restore_view(self, progress_cb=None):
         """计算段：恢复视图的数据准备（选中状态持久化 + 首站代理域加载）。
 
         返回 (station, dataset) 供 commit_restore_view 在 GUI 线程提交；
@@ -701,8 +711,12 @@ class PointCloudStationService:
             return None
         self._restoring = True
         try:
+            if progress_cb is not None:
+                progress_cb(0, '正在恢复站点视图')
             rows = self.list_stations()
             if not rows:
+                if progress_cb is not None:
+                    progress_cb(100, '没有可恢复的站点')
                 return (None, None)
             state = PointCloudStationRepo.get_view(self.project_uuid)
             by_id = {row.id: row for row in rows}
@@ -713,11 +727,15 @@ class PointCloudStationService:
                 selected_ids = [rows[0].id]
             for row in rows:
                 PointCloudStationRepo.set_selected(self.project_uuid, row.id, row.id in selected_ids)
+            if progress_cb is not None:
+                progress_cb(10, '正在恢复站点点云')
             # Opening a project must have a deterministic, low-cost initial view.
             # Persisted merge/active state remains available through explicit user
             # actions, but never hides the first station on project activation.
             first = rows[0]
-            return first, self.prepare_show_single(first)
+            if first.last_error:
+                return first, None
+            return first, self._load_proxy_domain(first, progress_cb=progress_cb)
         finally:
             self._restoring = False
 

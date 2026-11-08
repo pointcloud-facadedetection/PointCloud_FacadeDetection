@@ -56,10 +56,10 @@ class TestLoadingDialogBehavior:
         assert dlg._bar.isTextVisible()
         dlg.report_progress(-1, '正在恢复视图')
         assert dlg._bar.maximum() == 0
-        dlg.report_progress(100, '转换完成')
+        dlg.report_progress(85, '站点数据准备完成')
+        dlg.finish()
         assert dlg._bar.maximum() == 100
         assert dlg._bar.value() == 100
-        dlg.finish()
 
 
 # ---------------------------------------------------------------------------
