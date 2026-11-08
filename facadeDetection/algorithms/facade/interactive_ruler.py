@@ -330,5 +330,8 @@ def place_ruler_on_strip(points, plane_model, center, direction,
     result = place_ruler(surface, center, ruler_length, ruler_width,
                          threshold_mm, max_hole_ratio, clamp_center=clamp_center)
     result['strip_point_count'] = int(len(strip))
-    result['sor_removed_count'] = int(surface.stats.get('n_sor_removed', 0))
+    removed = int(surface.stats.get('n_sor_removed', 0))
+    result['sor_removed_count'] = removed
+    result['sor_removed_ratio'] = removed / max(
+        1, int(surface.stats.get('n_points', 0)))
     return result

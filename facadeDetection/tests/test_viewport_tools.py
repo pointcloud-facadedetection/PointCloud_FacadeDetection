@@ -71,6 +71,25 @@ def test_two_click_ruler_uses_start_and_places_in_background(qapp):
     controller.cancel()
 
 
+def test_high_sor_removed_ratio_requires_defect_review(qapp):
+    viewport = FakeViewport()
+    controller = ViewportToolsController(
+        viewport, object(), lambda: 'cloud', lambda: {'id': 1},
+        lambda: {'threshold_mm': 4.0})
+    messages = []
+    controller.measure_text.connect(messages.append)
+    controller._tool = controller.TOOL_RULER
+    controller._placement_gen = 1
+    controller._on_ruler_placement_done(1, {
+        'ok': True, 'render': {'body_line': [[0, 0, 0], [1, 0, 0]]},
+        'gap_mm': 1.0, 'exceeded': False, 'coverage_valid': True,
+        'sor_removed_count': 400, 'sor_removed_ratio': 0.4,
+    })
+    assert '需复核（原判合格）' in messages[-1]
+    assert '40%' in messages[-1]
+    controller.cancel()
+
+
 def test_tool_renderer_is_above_heatmap_renderer():
     import vtk
 

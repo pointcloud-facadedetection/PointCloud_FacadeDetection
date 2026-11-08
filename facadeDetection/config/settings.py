@@ -285,7 +285,8 @@ class Config:
     GLOBAL_PLANE_OUTLIER_SIGMA: float = 3.0
     GLOBAL_PLANE_FINAL_GATE_SIGMA: float = 3.5
     GLOBAL_PLANE_ENABLE_P95_REFIT: bool = True
-    GLOBAL_PLANE_P95_CONFIDENCE: float = 0.95
+    # 可信核心保留比例：默认 50%，字段名保留兼容旧报告和调用方。
+    GLOBAL_PLANE_P95_CONFIDENCE: float = 0.50
 
     # ============ 效率优化参数 ============
     # 质量评估 CoverageMask 分辨率（米）：默认 5cm，权衡精度与速度

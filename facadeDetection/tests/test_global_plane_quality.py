@@ -26,6 +26,42 @@ def test_global_plane_fit_rejects_large_outliers_and_preserves_orientation():
     assert result['inlier_ratio'] >= 0.70
 
 
+def test_global_plane_half_split_requires_baseline_review():
+    from config.settings import Config
+    rng = np.random.default_rng(2026)
+    main = np.column_stack((rng.uniform(-2, 2, 100),
+                            rng.uniform(0, 4, 100),
+                            rng.normal(0, 0.001, 100)))
+    second_surface = main.copy()
+    second_surface[:, 2] += 0.12
+    result = fit_global_plane(
+        np.vstack((main, second_surface)),
+        reference_plane=np.array([0, 0, 1, 0]),
+    )
+    assert Config.GLOBAL_PLANE_P95_CONFIDENCE == 0.50
+    assert result['p95_ci_refit'] is True
+    assert 0.40 <= result['p95_core_ratio'] <= 0.60
+    assert result['baseline_ambiguous'] is True
+    assert result['fit_accepted'] is False
+
+
+def test_global_plane_half_core_keeps_dominant_plane_and_protrusions():
+    rng = np.random.default_rng(77)
+    main = np.column_stack((rng.uniform(-2, 2, 160),
+                            rng.uniform(0, 4, 160),
+                            rng.normal(0, 0.001, 160)))
+    protrusions = main[:40].copy()
+    protrusions[:, 2] += 0.1
+    result = fit_global_plane(
+        np.vstack((main, protrusions)),
+        reference_plane=np.array([0, 0, 1, 0]),
+    )
+    assert result['baseline_ambiguous'] is False
+    assert result['fit_accepted'] is True
+    assert abs(result['plane_model'][3]) < 0.02
+    assert result['p95_core_ratio'] < 0.8
+
+
 def test_global_windows_return_both_pass_rates():
     rng = np.random.default_rng(11)
     points = np.column_stack((

@@ -426,8 +426,11 @@ class ViewportToolsController(QObject):
                 result['render'], exceeded=result.get('exceeded', False))
         gap_mm = float(result.get('gap_mm', 0.0))
         threshold_mm = (self._ruler_params_provider() or {}).get('threshold_mm')
+        review_required = float(result.get('sor_removed_ratio', 0.0)) >= 0.20
         if threshold_mm is not None:
             verdict = ('超限' if result.get('exceeded') else '合格')
+            if review_required:
+                verdict = f'需复核（原判{verdict}）'
             text = (f"靠尺 gap = {gap_mm:.1f} mm"
                     f"（限差 {float(threshold_mm):.0f} mm）：{verdict}")
         else:
@@ -437,6 +440,9 @@ class ViewportToolsController(QObject):
         removed = int(result.get('sor_removed_count', 0))
         if removed:
             text += f'；剔除孤立点 {removed} 个'
+        if review_required:
+            ratio = float(result.get('sor_removed_ratio', 0.0))
+            text += f'（{ratio:.0%}），请复核突起缺陷'
         self.measure_text.emit(text)
         self.status_message.emit(text, 0)
 

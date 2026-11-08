@@ -100,13 +100,12 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                      partition_min_points_ratio=0.10,
                      partition_angle_limit_deg=5.0,
                      enable_p95_refit=True,
-                     p95_confidence=0.95):
+                     p95_confidence=0.50):
     """Huber M-estimator IRLS with prior-normal initialization.
 
-    p95_confidence：表示保留残差分布的中心 95% 可信核心，而不是把
-    均值±1.96σ误用于通常非高斯、重尾的点云残差。可信核心先由
-    median/MAD 定位，再用绝对中心残差的 P95 截断；随后重新估计完整
-    平面法向和截距。
+    p95_confidence：可信核心保留比例（默认 50%），不是把均值±1.96σ
+    误用于通常非高斯、重尾的点云残差。可信核心先由 median/MAD 定位，
+    再按中心残差分布截断，随后重新估计完整平面法向和截距。
     """
     from algorithms.geometry import cluster_depth_significant
 
@@ -176,7 +175,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
     plane = np.r_[n, d]
 
-    # ===== 中心 95% 可信核心重拟合 =====
+    # ===== 可信核心重拟合（保留比例由 p95_confidence 决定） =====
     p95_ci_refit = False
     p95_threshold_mm = np.nan
     p95_core_count = 0
@@ -244,6 +243,22 @@ def fit_global_plane(points, *, reference_plane, seed=42,
         and p95_mm <= float(max_p95_mm)
         and angle_to_ref <= float(angle_limit_deg)
     )
+
+    dominant_plane_ratio = 1.0
+    baseline_ambiguous = False
+    if (p95_confidence <= 0.55
+            and mad_r >= max(0.005, partition_depth_gap_m / 8)):
+        signed_all = pts @ n0 + d0
+        labels, medians = cluster_depth_significant(
+            signed_all, tolerance=None,
+            min_gap=float(partition_depth_gap_m),
+            min_points=max(3, int(len(pts) * float(min_inlier_ratio))))
+        counts = np.bincount(labels[labels >= 0], minlength=len(medians))
+        if len(medians) > 1 and counts.sum():
+            dominant_plane_ratio = float(counts.max() / len(pts))
+            baseline_ambiguous = dominant_plane_ratio < 0.65
+            if baseline_ambiguous:
+                fit_accepted = False
 
     # ===== Partition Fallback =====
     if not fit_accepted and enable_partition_fallback:
@@ -362,7 +377,7 @@ def fit_global_plane(points, *, reference_plane, seed=42,
 
             return {
                 'plane_model': plane.astype(float),
-                'fit_accepted': True,
+                'fit_accepted': not baseline_ambiguous,
                 'inlier_count': int(inliers.sum()),
                 'point_count': int(len(pts)),
                 'inlier_ratio': inlier_ratio,
@@ -380,6 +395,8 @@ def fit_global_plane(points, *, reference_plane, seed=42,
                 'p95_threshold_mm': float(p95_threshold_mm),
                 'p95_core_count': p95_core_count,
                 'p95_core_ratio': p95_core_ratio,
+                'dominant_plane_ratio': dominant_plane_ratio,
+                'baseline_ambiguous': baseline_ambiguous,
             }
 
     return {
@@ -401,6 +418,8 @@ def fit_global_plane(points, *, reference_plane, seed=42,
         'p95_threshold_mm': float(p95_threshold_mm),
         'p95_core_count': p95_core_count,
         'p95_core_ratio': p95_core_ratio,
+                'dominant_plane_ratio': dominant_plane_ratio,
+                'baseline_ambiguous': baseline_ambiguous,
     }
 
 
