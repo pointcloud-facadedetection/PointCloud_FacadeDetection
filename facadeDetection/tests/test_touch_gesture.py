@@ -225,3 +225,86 @@ def test_real_mouse_still_uses_vtk_navigation(viewport):
     )
     consumed = viewport._gesture_filter.eventFilter(viewport._widget, event)
     assert consumed is False
+
+
+def test_single_touch_uses_qt_last_position_without_cached_begin(viewport):
+    calls = []
+    viewport._turntable_rotate = lambda dx, dy: calls.append((dx, dy))
+    viewport._touch_points = {}
+    point = SimpleNamespace(
+        id=lambda: 7,
+        position=lambda: QPointF(40, 55),
+        lastPosition=lambda: QPointF(20, 25),
+        state=lambda: Qt.TouchPointState.TouchPointMoved,
+    )
+    viewport._gesture_filter.eventFilter(
+        viewport._widget, _touch(QEvent.Type.TouchUpdate, [point]))
+    assert calls == [(20.0, -30.0)]
+
+
+def test_new_single_touch_sequence_clears_stale_pinch_lock(viewport):
+    calls = []
+    viewport._turntable_rotate = lambda dx, dy: calls.append((dx, dy))
+    viewport._touch_pinching = True
+    _send(viewport, QEvent.Type.TouchBegin, [(1, 10, 10)])
+    assert viewport._touch_pinching is False
+    _send(viewport, QEvent.Type.TouchUpdate, [(1, 30, 20)])
+    assert calls == [(20.0, -10.0)]
+
+
+def test_wheel_and_pinch_sync_zoom_slider(qapp):
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    try:
+        viewport = window.viewport
+        viewport._plotter.enable_parallel_projection()
+        before = _parallel_scale(viewport)
+        viewport._on_wheel(1)
+        assert window.operation_zoom_slider.value() == 115
+        assert _parallel_scale(viewport) == pytest.approx(before / 1.15)
+
+        viewport._zoom_by_factor(2.0)
+        assert window.operation_zoom_slider.value() == 230
+        assert _parallel_scale(viewport) == pytest.approx(before / 2.30)
+    finally:
+        window.close()
+
+
+def test_zoom_slider_extremes_are_absolute_zoom_limits(viewport):
+    viewport._plotter.enable_parallel_projection()
+    reference = _parallel_scale(viewport)
+    values = []
+    viewport._zoom_changed_callback = values.append
+
+    viewport.set_zoom_percent(1000)
+    assert values[-1] == 400
+    assert _parallel_scale(viewport) == pytest.approx(reference / 4)
+    viewport._zoom_by_factor(2.0)
+    assert values[-1] == 400
+
+    viewport.set_zoom_percent(1)
+    assert values[-1] == 25
+    assert _parallel_scale(viewport) == pytest.approx(reference * 4)
+    viewport._zoom_by_factor(0.5)
+    assert values[-1] == 25
+
+
+def test_zoom_slider_expands_and_preserves_configured_extremes(qapp):
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    try:
+        slider = window.operation_zoom_slider
+        assert slider.minimumWidth() >= 280
+        assert slider.minimum() == 25
+        assert slider.maximum() == 400
+        slider.ensurePolished()
+        option = QStyleOptionSlider()
+        slider.initStyleOption(option)
+        handle = slider.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, option,
+            QStyle.SubControl.SC_SliderHandle, slider)
+        assert handle.width() >= 48
+    finally:
+        window.close()

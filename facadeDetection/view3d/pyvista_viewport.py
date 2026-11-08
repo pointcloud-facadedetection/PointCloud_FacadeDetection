@@ -193,14 +193,23 @@ class _GestureFilter(QObject):
                 return False
 
             previous = viewport._touch_points
+            previous_from_qt = {}
             current = {}
             if event_type != QEvent.Type.TouchCancel:
                 for index, point in enumerate(event.touchPoints()):
                     if not self._released(point):
-                        current[self._point_id(point, index)] = point.position()
+                        point_id = self._point_id(point, index)
+                        current[point_id] = point.position()
+                        try:
+                            previous_from_qt[point_id] = point.lastPosition()
+                        except AttributeError:
+                            pass
             viewport._touch_points = current
             viewport._touch_active = bool(current)
             self._clear_vtk_drag(viewport)
+            if event_type == QEvent.Type.TouchBegin and len(current) == 1:
+                viewport._touch_pinching = False
+                viewport._touch_pinch_distance = None
 
             if len(current) >= 2:
                 first, second = list(current.values())[:2]
@@ -215,7 +224,8 @@ class _GestureFilter(QObject):
                 point_id, position = next(iter(current.items()))
                 viewport._touch_pinch_distance = None
                 if not viewport._touch_pinching:
-                    last = previous.get(point_id)
+                    last = previous_from_qt.get(
+                        point_id, previous.get(point_id))
                     viewport._touch_drag = position
                     if last is not None and event_type == QEvent.Type.TouchUpdate:
                         dx = float(position.x() - last.x())
@@ -283,6 +293,7 @@ class PyVistaViewport(BaseViewport):
         self._touch_pinch_distance = None
         self._touch_navigation_mode = 'rotate'
         self._zoom_reference = None
+        self._zoom_changed_callback = None
         self._install_zup_interaction()
 
         # 交互模式与拾取状态
@@ -529,18 +540,39 @@ class PyVistaViewport(BaseViewport):
                   else 1.0 / self._WHEEL_FACTOR)
         self._zoom_by_factor(factor)
 
+    def _capture_zoom_reference(self):
+        camera = self._plotter.camera
+        position = np.asarray(camera.position, dtype=np.float64)
+        focal = np.asarray(camera.focal_point, dtype=np.float64)
+        self._zoom_reference = {
+            'parallel_scale': float(camera.parallel_scale),
+            'offset': position - focal,
+        }
+
+    def _current_zoom_percent(self):
+        camera = self._plotter.camera
+        reference = self._zoom_reference
+        if bool(camera.parallel_projection):
+            scale = max(1e-9, float(camera.parallel_scale))
+            return 100.0 * reference['parallel_scale'] / scale
+        offset = np.asarray(camera.position, dtype=np.float64) - np.asarray(
+            camera.focal_point, dtype=np.float64)
+        distance = max(1e-9, float(np.linalg.norm(offset)))
+        return 100.0 * float(np.linalg.norm(reference['offset'])) / distance
+
+    def _notify_zoom_changed(self, percent):
+        callback = getattr(self, '_zoom_changed_callback', None)
+        if callback is not None:
+            callback(int(round(percent)))
+
     def set_zoom_percent(self, percent):
         percent = float(percent)
         if percent <= 0:
             raise ValueError('缩放百分比必须大于0')
+        percent = max(25.0, min(400.0, percent))
         camera = self._plotter.camera
         if self._zoom_reference is None:
-            position = np.asarray(camera.position, dtype=np.float64)
-            focal = np.asarray(camera.focal_point, dtype=np.float64)
-            self._zoom_reference = {
-                'parallel_scale': float(camera.parallel_scale),
-                'offset': position - focal,
-            }
+            self._capture_zoom_reference()
         reference = self._zoom_reference
         if bool(camera.parallel_projection):
             camera.parallel_scale = max(
@@ -550,21 +582,17 @@ class PyVistaViewport(BaseViewport):
                 np.asarray(camera.focal_point, dtype=np.float64)
                 + reference['offset'] * (100.0 / percent))
         self._render()
+        self._notify_zoom_changed(percent)
 
     def _zoom_by_factor(self, factor):
-        """按倍率缩放（滚轮/捏合手势共用）：正交改 parallel scale，透视 Dolly。"""
+        """滚轮和双指共用百分比缩放，并同步滑块及上下限。"""
         try:
-            camera = self._plotter.camera
-            try:
-                parallel = bool(camera.parallel_projection)
-            except Exception:
-                parallel = False
-            if parallel:
-                scale = float(camera.parallel_scale) / factor
-                camera.parallel_scale = max(1e-6, scale)
-            else:
-                camera.Dolly(factor)
-            self._render()
+            factor = float(factor)
+            if not np.isfinite(factor) or factor <= 0:
+                return
+            if self._zoom_reference is None:
+                self._capture_zoom_reference()
+            self.set_zoom_percent(self._current_zoom_percent() * factor)
         except Exception:
             pass
 

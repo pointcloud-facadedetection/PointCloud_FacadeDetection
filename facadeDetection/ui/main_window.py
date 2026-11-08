@@ -246,6 +246,8 @@ class MainWindow(OverviewPageMixin, OperationPageMixin,
         self.project_operation_service.color_pick_requested.connect(
             self._pick_scene_color)
         self._setup_ui()
+        if hasattr(self.viewport, '_notify_zoom_changed'):
+            self.viewport._zoom_changed_callback = self._sync_zoom_sliders
         self._create_resize_handles()
         self._connect_buttons()
         # 步骤 √ 只有在业务真正完成后才回填，故绑定放在控件与命令连接就绪之后。

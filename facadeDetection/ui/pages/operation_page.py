@@ -42,14 +42,17 @@ class OperationPageMixin:
                 button.setText('平移' if checked else '旋转')
                 button.blockSignals(False)
 
-    def _on_zoom_slider_changed(self, value):
-        self.viewport.set_zoom_percent(value)
+    def _sync_zoom_sliders(self, value):
         for name in ('operation_zoom_slider', 'review_zoom_slider'):
             slider = getattr(self, name, None)
             if slider is not None:
                 slider.blockSignals(True)
                 slider.setValue(value)
                 slider.blockSignals(False)
+
+    def _on_zoom_slider_changed(self, value):
+        self.viewport.set_zoom_percent(value)
+        self._sync_zoom_sliders(value)
 
     def _reset_zoom_sliders(self):
         for name in ('operation_zoom_slider', 'review_zoom_slider'):
@@ -104,19 +107,19 @@ class OperationPageMixin:
         viewport_title.setObjectName('viewportTitleLabel')
         viewport_title.setProperty('uiRole', 'sectionTitle')
         viewport_heading_row.addWidget(viewport_title)
-        viewport_heading_row.addStretch(1)
         self.operation_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.operation_zoom_slider.setObjectName('operationZoomSlider')
         self.operation_zoom_slider.setRange(25, 400)
         self.operation_zoom_slider.setValue(100)
-        self.operation_zoom_slider.setFixedSize(180, 48)
+        self.operation_zoom_slider.setMinimumWidth(280)
+        self.operation_zoom_slider.setFixedHeight(48)
         self.operation_zoom_slider.setStyleSheet(
             'QSlider::groove:horizontal {'
             ' height: 8px; background: #CBD5E1; border-radius: 4px;'
-            ' margin: 0 18px;'
+            ' margin: 0 24px;'
             '}'
             'QSlider::handle:horizontal {'
-            ' width: 40px; height: 40px; margin: -16px 0;'
+            ' width: 48px; height: 40px; margin: -16px 0;'
             ' border-radius: 20px; background: #2563EB;'
             ' border: 2px solid #FFFFFF;'
             '}'
@@ -124,7 +127,7 @@ class OperationPageMixin:
         )
         self.operation_zoom_slider.setToolTip('缩放百分比：100%为当前视角，双指捏合同样可用')
         self.operation_zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
-        viewport_heading_row.addWidget(self.operation_zoom_slider)
+        viewport_heading_row.addWidget(self.operation_zoom_slider, 1)
         self.btn_operation_touch_mode = QPushButton('旋转')
         self.btn_operation_touch_mode.setObjectName('btnOperationTouchMode')
         self.btn_operation_touch_mode.setProperty('buttonRole', 'secondary')
