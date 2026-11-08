@@ -32,6 +32,12 @@ class ReportPageMixin:
         if self.current_project is None:
             QMessageBox.information(self, '导出报告', '请先创建或选择项目。')
             return
+        if getattr(self, '_report_preview_dirty', False):
+            self._rebuild_report_preview()
+        errors = ReportDataService.validate_for_export(self._report_snapshot)
+        if errors:
+            QMessageBox.warning(self, '报告导出校验', '\n'.join(errors[:8]))
+            return
         default_dir = Path(self.current_project.directory_path) / 'reports'
         default_dir.mkdir(parents=True, exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(self, '导出质量报告',
@@ -39,9 +45,6 @@ class ReportPageMixin:
         if not path:
             return
         try:
-            # 预览刷新是按节拍合并的，导出前确保拿到最新快照
-            if getattr(self, '_report_preview_dirty', False):
-                self._rebuild_report_preview()
             PdfReportRenderer.write_pdf(self._report_html, path)
             self.report_export_service.register_pdf(
                 getattr(self.current_project, 'project_id', None),

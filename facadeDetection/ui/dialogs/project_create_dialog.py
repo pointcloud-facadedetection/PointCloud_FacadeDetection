@@ -507,7 +507,7 @@ class ProjectCreateDialog(QDialog):
         sections = (
             ('fls_directories', 'FLS 目录导入', '上传单站点原生 FLS 文件夹', 'directory'),
             ('pointcloud_files', '点云文件上传', '上传多站点拼接处理后点云文件 (E57/PLY)', 'pointcloud'),
-            ('photo_files', '现场照片上传', '上传对应站点拍摄 2D 照片', 'photo'),
+            ('photo_files', '现场照片上传（必填）', '上传对应站点拍摄 2D 照片', 'photo'),
         )
         for key, title, hint, kind in sections:
             box = QGroupBox(title)
@@ -727,7 +727,7 @@ class ProjectCreateDialog(QDialog):
         self.edt_report_no = QLineEdit()
         self.edt_report_no.setPlaceholderText("RJ-项目名称拼音首字母，可人工修改")
         self.edt_report_no.textEdited.connect(lambda _text: setattr(self, '_report_no_auto', False))
-        form.addRow("报告编号：", self.edt_report_no)
+        form.addRow(self._required_label("报告编号："), self.edt_report_no)
 
         self.date_inspection = QDateEdit()
         self.date_inspection.setCalendarPopup(True)
@@ -1088,6 +1088,19 @@ class ProjectCreateDialog(QDialog):
         if not ok:
             self.tabs.setCurrentIndex(1)
             QMessageBox.warning(self, "楼宇信息校验", message)
+            return
+        if not self.edt_report_no.text().strip():
+            self.tabs.setCurrentIndex(2)
+            self.edt_report_no.setFocus()
+            QMessageBox.warning(self, "报告信息校验", "报告编号为必填项，请填写后再保存")
+            return
+        photos = self._resource_values('photo_files')
+        invalid_photos = [path for path in photos if not Path(path).is_file()]
+        if not photos or invalid_photos:
+            self.tabs.setCurrentIndex(4)
+            QMessageBox.warning(
+                self, "现场照片校验",
+                "请至少上传一张有效现场照片，确保报告贴图可用后再保存")
             return
         self.accept()
 

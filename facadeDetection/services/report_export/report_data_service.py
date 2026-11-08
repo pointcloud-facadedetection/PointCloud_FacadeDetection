@@ -73,6 +73,40 @@ class ReportDataService:
         }
 
     @staticmethod
+    def validate_for_export(snapshot: dict) -> list[str]:
+        errors = []
+        project = snapshot.get('project') or {}
+        facades = snapshot.get('facades') or []
+        if not str(project.get('report_no') or '').strip():
+            errors.append('报告编号未填写')
+        if not facades:
+            errors.append('没有可导出的立面质量结果')
+        for facade in facades:
+            label = facade.get('wall_label') or f"立面 {facade.get('report_no', '?')}"
+            photos = [item for item in facade.get('images', [])
+                      if isinstance(item, dict) and item.get('key') == 'photo']
+            if not photos:
+                errors.append(f'{label} 缺少现场照片叠加图')
+                continue
+            path = Path(photos[0].get('path') or '')
+            if not path.is_file():
+                errors.append(f'{label} 的现场照片叠加图未保存或文件不存在')
+                continue
+            import cv2
+            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                errors.append(f'{label} 的现场照片叠加图无法读取')
+                continue
+            height, width = image.shape[:2]
+            scale = min(64 / max(height, 1), 64 / max(width, 1), 1.0)
+            if scale < 1.0:
+                image = cv2.resize(image, (
+                    max(1, round(width * scale)), max(1, round(height * scale))))
+            if float(image.std()) < 1.0:
+                errors.append(f'{label} 的现场照片叠加图为空白或全黑图片')
+        return errors
+
+    @staticmethod
     def _project_meta(project) -> dict:
         """Extract project metadata for report cover."""
         from services.building_info_service import parse_building_info

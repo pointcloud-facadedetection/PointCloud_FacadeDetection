@@ -561,6 +561,11 @@ class ProjectOverviewService:
         assets['raw_pointclouds'] = pcs
         assets['raw_images'] = photos
         Storage.save_pcfd_index(root, index)
+        saved_photos = {asset.path for asset in FileRepo.list_assets_by_kind(
+            project_uuid, FileKind.raw_image)}
+        missing = sorted(set(photos) - saved_photos)
+        if missing:
+            raise RuntimeError('现场照片保存失败，未写入项目资产：' + '、'.join(missing))
 
     # -------------- 文件导入 --------------
     def _ensure_file_service(self):
