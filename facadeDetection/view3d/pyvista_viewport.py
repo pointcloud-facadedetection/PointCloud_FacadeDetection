@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from time import monotonic
+
 import numpy as np
 import pyvista as pv
 from PySide6.QtCore import QObject, Qt, Signal, QTimer, QEvent, QPoint
@@ -246,10 +248,15 @@ class _GestureFilter(QObject):
 class PyVistaViewport(BaseViewport):
     """Qt 原生 PyVista 视口，接口与 Open3DViewport 对齐。"""
 
+    _MAX_DISPLAY_POINTS = 700_000
+    _POINT_PIXEL_SCALE = 2.5
+    _INTERACTIVE_RENDER_MS = 33
+
     def __init__(self, parent=None):
         from pyvistaqt import QtInteractor
 
-        self._widget = QtInteractor(parent, auto_update=False)
+        self._widget = QtInteractor(
+            parent, auto_update=False, multi_samples=0)
         self._widget.setObjectName('pyvistaViewport')
         self._widget.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self._plotter = self._widget  # QtInteractor 本身即 Plotter API
@@ -276,6 +283,7 @@ class PyVistaViewport(BaseViewport):
         self._adapter = _RenderCounterShim()  # 首帧等待兼容垫片
         self._render_enabled = True
         self._render_pending = False
+        self._last_render_time = 0.0
         self._scene_view_initialized = False
         self._initial_camera = None
         self._grid_actor = None
@@ -628,12 +636,21 @@ class PyVistaViewport(BaseViewport):
         if not self._render_enabled or self._render_pending:
             return
         self._render_pending = True
-        QTimer.singleShot(0, self._flush_render)
+        navigating = (getattr(self, '_touch_active', False)
+                      or getattr(self, '_drag_left', None) is not None
+                      or getattr(self, '_drag_right', None) is not None)
+        delay_ms = 0
+        last_render_time = getattr(self, '_last_render_time', 0.0)
+        if navigating and last_render_time:
+            elapsed_ms = (monotonic() - last_render_time) * 1000.0
+            delay_ms = max(0, int(self._INTERACTIVE_RENDER_MS - elapsed_ms))
+        QTimer.singleShot(delay_ms, self._flush_render)
 
     def _flush_render(self):
         self._render_pending = False
         if self._render_enabled:
             try:
+                self._last_render_time = monotonic()
                 self._plotter.update()
             except Exception:
                 pass
@@ -695,6 +712,17 @@ class PyVistaViewport(BaseViewport):
         keep[valid] = False
         return data['pos'][keep], data['color'][keep]
 
+    def _display_view(self, name):
+        """仅精简 GPU 显示数据，point_data 与检测/拾取数组保持完整。"""
+        pos, color = self._visible_view(name)
+        count = len(pos)
+        limit = self._MAX_DISPLAY_POINTS
+        if count <= limit:
+            return pos, color
+        indices = (np.arange(limit, dtype=np.int64) * (count - 1)
+                   // (limit - 1))
+        return pos[indices], color[indices]
+
     def set_hidden_rows(self, name, rows=None):
         """把指定行从显示中摘除（复核页选中立面：点云让位给热力贴图）。
 
@@ -710,7 +738,7 @@ class PyVistaViewport(BaseViewport):
 
     def _upload_cloud(self, name, reset_view=False):
         data = self.point_data[name]
-        pos_vis, col_vis = self._visible_view(name)
+        pos_vis, col_vis = self._display_view(name)
         poly = self._polys.get(name)
         if poly is None or poly.n_points != len(pos_vis):
             # 点数变化（含隐藏行切换）：PolyData 不能就地改尺寸，重建并换掉 actor
@@ -727,7 +755,8 @@ class PyVistaViewport(BaseViewport):
         if actor is None:
             actor = self._add_points(
                 poly, scalars='colors', rgb=True,
-                point_size=max(1, int(round(data['size'] * 4))),
+                point_size=max(1, int(round(
+                    data['size'] * self._POINT_PIXEL_SCALE))),
                 render_points_as_spheres=False, name=f'cloud::{name}')
             self._actors[name] = actor
         else:
@@ -889,7 +918,7 @@ class PyVistaViewport(BaseViewport):
         self.set_cloud_uniform_color(name, None, render=False)
         data['color'] = np.ascontiguousarray(
             normalize_colors(colors, len(data['pos'])).astype(np.float32))
-        _, col_vis = self._visible_view(name)
+        _, col_vis = self._display_view(name)
         poly = self._polys.get(name)
         if poly is None or poly.n_points != len(col_vis):
             # 点数已变化（换数据集/去噪/隐藏行切换后）：整朵重传，避免数组长度不匹配
@@ -993,7 +1022,8 @@ class PyVistaViewport(BaseViewport):
         data = self.point_data.get(name)
         actor = self._actors.get(name)
         if data is not None and actor is not None:
-            value = max(1, int(round(float(size) * 4)))
+            value = max(1, int(round(
+                float(size) * self._POINT_PIXEL_SCALE)))
             data['size'] = float(size)
             actor.prop.point_size = value
             self._render()
