@@ -109,7 +109,19 @@ class OperationPageMixin:
         self.operation_zoom_slider.setObjectName('operationZoomSlider')
         self.operation_zoom_slider.setRange(25, 400)
         self.operation_zoom_slider.setValue(100)
-        self.operation_zoom_slider.setFixedWidth(120)
+        self.operation_zoom_slider.setFixedSize(180, 48)
+        self.operation_zoom_slider.setStyleSheet(
+            'QSlider::groove:horizontal {'
+            ' height: 8px; background: #CBD5E1; border-radius: 4px;'
+            ' margin: 0 18px;'
+            '}'
+            'QSlider::handle:horizontal {'
+            ' width: 40px; height: 40px; margin: -16px 0;'
+            ' border-radius: 20px; background: #2563EB;'
+            ' border: 2px solid #FFFFFF;'
+            '}'
+            'QSlider::handle:horizontal:pressed { background: #1D4ED8; }'
+        )
         self.operation_zoom_slider.setToolTip('缩放百分比：100%为当前视角，双指捏合同样可用')
         self.operation_zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         viewport_heading_row.addWidget(self.operation_zoom_slider)

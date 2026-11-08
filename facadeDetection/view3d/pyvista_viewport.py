@@ -16,7 +16,7 @@ import numpy as np
 import pyvista as pv
 from PySide6.QtCore import QObject, Qt, Signal, QTimer, QEvent, QPoint
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from .base_viewport import BaseViewport
 from .lod import normalize_colors
@@ -129,65 +129,108 @@ class _PickInputFilter(QObject):
 
 
 class _GestureFilter(QObject):
-    """把 Qt 捏合手势转发给视口的缩放处理。"""
+    """直接处理原生触摸轨迹，避免 VTK 合成鼠标叠加导航。"""
+
+    _MOUSE_EVENTS = (
+        QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+        QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove)
+    _TOUCH_EVENTS = (
+        QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+        QEvent.Type.TouchEnd, QEvent.Type.TouchCancel)
 
     def __init__(self, viewport, parent=None):
         super().__init__(parent)
         self._viewport = viewport
 
-    def eventFilter(self, watched, event):
+    @staticmethod
+    def _point_id(point, fallback):
         try:
-            from PySide6.QtCore import QEvent, Qt
-            touch_events = (
-                QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
-                QEvent.Type.TouchEnd, QEvent.Type.TouchCancel)
-            if event.type() in touch_events:
-                viewport = self._viewport
-                if (viewport._mode != viewport.InteractionMode.NAVIGATE
-                        or viewport._quad_resize is not None):
+            return int(point.id())
+        except (AttributeError, TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _released(point):
+        try:
+            return point.state() == Qt.TouchPointState.TouchPointReleased
+        except AttributeError:
+            return False
+
+    @staticmethod
+    def _distance(first, second):
+        return float(np.hypot(second.x() - first.x(),
+                              second.y() - first.y()))
+
+    @staticmethod
+    def _clear_vtk_drag(viewport):
+        viewport._drag_left = None
+        viewport._drag_right = None
+        viewport._touch_drag = None
+
+    def eventFilter(self, watched, event):
+        viewport = self._viewport
+        widget = getattr(viewport, '_widget', None)
+        if widget is None:
+            return False
+        try:
+            if watched is not widget and watched is not widget.windowHandle():
+                return False
+            event_type = event.type()
+            navigating = (
+                viewport._mode == viewport.InteractionMode.NAVIGATE
+                and viewport._quad_resize is None)
+            if event_type in self._MOUSE_EVENTS:
+                if not navigating:
                     return False
-                points = event.touchPoints()
-                if viewport._touch_pinching:
-                    if (event.type() in (QEvent.Type.TouchEnd,
-                                         QEvent.Type.TouchCancel)
-                            and not points):
-                        viewport._touch_pinching = False
-                        viewport._touch_drag = None
+                source = event.source()
+                if (source != Qt.MouseEventSource.MouseEventNotSynthesized
+                        or viewport._touch_active or viewport._touch_pinching):
+                    self._clear_vtk_drag(viewport)
                     event.accept()
                     return True
-                if len(points) >= 2:
-                    viewport._touch_pinching = True
-                    viewport._touch_drag = None
-                    event.accept()
-                    return True
-                if event.type() in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
-                    viewport._touch_drag = None
-                    event.accept()
-                    return True
-                if not points:
-                    return False
-                position = points[0].position()
-                previous = viewport._touch_drag
-                viewport._touch_drag = position
-                if previous is not None and event.type() == QEvent.Type.TouchUpdate:
-                    dx = float(position.x() - previous.x())
-                    dy = float(position.y() - previous.y())
-                    if viewport._touch_navigation_mode == 'pan':
-                        viewport._camera_pan(dx, dy)
-                    else:
-                        viewport._turntable_rotate(dx, dy)
-                event.accept()
-                return True
-            if event.type() == QEvent.Gesture:
-                pinch = event.gesture(Qt.PinchGesture)
-                if pinch is not None:
-                    factor = float(pinch.scaleFactor())
-                    if factor > 0:
-                        self._viewport._zoom_by_factor(factor)
-                    return True
+                return False
+            if event_type not in self._TOUCH_EVENTS or not navigating:
+                return False
+
+            previous = viewport._touch_points
+            current = {}
+            if event_type != QEvent.Type.TouchCancel:
+                for index, point in enumerate(event.touchPoints()):
+                    if not self._released(point):
+                        current[self._point_id(point, index)] = point.position()
+            viewport._touch_points = current
+            viewport._touch_active = bool(current)
+            self._clear_vtk_drag(viewport)
+
+            if len(current) >= 2:
+                first, second = list(current.values())[:2]
+                distance = self._distance(first, second)
+                previous_distance = viewport._touch_pinch_distance
+                if (viewport._touch_pinching and previous_distance is not None
+                        and previous_distance > 1e-6 and distance > 1e-6):
+                    viewport._zoom_by_factor(distance / previous_distance)
+                viewport._touch_pinching = True
+                viewport._touch_pinch_distance = distance
+            elif len(current) == 1:
+                point_id, position = next(iter(current.items()))
+                viewport._touch_pinch_distance = None
+                if not viewport._touch_pinching:
+                    last = previous.get(point_id)
+                    viewport._touch_drag = position
+                    if last is not None and event_type == QEvent.Type.TouchUpdate:
+                        dx = float(position.x() - last.x())
+                        dy = float(last.y() - position.y())
+                        if viewport._touch_navigation_mode == 'pan':
+                            viewport._camera_pan(dx, dy)
+                        else:
+                            viewport._turntable_rotate(dx, dy)
+            else:
+                viewport._touch_pinching = False
+                viewport._touch_pinch_distance = None
+            event.accept()
+            return True
         except Exception:
-            pass
-        return False
+            return False
 
 
 class PyVistaViewport(BaseViewport):
@@ -234,7 +277,10 @@ class PyVistaViewport(BaseViewport):
         self._drag_left = None
         self._drag_right = None
         self._touch_drag = None
+        self._touch_points = {}
+        self._touch_active = False
         self._touch_pinching = False
+        self._touch_pinch_distance = None
         self._touch_navigation_mode = 'rotate'
         self._zoom_reference = None
         self._install_zup_interaction()
@@ -285,14 +331,13 @@ class PyVistaViewport(BaseViewport):
         self._pick_input_filter = _PickInputFilter(self, parent=self._widget)
         self._widget.installEventFilter(self._pick_input_filter)
 
-        # 触控手势：捏合缩放（Surface 触屏）
-        try:
-            from PySide6.QtCore import Qt as _Qt
-            self._gesture_filter = _GestureFilter(self)
-            self._widget.grabGesture(_Qt.PinchGesture)
+        # 原生 Windows 触摸可能先投递到应用/native window，不能只监听 VTK 子控件。
+        self._gesture_filter = _GestureFilter(self, parent=self._widget)
+        self._gesture_app = QApplication.instance()
+        if self._gesture_app is not None:
+            self._gesture_app.installEventFilter(self._gesture_filter)
+        else:
             self._widget.installEventFilter(self._gesture_filter)
-        except Exception:
-            pass
 
         # VTK 按需渲染：渲染成功后递增帧计数
         try:
@@ -448,19 +493,30 @@ class PyVistaViewport(BaseViewport):
             pass
 
     def _camera_pan(self, dx, dy):
-        """按注视点深度的世界/像素比平移（VTK 经典配方）。"""
+        """按当前视锥的世界/像素比平移，输入使用 VTK 的右/上方向。"""
         try:
-            renderer = self._plotter.renderer
             camera = self._plotter.camera
             fp = np.asarray(camera.focal_point, dtype=np.float64)
             pos = np.asarray(camera.position, dtype=np.float64)
-            renderer.SetWorldPoint(fp[0], fp[1], fp[2], 1.0)
-            renderer.WorldToDisplay()
-            d = renderer.GetDisplayPoint()
-            renderer.SetDisplayPoint(d[0] - dx, d[1] - dy, d[2])
-            renderer.DisplayToWorld()
-            w = renderer.GetWorldPoint()
-            delta = np.array([w[0] / w[3], w[1] / w[3], w[2] / w[3]]) - fp
+            forward = fp - pos
+            distance = float(np.linalg.norm(forward))
+            if distance < 1e-9:
+                return
+            forward /= distance
+            right = np.cross(forward, np.asarray(camera.up, dtype=np.float64))
+            right_length = float(np.linalg.norm(right))
+            if right_length < 1e-9:
+                return
+            right /= right_length
+            up = np.cross(right, forward)
+            height = max(1, int(self._plotter.renderer.GetSize()[1]))
+            if bool(camera.parallel_projection):
+                world_height = 2.0 * float(camera.parallel_scale)
+            else:
+                world_height = (2.0 * distance * np.tan(
+                    np.radians(float(camera.view_angle)) * 0.5))
+            world_per_pixel = world_height / height
+            delta = -(float(dx) * right + float(dy) * up) * world_per_pixel
             camera.focal_point = tuple(fp + delta)
             camera.position = tuple(pos + delta)
             self._render()
@@ -2199,6 +2255,13 @@ class PyVistaViewport(BaseViewport):
 
     def destroy(self):
         self._render_enabled = False
+        app = getattr(self, '_gesture_app', None)
+        gesture_filter = getattr(self, '_gesture_filter', None)
+        if app is not None and gesture_filter is not None:
+            try:
+                app.removeEventFilter(gesture_filter)
+            except Exception:
+                pass
         self.clear()
         try:
             self._widget.close()
