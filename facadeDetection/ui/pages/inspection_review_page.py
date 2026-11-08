@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidgetItem,
     QPushButton,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -175,6 +176,11 @@ class InspectionReviewPageMixin:
         self.btn_review_ruler.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_ruler.toggled.connect(self._on_review_ruler_toggled)
         row.addWidget(self.btn_review_ruler)
+        self.lbl_review_ruler_example = QLabel('尺体示意：2m，红/蓝为端点')
+        self.lbl_review_ruler_example.setStyleSheet('color:#64748B; font-size:11px;')
+        self.lbl_review_ruler_example.setToolTip(
+            '尺体表示实际2m检测位置；红/蓝点表示两端，数字为端点到四边的垂直距离')
+        row.addWidget(self.lbl_review_ruler_example)
 
         self.btn_review_clear = QPushButton('清除')
         self.btn_review_clear.setObjectName('btn_review_clear')
@@ -183,6 +189,23 @@ class InspectionReviewPageMixin:
         self.btn_review_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_review_clear.clicked.connect(self._on_review_clear_clicked)
         row.addWidget(self.btn_review_clear)
+
+        self.review_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.review_zoom_slider.setObjectName('reviewZoomSlider')
+        self.review_zoom_slider.setRange(25, 400)
+        self.review_zoom_slider.setValue(100)
+        self.review_zoom_slider.setFixedWidth(100)
+        self.review_zoom_slider.setToolTip('缩放百分比：100%为当前视角，双指捏合同样可用')
+        self.review_zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
+        row.addWidget(self.review_zoom_slider)
+
+        self.btn_review_touch_mode = QPushButton('旋转')
+        self.btn_review_touch_mode.setObjectName('btnReviewTouchMode')
+        self.btn_review_touch_mode.setProperty('buttonRole', 'secondary')
+        self.btn_review_touch_mode.setCheckable(True)
+        self.btn_review_touch_mode.setToolTip('单点触控选择旋转或平移；双指捏合缩放')
+        self.btn_review_touch_mode.toggled.connect(self._on_touch_mode_toggled)
+        row.addWidget(self.btn_review_touch_mode)
 
         self.btn_review_reset_view = QPushButton('归位')
         self.btn_review_reset_view.setObjectName('btnReviewResetView')
@@ -261,6 +284,7 @@ class InspectionReviewPageMixin:
         self.viewport_tools_controller.clear_visuals()
 
     def _on_review_reset_view(self):
+        self._reset_zoom_sliders()
         self.viewport_tools_controller.cancel()
         self._close_review_resize_confirm_card()
         viewport = self.viewport
@@ -389,9 +413,16 @@ class InspectionReviewPageMixin:
             button.update()
 
     def _on_review_tool_activated(self, tool):
+        if tool == 'ruler' and getattr(self, 'viewport', None) is not None:
+            self._touch_mode_before_ruler = self.viewport._touch_navigation_mode
+            self._on_touch_mode_toggled(True)
         self._sync_review_tool_active(tool)
 
     def _on_review_tool_deactivated(self):
+        previous = getattr(self, '_touch_mode_before_ruler', None)
+        if previous is not None:
+            self._on_touch_mode_toggled(previous == 'pan')
+            self._touch_mode_before_ruler = None
         self._sync_review_tool_active()
 
     def _store_facade_list_item(self, item, facade):

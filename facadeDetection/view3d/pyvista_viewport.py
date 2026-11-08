@@ -138,6 +138,37 @@ class _GestureFilter(QObject):
     def eventFilter(self, watched, event):
         try:
             from PySide6.QtCore import QEvent, Qt
+            touch_events = (
+                QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                QEvent.Type.TouchEnd, QEvent.Type.TouchCancel)
+            if event.type() in touch_events:
+                viewport = self._viewport
+                if (viewport._mode != viewport.InteractionMode.NAVIGATE
+                        or viewport._quad_resize is not None):
+                    return False
+                points = event.touchPoints()
+                if len(points) >= 2:
+                    viewport._touch_drag = None
+                    event.accept()
+                    return True
+                if event.type() in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+                    viewport._touch_drag = None
+                    event.accept()
+                    return True
+                if not points:
+                    return False
+                position = points[0].position()
+                previous = viewport._touch_drag
+                viewport._touch_drag = position
+                if previous is not None and event.type() == QEvent.Type.TouchUpdate:
+                    dx = float(position.x() - previous.x())
+                    dy = float(position.y() - previous.y())
+                    if viewport._touch_navigation_mode == 'pan':
+                        viewport._camera_pan(dx, dy)
+                    else:
+                        viewport._turntable_rotate(dx, dy)
+                event.accept()
+                return True
             if event.type() == QEvent.Gesture:
                 pinch = event.gesture(Qt.PinchGesture)
                 if pinch is not None:
@@ -192,6 +223,9 @@ class PyVistaViewport(BaseViewport):
         # Z-up 转台交互（Tekla 式）：左键旋转、右键平移、滚轮缩放
         self._drag_left = None
         self._drag_right = None
+        self._touch_drag = None
+        self._touch_navigation_mode = 'rotate'
+        self._zoom_reference = None
         self._install_zup_interaction()
 
         # 交互模式与拾取状态
@@ -265,6 +299,12 @@ class PyVistaViewport(BaseViewport):
     _ELEV_LIMIT_DEG = 85.0    # 俯仰钳制：留出余量，避免视线与全局Z平行
                                # （平行时VTK每帧刷view-up重置告警）
     _WHEEL_FACTOR = 1.15      # 滚轮缩放倍率
+
+    def set_touch_navigation_mode(self, mode):
+        if mode not in ('rotate', 'pan'):
+            raise ValueError('触控模式仅支持 rotate 或 pan')
+        self._touch_navigation_mode = mode
+        self._touch_drag = None
 
     def _install_zup_interaction(self):
         """以 vtkInteractorStyleUser 处理普通导航鼠标事件，实现 Z 轴锁定转台。
@@ -421,6 +461,28 @@ class PyVistaViewport(BaseViewport):
         factor = (self._WHEEL_FACTOR if direction > 0
                   else 1.0 / self._WHEEL_FACTOR)
         self._zoom_by_factor(factor)
+
+    def set_zoom_percent(self, percent):
+        percent = float(percent)
+        if percent <= 0:
+            raise ValueError('缩放百分比必须大于0')
+        camera = self._plotter.camera
+        if self._zoom_reference is None:
+            position = np.asarray(camera.position, dtype=np.float64)
+            focal = np.asarray(camera.focal_point, dtype=np.float64)
+            self._zoom_reference = {
+                'parallel_scale': float(camera.parallel_scale),
+                'offset': position - focal,
+            }
+        reference = self._zoom_reference
+        if bool(camera.parallel_projection):
+            camera.parallel_scale = max(
+                1e-6, reference['parallel_scale'] * 100.0 / percent)
+        else:
+            camera.position = tuple(
+                np.asarray(camera.focal_point, dtype=np.float64)
+                + reference['offset'] * (100.0 / percent))
+        self._render()
 
     def _zoom_by_factor(self, factor):
         """按倍率缩放（滚轮/捏合手势共用）：正交改 parallel scale，透视 Dolly。"""
@@ -700,6 +762,7 @@ class PyVistaViewport(BaseViewport):
     def reset_view(self):
         """恢复建筑立面默认正视图（与 Open3D 视口一致）。"""
         self._scene_view_initialized = False
+        self._zoom_reference = None
         if self.point_data:
             self._initialize_scene_view()
             self._render()

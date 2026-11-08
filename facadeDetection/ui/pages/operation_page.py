@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QToolButton,
@@ -30,6 +31,38 @@ from services.result_export_service import ResultExportService
 
 
 class OperationPageMixin:
+    def _on_touch_mode_toggled(self, checked):
+        mode = 'pan' if checked else 'rotate'
+        self.viewport.set_touch_navigation_mode(mode)
+        for name in ('btn_operation_touch_mode', 'btn_review_touch_mode'):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(checked)
+                button.setText('平移' if checked else '旋转')
+                button.blockSignals(False)
+
+    def _on_zoom_slider_changed(self, value):
+        self.viewport.set_zoom_percent(value)
+        for name in ('operation_zoom_slider', 'review_zoom_slider'):
+            slider = getattr(self, name, None)
+            if slider is not None:
+                slider.blockSignals(True)
+                slider.setValue(value)
+                slider.blockSignals(False)
+
+    def _reset_zoom_sliders(self):
+        for name in ('operation_zoom_slider', 'review_zoom_slider'):
+            slider = getattr(self, name, None)
+            if slider is not None:
+                slider.blockSignals(True)
+                slider.setValue(100)
+                slider.blockSignals(False)
+
+    def _on_operation_reset_view(self):
+        self._reset_zoom_sliders()
+        self.project_operation_service.reset_view()
+
     def _create_operation_page(self, page_title, page_key):
         page = QWidget()
         self.operation_page = page
@@ -67,12 +100,27 @@ class OperationPageMixin:
         viewport_title.setProperty('uiRole', 'sectionTitle')
         viewport_heading_row.addWidget(viewport_title)
         viewport_heading_row.addStretch(1)
+        self.operation_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.operation_zoom_slider.setObjectName('operationZoomSlider')
+        self.operation_zoom_slider.setRange(25, 400)
+        self.operation_zoom_slider.setValue(100)
+        self.operation_zoom_slider.setFixedWidth(120)
+        self.operation_zoom_slider.setToolTip('缩放百分比：100%为当前视角，双指捏合同样可用')
+        self.operation_zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
+        viewport_heading_row.addWidget(self.operation_zoom_slider)
+        self.btn_operation_touch_mode = QPushButton('旋转')
+        self.btn_operation_touch_mode.setObjectName('btnOperationTouchMode')
+        self.btn_operation_touch_mode.setProperty('buttonRole', 'secondary')
+        self.btn_operation_touch_mode.setCheckable(True)
+        self.btn_operation_touch_mode.setToolTip('单点触控选择旋转或平移；双指捏合缩放')
+        self.btn_operation_touch_mode.toggled.connect(self._on_touch_mode_toggled)
+        viewport_heading_row.addWidget(self.btn_operation_touch_mode)
         self.btn_operation_reset_view = QPushButton('归位')
         self.btn_operation_reset_view.setObjectName('btnOperationResetView')
         self.btn_operation_reset_view.setProperty('buttonRole', 'secondary')
         self.btn_operation_reset_view.setToolTip('恢复测站初始视角或默认立面视角')
         self.btn_operation_reset_view.clicked.connect(
-            self.project_operation_service.reset_view)
+            self._on_operation_reset_view)
         viewport_heading_row.addWidget(self.btn_operation_reset_view)
         viewport_state = QLabel('等待点云加载')
         viewport_state.setObjectName('viewportStateLabel')
