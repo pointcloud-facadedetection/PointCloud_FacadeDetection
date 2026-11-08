@@ -170,13 +170,15 @@ def test_bipolar_midrange_is_not_fully_saturated():
     assert middle[1, 0] > cold_end[0]
 
 
-def test_pass_band_has_signed_gradient_and_explicit_threshold_colors():
+def test_pass_band_has_signed_gradient_and_smooth_threshold_transition():
     from services.heatmap_spec import bipolar_colormap
-    colors = bipolar_colormap([-8.0, -4.0, 0.0, 4.0, 8.0], 8.0, scale_mm=16.0)
-    assert not np.allclose(colors[1], colors[3]), '合格区不能整片同色'
-    assert np.allclose(colors[2], [158 / 255, 178 / 255, 158 / 255])
-    assert np.allclose(colors[0], [0.95, 0.65, 0.12])
-    assert np.allclose(colors[4], [0.10, 0.65, 0.85])
+    colors = bipolar_colormap(
+        [-8.001, -8.0, -4.0, 0.0, 4.0, 8.0, 8.001],
+        8.0, scale_mm=16.0)
+    assert not np.allclose(colors[2], colors[4]), '合格区不能整片同色'
+    assert np.allclose(colors[3], [158 / 255, 178 / 255, 158 / 255])
+    assert np.allclose(colors[0], colors[1], atol=0.01)
+    assert np.allclose(colors[5], colors[6], atol=0.01)
 
 
 def test_sparse_samples_keep_visibility_without_divider_line():

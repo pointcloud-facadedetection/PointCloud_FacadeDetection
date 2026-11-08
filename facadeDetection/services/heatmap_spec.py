@@ -176,11 +176,6 @@ def bipolar_colormap(signed_values_mm, limit_mm, scale_mm=None):
         out[cold_mask] = (cold_pass * (1.0 - tc)
                           + (cool * (1.0 - tc) + cold * tc) * tc)
 
-    boundary_width = min(0.25, limit * 0.05)
-    near_boundary = np.abs(np.abs(values) - limit) <= boundary_width
-    out[near_boundary & (values < 0)] = (0.95, 0.65, 0.12)
-    out[near_boundary & (values > 0)] = (0.10, 0.65, 0.85)
-
     return np.clip(out, 0.0, 1.0)
 
 HEATMAP_SPECS = {
