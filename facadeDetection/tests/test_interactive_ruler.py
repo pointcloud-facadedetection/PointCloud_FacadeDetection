@@ -259,7 +259,7 @@ class TestTransparentPngUvRect:
         assert (u0, v0, u1, v1) == pytest.approx((0.0, 0.0, 4.0, 3.0))
 
     def test_max_size_downscales_pixel(self):
-        # 90m 长边触发 max_size=3200 降采样：size = 99/3199（含 5% 边距）
+        # 90m 长边触发 max_size=4096 降采样：size = 99/4095（含 5% 边距）
         quality = self._quality()
         quality['quality_comparison']['domain'].update(
             {'u_max_m': 4.0, 'v_max_m': 90.0})
@@ -268,7 +268,7 @@ class TestTransparentPngUvRect:
         y, z = np.meshgrid(ys, zs)
         pts = np.column_stack([np.zeros(y.size), y.ravel(), z.ravel()])
         rect = interactive_ruler.transparent_png_uv_rect(pts, quality)
-        assert rect['pixel_size'] == pytest.approx(99.0 / 3199)
+        assert rect['pixel_size'] == pytest.approx(99.0 / 4095)
         u0, v0, u1, v1 = rect['uv_bounds']
         assert (u0, u1) == pytest.approx((0.0, 4.0), abs=0.05)
         assert (v0, v1) == pytest.approx((0.0, 90.0), abs=0.05)
