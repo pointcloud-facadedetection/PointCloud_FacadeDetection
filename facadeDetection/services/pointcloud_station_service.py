@@ -318,7 +318,7 @@ class PointCloudStationService:
         report(35, f'已读取原始点云 {len(points):,} 点')
         # 原生 intensity 保存在规范化 PLY 的独立标量属性中。旧 raw/proxy
         # 缓存尚未包含该数组，因此这里按资产读取一次并随后同步到代理域。
-        source_intensity = self._load_native_intensity(station.source_path)
+        source_intensity = None
         source_id = f'{dataset_id}:source'
         state = _normalize_denoise_state(PointCloudStationRepo.get_denoise_state(
             self.project_uuid, station.id))
@@ -363,6 +363,7 @@ class PointCloudStationService:
                 source_count=len(points))
         report(55, '代理缓存检查完成')
         if restored_direct:
+            source_intensity = self._load_native_intensity(station.source_path)
             representative_ids = state_indices[state_offsets[:-1]]
             proxy = points[representative_ids]
             proxy_colors = colors[representative_ids] if colors is not None else None
@@ -394,8 +395,24 @@ class PointCloudStationService:
                 representative_ids = cached_proxy['representative_ids']
                 proxy = points[representative_ids]
                 proxy_colors = colors[representative_ids] if colors is not None else None
-            proxy_intensity = self._aggregate_proxy_intensity(
-                source_intensity, cached_proxy['offsets'], cached_proxy['indices'])
+            proxy_intensity = cached_proxy.get('proxy_intensity')
+            if proxy_intensity is None:
+                source_intensity = self._load_native_intensity(station.source_path)
+                proxy_intensity = self._aggregate_proxy_intensity(
+                    source_intensity, cached_proxy['offsets'], cached_proxy['indices'])
+                if proxy_intensity is not None:
+                    proxy_cache.save_proxy_cache(
+                        self.project_uuid, station.id, fingerprint_key,
+                        offsets=cached_proxy['offsets'],
+                        indices=cached_proxy['indices'],
+                        ranges=cached_proxy['ranges'],
+                        scan_origins=cached_proxy['scan_origins'],
+                        distance_source=cached_proxy['distance_source'],
+                        representative_ids=cached_proxy['representative_ids'],
+                        proxy_points=cached_proxy.get('proxy_points'),
+                        proxy_colors=cached_proxy.get('proxy_colors'),
+                        proxy_normals=cached_proxy.get('proxy_normals'),
+                        proxy_intensity=proxy_intensity)
             metadata.update({
                 'proxy_source_offsets': cached_proxy['offsets'],
                 'proxy_source_indices': cached_proxy['indices'],
@@ -428,6 +445,7 @@ class PointCloudStationService:
             indices = built['proxy_source_indices']
             ranges = built['ranges']
             representatives = built['representatives']
+            source_intensity = self._load_native_intensity(station.source_path)
             proxy_intensity = self._aggregate_proxy_intensity(
                 source_intensity, offsets, indices)
             metadata.update({
@@ -446,7 +464,8 @@ class PointCloudStationService:
                 offsets=offsets, indices=indices, ranges=ranges,
                 scan_origins=dist.scan_origins, distance_source=dist.source,
                 representative_ids=representatives,
-                proxy_points=proxy, proxy_colors=proxy_colors)
+                proxy_points=proxy, proxy_colors=proxy_colors,
+                proxy_intensity=proxy_intensity)
             print(f'[PCFD] proxy.built station={station.id} '
                   f'proxy={len(proxy)} raw={len(points)} '
                   f'density={dist.density_source}', flush=True)

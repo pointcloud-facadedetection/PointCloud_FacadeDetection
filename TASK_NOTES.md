@@ -355,3 +355,9 @@
 - 二次打开约25秒的主要原因是 `_load_native_intensity` 调用全量 `read_ply_features_fast`，为读取 intensity 同时创建 2800 万点 XYZ/RGB/intensity（约780MB）。
 - 新增 `read_ply_intensity_fast`，仅按 PLY 记录布局映射并复制 intensity 列，不创建 XYZ/RGB。
 - 2800 万点实测单项读取 0.255 秒、峰值106.83 MiB；40 项 E57、代理与 memmap 测试通过。
+
+## 代理intensity缓存避免重开重复聚合
+
+- 完整二次打开日志显示 `raw_cache.restored` 到 `proxy_cache.restored` 仍约31秒，除读取外还包括逐点 Python 中位数聚合。
+- 代理 NPZ 新增 `proxy_intensity` 字段：首次构建保存，旧缓存首次升级后保存，重开直接恢复，不再读取原生 PLY intensity 或重复聚合。
+- 已缓存 intensity 时 `source_intensities` 仍走独立懒加载；41 项缓存测试通过，覆盖重开禁止原生读取。

@@ -175,7 +175,8 @@ def load_raw_cache(project_uuid, station_id, fingerprint_key):
 def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
                      indices, ranges, scan_origins, distance_source,
                      representative_ids, proxy_points=None,
-                     proxy_colors=None, proxy_normals=None) -> bool:
+                     proxy_colors=None, proxy_normals=None,
+                     proxy_intensity=None) -> bool:
     """写入代理缓存（np.savez 不压缩）；失败仅警告并返回 False。
 
     proxy_points/proxy_colors 是重建产出的代理数组本体；持久化后重开项目
@@ -196,6 +197,9 @@ def save_proxy_cache(project_uuid, station_id, fingerprint_key, *, offsets,
         if proxy_normals is not None:
             arrays['proxy_normals'] = np.asarray(
                 proxy_normals, dtype=np.float64).reshape(-1, 3)
+        if proxy_intensity is not None:
+            arrays['proxy_intensity'] = np.asarray(
+                proxy_intensity, dtype=np.float32).reshape(-1)
         _save_npz(
             proxy_cache_path(project_uuid, station_id),
             offsets=np.asarray(offsets, dtype=np.int64),
@@ -262,6 +266,11 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                 if cand_normals.ndim == 2 and cand_normals.shape[1] == 3 and \
                         len(cand_normals) == len(offsets) - 1:
                     proxy_normals = cand_normals
+            proxy_intensity = None
+            if 'proxy_intensity' in data.files:
+                candidate = np.asarray(data['proxy_intensity'], dtype=np.float32)
+                if candidate.ndim == 1 and len(candidate) == len(offsets) - 1:
+                    proxy_intensity = candidate
         # CSR 结构完整性：损坏文件绝不进入主流程
         if (len(offsets) < 2 or offsets[0] != 0 or
                 np.any(np.diff(offsets) <= 0) or
@@ -282,7 +291,8 @@ def load_proxy_cache(project_uuid, station_id, fingerprint_key,
                 'ranges': ranges, 'scan_origins': scan_origins,
                 'distance_source': distance_source,
                 'proxy_points': proxy_points, 'proxy_colors': proxy_colors,
-                'proxy_normals': proxy_normals}
+                'proxy_normals': proxy_normals,
+                'proxy_intensity': proxy_intensity}
     except Exception:
         return None
 

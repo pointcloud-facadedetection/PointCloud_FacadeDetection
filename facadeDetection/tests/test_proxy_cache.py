@@ -756,3 +756,25 @@ def test_source_payload_is_released_and_lazily_remapped(harness):
     assert dataset.index.source_points is not None
     assert service.pointcloud.get_source_asset(dataset.metadata['source_id']) is not None
     assert len(harness.ply_load_calls) == 1, '重载必须走 raw memmap，不重读原始 PLY'
+
+
+def test_cached_proxy_intensity_skips_native_read_on_reopen(harness, monkeypatch):
+    from services.pointcloud_station_service import PointCloudStationService
+    monkeypatch.setattr(
+        PointCloudStationService, '_load_native_intensity',
+        staticmethod(lambda _path: np.ones(harness.n_points, dtype=np.float32)))
+    first = harness.new_service()
+    first_dataset = first._load_proxy_domain(harness.station)
+    assert first_dataset.proxy_intensities is not None
+    assert len(first_dataset.proxy_intensities) == len(first_dataset.proxy_points)
+
+    def unexpected_read(_path):
+        raise AssertionError('缓存已有 proxy_intensity，不应重读原生 PLY intensity')
+
+    monkeypatch.setattr(PointCloudStationService, '_load_native_intensity',
+                        staticmethod(unexpected_read))
+    second = harness.new_service()
+    second_dataset = second._load_proxy_domain(harness.station)
+    assert second_dataset.proxy_intensities is not None
+    np.testing.assert_array_equal(
+        second_dataset.proxy_intensities, first_dataset.proxy_intensities)
