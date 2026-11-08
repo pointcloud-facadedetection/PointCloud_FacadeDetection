@@ -192,3 +192,28 @@ def test_resized_facade_persistence_invalidates_old_quality(monkeypatch):
         assert row.plane_json['proxy_indices'] == [0, 1, 2, 3, 4]
         assert row.plane_json['edit_revision'] == 1
         assert row.plane_json['facade_geometry']['uv_bounds'] == [0, 0, 2, 2]
+
+
+def test_incremental_ids_chunking_preserves_results_and_bounds_memory():
+    import tracemalloc
+
+    rng = np.random.default_rng(42)
+    points = np.column_stack([
+        np.zeros(400_000, dtype=np.float32),
+        rng.random(400_000, dtype=np.float32) * 4.0,
+        rng.random(400_000, dtype=np.float32) * 4.0,
+    ])
+    old_ids = np.arange(100, dtype=np.int64)
+    new_bounds = [0.0, 0.0, 3.0, 3.0]
+    whole = incremental_proxy_ids(
+        points, GEOMETRY, old_ids, new_bounds, chunk_size=400_000)
+    chunked = incremental_proxy_ids(
+        points, GEOMETRY, old_ids, new_bounds, chunk_size=997)
+    np.testing.assert_array_equal(chunked, whole)
+
+    tracemalloc.start()
+    incremental_proxy_ids(
+        points, GEOMETRY, old_ids, new_bounds, chunk_size=50_000)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 50 * 1024 * 1024, f'边界分块峰值异常: {peak / 1024**2:.1f} MiB'
