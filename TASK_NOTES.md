@@ -328,3 +328,9 @@
 - `source_loader` 从 raw `.npy` memmap 按需恢复，不重读原始 PLY、不重建代理；`source_intensities` 仅在实际访问时读取。
 - `has_source_mapping` 只依赖 CSR，不再因原始载荷释放而退化为体素反查；`get_source_asset` 与 `processed_raw_points` 会触发按需恢复。
 - 加载器使用服务弱引用，避免数据集与站点服务形成强引用循环；81 项缓存、worker、接口与 artifact 测试通过。
+
+## 复核与靠尺后台任务同步释放原始载荷
+
+- 检测复核的 UV 重建会触发原始 memmap 按需恢复，现于 `_HeatRectWorker` 完成后释放，避免进入复核后再次长期驻留。
+- 靠尺基础点集提取完成后同样释放；返回的裁剪结果与靠尺点集为独立数据，不受影响。
+- 3 项针对性测试通过。

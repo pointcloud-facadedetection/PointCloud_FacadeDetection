@@ -708,6 +708,9 @@ class InspectionReviewPageMixin:
         workers = self.__dict__.setdefault('_review_heat_rect_workers', {})
         if workers.get(key) is worker:
             workers.pop(key, None)
+        release = getattr(self.facade_service, 'release_quality_sources', None)
+        if callable(release):
+            release()
 
     @staticmethod
     def _reconstruct_heat_rect(dataset, quality, image_hw):

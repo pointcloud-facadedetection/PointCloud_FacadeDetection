@@ -252,3 +252,15 @@ def test_pick_releases_actual_roi_mouse_and_keyboard_grabs(qapp):
     finally:
         viewport.exit_pick_mode()
         viewport.destroy()
+
+
+def test_ruler_base_completion_releases_source_payload(qapp):
+    from types import SimpleNamespace
+    releases = []
+    service = SimpleNamespace(
+        release_quality_sources=lambda: releases.append(1))
+    controller = ViewportToolsController(
+        FakeViewport(), service, lambda: 'cloud', lambda: {'id': 1},
+        lambda: {})
+    controller._on_ruler_base_thread_finished()
+    assert releases == [1]

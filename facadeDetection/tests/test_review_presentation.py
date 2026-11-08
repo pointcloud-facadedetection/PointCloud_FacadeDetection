@@ -299,7 +299,11 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
     harness._review_heatmap_mode = 'global_plane_flatness_area'
     harness.facade_quality_controller = SimpleNamespace(
         active_cloud_name=lambda: 'c')
-    harness.facade_service = SimpleNamespace(get_dataset=lambda _cloud: dataset)
+    harness.releases = []
+    harness.facade_service = SimpleNamespace(
+        get_dataset=lambda _cloud: dataset,
+        release_quality_sources=lambda: harness.releases.append(1))
+
     quality = {
         'facade_geometry': {'uv_bounds': [-1.0, -1.0, 5.0, 4.0]},
         'quality_comparison': {'domain': {
@@ -316,6 +320,8 @@ def test_heat_rect_rebuild_finishes_in_background(qapp):
     assert pump_until(qapp, lambda: key in harness._review_heat_rect_cache)
     rect = harness._review_heat_rect_cache[key]
     assert rect['uv_bounds'] == pytest.approx((0.0, 0.0, 4.0, 3.0))
+    assert pump_until(qapp, lambda: harness.releases == [1])
+
     assert harness.repaints == 1
     assert harness._review_heat_uv_bounds(facade, quality, (301, 401)) == \
         pytest.approx((0.0, 0.0, 4.0, 3.0))

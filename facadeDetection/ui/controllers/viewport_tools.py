@@ -357,6 +357,9 @@ class ViewportToolsController(QObject):
 
     def _on_ruler_base_thread_finished(self):
         self._base_worker = None
+        release = getattr(self._facade_service, 'release_quality_sources', None)
+        if callable(release):
+            release()
 
     def _on_ruler_pick(self, picked):
         if not picked:
