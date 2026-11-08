@@ -123,13 +123,18 @@ def test_continuous_signed_raster_has_smooth_values_and_preserves_holes():
     values = points[:, 0].copy()
     raster = rasterize_facade(
         points, None, [1.0, 0.0, 0.0, 0.0], values, 0.004,
-        pixel_size=1.0, base_points=points, physical_cell_m=2.0,
+        pixel_size=0.001, base_points=points, physical_cell_m=2.0,
         continuous_signed=True, continuous_colormap=bipolar_colormap)
     overlay = raster['overlay_rgba']
     occupied = overlay[:, :, 3] > 0
-    assert np.any(overlay[:, :, 3] == 160), '阈值内使用中性半透明色'
-    assert np.any(overlay[:, :, 3] == 225), '超限使用高亮红/蓝'
-    assert len(np.unique(overlay[:, :, :3][occupied].reshape(-1, 3), axis=0)) > 5
+    signed = raster['pixel_defect_values']
+    pass_pixels = occupied & (np.abs(signed) <= 0.004)
+    defect_pixels = occupied & (np.abs(signed) > 0.004)
+    assert np.any(pass_pixels), '阈值内区域必须可见'
+    assert np.any(defect_pixels), '超限区域必须可见'
+    assert np.all(overlay[:, :, 3][pass_pixels] >= 80)
+    assert np.all(overlay[:, :, 3][defect_pixels] >= 140)
+    assert len(np.unique(overlay[:, :, :3][occupied].reshape(-1, 3), axis=0)) >= 4
 
     corners = np.array([
         [-0.006, 0.0, 0.0], [0.006, 8.0, 0.0],
@@ -172,3 +177,20 @@ def test_pass_band_has_signed_gradient_and_explicit_threshold_colors():
     assert np.allclose(colors[2], [158 / 255, 178 / 255, 158 / 255])
     assert np.allclose(colors[0], [0.95, 0.65, 0.12])
     assert np.allclose(colors[4], [0.10, 0.65, 0.85])
+
+
+def test_sparse_samples_keep_visibility_and_threshold_contour():
+    from algorithms.facade.projection import _continuous_signed_overlay
+    from services.heatmap_spec import bipolar_colormap
+
+    values = np.linspace(-0.006, 0.006, 81)
+    overlay, _smooth = _continuous_signed_overlay(
+        values.astype(np.float32), np.arange(81, dtype=np.int64),
+        np.ones((9, 9), dtype=bool), 0.004, 0.02, 0.01,
+        bipolar_colormap)
+    visible = overlay[:, :, 3] > 0
+    assert visible.any()
+    assert np.all(overlay[:, :, 3][visible] >= 100), '稀疏样本不得产生接近透明的条纹'
+    boundary = np.all(overlay[:, :, :3] == [40, 45, 50], axis=2) & visible
+    assert int(boundary.sum()) > 0, '±阈值位置必须绘制独立分界线'
+    assert np.all(overlay[:, :, 3][boundary] == 255)
