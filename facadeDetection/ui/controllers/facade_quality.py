@@ -294,6 +294,9 @@ class FacadeQualityController(QObject):
         shutdown = getattr(self.facade_service, 'shutdown_quality_workers', None)
         if callable(shutdown):
             shutdown()
+        release = getattr(self.facade_service, 'release_quality_sources', None)
+        if callable(release):
+            release()
 
     def _run_next_batch(self):
         if not self._batch_queue:

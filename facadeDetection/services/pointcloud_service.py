@@ -120,7 +120,22 @@ class PointCloudService:
             "metadata": metadata or {},
         }
 
+    def release_source_domains(self):
+        """释放原始点云载荷，保留代理点云与 CSR 映射供下次按需重载。"""
+        for dataset in self.datasets.values():
+            dataset.index.source_points = None
+            dataset.index.source_colors = None
+            metadata = dataset.metadata or {}
+            metadata.pop('_source_intensities', None)
+        self.source_assets.clear()
+
     def get_source_asset(self, source_id):
+        asset = self.source_assets.get(source_id)
+        if asset is None:
+            for dataset in self.datasets.values():
+                if (dataset.metadata or {}).get('source_id') == source_id:
+                    dataset.index.get_source_points()
+                    break
         return self.source_assets.get(source_id)
 
     def get_metadata(self, dataset_id):

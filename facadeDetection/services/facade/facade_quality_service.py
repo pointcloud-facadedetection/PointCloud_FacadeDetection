@@ -35,6 +35,10 @@ class FacadeQualityService:
     def set_index_service(self, index_service: FacadeIndexService):
         self._index_service = index_service
 
+    def release_quality_sources(self):
+        if self._pointcloud_service is not None:
+            self._pointcloud_service.release_source_domains()
+
     @staticmethod
     def shutdown_quality_workers():
         from algorithms.facade.ruler_quality import _reset_shared_process_pool

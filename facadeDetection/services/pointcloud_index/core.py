@@ -72,7 +72,14 @@ class PointCloudDataset:
 
     @property
     def source_intensities(self) -> np.ndarray | None:
-        return (self.metadata or {}).get('_source_intensities')
+        metadata = self.metadata or {}
+        value = metadata.get('_source_intensities')
+        if value is None:
+            loader = metadata.get('_source_intensity_loader')
+            if callable(loader):
+                value = loader()
+                metadata['_source_intensities'] = value
+        return value
 
     @property
     def revision(self) -> str:
@@ -125,6 +132,7 @@ class VoxelCascadeIndex:
         self._raw_to_voxel = None
         self._source_to_proxy = None
         self._is_stratified = bool(is_stratified)
+        self.source_loader = None
 
         # === Source 映射 (CSR 格式唯一) ===
         self.source_points = None if source_points is None else np.asarray(source_points, dtype=np.float32)
@@ -311,9 +319,16 @@ class VoxelCascadeIndex:
     # ==================== Source 原始空间映射 (CSR 唯一) ====================
 
     def has_source_mapping(self) -> bool:
-        return (self.source_points is not None and
-                self.source_raw_offsets is not None and
-                self.source_raw_indices is not None)
+        return (self.source_raw_offsets is not None
+                and self.source_raw_indices is not None)
+
+    def _ensure_source_payload(self):
+        if self.source_points is None and self.source_loader is not None:
+            asset = self.source_loader()
+            self.source_points = np.asarray(asset['points'], dtype=np.float32)
+            colors = asset.get('colors')
+            self.source_colors = (None if colors is None else
+                                  np.asarray(colors, dtype=np.float32))
 
     def proxy_to_source_ids(self, proxy_ids, deduplicate=True) -> np.ndarray:
         """Proxy → Source 原始点索引 (CSR 向量化查询)。"""
@@ -377,9 +392,11 @@ class VoxelCascadeIndex:
         return np.unique(proxy_sorted[positions[valid]]).astype(np.int32, copy=False)
 
     def get_source_points(self):
+        self._ensure_source_payload()
         return self.source_points
 
     def get_source_colors(self):
+        self._ensure_source_payload()
         return self.source_colors
 
     def query_aabb(self, min_bound, max_bound, raw_points, exact=True) -> np.ndarray:

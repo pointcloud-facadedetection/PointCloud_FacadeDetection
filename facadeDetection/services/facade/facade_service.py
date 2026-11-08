@@ -82,6 +82,9 @@ class FacadeService:
             results_dir=results_dir,
             progress_cb=progress_cb)
 
+    def release_quality_sources(self):
+        self._quality_service.release_quality_sources()
+
     def shutdown_quality_workers(self):
         self._quality_service.shutdown_quality_workers()
 

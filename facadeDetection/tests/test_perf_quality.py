@@ -410,6 +410,7 @@ def test_quality_worker_closes_process_pool_only_when_requested(qapp):
     class Service:
         def __init__(self):
             self.shutdown_calls = 0
+            self.release_calls = 0
 
         def compute_quality(self, *_args, **_kwargs):
             return {'ok': True, 'overall': {}}
@@ -417,10 +418,15 @@ def test_quality_worker_closes_process_pool_only_when_requested(qapp):
         def shutdown_quality_workers(self):
             self.shutdown_calls += 1
 
+        def release_quality_sources(self):
+            self.release_calls += 1
+
     service = Service()
     QualityWorker(service, 'cloud', {'id': 1}, {}).run()
     assert service.shutdown_calls == 1
+    assert service.release_calls == 1
 
     QualityWorker(service, 'cloud', {'id': 2}, {},
                   shutdown_process_pool=False).run()
     assert service.shutdown_calls == 1, '批量任务必须等整批结束再关闭进程池'
+    assert service.release_calls == 1, '批量任务保留原始点云至整批结束'

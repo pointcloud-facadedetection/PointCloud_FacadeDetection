@@ -735,3 +735,24 @@ class TestProxyNormalsPersistence:
         print(f'\n[perf] proxy_normals first_detect={t_first:.2f}s '
               f'reuse_detect={t_second:.2f}s proxy={n_proxy}')
         assert t_second < t_first
+
+
+def test_source_payload_is_released_and_lazily_remapped(harness):
+    service = harness.new_service()
+    dataset = service._load_proxy_domain(harness.station)
+    raw_count = len(dataset.processed_raw_points)
+    assert raw_count > 0
+    assert len(harness.ply_load_calls) == 1
+
+    service.pointcloud.release_source_domains()
+    assert service.pointcloud.source_assets == {}
+    assert dataset.index.source_points is None
+    assert dataset.index.source_colors is None
+    assert dataset.index.has_source_mapping(), '释放载荷不得删除 CSR 映射'
+    assert len(dataset.proxy_points) > 0, '代理点云必须继续可用'
+
+    restored = dataset.processed_raw_points
+    assert len(restored) == raw_count
+    assert dataset.index.source_points is not None
+    assert service.pointcloud.get_source_asset(dataset.metadata['source_id']) is not None
+    assert len(harness.ply_load_calls) == 1, '重载必须走 raw memmap，不重读原始 PLY'

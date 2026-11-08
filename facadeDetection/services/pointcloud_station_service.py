@@ -1,4 +1,5 @@
 from pathlib import Path
+import weakref
 import numpy as np
 import open3d as o3d
 from algorithms.registration import (
@@ -456,6 +457,26 @@ class PointCloudStationService:
         dataset = self.pointcloud.register_dataset(dataset_id, proxy, proxy_colors,
                                                    metadata=metadata,
                                                    intensities=proxy_intensity)
+
+        service_ref = weakref.ref(self)
+
+        def load_source_payload():
+            service = service_ref()
+            if service is None:
+                raise RuntimeError('点云服务已关闭，无法恢复原始点云')
+            cached = proxy_cache.load_raw_cache(
+                service.project_uuid, station.id, fingerprint_key)
+            if cached is None:
+                raise RuntimeError('原始点云缓存已失效，请重新导入站点')
+            raw_points, raw_colors = cached
+            service.pointcloud.register_source_asset(
+                source_id, raw_points, raw_colors,
+                {'ply_path': station.source_path})
+            return service.pointcloud.get_source_asset(source_id)
+
+        dataset.index.source_loader = load_source_payload
+        dataset.metadata['_source_intensity_loader'] = (
+            lambda: service_ref()._load_native_intensity(station.source_path))
         report(90, '点云索引建立完成')
         self._station_fingerprints[station.id] = fingerprint_key
         # 从持久化的索引中重建去噪代理。不需要派生点云文件
