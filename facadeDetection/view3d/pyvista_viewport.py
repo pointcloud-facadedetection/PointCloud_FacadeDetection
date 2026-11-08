@@ -1601,8 +1601,10 @@ class PyVistaViewport(BaseViewport):
                 sign_u, sign_v = ((-1.0, 1.0) if index % 2 == 0 else (1.0, -1.0))
                 anchor = (np.asarray(point) + sign_u * offset_u * u_axis
                           + sign_v * offset_v * v_axis)
-                text = (f"顶 {distances['顶']:.3f} m  底 {distances['底']:.3f} m\n"
-                        f"左 {distances['左']:.3f} m  右 {distances['右']:.3f} m")
+                text = (f"上：{distances['顶'] * 1000:.2f}mm  "
+                        f"下：{distances['底'] * 1000:.2f}mm\n"
+                        f"左：{distances['左'] * 1000:.2f}mm  "
+                        f"右：{distances['右'] * 1000:.2f}mm")
                 actor = self._edge_distance_text_actor(
                     text, anchor, (0.10, 0.22, 0.32))
                 self._edge_distance_actors.append(actor)

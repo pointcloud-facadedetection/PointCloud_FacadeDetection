@@ -292,7 +292,7 @@ def test_edge_distance_markers_have_four_lines_and_labels(qapp):
         assert len(viewport._edge_distance_actors) == 5
         assert len(viewport._edge_distance_label_bindings) == 1
         text = viewport._edge_distance_label_bindings[0][0].GetInput()
-        assert text == '顶 1.500 m  底 1.500 m\n左 1.000 m  右 3.000 m'
+        assert text == '上：1500.00mm  下：1500.00mm\n左：1000.00mm  右：3000.00mm'
 
         viewport.show_edge_distance_markers(
             [[0.0, 1.0, 1.5], [0.0, 1.0, 1.5]], GEOMETRY)
