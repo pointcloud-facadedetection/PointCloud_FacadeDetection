@@ -249,7 +249,13 @@ def test_viewport_applies_saved_station_position(qapp):
         assert np.allclose(viewport._plotter.camera.position, [5, 6, 7])
         assert np.allclose(viewport._plotter.camera.focal_point, [1, 2, 3])
         viewport._plotter.camera.position = [100, 100, 100]
+        qapp.processEvents()
+        updates = []
+        viewport._plotter.update = lambda: updates.append(1)
         viewport.reset_view()
         assert np.allclose(viewport._plotter.camera.position, [5, 6, 7])
+        assert viewport._render_pending
+        qapp.processEvents()
+        assert updates == [1]
     finally:
         viewport.destroy()

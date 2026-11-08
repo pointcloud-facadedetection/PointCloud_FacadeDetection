@@ -699,6 +699,7 @@ class PyVistaViewport(BaseViewport):
         self._scene_view_initialized = False
         if self.point_data:
             self._initialize_scene_view()
+            self._render()
 
     def set_cloud_uniform_color(self, name, color=None, render=True):
         """用 actor 固定色显示，保留点云颜色缓冲供后续恢复。"""

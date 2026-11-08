@@ -194,3 +194,9 @@
 - 无并行 GUI/探针进程执行完整命令 `../.venv/Scripts/python.exe -m pytest -q --durations=5`：**309 passed**，耗时 328.37 秒。
 - 前一轮 93% 后的 `qtwebview2/pythonnet` 原生访问冲突未在本轮复现；`tests/test_task_progress.py` 单独复测 13 passed。
 - 热力图比例尺、透明边缘、复核视角、双页面归位和恢复百分比均已完成并分批提交；本轮代码与验证记录收尾完成。
+
+## 归位后视口不刷新修复
+
+- 原因是 `PyVistaViewport.reset_view()` 只恢复相机，没有请求渲染；之前没有待渲染帧时，视口会继续显示旧画面。
+- 修复为恢复初始/默认相机后调用一次统一的 `_render()`，仍走既有零时刻合并队列，不重载点云。
+- 回归直接验证渲染队列执行一次 `plotter.update()`；相关 8 项测试通过。离屏环境不以 VTK 原生帧计数作为断言。
