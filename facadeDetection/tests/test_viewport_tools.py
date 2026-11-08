@@ -289,10 +289,16 @@ def test_edge_distance_markers_have_four_lines_and_labels(qapp):
     viewport = PyVistaViewport()
     try:
         viewport.show_edge_distance_markers([[0.0, 1.0, 1.5]], GEOMETRY)
-        assert len(viewport._edge_distance_actors) == 8
-        assert len(viewport._edge_distance_label_bindings) == 4
-        texts = [actor.GetInput() for actor, _position in viewport._edge_distance_label_bindings]
-        assert texts == ['顶 1.500 m', '底 1.500 m', '左 1.000 m', '右 3.000 m']
+        assert len(viewport._edge_distance_actors) == 5
+        assert len(viewport._edge_distance_label_bindings) == 1
+        text = viewport._edge_distance_label_bindings[0][0].GetInput()
+        assert text == '顶 1.500 m  底 1.500 m\n左 1.000 m  右 3.000 m'
+
+        viewport.show_edge_distance_markers(
+            [[0.0, 1.0, 1.5], [0.0, 1.0, 1.5]], GEOMETRY)
+        assert len(viewport._edge_distance_label_bindings) == 2
+        anchors = [position for _actor, position in viewport._edge_distance_label_bindings]
+        assert anchors[0] != anchors[1], '相同端点也必须使用不同的标签锚点'
         viewport.clear_edge_distance_markers()
         assert not viewport._edge_distance_actors
         assert not viewport._edge_distance_label_bindings

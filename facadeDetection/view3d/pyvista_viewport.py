@@ -1576,9 +1576,20 @@ class PyVistaViewport(BaseViewport):
             self.clear_edge_distance_markers()
             if not isinstance(geometry, dict):
                 return
-            for point in points:
+            origin = np.asarray(geometry['origin'], dtype=np.float64)
+            u_axis = np.asarray(geometry['u_axis'], dtype=np.float64)
+            v_axis = np.asarray(geometry['v_axis'], dtype=np.float64)
+            u_axis /= max(np.linalg.norm(u_axis), 1e-12)
+            v_axis /= max(np.linalg.norm(v_axis), 1e-12)
+            u0, v0, u1, v1 = np.asarray(
+                geometry['uv_bounds'], dtype=np.float64).reshape(4)
+            offset_u = min(0.5, max(0.10, (u1 - u0) * 0.03))
+            offset_v = min(0.5, max(0.10, (v1 - v0) * 0.01))
+            for index, point in enumerate(points):
+                distances = {}
                 for edge, foot, distance in self._edge_distance_specs(
                         point, geometry):
+                    distances[edge] = distance
                     color = ((0.10, 0.48, 0.78) if edge in ('顶', '底')
                              else (0.92, 0.48, 0.08))
                     actor = self._add_mesh(
@@ -1587,10 +1598,14 @@ class PyVistaViewport(BaseViewport):
                         name=f'edge_distance_{edge}')
                     self._edge_distance_actors.append(
                         self._to_overlay(actor, tool=True))
-                    midpoint = (np.asarray(point) + np.asarray(foot)) * 0.5
-                    actor = self._edge_distance_text_actor(
-                        f'{edge} {distance:.3f} m', midpoint, color)
-                    self._edge_distance_actors.append(actor)
+                sign_u, sign_v = ((-1.0, 1.0) if index % 2 == 0 else (1.0, -1.0))
+                anchor = (np.asarray(point) + sign_u * offset_u * u_axis
+                          + sign_v * offset_v * v_axis)
+                text = (f"顶 {distances['顶']:.3f} m  底 {distances['底']:.3f} m\n"
+                        f"左 {distances['左']:.3f} m  右 {distances['右']:.3f} m")
+                actor = self._edge_distance_text_actor(
+                    text, anchor, (0.10, 0.22, 0.32))
+                self._edge_distance_actors.append(actor)
             self._update_edge_distance_label_positions()
         except Exception as exc:
             print(f'[PCFD] viewport.edge_distances_failed: {exc!r}', flush=True)
