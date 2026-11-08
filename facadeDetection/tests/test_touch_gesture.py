@@ -278,10 +278,10 @@ def test_zoom_slider_extremes_are_absolute_zoom_limits(viewport):
     viewport._zoom_changed_callback = values.append
 
     viewport.set_zoom_percent(1000)
-    assert values[-1] == 400
-    assert _parallel_scale(viewport) == pytest.approx(reference / 4)
+    assert values[-1] == 800
+    assert _parallel_scale(viewport) == pytest.approx(reference / 8)
     viewport._zoom_by_factor(2.0)
-    assert values[-1] == 400
+    assert values[-1] == 800
 
     viewport.set_zoom_percent(1)
     assert values[-1] == 25
@@ -298,7 +298,7 @@ def test_zoom_slider_expands_and_preserves_configured_extremes(qapp):
         slider = window.operation_zoom_slider
         assert slider.minimumWidth() >= 280
         assert slider.minimum() == 25
-        assert slider.maximum() == 400
+        assert slider.maximum() == 800
         slider.ensurePolished()
         option = QStyleOptionSlider()
         slider.initStyleOption(option)
@@ -308,3 +308,18 @@ def test_zoom_slider_expands_and_preserves_configured_extremes(qapp):
         assert handle.width() >= 48
     finally:
         window.close()
+
+
+def test_focus_plane_resets_zoom_reference_and_allows_eight_times_zoom(viewport):
+    viewport.set_zoom_percent(400)
+    values = []
+    viewport._zoom_changed_callback = values.append
+
+    viewport.focus_plane([0.0, -1.0, 0.0], [0.0, 0.0, 0.0],
+                         [0.0, 0.0, 1.0], (4.0, 3.0))
+    assert values[-1] == 100
+    assert viewport._zoom_reference is None
+
+    focused_scale = _parallel_scale(viewport)
+    viewport.set_zoom_percent(800)
+    assert _parallel_scale(viewport) == pytest.approx(focused_scale / 8)

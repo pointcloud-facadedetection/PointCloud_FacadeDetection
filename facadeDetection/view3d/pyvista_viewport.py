@@ -577,7 +577,7 @@ class PyVistaViewport(BaseViewport):
         percent = float(percent)
         if percent <= 0:
             raise ValueError('缩放百分比必须大于0')
-        percent = max(25.0, min(400.0, percent))
+        percent = max(25.0, min(800.0, percent))
         camera = self._plotter.camera
         if self._zoom_reference is None:
             self._capture_zoom_reference()
@@ -887,6 +887,7 @@ class PyVistaViewport(BaseViewport):
         """恢复建筑立面默认正视图（与 Open3D 视口一致）。"""
         self._scene_view_initialized = False
         self._zoom_reference = None
+        self._notify_zoom_changed(100)
         if self.point_data:
             self._initialize_scene_view()
             self._render()
@@ -2114,6 +2115,8 @@ class PyVistaViewport(BaseViewport):
             else:
                 self._plotter.disable_parallel_projection()
             camera.parallel_scale = float(state['parallel_scale'])
+            self._zoom_reference = None
+            self._notify_zoom_changed(100)
             self._render()
         except Exception:
             pass
@@ -2155,6 +2158,8 @@ class PyVistaViewport(BaseViewport):
             self._plotter.enable_parallel_projection()
             camera.parallel_scale = max(screen_up_span * 0.5,
                                         screen_side_span * 0.5 / aspect) * 1.1
+            self._zoom_reference = None
+            self._notify_zoom_changed(100)
             self._render()
         except Exception as exc:
             print(f'[PCFD] viewport.focus_plane_failed: {exc!r}', flush=True)

@@ -109,7 +109,7 @@ class OperationPageMixin:
         viewport_heading_row.addWidget(viewport_title)
         self.operation_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.operation_zoom_slider.setObjectName('operationZoomSlider')
-        self.operation_zoom_slider.setRange(25, 400)
+        self.operation_zoom_slider.setRange(25, 800)
         self.operation_zoom_slider.setValue(100)
         self.operation_zoom_slider.setMinimumWidth(280)
         self.operation_zoom_slider.setFixedHeight(48)
